@@ -19,6 +19,8 @@ const LS_TITLE = 'stross.lastTitle';
 let devices = { cameras: [], audioInputs: [], systemAudio: [] };
 let running = false;
 let starting = false; // Android 采集启动中（等待真实状态回报）
+let startingSince = 0; // 启动开始时间戳（超时兜底用）
+const START_TIMEOUT_MS = 60000; // 采集启动超时
 let connection = null; // { url: "http://host:port", wsUrl: "ws://host:port/ws/push" }
 let currentTab = 'send';
 let IS_ANDROID = false;
@@ -323,6 +325,7 @@ async function startStream() {
   try {
     if (IS_ANDROID) {
       starting = true;
+      startingSince = Date.now();
       setRunning(true, 'starting');
       // Android：原生采集（MediaProjection + MediaCodec），经手机内嵌中继推流
       const res = await invoke('start_capture', { args: buildCaptureArgs() });
@@ -370,7 +373,6 @@ async function pollMobileStatus() {
     if (s.started) {
       starting = false;
       setRunning(true, 'live');
-      $('stream-meta').textContent = '屏幕采集已就绪，局域网内浏览器打开上方地址即可观看';
       return;
     }
     if (s.error) {
@@ -379,7 +381,13 @@ async function pollMobileStatus() {
       setRunning(false);
       return;
     }
-    // 仍在启动中（等待前台服务/投影），保持"采集中…"
+    // 仍在启动中：超时兜底，避免无限"采集中…"
+    if (starting && Date.now() - startingSince > START_TIMEOUT_MS) {
+      starting = false;
+      showFatal('采集启动超时（60 秒未就绪）。请停止后重试；若反复超时，请检查系统是否限制后台屏幕录制。');
+      setRunning(false);
+      return;
+    }
     setRunning(true, 'starting');
   } catch (_) {
     /* ignore */
@@ -414,12 +422,19 @@ function setRunning(r, phase = r ? 'live' : 'idle') {
   if (phase === 'starting') {
     dot.className = 'dot starting';
     text.textContent = '采集中…';
+    $('stream-meta').textContent = '等待系统授权与投影就绪（OPPO 等机型可能需 10~20 秒）';
   } else if (phase === 'live') {
     dot.className = 'dot live';
     text.textContent = IS_ANDROID ? '采集中 ✓ 推流中' : '推流中';
+    // 明确告知观看地址，避免"不知道是否真的在推"
+    const first = document.querySelector('#url-list li');
+    $('stream-meta').textContent = first && first.textContent.includes('http')
+      ? `屏幕采集已就绪 ✅ 局域网内浏览器打开 ${first.textContent.trim().replace('▶', '')} 即可观看`
+      : '推流中，请在「📥 观看」页查看';
   } else {
     dot.className = 'dot idle';
     text.textContent = '未推流';
+    $('stream-meta').textContent = '';
   }
 }
 

@@ -59,6 +59,14 @@ class ProjectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startAsForeground()
+        // 幂等：已有投影时直接返回，避免重复 getMediaProjection。
+        // 关键：第二次 getMediaProjection 会使第一次的 token 失效，
+        // 再用旧 token createVirtualDisplay 会抛
+        // "Cannot create VirtualDisplay with non-current MediaProjection"。
+        // （OPPO 等 ROM 会把前台服务启动延迟并重复回调 onStartCommand。）
+        if (projection != null) {
+            return START_NOT_STICKY
+        }
         val code = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
             ?: Activity.RESULT_CANCELED
         val data = intent?.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)

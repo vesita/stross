@@ -128,6 +128,12 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
                 }.start()
             } else {
                 pend?.reject("用户拒绝了屏幕录制授权")
+                // 同步回报前端：采集未启动及原因（前端靠 t=9 控制帧更新状态）
+                sendControl(JSObject().apply {
+                    put("t", 9)
+                    put("started", false)
+                    put("err", "用户拒绝了屏幕录制授权")
+                })
             }
         }
     }
@@ -169,6 +175,36 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
         if (!running.compareAndSet(false, true)) {
             return
         }
+        try {
+            startProjectionInner(proj)
+        } catch (e: Exception) {
+            // 任何启动失败都不能让线程/进程崩溃：回传状态帧，前端展示原因
+            Log.e(TAG, "启动采集失败: ${e.message}")
+            sendControl(JSObject().apply {
+                put("t", 9)
+                put("started", false)
+                put("err", "启动采集失败: ${e.message}")
+            })
+            running.set(false)
+            try {
+                encoder?.release()
+            } catch (_: Exception) {
+            }
+            encoder = null
+            try {
+                virtualDisplay?.release()
+            } catch (_: Exception) {
+            }
+            virtualDisplay = null
+            try {
+                proj.stop()
+            } catch (_: Exception) {
+            }
+            channel = null
+        }
+    }
+
+    private fun startProjectionInner(proj: MediaProjection) {
         projection = proj
         encodeThread = HandlerThread("stross-video-encoder").apply { start() }
         val handler = Handler(encodeThread!!.looper)

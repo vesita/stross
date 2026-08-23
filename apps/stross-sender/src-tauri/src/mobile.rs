@@ -187,7 +187,11 @@ pub async fn start_capture(
         Ok(())
     });
 
-    // 4) 调用 Kotlin 插件（Channel 序列化为 "__TAURI_IPC__<id>" 由 Kotlin 解析）
+    // 4) 调用 Kotlin 插件。注意：run_mobile_plugin 内部**同步阻塞**等待 Kotlin
+    //    resolve（屏幕录制授权弹窗可能耗时 10s+），而 Tauri 默认单线程 async
+    //    runtime——直接调用会冻结整个 runtime，导致 mobile_status 轮询等
+    //    其它命令全部卡住（前端表现为"状态卡住/假推流"）。
+    //    因此放到 spawn_blocking 独立线程，授权结果完全由 t=9 控制帧回报。
     let handle = app.state::<MobilePluginHandle>().0.clone();
     let payload = serde_json::json!({
         "streamId": args.stream_id,
@@ -198,9 +202,9 @@ pub async fn start_capture(
         "withAudio": args.with_audio,
         "channel": channel,
     });
-    handle
-        .run_mobile_plugin::<serde_json::Value>("startCapture", payload)
-        .map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let _ = handle.run_mobile_plugin::<serde_json::Value>("startCapture", payload);
+    });
 
     // 5) 记录会话（复用中继时不持有、不停止；由 AppState 常驻管理）
     //    同时重置采集状态，等待 Kotlin 控制帧回报真实状态

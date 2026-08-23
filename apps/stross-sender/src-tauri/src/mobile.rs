@@ -12,12 +12,18 @@
 //! * `t` track：0 视频 / 1 音频
 //! * `k` keyframe、`c` config（SPS/PPS 或 AudioSpecificConfig）
 //! * `p` 演示时间戳（毫秒）、`d` base64 编码的 Annex-B / ADTS 数据
+//!
+//! 注意：tauri 2.11 没有公开的 `plugin_handle()` 访问器，`PluginHandle` 只能在
+//! setup 阶段由 `register_android_plugin` 取得，因此存入托管状态
+//! [`MobilePluginHandle`] 供命令使用。
 
 use std::sync::{Arc, Mutex};
 
+use base64::Engine as _;
 use serde::Deserialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Runtime};
+use tauri::plugin::PluginHandle;
+use tauri::{AppHandle, Manager, Wry};
 
 use stross_core::pipeline::{Quality, StreamConfig, VideoSource};
 use stross_core::relay::{RelayHandle, RelayServer};
@@ -26,6 +32,23 @@ use stross_proto::frame::{
     Frame, CODEC_AAC, CODEC_H264, FLAG_CONFIG, FLAG_KEYFRAME, TRACK_AUDIO, TRACK_VIDEO,
 };
 use tokio::sync::mpsc;
+
+/// setup 阶段注册的 Android 插件句柄（托管状态，命令通过它调用 Kotlin）。
+pub struct MobilePluginHandle(pub PluginHandle<Wry>);
+
+/// 注册 Android 原生插件（在 `lib.rs::run` 中装配）。
+pub fn init() -> tauri::plugin::TauriPlugin<Wry> {
+    tauri::plugin::Builder::new("stross-media")
+        .setup(|app, api| {
+            #[cfg(target_os = "android")]
+            {
+                let handle = api.register_android_plugin("dev.stross.sender", "MediaPlugin")?;
+                app.manage(MobilePluginHandle(handle));
+            }
+            Ok(())
+        })
+        .build()
+}
 
 /// Kotlin 侧启动参数（与 `MediaPlugin.startCapture` 的 InvokeArg 对应）。
 #[derive(Deserialize)]
@@ -48,21 +71,10 @@ pub struct MobileCapture {
     pub tx: Arc<Mutex<Option<mpsc::Sender<Frame>>>>,
 }
 
-/// 注册 Android 原生插件（在 `lib.rs::run` 中装配）。
-pub fn init<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
-    tauri::plugin::Builder::new("stross-media")
-        .setup(|_app, api| {
-            #[cfg(target_os = "android")]
-            let _ = api.register_android_plugin("dev.stross.sender", "MediaPlugin");
-            Ok(())
-        })
-        .build()
-}
-
 /// 启动 Android 采集：内嵌中继 + 推流客户端 + Kotlin 插件。
 #[tauri::command]
-pub async fn start_capture<R: Runtime>(
-    app: AppHandle<R>,
+pub async fn start_capture(
+    app: AppHandle<Wry>,
     args: CaptureArgs,
 ) -> Result<serde_json::Value, String> {
     // 1) 内嵌中继
@@ -99,8 +111,11 @@ pub async fn start_capture<R: Runtime>(
     // 3) 帧通道：Kotlin base64 帧 → 协议帧 → 推流
     let tx_chan = tx.clone();
     let channel: Channel<serde_json::Value> = Channel::new(move |body| {
-        let v = match body {
-            InvokeResponseBody::Json(v) => v,
+        let v: serde_json::Value = match body {
+            InvokeResponseBody::Json(s) => match serde_json::from_str(&s) {
+                Ok(v) => v,
+                Err(_) => return Ok(()),
+            },
             InvokeResponseBody::Raw(_) => return Ok(()),
         };
         let Some(track) = v.get("t").and_then(|x| x.as_u64()) else {
@@ -136,7 +151,7 @@ pub async fn start_capture<R: Runtime>(
     });
 
     // 4) 调用 Kotlin 插件（Channel 序列化为 "__TAURI_IPC__<id>" 由 Kotlin 解析）
-    let plugin = app.plugin_handle("stross-media").map_err(|e| e.to_string())?;
+    let handle = app.state::<MobilePluginHandle>().0.clone();
     let payload = serde_json::json!({
         "streamId": args.stream_id,
         "width": args.width,
@@ -146,29 +161,26 @@ pub async fn start_capture<R: Runtime>(
         "withAudio": args.with_audio,
         "channel": channel,
     });
-    plugin
+    handle
         .run_mobile_plugin::<serde_json::Value>("startCapture", payload)
         .map_err(|e| e.to_string())?;
 
     // 5) 记录会话
+    let relay_port = relay.port;
     let state = app.state::<crate::AppState>();
     *state.mobile.lock().unwrap() = Some(MobileCapture { client, relay, tx });
-    Ok(serde_json::json!({ "relayPort": relay.port }))
+    Ok(serde_json::json!({ "relayPort": relay_port }))
 }
 
 /// 停止 Android 采集。
 #[tauri::command]
-pub async fn stop_capture<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+pub async fn stop_capture(app: AppHandle<Wry>) -> Result<(), String> {
     let state = app.state::<crate::AppState>();
-    let mut capture = state.mobile.lock().unwrap().take();
-    if let Some(mut cap) = capture {
+    let capture = state.mobile.lock().unwrap().take();
+    if let Some(cap) = capture {
         // 通知 Kotlin 停止采集
-        if let Ok(plugin) = app.plugin_handle("stross-media") {
-            let _ = plugin.run_mobile_plugin::<serde_json::Value>(
-                "stopCapture",
-                serde_json::json!({}),
-            );
-        }
+        let handle = app.state::<MobilePluginHandle>().0.clone();
+        let _ = handle.run_mobile_plugin::<serde_json::Value>("stopCapture", serde_json::json!({}));
         // 关闭推流通道 → 客户端发 Bye
         cap.tx.lock().unwrap().take();
         cap.client.stop().await;

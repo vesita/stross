@@ -64,12 +64,16 @@ rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-and
 # 1) 生成 Android 工程并装配 Kotlin 插件（权限、前台服务、MainActivity）
 ./scripts/setup-android.sh
 
-# 2) 构建 APK
+# 2) 构建 APK（可加 --target aarch64 只编 arm64，加快速度）
 cd apps/stross-sender/src-tauri
 cargo tauri android build --apk --debug
 ```
 
 APK 输出：`apps/stross-sender/src-tauri/gen/android/app/build/outputs/apk/`
+
+> 已在 Linux 上验证：aarch64 debug APK 构建成功（minSdk 24 / targetSdk 36，
+> 含 `RECORD_AUDIO`、`FOREGROUND_SERVICE_MEDIA_PROJECTION` 等权限）。
+> 需要 JDK 17+、Android SDK（platform 36、build-tools 36、NDK 27）与 Rust Android 目标。
 
 ### Android 端能力与注意
 

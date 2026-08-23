@@ -16,88 +16,138 @@
       </div>
     </div>
     <div class="header-right">
+      <span id="conn-badge" class="badge">未连接</span>
       <span id="ffmpeg-badge" class="badge">检查 ffmpeg…</span>
       <span id="ver-badge" class="badge muted">v-</span>
     </div>
   </header>
 
   <main>
-    <section class="card">
-      <h2>串流源</h2>
-
-      <fieldset>
-        <legend>视频</legend>
-        <div class="row">
-          <label class="seg" data-video="screen">
-            <input type="radio" name="video" value="screen" checked /> 🖥️ 屏幕
-          </label>
-          <label class="seg" data-video="camera">
-            <input type="radio" name="video" value="camera" /> 📷 摄像头
-          </label>
-          <label class="seg" data-video="synthetic">
-            <input type="radio" name="video" value="synthetic" /> 🧪 测试画面
-          </label>
-        </div>
-        <div class="row hidden" id="camera-row">
-          <select id="camera-select"></select>
-          <span class="hint">未发现摄像头设备</span>
-        </div>
-        <div class="row">
-          <label>画质
-            <select id="quality-select">
-              <option value="LOW">低 (640×360 @24fps)</option>
-              <option value="MEDIUM" selected>中 (1280×720 @30fps)</option>
-              <option value="HIGH">高 (1920×1080 @30fps)</option>
-            </select>
-          </label>
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>音频</legend>
-        <div class="row">
-          <label class="check"><input type="checkbox" id="mic-enable" checked /> 🎤 麦克风</label>
-          <select id="mic-select" class="grow"></select>
-          <span class="hint" id="mic-hint"></span>
-        </div>
-        <div class="row">
-          <label class="check"><input type="checkbox" id="sys-enable" /> 🔊 系统声音</label>
-          <select id="sys-select" class="grow"></select>
-          <span class="hint" id="sys-hint"></span>
-        </div>
-      </fieldset>
+    <!-- ==================== 连接视图 ==================== -->
+    <section id="connect-view" class="card connect-card">
+      <h2>连接中继</h2>
+      <p class="hint">先连接一台中继（本机或局域网内任意设备），连接后可以选择<strong>推流（发）</strong>或<strong>观看（收）</strong>。</p>
 
       <div class="row">
-        <label>串流名称
-          <input id="title-input" type="text" value="我的串流" maxlength="40" />
+        <label class="seg" data-conn="local">
+          <input type="radio" name="conn" value="local" checked /> 🖥️ 本机（自动启动中继）
+        </label>
+        <label class="seg" data-conn="remote">
+          <input type="radio" name="conn" value="remote" /> 🌐 局域网中继
         </label>
       </div>
 
+      <div class="row hidden" id="remote-row">
+        <input id="relay-addr" type="text" placeholder="http://192.168.1.100:8777" />
+        <button id="scan-btn" type="button">🔍 扫描局域网</button>
+      </div>
+
+      <div id="scan-results" class="scan-results hidden"></div>
+
       <div class="actions">
-        <button id="start-btn" class="primary" type="button">▶ 开始推流</button>
-        <button id="stop-btn" type="button" disabled>⏹ 停止</button>
-        <button id="viewer-btn" type="button" disabled>🌐 打开观看端</button>
+        <button id="connect-btn" class="primary" type="button">连接</button>
       </div>
-    </section>
-
-    <section class="card">
-      <h2>状态</h2>
-      <div id="status" class="status">
-        <div class="status-line"><span class="dot idle" id="status-dot"></span><span id="status-text">未推流</span></div>
-        <div id="stream-meta" class="meta"></div>
-        <div id="error-box" class="error hidden"></div>
-      </div>
-
-      <h2>观看地址</h2>
-      <p class="hint">局域网内任意设备（手机 / 平板 / 电脑）用浏览器打开：</p>
-      <ul id="url-list" class="url-list">
-        <li class="hint">开始推流后显示地址</li>
-      </ul>
+      <div id="connect-error" class="error hidden"></div>
 
       <h2>本机 IP</h2>
       <ul id="ip-list" class="url-list">
         <li class="hint">读取中…</li>
       </ul>
+    </section>
+
+    <!-- ==================== 主界面（连接后） ==================== -->
+    <section id="app-view" class="hidden">
+      <nav class="tabs">
+        <button id="tab-send-btn" class="tab active" type="button">📤 推流（发）</button>
+        <button id="tab-watch-btn" class="tab" type="button">📥 观看（收）</button>
+        <span class="tab-conn" id="tab-conn-label">未连接</span>
+      </nav>
+
+      <!-- 推流 -->
+      <div id="tab-send" class="tab-pane">
+        <section class="card">
+          <h2>串流源</h2>
+
+          <fieldset>
+            <legend>视频</legend>
+            <div class="row">
+              <label class="seg" data-video="screen">
+                <input type="radio" name="video" value="screen" checked /> 🖥️ 屏幕
+              </label>
+              <label class="seg" data-video="camera">
+                <input type="radio" name="video" value="camera" /> 📷 摄像头
+              </label>
+              <label class="seg" data-video="synthetic">
+                <input type="radio" name="video" value="synthetic" /> 🧪 测试画面
+              </label>
+            </div>
+            <div class="row hidden" id="camera-row">
+              <select id="camera-select"></select>
+              <span class="hint">未发现摄像头设备</span>
+            </div>
+            <div class="row">
+              <label>画质
+                <select id="quality-select">
+                  <option value="LOW">低 (640×360 @24fps)</option>
+                  <option value="MEDIUM" selected>中 (1280×720 @30fps)</option>
+                  <option value="HIGH">高 (1920×1080 @30fps)</option>
+                </select>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>音频</legend>
+            <div class="row">
+              <label class="check"><input type="checkbox" id="mic-enable" checked /> 🎤 麦克风</label>
+              <select id="mic-select" class="grow"></select>
+              <span class="hint" id="mic-hint"></span>
+            </div>
+            <div class="row">
+              <label class="check"><input type="checkbox" id="sys-enable" /> 🔊 系统声音</label>
+              <select id="sys-select" class="grow"></select>
+              <span class="hint" id="sys-hint"></span>
+            </div>
+          </fieldset>
+
+          <div class="row">
+            <label>串流名称
+              <input id="title-input" type="text" value="我的串流" maxlength="40" />
+            </label>
+          </div>
+
+          <div class="actions">
+            <button id="start-btn" class="primary" type="button">▶ 开始推流</button>
+            <button id="stop-btn" type="button" disabled>⏹ 停止</button>
+            <button id="viewer-btn" type="button" disabled>🌐 打开观看端</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>状态</h2>
+          <div id="status" class="status">
+            <div class="status-line"><span class="dot idle" id="status-dot"></span><span id="status-text">未推流</span></div>
+            <div id="stream-meta" class="meta"></div>
+            <div id="error-box" class="error hidden"></div>
+          </div>
+
+          <h2>观看地址</h2>
+          <p class="hint">局域网内任意设备（手机 / 平板 / 电脑）用浏览器打开：</p>
+          <ul id="url-list" class="url-list">
+            <li class="hint">开始推流后显示地址</li>
+          </ul>
+        </section>
+      </div>
+
+      <!-- 观看 -->
+      <div id="tab-watch" class="tab-pane hidden">
+        <section class="card">
+          <h2>观看串流</h2>
+          <p class="hint">已连接中继：<span id="watch-relay-url" class="mono"></span></p>
+          <p class="hint">页面会列出该中继上的在线串流；没有串流时，请先在「📤 推流」页开始推流。</p>
+          <iframe id="watch-frame" src="about:blank" title="Stross 观看端"></iframe>
+        </section>
+      </div>
     </section>
   </main>
 

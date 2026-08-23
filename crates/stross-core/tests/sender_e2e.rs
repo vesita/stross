@@ -16,6 +16,57 @@ fn has_ffmpeg() -> bool {
 }
 
 #[tokio::test]
+async fn push_to_external_relay() {
+    if !has_ffmpeg() {
+        eprintln!("跳过：未找到 ffmpeg");
+        return;
+    }
+    // 外部中继（相当于"连接"到另一台机器的中继）
+    let relay = stross_core::relay::RelayServer::start(0).await.unwrap();
+
+    let cfg = StreamConfig {
+        stream_id: "ext".into(),
+        title: "外部中继测试".into(),
+        video: Some(VideoSource::Synthetic {
+            pattern: "smptebars".into(),
+        }),
+        quality: Quality::LOW,
+        audio: None,
+        duration_secs: Some(2),
+    };
+    let url = format!("ws://127.0.0.1:{}/ws/push", relay.port);
+    let engine = SenderEngine::start(cfg, Some(url), 0).await.expect("推流到外部中继");
+
+    // 观看端从外部中继收帧
+    let (mut watch, _) = tokio_tungstenite::connect_async(format!(
+        "ws://127.0.0.1:{}/ws/watch?stream=ext",
+        relay.port
+    ))
+    .await
+    .unwrap();
+    let first = watch.next().await.unwrap().unwrap();
+    let ready = ControlMessage::from_text(&first.into_text().unwrap()).unwrap();
+    assert!(matches!(ready, ControlMessage::Ready { .. }));
+
+    let mut frames = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline && frames < 5 {
+        match tokio::time::timeout(Duration::from_secs(3), watch.next()).await {
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                let frame = Frame::from_bytes(&bytes).unwrap();
+                if frame.header.track == TRACK_VIDEO {
+                    frames += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(frames >= 2, "外部中继应转发视频帧（收到 {frames}）");
+    engine.stop().await;
+    relay.stop().await;
+}
+
+#[tokio::test]
 async fn synthetic_video_flows_end_to_end() {
     if !has_ffmpeg() {
         eprintln!("跳过：未找到 ffmpeg");

@@ -165,3 +165,54 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 }
 .url-list li:hover { border-color: var(--accent); }
 .url-list li .tag { color: var(--accent); font-size: 11px; margin-right: 8px; }
+
+/* ---------------- 连接视图 ---------------- */
+.connect-card { max-width: 720px; margin: 0 auto; }
+
+.scan-results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.scan-results button {
+  text-align: left;
+  font-family: ui-monospace, monospace;
+}
+.err-text { color: var(--err); }
+
+/* ---------------- 主界面 Tabs ---------------- */
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.tab {
+  padding: 10px 22px;
+  border-radius: 10px;
+  font-size: 15px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  cursor: pointer;
+}
+.tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.tab-conn {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+}
+
+.tab-pane { display: flex; flex-direction: column; gap: 16px; }
+
+/* 观看 iframe */
+#watch-frame {
+  width: 100%;
+  height: 62vh;
+  min-height: 360px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #000;
+}
+
+.mono { font-family: ui-monospace, monospace; }

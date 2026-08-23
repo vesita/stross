@@ -87,8 +87,9 @@ APK 输出：`apps/stross-sender/src-tauri/gen/android/app/build/outputs/apk/`
 - **麦克风**：AudioRecord → AAC（需要 `RECORD_AUDIO` 运行时权限）。
 - **观看地址**：App 内显示 `http://<手机IP>:8777/`，局域网设备浏览器直接打开。
 - 摄像头推流（Android）暂未接入，属后续路线图（nokhwa/Camera2）。
-- Android 前端入口与桌面共用 `web/`；采集走
-  `mobile::start_capture` 命令（Rust 侧 `src-tauri/src/mobile.rs`）。
+- Android 前端入口与桌面共用 `web/`，命令面一致（`start_stream` / `capture_status`）；
+  采集由 Rust 侧 `mobile.rs` 的 `AndroidCapture` 实现
+  `stross-media::CaptureBackend`（Kotlin 插件经 Channel 回传帧）。
 
 ## 问题排查
 

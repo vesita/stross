@@ -67,30 +67,66 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 
 ## 架构
 
+五层模块化设计（依赖方向自底向上，单向无环）：
+
+```
+┌────────────────────────────────────────────────────────────┐
+│ apps/stross-sender       ⑤ UI 模块：Tauri 薄命令层 + web/ + android/(Kotlin) │
+├────────────────────────────────────────────────────────────┤
+│ crates/stross-app        ③ 核心封装模块：StrossApp 状态机 / SenderEngine 组合 │
+├──────────────────────────────┬─────────────────────────────┤
+│ crates/stross-core          │ crates/stross-media          │
+│ ② 核心局域网共享模块        │ ④ 系统适配模块               │
+│ 中继 / 推流客户端 / mDNS    │ ffmpeg 管线 / 设备枚举        │
+│ / 本机 IP / 观看端页面      │ / NAL·ADTS 解析 / CaptureBackend│
+├──────────────────────────────┴─────────────────────────────┤
+│ crates/stross-proto        ① 协议模块：帧头 + 控制消息（serde）        │
+└────────────────────────────────────────────────────────────┘
+```
+
+- **① 协议模块**（`stross-proto`）：线上契约（16 字节帧头 + JSON 控制消息），
+  保持独立小 crate —— 共享模块与系统适配模块都依赖它，但互不依赖。
+- **② 共享模块**（`stross-core`）：纯数据共享逻辑 —— 中继服务器（axum + WS）、
+  推流客户端、mDNS 发现、本机 IP、内嵌观看端页面。不含任何采集/平台代码。
+- **④ 系统适配模块**（`stross-media`）：把"本机媒体源变成协议帧"的平台适配 ——
+  ffmpeg 采集管线、设备枚举、H.264/AAC 流切帧，以及统一的
+  [`CaptureBackend`](crates/stross-media/src/capture.rs) trait。
+- **③ 核心封装模块**（`stross-app`）：组合共享 + 适配 —— `SenderEngine`
+  （中继 + 推流客户端 + 采集后端）、`StrossApp` 状态机（先连接再收/发、mDNS、
+  状态查询）。**不依赖任何 UI 框架**，可独立单元测试。
+- **⑤ UI 模块**（`apps/stross-sender`）：Tauri 壳只做两件事 —— 把 `StrossApp`
+  注入托管状态、把前端命令转发给它；Android 原生采集以 `CaptureBackend`
+  实现（`mobile.rs`）藏在适配层后面，命令面与桌面完全一致。
+
+数据流：
+
 ```
 ┌──────────────┐   H.264/AAC 原始流    ┌─────────┐   H.264/AAC      ┌──────────────┐
 │ 推流端        │ ── WebSocket push ──▶ │ 中继     │ ── broadcast ─▶ │ 观看端(浏览器) │
-│ (Rust 编排)  │   (逐帧 + 时间戳)     │ (Rust)  │   (关键帧对齐)  │ (MSE + jmuxer)│
+│ (CaptureBackend)│  (逐帧 + 时间戳)    │ (Rust)  │   (关键帧对齐)  │ (MSE + jmuxer)│
 └──────────────┘                       └─────────┘                  └──────────────┘
 ```
 
-- **推流端**：桌面 = ffmpeg 子进程（视频 H.264 Annex-B、音频 AAC ADTS）→ Rust 解析成帧；
-  Android = Kotlin 插件（MediaProjection + MediaCodec）经 Channel 回传帧。
+- **推流端**：桌面 = `FfmpegBackend`（ffmpeg 子进程：视频 H.264 Annex-B、音频 AAC ADTS）；
+  Android = `AndroidCapture`（Kotlin 插件 MediaProjection + MediaCodec 经 Channel 回传帧）。
 - **中继**：tokio + axum，`/ws/push` 收流、`/ws/watch` 广播、`/api/streams` 列流、
   `/` 内嵌观看端页面。新观众**先收到最近关键帧**再对齐播放。
 - **观看端**：WebSocket 收帧 → jmuxer 封成 fMP4 → MSE 播放，支持断线自动重连。
 
 详细设计见 [docs/architecture.md](docs/architecture.md)、[docs/protocol.md](docs/protocol.md)。
+下一阶段规划（设备路由 / 原生播放器 / AV 同步）见 [docs/roadmap.md](docs/roadmap.md)。
 
 ## 目录结构
 
 ```
 crates/
-  stross-proto/      线上协议：帧头 + 控制消息（serde）
-  stross-core/       核心库：ffmpeg 管线、NAL/ADTS 解析、WS 中继、mDNS、设备枚举
+  stross-proto/      ① 协议：帧头 + 控制消息（serde）
+  stross-core/       ② 局域网共享：中继 / 推流客户端 / mDNS 发现 / 本机 IP / 观看端页面
+  stross-media/      ④ 系统适配：ffmpeg 管线 / 设备枚举 / NAL·ADTS 解析 / CaptureBackend
+  stross-app/        ③ 核心封装：StrossApp 状态机 / SenderEngine（无 UI 依赖，可单测）
 apps/
-  stross-relay/      独立中继二进制（纯 Rust）
-  stross-sender/     Tauri 推流端（桌面 + Android）
+  stross-relay/      独立中继二进制（纯 Rust，薄壳）
+  stross-sender/     ⑤ UI：Tauri 推流端（桌面 + Android）
     src-tauri/
       android/       Kotlin 插件源码（MediaProjection + MediaCodec）
       web/           推流端界面（零构建步骤的 HTML/JS/CSS）
@@ -109,7 +145,7 @@ crates/stross-core/assets/viewer/   观看端页面（编译期内嵌进中继�
 
 ```bash
 cargo test --workspace          # 单元 + 集成测试
-cargo test -p stross-core --test sender_e2e -- --nocapture   # 真实 ffmpeg 端到端
+cargo test -p stross-app --test sender_e2e -- --nocapture   # 真实 ffmpeg 端到端
 ```
 
 ## 路线图

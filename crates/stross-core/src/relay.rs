@@ -350,15 +350,13 @@ async fn handle_push(mut ws: WebSocket, state: RelayState) {
                 }
             }
             Message::Binary(bytes) => {
-                if let Some(id) = &stream_id {
-                    if let Ok(header) = FrameHeader::decode(&bytes) {
-                        if header.track == TRACK_VIDEO && header.is_keyframe() {
-                            state.set_last_keyframe(id, bytes.clone());
-                        }
-                        if let Some(entry) = state.get(id) {
-                            // 中继广播原样字节；观看端自己按关键帧对齐
-                            let _ = entry.tx.send(bytes);
-                        }
+                if let (Some(id), Ok(header)) = (&stream_id, FrameHeader::decode(&bytes)) {
+                    if header.track == TRACK_VIDEO && header.is_keyframe() {
+                        state.set_last_keyframe(id, bytes.clone());
+                    }
+                    if let Some(entry) = state.get(id) {
+                        // 中继广播原样字节；观看端自己按关键帧对齐
+                        let _ = entry.tx.send(bytes);
                     }
                 }
             }

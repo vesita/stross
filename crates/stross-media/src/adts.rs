@@ -104,12 +104,12 @@ mod tests {
         h[0] = 0xFF;
         h[1] = 0xF1; // MPEG-4, layer 0, no CRC
         h[2] = 0x50; // profile AAC-LC (01), 采样率 48000 索引 3, private 0, channel 2 (0010)
-        h[3] = (0x00) | (((total >> 11) & 0x03) as u8);
+        h[3] = ((total >> 11) & 0x03) as u8;
         h[4] = ((total >> 3) & 0xFF) as u8;
         h[5] = (((total & 0x07) as u8) << 5) | 0x1F;
         h[6] = 0xFC;
         let mut v = h.to_vec();
-        v.extend(std::iter::repeat(0u8).take(payload_len));
+        v.extend(std::iter::repeat_n(0u8, payload_len));
         v
     }
 

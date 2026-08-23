@@ -2,15 +2,17 @@
 //!
 //! 用法:
 //! ```text
-//! cargo run -p stross-core --example demo_push -- 10          # 纯视频
-//! cargo run -p stross-core --example demo_push -- 10 --audio  # 加正弦波音频
+//! cargo run -p stross-app --example demo_push -- 10          # 纯视频
+//! cargo run -p stross-app --example demo_push -- 10 --audio  # 加正弦波音频
 //! # 然后局域网内打开 http://<本机IP>:8777/ 观看
 //! ```
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use stross_core::pipeline::{AudioSourceConfig, Quality, StreamConfig, VideoSource};
-use stross_core::sender::SenderEngine;
+use stross_app::SenderEngine;
+use stross_media::capture::FfmpegBackend;
+use stross_media::pipeline::{AudioSourceConfig, Quality, StreamConfig, VideoSource};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -23,8 +25,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut secs: u64 = 15;
     let mut with_audio = false;
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
+    let args = std::env::args().skip(1);
+    for a in args {
         match a.as_str() {
             "--audio" => with_audio = true,
             _ => {
@@ -53,12 +55,12 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let engine = match SenderEngine::start(cfg.clone(), None, 0).await {
+    let engine = match SenderEngine::start(cfg.clone(), Arc::new(FfmpegBackend::new()), None, 0).await {
         Ok(e) => e,
         Err(_) if with_audio => {
             eprintln!("（音频启动失败，退回纯视频）");
             cfg.audio = None;
-            SenderEngine::start(cfg, None, 0).await?
+            SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), None, 0).await?
         }
         Err(e) => return Err(e),
     };

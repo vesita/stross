@@ -1,6 +1,6 @@
 [package]
 name = "stross-core"
-description = "Core library for Stross: capture pipelines, relay server, discovery"
+description = "Core LAN sharing library for Stross: relay server, push client, discovery"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 stross-proto = { path = "../stross-proto", version = "0.1.0" }
 anyhow.workspace = true
-thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -175,7 +175,7 @@ impl AccessUnitBuilder {
         match nal_type(&nal) {
             Some(NAL_SLICE_NON_IDR) | Some(NAL_SLICE_IDR) => {
                 let is_idr = nal_type(&nal) == Some(NAL_SLICE_IDR);
-                let first_slice = first_mb_in_slice(&nal).map_or(true, |v| v == 0);
+                let first_slice = first_mb_in_slice(&nal).is_none_or(|v| v == 0);
                 if first_slice && !self.current.is_empty() {
                     let au = self.take();
                     self.current.push(nal);
@@ -223,7 +223,7 @@ mod tests {
 
     fn nal(kind: u8, payload: u8) -> Vec<u8> {
         let mut v = vec![kind];
-        v.extend(std::iter::repeat(payload).take(10));
+        v.extend(std::iter::repeat_n(payload, 10));
         v
     }
 

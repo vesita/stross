@@ -1,10 +1,8 @@
-//! 推流引擎：把中继、推流客户端和采集会话组合成开箱即用的推流端。
+//! WS 推流客户端：连接中继（内嵌或外部），发送 `Hello` 后持续转发媒体帧。
 //!
 //! ```text
-//! SenderEngine
-//! ├── RelayServer（内嵌中继，可选）
-//! ├── RelayClient（WS 推流客户端，连到内嵌或外部中继）
-//! └── StreamSession（ffmpeg 子进程 + 读管道）
+//! RelayClient
+//! └── client_loop（Hello → 转发帧 → 通道关闭或停止信号时 Bye）
 //! ```
 
 use anyhow::{Context, Result};
@@ -16,61 +14,6 @@ use tokio::task::JoinHandle;
 use stross_proto::frame::Frame;
 use stross_proto::message::ControlMessage;
 
-use crate::pipeline::{StreamConfig, StreamSession};
-use crate::relay::{RelayHandle, RelayServer};
-
-/// 完整的推流引擎。
-pub struct SenderEngine {
-    relay: Option<RelayHandle>,
-    client: RelayClient,
-    session: StreamSession,
-}
-
-impl SenderEngine {
-    /// 启动推流。
-    ///
-    /// * `relay_url`：`Some("ws://host:port")` 表示推到外部中继；
-    ///   `None` 表示启动内嵌中继（绑定 `bind_port`，0 = 自动分配）。
-    pub async fn start(
-        cfg: StreamConfig,
-        relay_url: Option<String>,
-        bind_port: u16,
-    ) -> Result<Self> {
-        let relay = match &relay_url {
-            Some(_) => None,
-            None => Some(RelayServer::start(bind_port).await?),
-        };
-        let url = match &relay_url {
-            Some(u) => u.clone(),
-            None => format!(
-                "ws://127.0.0.1:{}/ws/push",
-                relay.as_ref().expect("内嵌中继必然存在").port
-            ),
-        };
-        let (client, tx) = RelayClient::connect(&url, &cfg).await?;
-        let session = StreamSession::spawn(&cfg, tx)?;
-        Ok(Self {
-            relay,
-            client,
-            session,
-        })
-    }
-
-    /// 内嵌中继端口（未内嵌时为 `None`）。
-    pub fn relay_port(&self) -> Option<u16> {
-        self.relay.as_ref().map(|r| r.port)
-    }
-
-    /// 停止推流：结束采集 → 优雅 Bye → 关闭内嵌中继。
-    pub async fn stop(mut self) {
-        self.session.stop().await;
-        self.client.stop().await;
-        if let Some(r) = self.relay.take() {
-            r.stop().await;
-        }
-    }
-}
-
 /// WS 推流客户端。
 pub struct RelayClient {
     task: JoinHandle<()>,
@@ -80,7 +23,10 @@ pub struct RelayClient {
 
 impl RelayClient {
     /// 连接中继并发送 `Hello`；返回本客户端与帧通道。
-    pub async fn connect(url: &str, cfg: &StreamConfig) -> Result<(Self, mpsc::Sender<Frame>)> {
+    ///
+    /// `hello` 由调用方构造（如 `StreamConfig::hello()`），
+    /// 这样本模块不需要依赖任何采集配置类型。
+    pub async fn connect(url: &str, hello: ControlMessage) -> Result<(Self, mpsc::Sender<Frame>)> {
         let (ws, _resp) = tokio_tungstenite::connect_async(url)
             .await
             .context("连接中继失败")?;
@@ -88,12 +34,6 @@ impl RelayClient {
         let (connected_tx, connected_rx) = watch::channel(true);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let hello = ControlMessage::Hello {
-            stream_id: cfg.stream_id.clone(),
-            title: cfg.title.clone(),
-            video: cfg.video_track_info(),
-            audio: cfg.audio_track_info(),
-        };
         let task = tokio::spawn(client_loop(ws, rx, hello, connected_tx, shutdown_rx));
         Ok((
             Self {

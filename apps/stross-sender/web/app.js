@@ -324,9 +324,10 @@ async function scanRelays() {
 
 function currentVideoSource() {
   const kind = document.querySelector('input[name="video"]:checked').value;
-  if (kind === 'screen') return { kind: 'Screen' };
-  if (kind === 'camera') return { kind: 'Camera', device: $('camera-select').value || null };
-  return { kind: 'Synthetic', pattern: 'testsrc2' };
+  // 注意：与 Rust 端 VideoSource 的 serde(rename_all="camelCase") 契约一致（小写）
+  if (kind === 'screen') return { kind: 'screen' };
+  if (kind === 'camera') return { kind: 'camera', device: $('camera-select').value || null };
+  return { kind: 'synthetic', pattern: 'testsrc2' };
 }
 
 function buildConfig() {
@@ -352,22 +353,7 @@ function buildConfig() {
   };
 }
 
-/** Android：构造原生采集参数（mobile::start_capture 的 CaptureArgs）。 */
-function buildCaptureArgs() {
-  const q = QUALITIES[$('quality-select').value];
-  return {
-    streamId: 'stross-' + Date.now().toString(36),
-    title: $('title-input').value.trim() || '我的串流',
-    width: q.width,
-    height: q.height,
-    fps: q.fps,
-    bitrateKbps: q.bitrateKbps,
-    withAudio: $('mic-enable').checked,
-  };
-}
-
-// ---------------------------------------------------------------- 推流控制
-
+/** Android：与桌面统一走 start_stream（cfg 携带画质/音频；原生采集在 Rust 后端适配）。 */
 async function startStream() {
   hideError();
   if (!connection) {
@@ -381,16 +367,13 @@ async function startStream() {
       starting = true;
       startingSince = Date.now();
       setRunning(true, 'starting');
-      // Android：原生采集（MediaProjection + MediaCodec），经手机内嵌中继推流
-      const res = await invoke('start_capture', { args: buildCaptureArgs() });
-      const urls = MY_IPS.length
-        ? MY_IPS.map((ip) => `http://${ip}:${res.relayPort}/`)
-        : [`http://127.0.0.1:${res.relayPort}/`];
-      renderUrls(urls);
+      // Android 原生采集启动需要系统授权，真实状态由 capture_status 轮询回报
+    }
+    const res = await invoke('start_stream', { cfg: buildConfig(), relayUrl: connection.wsUrl });
+    renderUrls(res.watchUrls);
+    if (IS_ANDROID) {
       pollMobileStatus(); // 立即查一次真实采集状态
     } else {
-      const res = await invoke('start_stream', { cfg: buildConfig(), relayUrl: connection.wsUrl });
-      renderUrls(res.watchUrls);
       setRunning(true, 'live');
     }
   } catch (e) {
@@ -402,11 +385,7 @@ async function startStream() {
 
 async function stopStream() {
   try {
-    if (IS_ANDROID) {
-      await invoke('stop_capture');
-    } else {
-      await invoke('stop_stream');
-    }
+    await invoke('stop_stream');
   } catch (e) {
     showFatal(String(e));
   }
@@ -414,11 +393,11 @@ async function stopStream() {
   setRunning(false);
 }
 
-/** Android：轮询采集真实状态（Kotlin 控制帧 t=9 回报）。 */
+/** Android：轮询采集真实状态（Kotlin 控制帧 t=9 回报 → capture_status）。 */
 async function pollMobileStatus() {
   if (!IS_ANDROID || !connection) return;
   try {
-    const s = await invoke('mobile_status');
+    const s = await invoke('capture_status');
     if (!s.active) {
       starting = false;
       setRunning(false);

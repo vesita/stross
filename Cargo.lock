@@ -3464,6 +3464,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "stross-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "stross-core",
+ "stross-media",
+ "stross-proto",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tracing",
+ "tracing-subscriber",
+ "tungstenite 0.27.0",
+]
+
+[[package]]
 name = "stross-core"
 version = "0.1.0"
 dependencies = [
@@ -3478,12 +3496,26 @@ dependencies = [
  "serde",
  "serde_json",
  "stross-proto",
- "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.27.0",
  "tracing",
  "tracing-subscriber",
  "tungstenite 0.27.0",
+]
+
+[[package]]
+name = "stross-media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "serde",
+ "serde_json",
+ "stross-proto",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3518,7 +3550,9 @@ dependencies = [
  "open",
  "serde",
  "serde_json",
+ "stross-app",
  "stross-core",
+ "stross-media",
  "stross-proto",
  "tauri",
  "tauri-build",

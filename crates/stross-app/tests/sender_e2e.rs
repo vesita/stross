@@ -2,17 +2,19 @@
 //!
 //! 需要本机安装 ffmpeg（含 libx264）。没有 ffmpeg 时自动跳过。
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use stross_core::pipeline::{Quality, StreamConfig, VideoSource};
-use stross_core::sender::SenderEngine;
+use stross_app::SenderEngine;
+use stross_media::capture::FfmpegBackend;
+use stross_media::pipeline::{Quality, StreamConfig, VideoSource};
 use stross_proto::frame::{Frame, TRACK_VIDEO};
 use stross_proto::message::ControlMessage;
 use tokio_tungstenite::tungstenite::Message;
 
 fn has_ffmpeg() -> bool {
-    stross_core::pipeline::ffmpeg_available()
+    stross_media::pipeline::ffmpeg_available()
 }
 
 #[tokio::test]
@@ -35,7 +37,9 @@ async fn push_to_external_relay() {
         duration_secs: Some(2),
     };
     let url = format!("ws://127.0.0.1:{}/ws/push", relay.port);
-    let engine = SenderEngine::start(cfg, Some(url), 0).await.expect("推流到外部中继");
+    let engine = SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), Some(url), 0)
+        .await
+        .expect("推流到外部中继");
 
     // 观看端从外部中继收帧
     let (mut watch, _) = tokio_tungstenite::connect_async(format!(
@@ -84,7 +88,9 @@ async fn synthetic_video_flows_end_to_end() {
         duration_secs: Some(3),
     };
 
-    let engine = SenderEngine::start(cfg, None, 0).await.expect("启动推流引擎");
+    let engine = SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), None, 0)
+        .await
+        .expect("启动推流引擎");
     let port = engine.relay_port().expect("内嵌中继端口");
 
     // 观看端连接

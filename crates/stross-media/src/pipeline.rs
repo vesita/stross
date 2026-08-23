@@ -160,6 +160,16 @@ pub struct StreamConfig {
 }
 
 impl StreamConfig {
+    /// 生成推流端注册用的 `Hello` 控制消息。
+    pub fn hello(&self) -> stross_proto::message::ControlMessage {
+        stross_proto::message::ControlMessage::Hello {
+            stream_id: self.stream_id.clone(),
+            title: self.title.clone(),
+            video: self.video_track_info(),
+            audio: self.audio_track_info(),
+        }
+    }
+
     /// 生成 Hello 消息里的轨道信息（供观看端展示）。
     pub fn video_track_info(&self) -> Option<stross_proto::message::TrackInfo> {
         self.video.as_ref().map(|_| stross_proto::message::TrackInfo {
@@ -513,7 +523,7 @@ fn spawn_ffmpeg(args: &[String]) -> Result<Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    Ok(cmd.spawn().context("启动 ffmpeg 失败")?)
+    cmd.spawn().context("启动 ffmpeg 失败")
 }
 
 /// 视频读循环：切 NAL → 组访问单元 → 发帧。

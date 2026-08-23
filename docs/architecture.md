@@ -1,6 +1,36 @@
 # 架构设计
 
-## 0. 交互模型
+## 0. 分层架构
+
+五层模块化设计，依赖方向自底向上、单向无环：
+
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│ apps/stross-sender  ⑤ UI 模块：Tauri 薄命令层 + web/ + android/(Kotlin) │
+├──────────────────────────────────────────────────────────────────┤
+│ crates/stross-app   ③ 核心封装模块：StrossApp 状态机 / SenderEngine 组合 │
+├───────────────────────────────┬──────────────────────────────────┤
+│ crates/stross-core           │ crates/stross-media               │
+│ ② 核心局域网共享模块          │ ④ 系统适配模块                    │
+│ 中继 / 推流客户端 / mDNS      │ ffmpeg 管线 / 设备枚举            │
+│ / 本机 IP / 观看端页面        │ / NAL·ADTS 解析 / CaptureBackend  │
+├───────────────────────────────┴──────────────────────────────────┤
+│ crates/stross-proto   ① 协议模块：帧头 + 控制消息（serde）                │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+| 层 | crate | 职责 | 依赖 |
+|---|---|---|---|
+| ① 协议 | `stross-proto` | 线上契约：16 字节帧头 + JSON 控制消息 | 无内部依赖 |
+| ② 共享 | `stross-core` | 纯数据共享逻辑：中继、WS 推流客户端、mDNS、本机 IP、观看端页面 | proto |
+| ④ 适配 | `stross-media` | 系统适配：ffmpeg 采集管线、设备枚举、H.264/AAC 切帧、`CaptureBackend` trait | proto |
+| ③ 封装 | `stross-app` | 应用状态机 + 引擎组合，无 UI 依赖、可单测 | core + media |
+| ⑤ UI | `stross-sender` | Tauri 薄命令层 + Web 前端 + Android Kotlin 桥 | app |
+
+> 协议为何保持独立小 crate：共享模块与系统适配模块**都**要使用 `Frame`/`ControlMessage`，
+> 独立成 crate 才能让 media 只依赖协议、而不反向依赖共享模块（否则 media 会拉进 axum 等中继依赖）。
+
+### 交互模型
 
 桌面/Android 应用采用「**先连接，再收/发**」：
 
@@ -15,8 +45,8 @@
 
 - 「本机」连接：`start_relay` 启动一个常驻中继（观看与推流共用）。
 - 「局域网中继」连接：探测 `/api/streams` 可达性；mDNS 扫描返回候选。
-- 推流时把 `relay_url` 指向所连接的中继（`SenderEngine::start(relay_url)` 早已支持
-  内嵌/外部两种模式）。
+- 推流时把 `relay_url` 指向所连接的中继（桌面内嵌 / 外部中继统一走
+  `SenderEngine::start(relay_url)`）。
 - 观看页通过 iframe 加载中继托管的观看端页面，复用同一套 MSE 播放器。
 
 ## 1. 总体数据流
@@ -32,7 +62,7 @@
               │ Rust: NAL/ADTS 切帧          │ / 内嵌观看端页面        │
               │ 逐帧打时间戳 → Frame         └──────────────────────┘
               └── WebSocket push ──────────▶        ▲
-                                                   │
+                                                    │
 推流端（Android）                                    │
 ┌──────────────────────────────┐                    │
 │ MediaProjection → MediaCodec  │  Channel(base64)  │
@@ -62,7 +92,26 @@
 `Hello`（推流端声明）→ `Welcome`（中继确认）；观看端连上即收 `Ready`；
 `Bye` 结束；`Error` 携带错误。
 
-## 3. 桌面采集管线（crates/stross-core/src/pipeline.rs）
+## 3. 系统适配模块（crates/stross-media）
+
+### 采集后端抽象（capture.rs）
+
+`CaptureBackend` trait 把「把本机媒体源变成 `Frame` 流」抽象成统一接口，
+上层引擎/状态机只依赖 trait，不关心平台：
+
+```rust
+pub trait CaptureBackend: Send + Sync {
+    fn start(&self, cfg: &StreamConfig, tx: mpsc::Sender<Frame>) -> Result<()>;
+    fn stop(&self);
+    fn status(&self) -> CaptureStatus;
+}
+```
+
+- 桌面：`FfmpegBackend`（本 crate）—— ffmpeg 子进程采集；
+- Android：`AndroidCapture`（UI 层 `mobile.rs` 实现）—— MediaProjection + MediaCodec，
+  经 Tauri `Channel` 回传帧；`status()` 由 Kotlin 控制帧（`t=9`）异步回报。
+
+### 桌面采集管线（pipeline.rs）
 
 两个 ffmpeg 子进程并行，编码参数刻意选择：
 
@@ -80,6 +129,13 @@ Rust 侧用 `AnnexBSplitter`（状态机切 NAL）→ `AccessUnitBuilder`
 > 注：`-tune zerolatency` 会启用 slice 线程把一帧切成多个 slice，
 > 因此必须解析 slice 头部的 `first_mb_in_slice`（Exp-Golomb 首个码字）
 > 才能正确分帧——这也是对 Android MediaCodec 多 slice 输出的兜底。
+
+### 设备枚举（devices.rs）
+
+摄像头 / 麦克风 / 系统声音：
+- Windows：解析 `ffmpeg -f dshow -list_devices`；
+- Linux：`/dev/video*` + sysfs 名称、`pactl` 源列表（monitor = 系统声音）；
+- macOS：`avfoundation` 设备列表（尽力而为）。
 
 ## 4. 中继（crates/stross-core/src/relay.rs）
 
@@ -99,25 +155,43 @@ Rust 侧用 `AnnexBSplitter`（状态机切 NAL）→ `AccessUnitBuilder`
   封成 fMP4 喂给 MSE。
 - 断线 3 秒自动重连；界面显示码率/fps/缓冲时长。
 
-## 6. Android 采集（apps/stross-sender/src-tauri/android/）
+## 6. 核心封装模块（crates/stross-app）
+
+### 推流引擎（engine.rs）
+
+`SenderEngine` 把三件事组合起来：
+
+1. 内嵌中继（或连接外部中继）；
+2. `RelayClient`（tokio-tungstenite 推流客户端：Hello → 帧 → Bye）；
+3. `CaptureBackend`（采集后端，`Arc` 共享注入）。
+
+`SenderEngine::stop()` 顺序：停采集 → 关闭帧通道 → 客户端优雅 Bye → 关中继。
+
+### 应用状态机（app.rs）
+
+`StrossApp` 是命令面的唯一实现，**不依赖任何 UI 框架**：
+
+| 方法 | 说明 |
+|---|---|
+| `start_relay()` | 启动/复用本机常驻中继 + mDNS 广播 |
+| `scan_relays()` | mDNS 扫描局域网中继 |
+| `start_stream(cfg, relay_url)` | 组合引擎：外部中继 / 本机中继 / 内嵌中继 |
+| `stop_stream()` / `stream_status()` | 推流生命周期 |
+| `capture_status()` | 采集真实状态（Android 异步回报） |
+| `app_info()` / `list_devices()` | 信息与设备 |
+
+UI 层（桌面 / Android）只把 `invoke` 命令转发到这里，因此命令面两边完全一致：
+桌面 `start_stream` 与 Android 走同一条路径，平台差异被 `CaptureBackend` 隔离。
+
+## 7. Android 采集（apps/stross-sender/src-tauri/android/）
 
 - `MediaPlugin.kt`：`@TauriPlugin`，`@Command startCapture/stopCapture`。
 - 屏幕：`MediaProjectionManager.createScreenCaptureIntent()` 授权 →
   `ProjectionService`（API 34+ 强制的前台服务）→ `getMediaProjection` →
   VirtualDisplay 直连 MediaCodec 输入面（零拷贝）→ H.264 输出。
 - 麦克风：`AudioRecord` → AAC MediaCodec → 手动加 ADTS 头。
-- 编码帧经 Tauri `Channel`（base64 JSON）回传 Rust `mobile.rs`，
-  转成协议帧送入推流客户端——与桌面端共用同一套中继/观看端。
-
-## 7. 推流引擎（crates/stross-core/src/sender.rs）
-
-`SenderEngine` 把三件事组合起来：
-
-1. 内嵌中继（或连接外部中继）；
-2. `RelayClient`（tokio-tungstenite 推流客户端：Hello → 帧 → Bye）；
-3. `StreamSession`（ffmpeg 子进程 + 读管道）。
-
-`SenderEngine::stop()` 顺序：杀 ffmpeg → 关闭帧通道 → 客户端优雅 Bye → 关中继。
+- 编码帧经 Tauri `Channel`（base64 JSON）回传 Rust `mobile.rs`（`AndroidCapture`
+  实现 `CaptureBackend`），转成协议帧送入推流客户端——与桌面端共用同一套中继/观看端。
 
 ## 8. 关键设计决策
 
@@ -128,3 +202,5 @@ Rust 侧用 `AnnexBSplitter`（状态机切 NAL）→ `AccessUnitBuilder`
 | WebSocket 而非 WebRTC | 实现简单、穿透局域网无压力；代价是延迟 1–2s（GOP 级） |
 | 每帧一个 WS 消息 | 观看端按帧统计、按帧对齐，无需解析容器 |
 | 中继独立于推流端 | 多机推流到同一中继；观看端页面由中继托管 |
+| 协议独立 crate | media 与 core 都要用 `Frame`，独立成 crate 让适配层不反向依赖共享层 |
+| `CaptureBackend` trait | 桌面 ffmpeg 与 Android 原生采集统一抽象，UI 命令面两边一致 |

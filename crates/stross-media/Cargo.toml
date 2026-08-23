@@ -1,0 +1,19 @@
+[package]
+name = "stross-media"
+description = "System adaptation layer for Stross: capture pipelines (ffmpeg), device enumeration, stream parsing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+stross-proto = { path = "../stross-proto", version = "0.1.0" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

@@ -1,0 +1,249 @@
+//! 采集设备枚举：摄像头、麦克风、系统声音。
+//!
+//! 策略（尽量零额外依赖）：
+//!
+//! * **Windows**：解析 `ffmpeg -f dshow -list_devices true` 的输出。
+//! * **Linux**：摄像头扫 `/dev/video*` + sysfs 名称；音频用 `pactl`。
+//! * **Android**：返回空列表，采集走原生 Kotlin 插件。
+//! * **macOS**：解析 `avfoundation` 设备列表（尽力而为）。
+
+use std::process::Command;
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use crate::pipeline::ffmpeg_bin;
+
+/// 摄像头设备。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraDevice {
+    /// 稳定标识（Linux 为 `/dev/videoN`，Windows 为 dshow 名称）。
+    pub id: String,
+    /// 展示名称。
+    pub name: String,
+}
+
+/// 枚举摄像头。
+pub fn list_cameras() -> Vec<CameraDevice> {
+    #[cfg(target_os = "windows")]
+    {
+        dshow_devices()
+            .into_iter()
+            .filter(|(_, kind)| kind == "video")
+            .map(|(name, _)| CameraDevice { id: name.clone(), name })
+            .collect()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        avfoundation_devices()
+            .into_iter()
+            .filter(|(_, kind)| kind == "video")
+            .map(|(name, _)| CameraDevice { id: name.clone(), name })
+            .collect()
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/dev") {
+            let mut paths: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().starts_with("video"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            paths.sort();
+            for p in paths {
+                let id = p.to_string_lossy().to_string();
+                let name = sysfs_name(&p).unwrap_or_else(|| id.clone());
+                out.push(CameraDevice { id, name });
+            }
+        }
+        out
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android"
+    )))]
+    {
+        Vec::new()
+    }
+}
+
+/// 枚举麦克风（输入设备）。
+pub fn list_audio_inputs() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        dshow_devices()
+            .into_iter()
+            .filter(|(_, kind)| kind == "audio")
+            .map(|(name, _)| name)
+            .collect()
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        pulse_sources().into_iter().filter(|s| !s.contains(".monitor")).collect()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        avfoundation_devices()
+            .into_iter()
+            .filter(|(_, kind)| kind == "audio")
+            .map(|(name, _)| name)
+            .collect()
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android"
+    )))]
+    {
+        Vec::new()
+    }
+}
+
+/// 枚举系统声音（回环采集：PulseAudio monitor / Windows Stereo Mix 等）。
+pub fn list_system_audio() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        dshow_devices()
+            .into_iter()
+            .filter(|(_, kind)| kind == "audio")
+            .map(|(name, _)| name)
+            .filter(is_loopback_like)
+            .collect()
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        pulse_sources().into_iter().filter(|s| s.contains(".monitor")).collect()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Vec::new()
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android"
+    )))]
+    {
+        Vec::new()
+    }
+}
+
+/// Windows 常见回环设备关键字（Stereo Mix / 立体声混音 / What U Hear 等）。
+#[cfg(target_os = "windows")]
+fn is_loopback_like(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [
+        "stereo mix",
+        "立体声混音",
+        "立体声混合",
+        "what u hear",
+        "loopback",
+        "听得到的",
+        "wave out",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+}
+
+/// 解析 `ffmpeg -f dshow -list_devices` 的输出。
+/// 返回 `(设备名, 类型)`，类型为 "video" / "audio"。
+#[cfg(target_os = "windows")]
+fn dshow_devices() -> Vec<(String, &'static str)> {
+    let out = Command::new(ffmpeg_bin())
+        .args(["-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy"])
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    let text = String::from_utf8_lossy(&out.stderr);
+    let mut devices = Vec::new();
+    for line in text.lines() {
+        let Some(open) = line.find('"') else { continue };
+        let rest = &line[open + 1..];
+        let Some(close) = rest.find('"') else { continue };
+        let name = rest[..close].to_string();
+        let kind = if line.contains("(video)") {
+            "video"
+        } else if line.contains("(audio)") {
+            "audio"
+        } else {
+            continue;
+        };
+        devices.push((name, kind));
+    }
+    devices
+}
+
+/// 解析 `ffmpeg -f avfoundation -list_devices` 的输出（尽力而为）。
+#[cfg(target_os = "macos")]
+fn avfoundation_devices() -> Vec<(String, &'static str)> {
+    let out = Command::new(ffmpeg_bin())
+        .args(["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    let text = String::from_utf8_lossy(&out.stderr);
+    let mut devices = Vec::new();
+    for line in text.lines() {
+        // "[AVFoundation input device @ ...] [0] FaceTime HD Camera"
+        let Some(open) = line.find('[') else { continue };
+        let after = &line[open + 1..];
+        let Some(close) = after.find(']') else { continue };
+        let rest = after[close + 1..].trim();
+        let Some(sep) = rest.find(']') else { continue };
+        let desc = rest[sep + 1..].trim().to_string();
+        if desc.is_empty() {
+            continue;
+        }
+        let kind = if line.contains("capture devices") || desc.contains("Camera") || desc.contains("camera") {
+            "video"
+        } else {
+            "audio"
+        };
+        devices.push((desc, kind));
+    }
+    devices
+}
+
+/// `pactl list short sources` 的源名称列表（Linux）。
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn pulse_sources() -> Vec<String> {
+    let out = Command::new("pactl").args(["list", "short", "sources"]).output();
+    let Ok(out) = out else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .filter_map(|line| line.split_whitespace().nth(1).map(|s| s.to_string()))
+        .collect()
+}
+
+/// 从 sysfs 读取 v4l2 设备名。
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn sysfs_name(dev: &std::path::Path) -> Option<String> {
+    let video = dev.file_name()?.to_string_lossy();
+    let name = std::fs::read_to_string(format!("/sys/class/video4linux/{video}/name"))
+        .ok()?
+        .trim()
+        .to_string();
+    Some(if name.is_empty() { video.to_string() } else { name })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cameras_never_panic() {
+        // 无论环境有没有设备，枚举都不应 panic
+        let _ = list_cameras();
+        let _ = list_audio_inputs();
+        let _ = list_system_audio();
+    }
+}

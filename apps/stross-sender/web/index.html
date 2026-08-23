@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stross 串流器</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">📡</span>
+      <div>
+        <h1>Stross</h1>
+        <span class="subtitle">局域网串流器</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <span id="ffmpeg-badge" class="badge">检查 ffmpeg…</span>
+      <span id="ver-badge" class="badge muted">v-</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>串流源</h2>
+
+      <fieldset>
+        <legend>视频</legend>
+        <div class="row">
+          <label class="seg" data-video="screen">
+            <input type="radio" name="video" value="screen" checked /> 🖥️ 屏幕
+          </label>
+          <label class="seg" data-video="camera">
+            <input type="radio" name="video" value="camera" /> 📷 摄像头
+          </label>
+          <label class="seg" data-video="synthetic">
+            <input type="radio" name="video" value="synthetic" /> 🧪 测试画面
+          </label>
+        </div>
+        <div class="row hidden" id="camera-row">
+          <select id="camera-select"></select>
+          <span class="hint">未发现摄像头设备</span>
+        </div>
+        <div class="row">
+          <label>画质
+            <select id="quality-select">
+              <option value="LOW">低 (640×360 @24fps)</option>
+              <option value="MEDIUM" selected>中 (1280×720 @30fps)</option>
+              <option value="HIGH">高 (1920×1080 @30fps)</option>
+            </select>
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>音频</legend>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="mic-enable" checked /> 🎤 麦克风</label>
+          <select id="mic-select" class="grow"></select>
+          <span class="hint" id="mic-hint"></span>
+        </div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="sys-enable" /> 🔊 系统声音</label>
+          <select id="sys-select" class="grow"></select>
+          <span class="hint" id="sys-hint"></span>
+        </div>
+      </fieldset>
+
+      <div class="row">
+        <label>串流名称
+          <input id="title-input" type="text" value="我的串流" maxlength="40" />
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="start-btn" class="primary" type="button">▶ 开始推流</button>
+        <button id="stop-btn" type="button" disabled>⏹ 停止</button>
+        <button id="viewer-btn" type="button" disabled>🌐 打开观看端</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>状态</h2>
+      <div id="status" class="status">
+        <div class="status-line"><span class="dot idle" id="status-dot"></span><span id="status-text">未推流</span></div>
+        <div id="stream-meta" class="meta"></div>
+        <div id="error-box" class="error hidden"></div>
+      </div>
+
+      <h2>观看地址</h2>
+      <p class="hint">局域网内任意设备（手机 / 平板 / 电脑）用浏览器打开：</p>
+      <ul id="url-list" class="url-list">
+        <li class="hint">开始推流后显示地址</li>
+      </ul>
+
+      <h2>本机 IP</h2>
+      <ul id="ip-list" class="url-list">
+        <li class="hint">读取中…</li>
+      </ul>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

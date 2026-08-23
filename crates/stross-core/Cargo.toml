@@ -1,0 +1,32 @@
+[package]
+name = "stross-core"
+description = "Core library for Stross: capture pipelines, relay server, discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+stross-proto = { path = "../stross-proto", version = "0.1.0" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+local-ip-address = "0.6"
+hostname = "0.4"
+mdns-sd = { version = "0.13", optional = true }
+tokio-tungstenite = "0.27"
+tungstenite = "0.27"
+
+[features]
+default = []
+# 启用 mDNS 服务发现（局域网自动发现中继/推流端）
+discovery = ["dep:mdns-sd"]
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tracing-subscriber.workspace = true

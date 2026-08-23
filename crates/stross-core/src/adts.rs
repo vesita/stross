@@ -1,0 +1,143 @@
+//! AAC ADTS 帧解析：从字节流切分出完整的 ADTS 帧。
+//!
+//! ffmpeg 以 `-f adts` 输出 ADTS 封装（每帧自带头，含采样率与声道信息），
+//! 观看端（jmuxer）可直接从 ADTS 头提取 AudioSpecificConfig。
+
+/// ADTS 固定头最小长度（无 CRC 时 7 字节，有 CRC 时 9 字节）。
+pub const ADTS_MIN_HEADER: usize = 7;
+
+/// 判断缓冲区开头是否像 ADTS 帧（同步字 0xFFF）。
+pub fn is_adts_frame(buf: &[u8]) -> bool {
+    buf.len() >= 2 && buf[0] == 0xFF && (buf[1] & 0xF0) == 0xF0
+}
+
+/// 从 ADTS 头解析帧总长度（含头）。
+pub fn adts_frame_len(buf: &[u8]) -> Option<usize> {
+    if !is_adts_frame(buf) || buf.len() < ADTS_MIN_HEADER {
+        return None;
+    }
+    let len = (((buf[3] & 0x03) as usize) << 11)
+        | ((buf[4] as usize) << 3)
+        | (((buf[5] >> 5) & 0x07) as usize);
+    if len < ADTS_MIN_HEADER {
+        None
+    } else {
+        Some(len)
+    }
+}
+
+/// 有状态 ADTS 切分器：喂入任意字节块，产出完整 ADTS 帧。
+#[derive(Default)]
+pub struct AdtsSplitter {
+    buf: Vec<u8>,
+}
+
+impl AdtsSplitter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 喂入数据，返回切出的完整 ADTS 帧。
+    pub fn feed(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+        self.buf.extend_from_slice(data);
+        let mut out = Vec::new();
+        loop {
+            // 同步：找下一个 0xFFF
+            if !is_adts_frame(&self.buf) {
+                if let Some(pos) = self.find_sync() {
+                    self.buf.drain(..pos);
+                } else {
+                    // 剩余不足 2 字节，等待更多数据
+                    self.buf.clear();
+                    break;
+                }
+                continue;
+            }
+            match adts_frame_len(&self.buf) {
+                Some(len) if self.buf.len() >= len => {
+                    let frame = self.buf[..len].to_vec();
+                    self.buf.drain(..len);
+                    out.push(frame);
+                }
+                _ => break, // 帧不完整，等待更多数据
+            }
+        }
+        out
+    }
+
+    /// 冲刷剩余的完整帧。
+    pub fn finish(&mut self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        while is_adts_frame(&self.buf) {
+            match adts_frame_len(&self.buf) {
+                Some(len) if self.buf.len() >= len => {
+                    let frame = self.buf[..len].to_vec();
+                    self.buf.drain(..len);
+                    out.push(frame);
+                }
+                _ => break,
+            }
+        }
+        out
+    }
+
+    fn find_sync(&self) -> Option<usize> {
+        let mut i = 0;
+        while i + 1 < self.buf.len() {
+            if self.buf[i] == 0xFF && (self.buf[i + 1] & 0xF0) == 0xF0 {
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造一个最小合法的 ADTS 帧头（7 字节）+ 载荷。
+    fn fake_adts(payload_len: usize) -> Vec<u8> {
+        let total = ADTS_MIN_HEADER + payload_len;
+        let mut h = [0u8; 7];
+        h[0] = 0xFF;
+        h[1] = 0xF1; // MPEG-4, layer 0, no CRC
+        h[2] = 0x50; // profile AAC-LC (01), 采样率 48000 索引 3, private 0, channel 2 (0010)
+        h[3] = (0x00) | (((total >> 11) & 0x03) as u8);
+        h[4] = ((total >> 3) & 0xFF) as u8;
+        h[5] = (((total & 0x07) as u8) << 5) | 0x1F;
+        h[6] = 0xFC;
+        let mut v = h.to_vec();
+        v.extend(std::iter::repeat(0u8).take(payload_len));
+        v
+    }
+
+    #[test]
+    fn header_length_parse() {
+        let frame = fake_adts(50);
+        assert_eq!(adts_frame_len(&frame), Some(57));
+        assert!(is_adts_frame(&frame));
+        assert!(!is_adts_frame(&[0x00, 0x00]));
+    }
+
+    #[test]
+    fn split_across_boundaries_and_resync() {
+        let mut s = AdtsSplitter::new();
+        let f1 = fake_adts(10);
+        let f2 = fake_adts(20);
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&[0xAA, 0xBB]); // 干扰字节（模拟丢包/错位）
+        stream.extend_from_slice(&f1);
+        stream.extend_from_slice(&f2);
+
+        let mut out = Vec::new();
+        for chunk in stream.chunks(9) {
+            out.extend(s.feed(chunk));
+        }
+        out.extend(s.finish());
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], f1);
+        assert_eq!(out[1], f2);
+    }
+}

@@ -17,6 +17,8 @@ let devices = { cameras: [], audioInputs: [], systemAudio: [] };
 let running = false;
 let connection = null; // { url: "http://host:port", wsUrl: "ws://host:port/ws/push" }
 let currentTab = 'send';
+let IS_ANDROID = false;
+let MY_IPS = [];
 
 // ---------------------------------------------------------------- 初始化
 
@@ -27,9 +29,18 @@ async function init() {
   }
   try {
     const info = await invoke('app_info');
+    IS_ANDROID = info.platform === 'android';
+    MY_IPS = info.ips || [];
     $('ver-badge').textContent = 'v' + info.version;
     const fb = $('ffmpeg-badge');
-    if (info.ffmpeg) {
+    if (IS_ANDROID) {
+      fb.textContent = '原生采集';
+      fb.classList.add('ok');
+      // Android：视频源固定为屏幕（MediaProjection），无系统声音采集
+      $('video-seg-row').classList.add('hidden');
+      $('android-video-note').classList.remove('hidden');
+      $('sys-row').classList.add('hidden');
+    } else if (info.ffmpeg) {
       fb.textContent = 'ffmpeg ✓';
       fb.classList.add('ok');
     } else {
@@ -55,6 +66,9 @@ function showConnectError(msg) {
   const box = $('connect-error');
   box.textContent = msg;
   box.classList.remove('hidden');
+}
+function hideConnectError() {
+  $('connect-error').classList.add('hidden');
 }
 
 // ---------------------------------------------------------------- 连接
@@ -238,6 +252,20 @@ function buildConfig() {
 
 // ---------------------------------------------------------------- 推流控制
 
+/** Android：构造原生采集参数（mobile::start_capture 的 CaptureArgs）。 */
+function buildCaptureArgs() {
+  const q = QUALITIES[$('quality-select').value];
+  return {
+    streamId: 'stross-' + Date.now().toString(36),
+    title: $('title-input').value.trim() || '我的串流',
+    width: q.width,
+    height: q.height,
+    fps: q.fps,
+    bitrateKbps: q.bitrateKbps,
+    withAudio: $('mic-enable').checked,
+  };
+}
+
 async function startStream() {
   hideError();
   if (!connection) {
@@ -246,9 +274,18 @@ async function startStream() {
   }
   $('start-btn').disabled = true;
   try {
-    // 推到当前连接的中继
-    const res = await invoke('start_stream', { cfg: buildConfig(), relayUrl: connection.wsUrl });
-    renderUrls(res.watchUrls);
+    if (IS_ANDROID) {
+      // Android：原生采集（MediaProjection + MediaCodec），经手机内嵌中继推流
+      const res = await invoke('start_capture', { args: buildCaptureArgs() });
+      const urls = MY_IPS.length
+        ? MY_IPS.map((ip) => `http://${ip}:${res.relayPort}/`)
+        : [`http://127.0.0.1:${res.relayPort}/`];
+      renderUrls(urls);
+    } else {
+      // 桌面：ffmpeg 管线，推到当前连接的中继
+      const res = await invoke('start_stream', { cfg: buildConfig(), relayUrl: connection.wsUrl });
+      renderUrls(res.watchUrls);
+    }
     setRunning(true);
   } catch (e) {
     showFatal(String(e));
@@ -258,7 +295,11 @@ async function startStream() {
 
 async function stopStream() {
   try {
-    await invoke('stop_stream');
+    if (IS_ANDROID) {
+      await invoke('stop_capture');
+    } else {
+      await invoke('stop_stream');
+    }
   } catch (e) {
     showFatal(String(e));
   }
@@ -266,6 +307,7 @@ async function stopStream() {
 }
 
 async function pollStatus() {
+  if (IS_ANDROID) return; // Android 采集状态由 start/stop 命令驱动
   try {
     const s = await invoke('stream_status');
     setRunning(s.running);

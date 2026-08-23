@@ -61,6 +61,8 @@ impl Default for AppState {
 #[serde(rename_all = "camelCase")]
 struct AppInfo {
     version: String,
+    /// "desktop" | "android" —— 前端据此选择 ffmpeg 管线还是原生采集
+    platform: String,
     ffmpeg: bool,
     ips: Vec<String>,
 }
@@ -96,6 +98,7 @@ struct StreamStatus {
 fn app_info() -> AppInfo {
     AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        platform: cfg!(target_os = "android").then_some("android").unwrap_or("desktop").to_string(),
         ffmpeg: ffmpeg_available(),
         ips: local_ips().into_iter().map(|ip| ip.to_string()).collect(),
     }
@@ -293,6 +296,14 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Android 上 Rust tracing 输出到 logcat，桌面输出到 stderr
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let builder = tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(invoke_handler());

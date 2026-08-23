@@ -70,7 +70,7 @@
 
           <fieldset>
             <legend>视频</legend>
-            <div class="row">
+            <div class="row" id="video-seg-row">
               <label class="seg" data-video="screen">
                 <input type="radio" name="video" value="screen" checked /> 🖥️ 屏幕
               </label>
@@ -80,6 +80,9 @@
               <label class="seg" data-video="synthetic">
                 <input type="radio" name="video" value="synthetic" /> 🧪 测试画面
               </label>
+            </div>
+            <div class="row hidden" id="android-video-note">
+              <span>📱 屏幕（MediaProjection，首次会请求系统授权）</span>
             </div>
             <div class="row hidden" id="camera-row">
               <select id="camera-select"></select>
@@ -103,7 +106,7 @@
               <select id="mic-select" class="grow"></select>
               <span class="hint" id="mic-hint"></span>
             </div>
-            <div class="row">
+            <div class="row" id="sys-row">
               <label class="check"><input type="checkbox" id="sys-enable" /> 🔊 系统声音</label>
               <select id="sys-select" class="grow"></select>
               <span class="hint" id="sys-hint"></span>

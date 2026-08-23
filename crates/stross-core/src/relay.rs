@@ -33,6 +33,21 @@ use stross_proto::message::{ControlMessage, StreamInfo};
 
 use crate::assets;
 
+/// CORS 中间件：Stross 桌面/Android 前端运行在 Tauri 的本地源
+/// （`tauri://localhost` / `http://tauri.localhost`），连接阶段会跨源
+/// 访问中继的 `/api/*`，必须允许任意来源。
+async fn cors_layer(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut().insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        axum::http::HeaderValue::from_static("*"),
+    );
+    resp
+}
+
 /// 默认中继端口。
 pub const DEFAULT_PORT: u16 = 8777;
 
@@ -125,6 +140,7 @@ impl RelayServer {
             .route("/api/streams", get(api_streams))
             .route("/ws/push", get(ws_push))
             .route("/ws/watch", get(ws_watch))
+            .layer(axum::middleware::from_fn(cors_layer))
             .with_state(state.clone());
 
         let listener = TcpListener::bind(("0.0.0.0", port)).await?;

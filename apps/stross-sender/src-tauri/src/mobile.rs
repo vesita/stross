@@ -66,21 +66,35 @@ pub struct CaptureArgs {
 /// 运行中的 Android 采集会话（由 `AppState` 持有）。
 pub struct MobileCapture {
     pub client: RelayClient,
-    pub relay: RelayHandle,
+    /// 自己创建的中继（复用已连接中继时为 None，交给 AppState 常驻管理）。
+    pub relay: Option<RelayHandle>,
     /// 推流帧通道；停止时 `take()` 掉以触发优雅 Bye。
     pub tx: Arc<Mutex<Option<mpsc::Sender<Frame>>>>,
 }
 
-/// 启动 Android 采集：内嵌中继 + 推流客户端 + Kotlin 插件。
+/// 启动 Android 采集：复用已连接中继 + 推流客户端 + Kotlin 插件。
 #[tauri::command]
 pub async fn start_capture(
     app: AppHandle<Wry>,
     args: CaptureArgs,
 ) -> Result<serde_json::Value, String> {
-    // 1) 内嵌中继
-    let relay = RelayServer::start(stross_core::relay::DEFAULT_PORT)
-        .await
-        .map_err(|e| e.to_string())?;
+    // 1) 复用「连接」阶段启动的本机中继；没有则新建（不持有 std MutexGuard 跨 await）
+    let (relay_port, owned_relay) = {
+        let state = app.state::<crate::AppState>();
+        let existing = state.relay.lock().unwrap().as_ref().map(|r| r.port);
+        match existing {
+            Some(port) => (port, None),
+            None => {
+                let handle = RelayServer::start(stross_core::relay::DEFAULT_PORT)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let port = handle.port;
+                *state.relay.lock().unwrap() = Some(handle);
+                (port, None) // 已交给 AppState 常驻
+            }
+        }
+    };
+    let _ = owned_relay;
 
     // 2) 推流客户端（Hello 的轨道信息为占位，实际以 Kotlin 首帧为准）
     let cfg = StreamConfig {
@@ -102,7 +116,7 @@ pub async fn start_capture(
         },
         duration_secs: None,
     };
-    let url = format!("ws://127.0.0.1:{}/ws/push", relay.port);
+    let url = format!("ws://127.0.0.1:{relay_port}/ws/push");
     let (client, tx) = RelayClient::connect(&url, &cfg)
         .await
         .map_err(|e| e.to_string())?;
@@ -165,10 +179,13 @@ pub async fn start_capture(
         .run_mobile_plugin::<serde_json::Value>("startCapture", payload)
         .map_err(|e| e.to_string())?;
 
-    // 5) 记录会话
-    let relay_port = relay.port;
+    // 5) 记录会话（复用中继时不持有、不停止；由 AppState 常驻管理）
     let state = app.state::<crate::AppState>();
-    *state.mobile.lock().unwrap() = Some(MobileCapture { client, relay, tx });
+    *state.mobile.lock().unwrap() = Some(MobileCapture {
+        client,
+        relay: owned_relay,
+        tx,
+    });
     Ok(serde_json::json!({ "relayPort": relay_port }))
 }
 
@@ -184,7 +201,9 @@ pub async fn stop_capture(app: AppHandle<Wry>) -> Result<(), String> {
         // 关闭推流通道 → 客户端发 Bye
         cap.tx.lock().unwrap().take();
         cap.client.stop().await;
-        cap.relay.stop().await;
+        if let Some(relay) = cap.relay {
+            relay.stop().await;
+        }
     }
     Ok(())
 }

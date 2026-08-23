@@ -35,6 +35,9 @@ pub struct AppState {
     /// Android 原生采集会话（仅移动端）。
     #[cfg(mobile)]
     pub mobile: Mutex<Option<mobile::MobileCapture>>,
+    /// Android 采集真实状态（Kotlin 控制帧回传，供前端轮询）。
+    #[cfg(mobile)]
+    pub mobile_status: std::sync::Arc<std::sync::Mutex<mobile::MobileCaptureStatus>>,
 }
 
 /// 运行中的推流。
@@ -53,6 +56,10 @@ impl Default for AppState {
             relay: Mutex::new(None),
             #[cfg(mobile)]
             mobile: Mutex::new(None),
+            #[cfg(mobile)]
+            mobile_status: std::sync::Arc::new(std::sync::Mutex::new(
+                mobile::MobileCaptureStatus::default(),
+            )),
         }
     }
 }
@@ -290,7 +297,8 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         stream_status,
         open_viewer,
         mobile::start_capture,
-        mobile::stop_capture
+        mobile::stop_capture,
+        mobile::mobile_status
     ]
 }
 

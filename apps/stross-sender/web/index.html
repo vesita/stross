@@ -16,6 +16,7 @@
       </div>
     </div>
     <div class="header-right">
+      <button id="disconnect-btn" class="ghost-btn hidden" type="button">✕ 断开</button>
       <span id="conn-badge" class="badge">未连接</span>
       <span id="ffmpeg-badge" class="badge">检查 ffmpeg…</span>
       <span id="ver-badge" class="badge muted">v-</span>
@@ -145,10 +146,16 @@
       <!-- 观看 -->
       <div id="tab-watch" class="tab-pane hidden">
         <section class="card">
-          <h2>观看串流</h2>
+          <div class="card-head">
+            <h2>观看串流</h2>
+            <button id="watch-refresh-btn" class="small-btn" type="button">🔄 刷新</button>
+          </div>
           <p class="hint">已连接中继：<span id="watch-relay-url" class="mono"></span></p>
           <p class="hint">页面会列出该中继上的在线串流；没有串流时，请先在「📤 推流」页开始推流。</p>
-          <iframe id="watch-frame" src="about:blank" title="Stross 观看端"></iframe>
+          <div class="iframe-wrap">
+            <div id="watch-loading" class="watch-loading">加载观看页…</div>
+            <iframe id="watch-frame" src="about:blank" title="Stross 观看端"></iframe>
+          </div>
         </section>
       </div>
     </section>

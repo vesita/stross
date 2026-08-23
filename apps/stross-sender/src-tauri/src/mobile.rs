@@ -72,6 +72,15 @@ pub struct MobileCapture {
     pub tx: Arc<Mutex<Option<mpsc::Sender<Frame>>>>,
 }
 
+/// Android 采集真实状态（由 Kotlin 控制帧 t=9 回传）。
+#[derive(Default, Clone)]
+pub struct MobileCaptureStatus {
+    /// 采集是否真正启动（虚拟显示 + 编码器就绪）。
+    pub started: bool,
+    /// 启动失败原因。
+    pub error: Option<String>,
+}
+
 /// 启动 Android 采集：复用已连接中继 + 推流客户端 + Kotlin 插件。
 #[tauri::command]
 pub async fn start_capture(
@@ -122,8 +131,9 @@ pub async fn start_capture(
         .map_err(|e| e.to_string())?;
     let tx = Arc::new(Mutex::new(Some(tx)));
 
-    // 3) 帧通道：Kotlin base64 帧 → 协议帧 → 推流
+    // 3) 帧通道：Kotlin base64 帧 → 协议帧 → 推流；t=9 为采集状态控制帧
     let tx_chan = tx.clone();
+    let status = app.state::<crate::AppState>().mobile_status.clone();
     let channel: Channel<serde_json::Value> = Channel::new(move |body| {
         let v: serde_json::Value = match body {
             InvokeResponseBody::Json(s) => match serde_json::from_str(&s) {
@@ -135,6 +145,19 @@ pub async fn start_capture(
         let Some(track) = v.get("t").and_then(|x| x.as_u64()) else {
             return Ok(());
         };
+        // 采集状态控制帧（不推给中继，只更新状态供前端轮询）
+        if track == 9 {
+            let mut st = status.lock().unwrap();
+            if let Some(started) = v.get("started").and_then(|x| x.as_bool()) {
+                st.started = started;
+                st.error = v.get("err").and_then(|x| x.as_str()).map(|s| s.to_string());
+            }
+            if v.get("stopped").and_then(|x| x.as_bool()).unwrap_or(false) {
+                st.started = false;
+                st.error = None;
+            }
+            return Ok(());
+        }
         let keyframe = v.get("k").and_then(|x| x.as_bool()).unwrap_or(false);
         let is_config = v.get("c").and_then(|x| x.as_bool()).unwrap_or(false);
         let pts = v.get("p").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
@@ -180,13 +203,28 @@ pub async fn start_capture(
         .map_err(|e| e.to_string())?;
 
     // 5) 记录会话（复用中继时不持有、不停止；由 AppState 常驻管理）
+    //    同时重置采集状态，等待 Kotlin 控制帧回报真实状态
     let state = app.state::<crate::AppState>();
     *state.mobile.lock().unwrap() = Some(MobileCapture {
         client,
         relay: owned_relay,
         tx,
     });
+    *state.mobile_status.lock().unwrap() = MobileCaptureStatus::default();
     Ok(serde_json::json!({ "relayPort": relay_port }))
+}
+
+/// 查询 Android 采集真实状态（前端轮询用）。
+#[tauri::command]
+pub async fn mobile_status(app: AppHandle<Wry>) -> Result<serde_json::Value, String> {
+    let state = app.state::<crate::AppState>();
+    let active = state.mobile.lock().unwrap().is_some();
+    let st = state.mobile_status.lock().unwrap().clone();
+    Ok(serde_json::json!({
+        "active": active,
+        "started": st.started,
+        "error": st.error,
+    }))
 }
 
 /// 停止 Android 采集。

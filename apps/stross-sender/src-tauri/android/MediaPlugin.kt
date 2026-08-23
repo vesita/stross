@@ -153,6 +153,12 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
         val projection = ProjectionService.awaitProjection(40_000)
         if (projection == null) {
             Log.e(TAG, "获取 MediaProjection 超时（40s）")
+            // 通知 Rust/前端：采集实际未启动
+            sendControl(JSObject().apply {
+                put("t", 9)
+                put("started", false)
+                put("err", "屏幕投影获取超时，请重试")
+            })
             channel = null
             return
         }
@@ -179,6 +185,11 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
                 MediaFormat.KEY_BITRATE_MODE,
                 MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
             )
+            // 限制编码器输入帧率：虚拟显示按屏幕刷新率（60/90/120Hz）喂帧，
+            // 不限制会输出远超配置的帧率、浪费码率
+            if (Build.VERSION.SDK_INT >= 26) {
+                setFloat("max-fps-to-encoder", fps.toFloat())
+            }
             // 关键帧前重复 SPS/PPS，观看端可随时接入（对应 Rust 端 relay 的对齐逻辑）
             if (Build.VERSION.SDK_INT >= 19) {
                 setInteger("prepend-sps-pps-to-idr-frames", 1)
@@ -203,6 +214,12 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
             handler
         )
         Log.i(TAG, "虚拟显示已创建: ${width}x${height}@$fps")
+        // 通知 Rust/前端：采集真正就绪
+        sendControl(JSObject().apply {
+            put("t", 9)
+            put("started", true)
+            put("fps", fps)
+        })
 
         handler.post { drainVideoLoop(proj) }
 
@@ -413,10 +430,17 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
         ch.send(obj)
     }
 
+    /** 发送控制消息（t=9 表示采集状态事件，Rust 端转发给前端）。 */
+    @Synchronized
+    private fun sendControl(obj: JSObject) {
+        channel?.send(obj)
+    }
+
     private fun stopEverything() {
         if (!running.compareAndSet(true, false)) {
             return
         }
+        sendControl(JSObject().apply { put("t", 9); put("stopped", true) })
         channel = null
         host.stopService(Intent(host, ProjectionService::class.java))
         encodeThread?.quitSafely()

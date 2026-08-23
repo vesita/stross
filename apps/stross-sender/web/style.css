@@ -205,7 +205,36 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 
 .tab-pane { display: flex; flex-direction: column; gap: 16px; }
 
-/* 观看 iframe */
+/* 卡片头部（标题 + 操作按钮） */
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.card-head h2 { margin: 0; }
+
+/* 小按钮 / 幽灵按钮 */
+.small-btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  border-radius: 7px;
+}
+.ghost-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+}
+.ghost-btn:hover:not(:disabled) {
+  color: var(--err);
+  border-color: var(--err);
+  filter: none;
+}
+
+/* 观看 iframe 容器 + loading */
+.iframe-wrap { position: relative; }
 #watch-frame {
   width: 100%;
   height: 62vh;
@@ -214,5 +243,55 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
   border-radius: 10px;
   background: #000;
 }
+.watch-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 13px;
+  z-index: 2;
+  border-radius: 10px;
+}
+
+/* 采集中状态点 */
+.dot.starting {
+  background: var(--warn);
+  box-shadow: 0 0 8px var(--warn);
+  animation: pulse 0.8s infinite;
+}
 
 .mono { font-family: ui-monospace, monospace; }
+
+/* ---------------- 移动端适配（手机竖屏） ---------------- */
+@media (max-width: 720px) {
+  html, body { font-size: 15px; }
+  main { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
+  header { padding: 10px 14px; flex-wrap: wrap; gap: 6px; }
+  .logo { font-size: 22px; }
+  .brand h1 { font-size: 16px; }
+
+  /* 触控目标 ≥ 44px */
+  button {
+    padding: 12px 18px;
+    min-height: 44px;
+    font-size: 15px;
+  }
+  .seg { padding: 12px 14px; flex: 1; text-align: center; }
+  select, input[type="text"] { padding: 11px 12px; font-size: 15px; min-height: 44px; }
+  .check { min-height: 44px; }
+
+  .tabs { flex-wrap: wrap; gap: 6px; }
+  .tab { flex: 1; padding: 12px 8px; font-size: 14px; }
+  .tab-conn { flex-basis: 100%; margin-left: 0; margin-top: 4px; text-align: center; }
+
+  .actions { flex-wrap: wrap; }
+  .actions button { flex: 1; }
+
+  #watch-frame { height: 48vh; min-height: 300px; }
+
+  .url-list li { padding: 12px 14px; font-size: 14px; }
+  .header-right { gap: 6px; flex-wrap: wrap; }
+}

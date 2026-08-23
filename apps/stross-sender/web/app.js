@@ -13,12 +13,17 @@ const QUALITIES = {
   HIGH: { width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 },
 };
 
+const LS_RELAY = 'stross.lastRelay';
+const LS_TITLE = 'stross.lastTitle';
+
 let devices = { cameras: [], audioInputs: [], systemAudio: [] };
 let running = false;
+let starting = false; // Android 采集启动中（等待真实状态回报）
 let connection = null; // { url: "http://host:port", wsUrl: "ws://host:port/ws/push" }
 let currentTab = 'send';
 let IS_ANDROID = false;
 let MY_IPS = [];
+let statusTimer = null;
 
 // ---------------------------------------------------------------- 初始化
 
@@ -40,6 +45,7 @@ async function init() {
       $('video-seg-row').classList.add('hidden');
       $('android-video-note').classList.remove('hidden');
       $('sys-row').classList.add('hidden');
+      $('mic-hint').textContent = '需要麦克风权限；拒绝则仅推流屏幕';
     } else if (info.ffmpeg) {
       fb.textContent = 'ffmpeg ✓';
       fb.classList.add('ok');
@@ -48,11 +54,31 @@ async function init() {
       fb.classList.add('err');
     }
     renderIps(info.ips);
+    restorePrefs();
     await loadDevices();
   } catch (e) {
     showFatal(String(e));
   }
 }
+
+/** 恢复上次的连接地址/流名称偏好。 */
+function restorePrefs() {
+  const last = localStorage.getItem(LS_RELAY);
+  if (last) {
+    $('relay-addr').value = last;
+    document.querySelector('input[name="conn"][value="remote"]').checked = true;
+    $('remote-row').classList.remove('hidden');
+  }
+  const title = localStorage.getItem(LS_TITLE);
+  if (title) $('title-input').value = title;
+}
+
+function savePrefs() {
+  localStorage.setItem(LS_RELAY, $('relay-addr').value.trim());
+  localStorage.setItem(LS_TITLE, $('title-input').value.trim());
+}
+
+// ---------------------------------------------------------------- 提示
 
 function showFatal(msg) {
   const box = $('error-box');
@@ -83,6 +109,9 @@ function normAddr(addr) {
 async function connect() {
   hideConnectError();
   const mode = document.querySelector('input[name="conn"]:checked').value;
+  const btn = $('connect-btn');
+  btn.disabled = true;
+  btn.textContent = '连接中…';
   try {
     if (mode === 'local') {
       const info = await invoke('start_relay');
@@ -96,15 +125,22 @@ async function connect() {
         showConnectError('请输入中继地址，例如 http://192.168.1.100:8777');
         return;
       }
+      savePrefs();
       // 探测中继是否可达
       const resp = await fetch(addr + '/api/streams', { cache: 'no-store' });
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      if (!resp.ok) throw new Error('中继返回 HTTP ' + resp.status);
       await resp.json();
       connection = { url: addr, wsUrl: addr.replace(/^http/, 'ws') + '/ws/push' };
     }
     enterApp();
   } catch (e) {
-    showConnectError('连接失败：' + e.message);
+    const hint = e.message.includes('Failed to fetch') || e.message.includes('NetworkError')
+      ? '无法访问该地址。请检查：地址是否正确、设备是否在同一局域网、中继是否启动、防火墙是否放行。'
+      : '连接失败：' + e.message;
+    showConnectError(hint);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '连接';
   }
 }
 
@@ -113,16 +149,16 @@ function enterApp() {
   $('app-view').classList.remove('hidden');
   $('conn-badge').textContent = '已连接';
   $('conn-badge').classList.add('ok');
+  $('disconnect-btn').classList.remove('hidden');
   $('tab-conn-label').textContent = '已连接：' + connection.url;
   $('watch-relay-url').textContent = connection.url;
   setTab('send');
-  // 观看页：iframe 直接加载中继托管的观看端页面（复用同一播放器）
-  $('watch-frame').src = connection.url + '/';
+  loadWatchFrame();
   pollStatus();
 }
 
 function disconnect() {
-  if (running) {
+  if (running || starting) {
     stopStream();
   }
   connection = null;
@@ -130,7 +166,9 @@ function disconnect() {
   $('connect-view').classList.remove('hidden');
   $('conn-badge').textContent = '未连接';
   $('conn-badge').classList.remove('ok');
+  $('disconnect-btn').classList.add('hidden');
   $('watch-frame').src = 'about:blank';
+  setRunning(false);
 }
 
 // ---------------------------------------------------------------- 模式切换
@@ -141,6 +179,14 @@ function setTab(tab) {
   $('tab-watch-btn').classList.toggle('active', tab === 'watch');
   $('tab-send').classList.toggle('hidden', tab !== 'send');
   $('tab-watch').classList.toggle('hidden', tab !== 'watch');
+  if (tab === 'watch') loadWatchFrame();
+}
+
+/** 加载（或刷新）观看页 iframe。 */
+function loadWatchFrame() {
+  if (!connection) return;
+  $('watch-loading').classList.remove('hidden');
+  $('watch-frame').src = connection.url + '/';
 }
 
 // ---------------------------------------------------------------- 设备
@@ -250,8 +296,6 @@ function buildConfig() {
   };
 }
 
-// ---------------------------------------------------------------- 推流控制
-
 /** Android：构造原生采集参数（mobile::start_capture 的 CaptureArgs）。 */
 function buildCaptureArgs() {
   const q = QUALITIES[$('quality-select').value];
@@ -266,30 +310,36 @@ function buildCaptureArgs() {
   };
 }
 
+// ---------------------------------------------------------------- 推流控制
+
 async function startStream() {
   hideError();
   if (!connection) {
     showFatal('请先连接中继');
     return;
   }
+  savePrefs();
   $('start-btn').disabled = true;
   try {
     if (IS_ANDROID) {
+      starting = true;
+      setRunning(true, 'starting');
       // Android：原生采集（MediaProjection + MediaCodec），经手机内嵌中继推流
       const res = await invoke('start_capture', { args: buildCaptureArgs() });
       const urls = MY_IPS.length
         ? MY_IPS.map((ip) => `http://${ip}:${res.relayPort}/`)
         : [`http://127.0.0.1:${res.relayPort}/`];
       renderUrls(urls);
+      pollMobileStatus(); // 立即查一次真实采集状态
     } else {
-      // 桌面：ffmpeg 管线，推到当前连接的中继
       const res = await invoke('start_stream', { cfg: buildConfig(), relayUrl: connection.wsUrl });
       renderUrls(res.watchUrls);
+      setRunning(true, 'live');
     }
-    setRunning(true);
   } catch (e) {
     showFatal(String(e));
-    $('start-btn').disabled = false;
+    starting = false;
+    setRunning(false);
   }
 }
 
@@ -303,11 +353,45 @@ async function stopStream() {
   } catch (e) {
     showFatal(String(e));
   }
+  starting = false;
   setRunning(false);
 }
 
+/** Android：轮询采集真实状态（Kotlin 控制帧 t=9 回报）。 */
+async function pollMobileStatus() {
+  if (!IS_ANDROID || !connection) return;
+  try {
+    const s = await invoke('mobile_status');
+    if (!s.active) {
+      starting = false;
+      setRunning(false);
+      return;
+    }
+    if (s.started) {
+      starting = false;
+      setRunning(true, 'live');
+      $('stream-meta').textContent = '屏幕采集已就绪，局域网内浏览器打开上方地址即可观看';
+      return;
+    }
+    if (s.error) {
+      starting = false;
+      showFatal('采集启动失败：' + s.error);
+      setRunning(false);
+      return;
+    }
+    // 仍在启动中（等待前台服务/投影），保持"采集中…"
+    setRunning(true, 'starting');
+  } catch (_) {
+    /* ignore */
+  }
+}
+
 async function pollStatus() {
-  if (IS_ANDROID) return; // Android 采集状态由 start/stop 命令驱动
+  if (IS_ANDROID) {
+    // Android 每 2 秒轮询真实采集状态
+    if (running || starting) pollMobileStatus();
+    return;
+  }
   try {
     const s = await invoke('stream_status');
     setRunning(s.running);
@@ -319,13 +403,24 @@ async function pollStatus() {
   }
 }
 
-function setRunning(r) {
+/** phase: 'idle' | 'starting' | 'live' */
+function setRunning(r, phase = r ? 'live' : 'idle') {
   running = r;
-  $('start-btn').disabled = r;
-  $('stop-btn').disabled = !r;
+  const dot = $('status-dot');
+  const text = $('status-text');
+  $('start-btn').disabled = r || starting;
+  $('stop-btn').disabled = !(r || starting);
   $('viewer-btn').disabled = !r;
-  $('status-dot').className = 'dot ' + (r ? 'live' : 'idle');
-  $('status-text').textContent = r ? '推流中' : '未推流';
+  if (phase === 'starting') {
+    dot.className = 'dot starting';
+    text.textContent = '采集中…';
+  } else if (phase === 'live') {
+    dot.className = 'dot live';
+    text.textContent = IS_ANDROID ? '采集中 ✓ 推流中' : '推流中';
+  } else {
+    dot.className = 'dot idle';
+    text.textContent = '未推流';
+  }
 }
 
 function renderUrls(urls) {
@@ -340,9 +435,16 @@ function renderUrls(urls) {
     li.appendChild(document.createTextNode(u));
     li.title = '点击复制';
     li.onclick = () => {
-      navigator.clipboard?.writeText(u);
-      li.style.borderColor = 'var(--ok)';
-      setTimeout(() => (li.style.borderColor = ''), 800);
+      navigator.clipboard?.writeText(u).then(() => {
+        li.style.borderColor = 'var(--ok)';
+        li.textContent = '✅ 已复制';
+        setTimeout(() => {
+          li.style.borderColor = '';
+          li.innerHTML = '';
+          li.appendChild(tag);
+          li.appendChild(document.createTextNode(u));
+        }, 1500);
+      });
     };
     ul.appendChild(li);
   });
@@ -363,10 +465,18 @@ document.querySelectorAll('input[name="video"]').forEach((r) =>
 
 $('connect-btn').onclick = connect;
 $('scan-btn').onclick = scanRelays;
+$('disconnect-btn').onclick = disconnect;
 $('tab-send-btn').onclick = () => setTab('send');
 $('tab-watch-btn').onclick = () => setTab('watch');
+$('watch-refresh-btn').onclick = loadWatchFrame;
 $('start-btn').onclick = startStream;
 $('stop-btn').onclick = stopStream;
 $('viewer-btn').onclick = () => invoke('open_viewer').catch((e) => showFatal(String(e)));
 
+// iframe 加载完成后隐藏 loading
+$('watch-frame').addEventListener('load', () => {
+  $('watch-loading').classList.add('hidden');
+});
+
 init();
+setInterval(pollStatus, 2000);

@@ -32,6 +32,8 @@ pub struct AppState {
     engine: Mutex<Option<RunningStream>>,
     /// 常驻本机中继（连接阶段启动，观看与推流共用）。
     pub relay: Mutex<Option<RelayHandle>>,
+    /// mDNS 广播句柄（本机中继启动时广播，便于局域网内设备扫描发现）。
+    pub discovery: Mutex<Option<stross_core::discovery::Discovery>>,
     /// Android 原生采集会话（仅移动端）。
     #[cfg(mobile)]
     pub mobile: Mutex<Option<mobile::MobileCapture>>,
@@ -54,6 +56,7 @@ impl Default for AppState {
         Self {
             engine: Mutex::new(None),
             relay: Mutex::new(None),
+            discovery: Mutex::new(None),
             #[cfg(mobile)]
             mobile: Mutex::new(None),
             #[cfg(mobile)]
@@ -154,6 +157,22 @@ async fn start_relay(state: State<'_, AppState>) -> Result<RelayInfo, String> {
         .map_err(|e| e.to_string())?;
     let port = handle.port;
     *state.relay.lock().unwrap() = Some(handle);
+    // mDNS 广播本机中继，局域网内其它设备（如电脑端 Stross）可扫描发现，
+    // 免去手动输入地址
+    if let Some(ip) = local_ips().into_iter().next() {
+        let instance = format!("sender-{port}");
+        match stross_core::discovery::Discovery::start(
+            &instance,
+            ip,
+            port,
+            &[("kind", "relay"), ("name", "Stross 本机中继")],
+        ) {
+            Ok(d) => {
+                *state.discovery.lock().unwrap() = Some(d);
+            }
+            Err(e) => tracing::warn!("mDNS 广播失败: {e}"),
+        }
+    }
     Ok(relay_info(port))
 }
 
@@ -261,6 +280,11 @@ fn stream_status(state: State<'_, AppState>) -> StreamStatus {
 
 #[tauri::command]
 fn open_viewer(state: State<'_, AppState>) -> Result<(), String> {
+    if cfg!(target_os = "android") {
+        // Android 上 open crate 无法唤起系统浏览器（会报"没有文件或目录"），
+        // 请使用「观看」页的内嵌播放器
+        return Err("Android 请直接使用「观看」页".into());
+    }
     let guard = state.engine.lock().unwrap();
     let port = guard.as_ref().map(|s| s.relay_port).unwrap_or(DEFAULT_PORT);
     let url = format!("http://127.0.0.1:{port}/");
@@ -268,6 +292,91 @@ fn open_viewer(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+
+/// 无界面中继模式（`stross-sender --relay-only [--port N] [--no-advertise]`）。
+///
+/// PC 端整合：桌面应用已内嵌中继；此模式让同一二进制在不启动 GUI 的情况下
+/// 单独充当局域网中继（服务器 / 常驻部署场景，不依赖 webkit/GTK）。
+#[cfg(not(mobile))]
+pub fn run_relay_only(args: &[String]) {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    // 解析参数：--port N（默认 8777）、--no-advertise（关闭 mDNS 广播）
+    let mut port = DEFAULT_PORT;
+    let mut advertise = true;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--port" => {
+                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
+                    port = v;
+                    i += 1;
+                }
+            }
+            "--no-advertise" => advertise = false,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let rt = tokio::runtime::Runtime::new().expect("创建 tokio runtime 失败");
+    rt.block_on(async {
+        let handle = match RelayServer::start(port).await {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("中继启动失败: {e}");
+                return;
+            }
+        };
+        let ips = local_ips();
+        println!("\n  📡 Stross 中继（无界面模式）已启动\n");
+        for ip in &ips {
+            println!("     观看地址: http://{ip}:{}/", handle.port);
+        }
+        if ips.is_empty() {
+            println!("     观看地址: http://127.0.0.1:{}/", handle.port);
+        }
+        println!("\n     推流地址: ws://<中继IP>:{}/ws/push", handle.port);
+        println!("     Ctrl+C 退出\n");
+
+        let _discovery = if advertise {
+            match local_ips().into_iter().next() {
+                Some(ip) => {
+                    match stross_core::discovery::Discovery::start(
+                        &format!("sender-relay-{}", handle.port),
+                        ip,
+                        handle.port,
+                        &[("kind", "relay")],
+                    ) {
+                        Ok(d) => {
+                            println!("  mDNS 广播中…");
+                            Some(d)
+                        }
+                        Err(e) => {
+                            tracing::warn!("mDNS 广播失败: {e}");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        tokio::signal::ctrl_c().await.ok();
+        println!("正在停止…");
+        handle.stop().await;
+        drop(_discovery);
+    });
+}
 
 /// 桌面端命令集。
 #[cfg(not(mobile))]

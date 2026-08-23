@@ -48,6 +48,7 @@ permissions = """    <uses-permission android:name="android.permission.INTERNET"
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 """
 if "FOREGROUND_SERVICE_MEDIA_PROJECTION" not in s:
     s = s.replace("<application", permissions + "    <application")

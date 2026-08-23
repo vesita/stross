@@ -134,7 +134,13 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 
 .status-line { display: flex; align-items: center; gap: 10px; font-size: 15px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
-.dot.live { background: var(--err); box-shadow: 0 0 8px var(--err); animation: pulse 1.6s infinite; }
+.dot.live {
+  /* 推流中：绿色常亮 + 柔和呼吸，避免与"报错红点"混淆 */
+  background: var(--ok);
+  box-shadow: 0 0 8px var(--ok);
+  animation: pulse 1.6s infinite;
+}
+.dot.err { background: var(--err); box-shadow: 0 0 8px var(--err); }
 .dot.idle { background: var(--muted); }
 @keyframes pulse { 50% { opacity: .45; } }
 

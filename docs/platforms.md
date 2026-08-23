@@ -22,20 +22,25 @@ Arch 系：`sudo pacman -S webkit2gtk-4.1 gtk3 ffmpeg pulseaudio`
 ### 构建 / 运行
 
 ```bash
-# 推流端（Tauri 桌面应用）
+# 推流端（Tauri 桌面应用）—— PC 端整合的单一应用
 cargo run -p stross-sender
 
-# 独立中继
-cargo run -p stross-relay -- -p 8777
-cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature 见下
+# 同一二进制的无界面中继模式（服务器/常驻部署，不依赖图形环境）
+cargo run -p stross-sender -- --relay-only
+cargo run -p stross-sender -- --relay-only --port 9000 --no-advertise
 
-# 打包安装包
+# 打包安装包（桌面应用）
 cargo tauri build          # 在 apps/stross-sender/src-tauri 下执行
+
+# 可选：独立中继组件（多机部署场景）
+cargo run -p stross-relay -- -p 8777
+cargo run -p stross-relay --features discovery -- -p 8777 --advertise
 ```
 
 > `--advertise` 需要以 `--features discovery` 构建中继：
 > `cargo run -p stross-relay --features discovery -- -p 8777 --advertise`
-> （mDNS 广播 `_stross._tcp`，局域网内其它 Stross 实例可发现它）
+> （mDNS 广播 `_stross._tcp`，局域网内其它 Stross 实例可发现它。
+> 桌面应用与本机中继默认开启 mDNS 广播，无需额外参数。）
 
 ### 桌面采集支持矩阵
 

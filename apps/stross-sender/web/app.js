@@ -15,17 +15,17 @@ const QUALITIES = {
 
 const LS_RELAY = 'stross.lastRelay';
 const LS_TITLE = 'stross.lastTitle';
+const LS_RECENT = 'stross.recentRelays';
 
 let devices = { cameras: [], audioInputs: [], systemAudio: [] };
 let running = false;
 let starting = false; // Android 采集启动中（等待真实状态回报）
 let startingSince = 0; // 启动开始时间戳（超时兜底用）
 const START_TIMEOUT_MS = 60000; // 采集启动超时
-let connection = null; // { url: "http://host:port", wsUrl: "ws://host:port/ws/push" }
+let connection = null; // { url, wsUrl, relayUrls }
 let currentTab = 'send';
 let IS_ANDROID = false;
 let MY_IPS = [];
-let statusTimer = null;
 
 // ---------------------------------------------------------------- 初始化
 
@@ -43,10 +43,12 @@ async function init() {
     if (IS_ANDROID) {
       fb.textContent = '原生采集';
       fb.classList.add('ok');
-      // Android：视频源固定为屏幕（MediaProjection），无系统声音采集
+      // Android：视频源固定为屏幕（MediaProjection），无系统声音采集；
+      // 「打开观看端」依赖系统浏览器，Android 上隐藏（用「观看」页内嵌播放器）
       $('video-seg-row').classList.add('hidden');
       $('android-video-note').classList.remove('hidden');
       $('sys-row').classList.add('hidden');
+      $('viewer-btn').classList.add('hidden');
       $('mic-hint').textContent = '需要麦克风权限；拒绝则仅推流屏幕';
     } else if (info.ffmpeg) {
       fb.textContent = 'ffmpeg ✓';
@@ -63,7 +65,7 @@ async function init() {
   }
 }
 
-/** 恢复上次的连接地址/流名称偏好。 */
+/** 恢复上次的连接地址/流名称偏好，并渲染最近连接历史。 */
 function restorePrefs() {
   const last = localStorage.getItem(LS_RELAY);
   if (last) {
@@ -73,11 +75,53 @@ function restorePrefs() {
   }
   const title = localStorage.getItem(LS_TITLE);
   if (title) $('title-input').value = title;
+  renderRecent();
 }
 
 function savePrefs() {
   localStorage.setItem(LS_RELAY, $('relay-addr').value.trim());
   localStorage.setItem(LS_TITLE, $('title-input').value.trim());
+}
+
+// ---------------- 最近连接历史 ----------------
+
+function getRecent() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_RECENT) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function saveRecent(url) {
+  const list = getRecent().filter((u) => u !== url);
+  list.unshift(url);
+  localStorage.setItem(LS_RECENT, JSON.stringify(list.slice(0, 5)));
+}
+
+/** 渲染"最近连接"列表，点击即填入并自动连接。 */
+function renderRecent() {
+  const list = getRecent();
+  const block = $('recent-block');
+  if (!list.length) {
+    block.classList.add('hidden');
+    return;
+  }
+  block.classList.remove('hidden');
+  const ul = $('recent-list');
+  ul.innerHTML = '';
+  list.forEach((u) => {
+    const li = document.createElement('li');
+    li.textContent = u;
+    li.title = '点击连接';
+    li.onclick = () => {
+      $('relay-addr').value = u;
+      document.querySelector('input[name="conn"][value="remote"]').checked = true;
+      $('remote-row').classList.remove('hidden');
+      connect();
+    };
+    ul.appendChild(li);
+  });
 }
 
 // ---------------------------------------------------------------- 提示
@@ -120,6 +164,7 @@ async function connect() {
       connection = {
         url: `http://127.0.0.1:${info.port}`,
         wsUrl: `ws://127.0.0.1:${info.port}/ws/push`,
+        relayUrls: info.urls,
       };
     } else {
       const addr = normAddr($('relay-addr').value);
@@ -128,11 +173,12 @@ async function connect() {
         return;
       }
       savePrefs();
+      saveRecent(addr);
       // 探测中继是否可达
       const resp = await fetch(addr + '/api/streams', { cache: 'no-store' });
       if (!resp.ok) throw new Error('中继返回 HTTP ' + resp.status);
       await resp.json();
-      connection = { url: addr, wsUrl: addr.replace(/^http/, 'ws') + '/ws/push' };
+      connection = { url: addr, wsUrl: addr.replace(/^http/, 'ws') + '/ws/push', relayUrls: [addr + '/'] };
     }
     enterApp();
   } catch (e) {
@@ -154,6 +200,10 @@ function enterApp() {
   $('disconnect-btn').classList.remove('hidden');
   $('tab-conn-label').textContent = '已连接：' + connection.url;
   $('watch-relay-url').textContent = connection.url;
+  // 连接成功即可展示中继观看地址（推流前页面显示"暂无串流"）
+  if (connection.relayUrls && connection.relayUrls.length) {
+    renderUrls(connection.relayUrls);
+  }
   setTab('send');
   loadWatchFrame();
   pollStatus();
@@ -256,8 +306,12 @@ async function scanRelays() {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.textContent = '📍 ' + url;
+      btn.title = '点击直接连接';
       btn.onclick = () => {
         $('relay-addr').value = url;
+        document.querySelector('input[name="conn"][value="remote"]').checked = true;
+        $('remote-row').classList.remove('hidden');
+        connect();
       };
       box.appendChild(btn);
     });

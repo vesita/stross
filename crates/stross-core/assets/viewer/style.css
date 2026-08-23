@@ -143,3 +143,20 @@ video { width: 100%; height: 100%; object-fit: contain; }
 }
 .log .warn { color: var(--warn); }
 .log .err { color: var(--err); }
+
+/* ---------------- 移动端适配（手机浏览器/App 内 iframe） ---------------- */
+@media (max-width: 720px) {
+  header { padding: 10px 14px; }
+  main { flex-direction: column; height: auto; }
+  #sidebar {
+    width: 100%;
+    min-width: 0;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    max-height: 30vh;
+  }
+  #player-pane { padding: 10px; min-height: 55vh; }
+  #video-wrap { min-height: 40vh; }
+  .stream-card { padding: 12px 14px; }
+  #refresh-btn { padding: 12px; font-size: 15px; }
+}

@@ -27,10 +27,18 @@
 cargo run -p stross-sender          # 桌面应用（Tauri）
 ```
 
+**PC 端是整合的单一应用**（`stross-sender`），两种模式：
+
+```bash
+stross-sender                      # 桌面应用：连接 → 推流（发）/ 观看（收）
+stross-sender --relay-only         # 无界面中继（服务器/常驻部署，不依赖图形环境）
+stross-sender --relay-only --port 9000 --no-advertise   # 自定义端口 / 关闭 mDNS 广播
+```
+
 应用采用「**先连接，再收/发**」的交互：
 
 1. **连接**：选择「本机」（自动启动一个内嵌中继）或「局域网中继」
-   （输入地址，或用 mDNS 扫描局域网内的中继）；
+   （输入地址、最近连接一键连、或 mDNS 扫描局域网内的中继）；
 2. **推流（发）**：选屏幕/摄像头/麦克风/系统声音，点「开始推流」，
    画面推送到所连接的中继；
 3. **观看（收）**：切到「观看」页，内嵌播放器直接列出该中继上的
@@ -44,15 +52,18 @@ http://192.168.1.100:8777/
 
 无需安装任何软件即可观看。
 
+> `stross-relay` 保留为**可选的服务器组件**（独立部署、多机中继），
+> 日常使用 PC 端一个应用即可。
+
 ### 独立中继（可选）
 
-不依赖推流端的 GUI，单独跑一个中继，多台机器可以推到同一个中继：
+日常使用 PC 端一个应用即可（桌面模式内嵌中继，或 `--relay-only` 无界面模式）。
+需要独立部署中继时（如树莓派/NAS 常驻、多机推流到同一中继）：
 
 ```bash
 cargo run -p stross-relay -- -p 8777
+cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，见 docs/platforms.md
 ```
-
-然后任意推流端（桌面应用支持「推到外部中继」，代码见 `SenderEngine::start(relay_url)`）推送。
 
 ## 架构
 

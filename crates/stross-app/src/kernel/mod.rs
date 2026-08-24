@@ -259,6 +259,7 @@ impl Kernel {
 mod tests {
     use super::*;
     use futures_util::FutureExt;
+    use stross_proto::message::ReliabilityProfile;
 
     fn node(id: &str) -> NodeInfo {
         NodeInfo {

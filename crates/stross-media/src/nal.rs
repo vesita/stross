@@ -36,7 +36,11 @@ impl AnnexBSplitter {
         while i + 2 < self.buf.len() {
             if self.buf[i - 2] == 0 && self.buf[i - 1] == 0 && self.buf[i] == 1 {
                 // 起始码可能为 3 字节 (00 00 01) 或 4 字节 (00 00 00 01)
-                let code_start = if i >= 3 && self.buf[i - 3] == 0 { i - 3 } else { i - 2 };
+                let code_start = if i >= 3 && self.buf[i - 3] == 0 {
+                    i - 3
+                } else {
+                    i - 2
+                };
                 if code_start > prev {
                     out.push(self.buf[prev..code_start].to_vec());
                 }
@@ -304,7 +308,10 @@ mod tests {
         assert!(kf.keyframe);
         assert_eq!(kf.nals.len(), 1);
         assert!(b.push(nal(NAL_SLICE_NON_IDR, 0)).is_some());
-        assert!(b.push(nal(NAL_SLICE_IDR, 0)).is_some(), "IDR 应先切出上一帧");
+        assert!(
+            b.push(nal(NAL_SLICE_IDR, 0)).is_some(),
+            "IDR 应先切出上一帧"
+        );
         let kf2 = b.push(nal(NAL_SLICE_NON_IDR, 0)).unwrap();
         assert!(kf2.keyframe);
         let last = b.finish().unwrap();
@@ -320,7 +327,11 @@ mod tests {
         assert!(b.push(nal(NAL_SLICE_IDR, 0)).is_none());
         let kf = b.push(nal(NAL_SLICE_NON_IDR, 0)).unwrap();
         assert!(kf.keyframe);
-        assert!(kf.nals.len() <= 33, "pending 应被截断，避免内存膨胀: {}", kf.nals.len());
+        assert!(
+            kf.nals.len() <= 33,
+            "pending 应被截断，避免内存膨胀: {}",
+            kf.nals.len()
+        );
     }
 
     #[test]

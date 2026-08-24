@@ -94,11 +94,10 @@ async fn synthetic_video_flows_end_to_end() {
     let port = engine.relay_port().expect("内嵌中继端口");
 
     // 观看端连接
-    let (mut watch, _) = tokio_tungstenite::connect_async(format!(
-        "ws://127.0.0.1:{port}/ws/watch?stream=e2e"
-    ))
-    .await
-    .expect("连接观看端点");
+    let (mut watch, _) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/watch?stream=e2e"))
+            .await
+            .expect("连接观看端点");
 
     // 首个消息是 Ready
     let first = watch.next().await.unwrap().unwrap();

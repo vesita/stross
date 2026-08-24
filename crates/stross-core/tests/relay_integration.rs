@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use stross_core::relay::RelayServer;
-use stross_proto::frame::{Frame, FLAG_KEYFRAME, TRACK_AUDIO, TRACK_VIDEO};
+use stross_proto::frame::{FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO};
 use stross_proto::message::{ControlMessage, TrackInfo};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -81,12 +81,23 @@ async fn push_watch_relay_roundtrip() {
     let welcome = push.next().await.unwrap().unwrap();
     assert!(welcome.is_text(), "应收到 Welcome");
     let welcome = ControlMessage::from_text(&welcome.into_text().unwrap()).unwrap();
-    assert_eq!(welcome, ControlMessage::Welcome { stream_id: "test-stream".into() });
+    assert_eq!(
+        welcome,
+        ControlMessage::Welcome {
+            stream_id: "test-stream".into()
+        }
+    );
 
     // 先推一个非关键帧（观看端应忽略），再推关键帧
-    push.send(Message::Binary(video_frame(false).into())).await.unwrap();
-    push.send(Message::Binary(video_frame(true).into())).await.unwrap();
-    push.send(Message::Binary(audio_frame().into())).await.unwrap();
+    push.send(Message::Binary(video_frame(false).into()))
+        .await
+        .unwrap();
+    push.send(Message::Binary(video_frame(true).into()))
+        .await
+        .unwrap();
+    push.send(Message::Binary(audio_frame().into()))
+        .await
+        .unwrap();
 
     // ---- REST 流列表 ----
     let body = reqwest_lite(&format!("http://127.0.0.1:{port}/api/streams")).await;
@@ -97,14 +108,20 @@ async fn push_watch_relay_roundtrip() {
     assert!(streams[0].video.is_some());
 
     // ---- 观看端（在关键帧之后接入，验证对齐）----
-    let (mut watch, _) = tokio_tungstenite::connect_async(format!("{base}/ws/watch?stream=test-stream"))
-        .await
-        .expect("连接观看端点");
+    let (mut watch, _) =
+        tokio_tungstenite::connect_async(format!("{base}/ws/watch?stream=test-stream"))
+            .await
+            .expect("连接观看端点");
 
     // 首个消息必须是 Ready
     let first = watch.next().await.unwrap().unwrap();
     let ready = ControlMessage::from_text(&first.into_text().unwrap()).unwrap();
-    assert_eq!(ready, ControlMessage::Ready { stream_id: "test-stream".into() });
+    assert_eq!(
+        ready,
+        ControlMessage::Ready {
+            stream_id: "test-stream".into()
+        }
+    );
 
     // 关键帧 + 音频帧
     let mut seen_video_keyframe = false;

@@ -55,15 +55,16 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let engine = match SenderEngine::start(cfg.clone(), Arc::new(FfmpegBackend::new()), None, 0).await {
-        Ok(e) => e,
-        Err(_) if with_audio => {
-            eprintln!("（音频启动失败，退回纯视频）");
-            cfg.audio = None;
-            SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), None, 0).await?
-        }
-        Err(e) => return Err(e),
-    };
+    let engine =
+        match SenderEngine::start(cfg.clone(), Arc::new(FfmpegBackend::new()), None, 0).await {
+            Ok(e) => e,
+            Err(_) if with_audio => {
+                eprintln!("（音频启动失败，退回纯视频）");
+                cfg.audio = None;
+                SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), None, 0).await?
+            }
+            Err(e) => return Err(e),
+        };
     let port = engine.relay_port().unwrap();
     let ips = stross_core::net::local_ips();
     println!("\n  📡 演示推流中（{} 秒）…", secs);

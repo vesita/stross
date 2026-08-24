@@ -29,7 +29,10 @@ pub fn list_cameras() -> Vec<CameraDevice> {
         dshow_devices()
             .into_iter()
             .filter(|(_, kind)| kind == "video")
-            .map(|(name, _)| CameraDevice { id: name.clone(), name })
+            .map(|(name, _)| CameraDevice {
+                id: name.clone(),
+                name,
+            })
             .collect()
     }
     #[cfg(target_os = "macos")]
@@ -37,7 +40,10 @@ pub fn list_cameras() -> Vec<CameraDevice> {
         avfoundation_devices()
             .into_iter()
             .filter(|(_, kind)| kind == "video")
-            .map(|(name, _)| CameraDevice { id: name.clone(), name })
+            .map(|(name, _)| CameraDevice {
+                id: name.clone(),
+                name,
+            })
             .collect()
     }
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -85,7 +91,10 @@ pub fn list_audio_inputs() -> Vec<String> {
     }
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        pulse_sources().into_iter().filter(|s| !s.contains(".monitor")).collect()
+        pulse_sources()
+            .into_iter()
+            .filter(|s| !s.contains(".monitor"))
+            .collect()
     }
     #[cfg(target_os = "macos")]
     {
@@ -119,7 +128,10 @@ pub fn list_system_audio() -> Vec<String> {
     }
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        pulse_sources().into_iter().filter(|s| s.contains(".monitor")).collect()
+        pulse_sources()
+            .into_iter()
+            .filter(|s| s.contains(".monitor"))
+            .collect()
     }
     #[cfg(target_os = "macos")]
     {
@@ -158,7 +170,15 @@ fn is_loopback_like(name: &str) -> bool {
 #[cfg(target_os = "windows")]
 fn dshow_devices() -> Vec<(String, &'static str)> {
     let out = Command::new(ffmpeg_bin())
-        .args(["-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "dummy"])
+        .args([
+            "-hide_banner",
+            "-f",
+            "dshow",
+            "-list_devices",
+            "true",
+            "-i",
+            "dummy",
+        ])
         .output();
     let Ok(out) = out else { return Vec::new() };
     let text = String::from_utf8_lossy(&out.stderr);
@@ -166,7 +186,9 @@ fn dshow_devices() -> Vec<(String, &'static str)> {
     for line in text.lines() {
         let Some(open) = line.find('"') else { continue };
         let rest = &line[open + 1..];
-        let Some(close) = rest.find('"') else { continue };
+        let Some(close) = rest.find('"') else {
+            continue;
+        };
         let name = rest[..close].to_string();
         let kind = if line.contains("(video)") {
             "video"
@@ -184,7 +206,15 @@ fn dshow_devices() -> Vec<(String, &'static str)> {
 #[cfg(target_os = "macos")]
 fn avfoundation_devices() -> Vec<(String, &'static str)> {
     let out = Command::new(ffmpeg_bin())
-        .args(["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
+        .args([
+            "-hide_banner",
+            "-f",
+            "avfoundation",
+            "-list_devices",
+            "true",
+            "-i",
+            "",
+        ])
         .output();
     let Ok(out) = out else { return Vec::new() };
     let text = String::from_utf8_lossy(&out.stderr);
@@ -193,14 +223,19 @@ fn avfoundation_devices() -> Vec<(String, &'static str)> {
         // "[AVFoundation input device @ ...] [0] FaceTime HD Camera"
         let Some(open) = line.find('[') else { continue };
         let after = &line[open + 1..];
-        let Some(close) = after.find(']') else { continue };
+        let Some(close) = after.find(']') else {
+            continue;
+        };
         let rest = after[close + 1..].trim();
         let Some(sep) = rest.find(']') else { continue };
         let desc = rest[sep + 1..].trim().to_string();
         if desc.is_empty() {
             continue;
         }
-        let kind = if line.contains("capture devices") || desc.contains("Camera") || desc.contains("camera") {
+        let kind = if line.contains("capture devices")
+            || desc.contains("Camera")
+            || desc.contains("camera")
+        {
             "video"
         } else {
             "audio"
@@ -213,7 +248,9 @@ fn avfoundation_devices() -> Vec<(String, &'static str)> {
 /// `pactl list short sources` 的源名称列表（Linux）。
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn pulse_sources() -> Vec<String> {
-    let out = Command::new("pactl").args(["list", "short", "sources"]).output();
+    let out = Command::new("pactl")
+        .args(["list", "short", "sources"])
+        .output();
     let Ok(out) = out else { return Vec::new() };
     if !out.status.success() {
         return Vec::new();
@@ -232,7 +269,11 @@ fn sysfs_name(dev: &std::path::Path) -> Option<String> {
         .ok()?
         .trim()
         .to_string();
-    Some(if name.is_empty() { video.to_string() } else { name })
+    Some(if name.is_empty() {
+        video.to_string()
+    } else {
+        name
+    })
 }
 
 #[cfg(test)]

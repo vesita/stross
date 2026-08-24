@@ -14,13 +14,13 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use stross_proto::frame::{Frame, CODEC_AAC, CODEC_H264, FLAG_KEYFRAME, TRACK_AUDIO, TRACK_VIDEO};
+use stross_proto::frame::{CODEC_AAC, CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO};
 
 use crate::adts::AdtsSplitter;
 use crate::nal::{AccessUnitBuilder, AnnexBSplitter};
@@ -172,25 +172,29 @@ impl StreamConfig {
 
     /// 生成 Hello 消息里的轨道信息（供观看端展示）。
     pub fn video_track_info(&self) -> Option<stross_proto::message::TrackInfo> {
-        self.video.as_ref().map(|_| stross_proto::message::TrackInfo {
-            codec: "h264".into(),
-            width: Some(self.quality.width),
-            height: Some(self.quality.height),
-            fps: Some(self.quality.fps),
-            sample_rate: None,
-            channels: None,
-        })
+        self.video
+            .as_ref()
+            .map(|_| stross_proto::message::TrackInfo {
+                codec: "h264".into(),
+                width: Some(self.quality.width),
+                height: Some(self.quality.height),
+                fps: Some(self.quality.fps),
+                sample_rate: None,
+                channels: None,
+            })
     }
 
     pub fn audio_track_info(&self) -> Option<stross_proto::message::TrackInfo> {
-        self.audio.as_ref().map(|a| stross_proto::message::TrackInfo {
-            codec: "aac".into(),
-            width: None,
-            height: None,
-            fps: None,
-            sample_rate: Some(a.sample_rate),
-            channels: Some(a.channels),
-        })
+        self.audio
+            .as_ref()
+            .map(|a| stross_proto::message::TrackInfo {
+                codec: "aac".into(),
+                width: None,
+                height: None,
+                fps: None,
+                sample_rate: Some(a.sample_rate),
+                channels: Some(a.channels),
+            })
     }
 }
 
@@ -242,7 +246,11 @@ fn screen_input_args(q: &Quality) -> Result<Vec<String>> {
     ])
 }
 
-#[cfg(any(target_os = "macos", target_os = "android", not(any(target_os = "linux", target_os = "windows"))))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "android",
+    not(any(target_os = "linux", target_os = "windows"))
+))]
 fn screen_input_args(_q: &Quality) -> Result<Vec<String>> {
     bail!("当前平台不支持 ffmpeg 屏幕采集，请使用原生采集路径")
 }
@@ -279,7 +287,11 @@ fn camera_input_args(device: Option<&str>, q: &Quality) -> Result<Vec<String>> {
     ])
 }
 
-#[cfg(any(target_os = "macos", target_os = "android", not(any(target_os = "linux", target_os = "windows"))))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "android",
+    not(any(target_os = "linux", target_os = "windows"))
+))]
 fn camera_input_args(_device: Option<&str>, _q: &Quality) -> Result<Vec<String>> {
     bail!("当前平台不支持 ffmpeg 摄像头采集，请使用原生采集路径")
 }
@@ -360,25 +372,48 @@ fn mic_input_args(device: Option<&str>) -> Result<Vec<String>> {
 #[cfg(target_os = "windows")]
 fn mic_input_args(device: Option<&str>) -> Result<Vec<String>> {
     let dev = device.context("Windows 下必须指定麦克风设备名")?;
-    Ok(vec!["-f".into(), "dshow".into(), "-i".into(), format!("audio={dev}")])
+    Ok(vec![
+        "-f".into(),
+        "dshow".into(),
+        "-i".into(),
+        format!("audio={dev}"),
+    ])
 }
 
-#[cfg(any(target_os = "macos", target_os = "android", not(any(target_os = "linux", target_os = "windows"))))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "android",
+    not(any(target_os = "linux", target_os = "windows"))
+))]
 fn mic_input_args(_device: Option<&str>) -> Result<Vec<String>> {
     bail!("当前平台不支持 ffmpeg 音频采集")
 }
 
 #[cfg(target_os = "linux")]
 fn system_input_args(monitor: &str) -> Result<Vec<String>> {
-    Ok(vec!["-f".into(), "pulse".into(), "-i".into(), monitor.to_string()])
+    Ok(vec![
+        "-f".into(),
+        "pulse".into(),
+        "-i".into(),
+        monitor.to_string(),
+    ])
 }
 
 #[cfg(target_os = "windows")]
 fn system_input_args(device: &str) -> Result<Vec<String>> {
-    Ok(vec!["-f".into(), "dshow".into(), "-i".into(), format!("audio={device}")])
+    Ok(vec![
+        "-f".into(),
+        "dshow".into(),
+        "-i".into(),
+        format!("audio={device}"),
+    ])
 }
 
-#[cfg(any(target_os = "macos", target_os = "android", not(any(target_os = "linux", target_os = "windows"))))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "android",
+    not(any(target_os = "linux", target_os = "windows"))
+))]
 fn system_input_args(_device: &str) -> Result<Vec<String>> {
     bail!("当前平台不支持 ffmpeg 回环采集")
 }
@@ -507,10 +542,7 @@ impl StreamSession {
 
     /// 停止所有子进程（会触发读循环结束）。
     pub async fn stop(&mut self) {
-        for child in [&mut self.video, &mut self.audio]
-            .into_iter()
-            .flatten()
-        {
+        for child in [&mut self.video, &mut self.audio].into_iter().flatten() {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
@@ -572,7 +604,13 @@ async fn read_video_loop(
         let flags = if unit.keyframe { FLAG_KEYFRAME } else { 0 };
         sent += 1;
         let _ = tx
-            .send(Frame::new(TRACK_VIDEO, CODEC_H264, flags, pts, unit.to_annex_b()))
+            .send(Frame::new(
+                TRACK_VIDEO,
+                CODEC_H264,
+                flags,
+                pts,
+                unit.to_annex_b(),
+            ))
             .await;
     }
     tracing::debug!("视频读循环结束，共发送 {sent} 帧");

@@ -1,44 +1,23 @@
-//! stross-relay —— 独立的局域网串流中继。
-//!
-//! 内嵌观看端页面，局域网内任意设备（Linux / Windows / Android 浏览器）打开
-//! `http://<本机IP>:<端口>` 即可观看。
-//!
-//! ```text
-//! 用法:
-//!   stross-relay                       # 默认 0.0.0.0:8777
-//!   stross-relay -p 9000               # 指定端口
-//!   stross-relay -p 0                  # 随机端口
-//! ```
+//! `stross relay`：启动局域网中继（等同独立 `stross-relay`）。
 
-use clap::Parser;
-use stross_core::net::local_ips;
+use std::net::{IpAddr, Ipv4Addr};
+
+use clap::Args;
 use stross_core::relay::{DEFAULT_PORT, RelayServer};
-use tracing_subscriber::EnvFilter;
 
-#[derive(Parser, Debug)]
-#[command(name = "stross-relay", version, about = "Stross 局域网串流中继")]
-struct Args {
+#[derive(Args, Debug)]
+pub struct RelayArgs {
     /// 监听端口（0 = 随机）
     #[arg(short, long, default_value_t = DEFAULT_PORT)]
-    port: u16,
-
+    pub port: u16,
     /// 关闭 mDNS 广播（默认广播自己，便于局域网内设备自动发现）
     #[arg(long)]
-    no_advertise: bool,
+    pub no_advertise: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
-    let args = Args::parse();
+pub async fn run(args: RelayArgs) -> anyhow::Result<()> {
     let handle = RelayServer::start(args.port).await?;
-
-    let ips = local_ips();
+    let ips = stross_core::net::local_ips();
     tracing::info!("📡 Stross 中继已启动");
     if ips.is_empty() {
         tracing::info!("观看地址: http://127.0.0.1:{}/", handle.port);
@@ -54,10 +33,9 @@ async fn main() -> anyhow::Result<()> {
     if !args.no_advertise {
         let mut discovery = stross_core::discovery::Discovery::start(
             &format!("relay-{}", handle.port),
-            local_ips()
-                .first()
+            ips.first()
                 .copied()
-                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+                .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             handle.port,
             &[
                 ("kind", "relay"),

@@ -13,9 +13,9 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-axum = { version = "0.8", features = ["ws"] }
-hostname = "0.4"
-mdns-sd = { version = "0.13", optional = true }
+axum.workspace = true
+hostname.workspace = true
+mdns-sd = { workspace = true, optional = true }
 
 [features]
 default = []

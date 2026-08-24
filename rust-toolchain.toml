@@ -1,0 +1,6 @@
+# 固定工具链：edition 2024 + let-chains 需要 Rust 1.88+；
+# 统一到验证/格式化所用的版本，保证 fmt/clippy/build 行为可复现。
+[toolchain]
+channel = "1.98.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

@@ -11,12 +11,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use stross_core::relay::RelayServer;
-use stross_proto::frame::{Frame, FLAG_KEYFRAME, TRACK_AUDIO, TRACK_VIDEO};
-use stross_proto::message::{ControlMessage, TrackInfo};
 use str0m::change::SdpOffer;
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
+use stross_core::relay::RelayServer;
+use stross_proto::frame::{FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO};
+use stross_proto::message::{CodecId, ControlMessage, TrackInfo};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -59,7 +59,7 @@ fn hello() -> String {
         stream_id: "test-stream".into(),
         title: "测试串流".into(),
         video: Some(TrackInfo {
-            codec: "h264".into(),
+            codec: CodecId::H264,
             width: Some(640),
             height: Some(360),
             fps: Some(30),
@@ -67,7 +67,7 @@ fn hello() -> String {
             channels: None,
         }),
         audio: Some(TrackInfo {
-            codec: "aac".into(),
+            codec: CodecId::Aac,
             width: None,
             height: None,
             fps: None,
@@ -173,24 +173,30 @@ async fn webrtc_watch_receives_frames() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "answer 提交失败: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "answer 提交失败: {}",
+        resp.status()
+    );
 
     // 5) 启动客户端 run loop，收集媒体帧
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
     tokio::spawn(client_loop(udp, rtc, tx));
 
     // 6) 推视频关键帧（经 last_keyframe 缓存必达），等它到达证明转发已存活
-    push.send(Message::Binary(video_frame(true).into())).await.unwrap();
+    push.send(Message::Binary(video_frame(true).into()))
+        .await
+        .unwrap();
     let mut saw_keyframe = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline && !saw_keyframe {
         match tokio::time::timeout(Duration::from_secs(3), rx.recv()).await {
             Ok(Some(bytes)) => {
-                if let Ok(frame) = Frame::from_bytes(&bytes) {
-                    if frame.header.track == TRACK_VIDEO {
-                        assert!(frame.header.is_keyframe(), "WebRTC 观看端不应收到非关键帧");
-                        saw_keyframe = true;
-                    }
+                if let Ok(frame) = Frame::from_bytes(&bytes)
+                    && frame.header.track == TRACK_VIDEO
+                {
+                    assert!(frame.header.is_keyframe(), "WebRTC 观看端不应收到非关键帧");
+                    saw_keyframe = true;
                 }
             }
             _ => break,
@@ -199,16 +205,18 @@ async fn webrtc_watch_receives_frames() {
     assert!(saw_keyframe, "WebRTC 观看端应收到视频关键帧");
 
     // 7) 再推音频帧（此时观看端已在实时订阅），断言到达
-    push.send(Message::Binary(audio_frame().into())).await.unwrap();
+    push.send(Message::Binary(audio_frame().into()))
+        .await
+        .unwrap();
     let mut saw_audio = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < deadline && !saw_audio {
         match tokio::time::timeout(Duration::from_secs(3), rx.recv()).await {
             Ok(Some(bytes)) => {
-                if let Ok(frame) = Frame::from_bytes(&bytes) {
-                    if frame.header.track == TRACK_AUDIO {
-                        saw_audio = true;
-                    }
+                if let Ok(frame) = Frame::from_bytes(&bytes)
+                    && frame.header.track == TRACK_AUDIO
+                {
+                    saw_audio = true;
                 }
             }
             _ => break,

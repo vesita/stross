@@ -17,7 +17,9 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use stross_proto::frame::{Frame, TRACK_VIDEO};
-use stross_proto::message::{CapabilityDescriptor, CapabilityKind, MediaKind, ReliabilityProfile};
+use stross_proto::message::{
+    CapabilityDescriptor, CapabilityKind, CodecId, MediaKind, ReliabilityProfile, TransportId,
+};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, watch};
 
@@ -86,8 +88,8 @@ impl Sink for RecordingSink {
                 MediaKind::Mic,
                 MediaKind::SystemAudio,
             ],
-            codecs: vec!["h264".into(), "aac".into()],
-            transports: vec!["ws".into(), "webrtc".into()],
+            codecs: vec![CodecId::H264, CodecId::Aac],
+            transports: vec![TransportId::Ws, TransportId::WebRtc],
             max_width: Some(1920),
             max_height: Some(1080),
             preferred_profile: ReliabilityProfile::Lossy,
@@ -232,7 +234,7 @@ mod tests {
         let sink = RecordingSink::new("/tmp/stross-rec");
         let d = sink.descriptor();
         assert_eq!(d.kind, CapabilityKind::Sink);
-        assert!(d.codecs.contains(&"h264".to_string()));
+        assert!(d.codecs.contains(&CodecId::H264));
         assert_eq!(d.preferred_profile, ReliabilityProfile::Lossy);
     }
 }

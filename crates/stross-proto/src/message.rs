@@ -8,6 +8,63 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// 传输标识（有限集合）。
+///
+/// 用枚举而非字符串，让编译器在匹配/比较时穷尽检查（代码规范）；
+/// `rename_all = "lowercase"` 保证线上 JSON 与 mDNS TXT 格式与字符串时代一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportId {
+    /// WebSocket（TCP，无损）。
+    Ws,
+    /// WebRTC data channel（UDP，有损低延迟）。
+    WebRtc,
+    /// SRT（ARQ + 时延预算，自适应）。
+    Srt,
+    /// QUIC（多路复用，无损）。
+    Quic,
+    /// 内存传输（测试 / 示例用）。
+    Memory,
+}
+
+impl TransportId {
+    /// 从 mDNS TXT 字符串解析（未知值返回 `None`，调用方忽略）。
+    pub fn from_txt(s: &str) -> Option<Self> {
+        match s {
+            "ws" => Some(Self::Ws),
+            "webrtc" => Some(Self::WebRtc),
+            "srt" => Some(Self::Srt),
+            "quic" => Some(Self::Quic),
+            "memory" => Some(Self::Memory),
+            _ => None,
+        }
+    }
+}
+
+/// 编解码标识（有限集合，可扩展）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CodecId {
+    H264,
+    Aac,
+    Opus,
+    /// AV1（预留；传输/编码器支持后启用）。
+    Av1,
+}
+
+impl CodecId {
+    /// 从 mDNS TXT 字符串解析（未知值返回 `None`）。
+    pub fn from_txt(s: &str) -> Option<Self> {
+        match s {
+            "h264" => Some(Self::H264),
+            "aac" => Some(Self::Aac),
+            "opus" => Some(Self::Opus),
+            "av1" => Some(Self::Av1),
+            _ => None,
+        }
+    }
+}
+
 /// 传输可靠性契约（设计文档 §4.1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -48,10 +105,10 @@ pub enum MediaKind {
 pub struct CapabilityDescriptor {
     pub kind: CapabilityKind,
     pub media: Vec<MediaKind>,
-    /// 编解码器 id（"h264" / "aac" / "opus" / "av1" ...）。
-    pub codecs: Vec<String>,
-    /// 支持的传输 id（"ws" / "webrtc" / "quic" / "srt"）。
-    pub transports: Vec<String>,
+    /// 支持的编解码器（[`CodecId`]）。
+    pub codecs: Vec<CodecId>,
+    /// 支持的传输（[`TransportId`]）。
+    pub transports: Vec<TransportId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,7 +136,7 @@ impl CapabilityDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransportOffer {
-    pub transport: String,
+    pub transport: TransportId,
     pub addr: String,
     pub profile: ReliabilityProfile,
 }
@@ -109,7 +166,7 @@ pub enum SessionEventKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackInfo {
-    pub codec: String,
+    pub codec: CodecId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,7 +224,7 @@ pub enum ControlMessage {
     Offer {
         session_id: String,
         transports: Vec<TransportOffer>,
-        codecs: Vec<String>,
+        codecs: Vec<CodecId>,
         profile: ReliabilityProfile,
     },
     /// 协商应答。
@@ -212,7 +269,7 @@ mod tests {
             stream_id: "abc".into(),
             title: "测试".into(),
             video: Some(TrackInfo {
-                codec: "h264".into(),
+                codec: CodecId::H264,
                 width: Some(1920),
                 height: Some(1080),
                 fps: Some(30),
@@ -220,7 +277,7 @@ mod tests {
                 channels: None,
             }),
             audio: Some(TrackInfo {
-                codec: "aac".into(),
+                codec: CodecId::Aac,
                 width: None,
                 height: None,
                 fps: None,
@@ -249,8 +306,8 @@ mod tests {
             caps: vec![CapabilityDescriptor {
                 kind: CapabilityKind::Source,
                 media: vec![MediaKind::Screen, MediaKind::Mic],
-                codecs: vec!["h264".into(), "aac".into()],
-                transports: vec!["ws".into()],
+                codecs: vec![CodecId::H264, CodecId::Aac],
+                transports: vec![TransportId::Ws],
                 max_width: Some(1920),
                 max_height: Some(1080),
                 preferred_profile: ReliabilityProfile::Lossy,
@@ -267,11 +324,11 @@ mod tests {
         let offer = ControlMessage::Offer {
             session_id: "s1".into(),
             transports: vec![TransportOffer {
-                transport: "ws".into(),
+                transport: TransportId::Ws,
                 addr: "ws://127.0.0.1:8777/ws/push".into(),
                 profile: ReliabilityProfile::Lossless,
             }],
-            codecs: vec!["h264".into()],
+            codecs: vec![CodecId::H264],
             profile: ReliabilityProfile::Lossy,
         };
         let back: ControlMessage = serde_json::from_str(&offer.to_text()).unwrap();
@@ -280,7 +337,7 @@ mod tests {
         let answer = ControlMessage::Answer {
             session_id: "s1".into(),
             transport: Some(TransportOffer {
-                transport: "ws".into(),
+                transport: TransportId::Ws,
                 addr: "ws://127.0.0.1:8777/ws/watch".into(),
                 profile: ReliabilityProfile::Lossless,
             }),

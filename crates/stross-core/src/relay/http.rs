@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use stross_proto::message::StreamInfo;
 
 use crate::embedded;
-use crate::relay::{handle_push, handle_watch, PeerInfo, RelayState};
+use crate::relay::{PeerInfo, RelayState, handle_push, handle_watch};
 use crate::transport::webrtc::{PeerCommand, WebRtcTransport};
 use crate::transport::ws::WsTransport;
 
@@ -130,6 +130,21 @@ async fn api_webrtc_start(
         .lock()
         .unwrap()
         .insert(peer_id.clone(), peer);
+    // 看门狗：start 后 30s 未提交 answer 的 peer 回收（防止 UDP socket / 状态泄漏）
+    let state_cleanup = state.clone();
+    let peer_id_cleanup = peer_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        if state_cleanup
+            .webrtc_peers
+            .lock()
+            .unwrap()
+            .remove(&peer_id_cleanup)
+            .is_some()
+        {
+            tracing::warn!("webrtc peer {peer_id_cleanup} 30s 未完成信令，已回收");
+        }
+    });
     tracing::info!("webrtc 信令开始: peer={peer_id} stream={}", req.stream_id);
     Ok(Json(WebRtcStartResp { peer_id, sdp }))
 }
@@ -165,15 +180,14 @@ async fn api_webrtc_answer(
 
     tokio::spawn(async move {
         // 等待 control/media 双通道打开（最多 15s），然后复用 WS 观看端转发逻辑
-        if !*channels_open.borrow() {
-            if tokio::time::timeout(std::time::Duration::from_secs(15), channels_open.changed())
+        if !*channels_open.borrow()
+            && tokio::time::timeout(std::time::Duration::from_secs(15), channels_open.changed())
                 .await
                 .is_err()
-            {
-                tracing::warn!("webrtc 通道 15s 未打开，关闭 peer（stream={stream_id}）");
-                let _ = close_tx.send(PeerCommand::Close).await;
-                return;
-            }
+        {
+            tracing::warn!("webrtc 通道 15s 未打开，关闭 peer（stream={stream_id}）");
+            let _ = close_tx.send(PeerCommand::Close).await;
+            return;
         }
         handle_watch(session, stream_id, state).await;
     });

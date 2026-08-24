@@ -27,7 +27,7 @@ use bytes::Bytes;
 use tokio::sync::Mutex;
 
 use stross_proto::frame::{Frame, FrameHeader, HEADER_LEN};
-use stross_proto::message::{ControlMessage, ReliabilityProfile};
+use stross_proto::message::{ControlMessage, ReliabilityProfile, TransportId};
 
 use super::{
     DataSession, PeerAddr, SessionPacket, SessionParams, SharedStats, Transport, TransportError,
@@ -82,8 +82,8 @@ impl SrtTransport {
 
 #[async_trait]
 impl Transport for SrtTransport {
-    fn id(&self) -> &'static str {
-        "srt"
+    fn id(&self) -> TransportId {
+        TransportId::Srt
     }
 
     fn profile(&self) -> ReliabilityProfile {
@@ -346,7 +346,7 @@ mod tests {
         let accept_task = tokio::spawn(async move { handle.accept().await.unwrap() });
 
         let peer = PeerAddr {
-            transport: "srt".into(),
+            transport: TransportId::Srt,
             addr: format!("srt://127.0.0.1:{}", addr.port()),
         };
         let params = SessionParams {
@@ -426,6 +426,6 @@ mod tests {
     #[test]
     fn profile_is_adaptive() {
         assert_eq!(SrtTransport::new().profile(), ReliabilityProfile::Adaptive);
-        assert_eq!(SrtTransport::new().id(), "srt");
+        assert_eq!(SrtTransport::new().id(), TransportId::Srt);
     }
 }

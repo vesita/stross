@@ -17,7 +17,7 @@
 
 ### 前置依赖
 
-- Rust 1.80+（`rustup` 安装）
+- Rust 1.88+（`rustup` 安装；仓库自带 `rust-toolchain.toml`，会自动使用固定工具链）
 - ffmpeg（含 libx264；`STROSS_FFMPEG` 环境变量可指定路径）
 - Linux 还需要：`webkit2gtk-4.1`、`gtk3`（Tauri 依赖）、PulseAudio/PipeWire（音频采集）
 

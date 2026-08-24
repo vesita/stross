@@ -36,7 +36,12 @@ impl Discovery {
         let daemon = ServiceDaemon::new()?;
         let hostname = hostname::get().unwrap_or_else(|_| "stross".into());
         let host = format!("{}.local.", hostname.to_string_lossy());
-        let mut info = ServiceInfo::new(SERVICE_TYPE, instance, &host, ip, port, txt)
+        // mdns-sd 0.21：TXT 属性走 IntoTxtProperties（HashMap<String, String>）
+        let props: std::collections::HashMap<String, String> = txt
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let mut info = ServiceInfo::new(SERVICE_TYPE, instance, &host, ip, port, props)
             .map_err(|e| anyhow::anyhow!("ServiceInfo: {e}"))?;
         info = info.enable_addr_auto();
         daemon.register(info)?;
@@ -61,7 +66,8 @@ impl Discovery {
             };
             match event {
                 Ok(ServiceEvent::ServiceResolved(info)) => {
-                    let ip = info.get_addresses().iter().next().copied();
+                    // mdns-sd 0.21：地址为 HashSet<ScopedIp>（带接口信息）
+                    let ip = info.get_addresses().iter().next().map(|s| s.to_ip_addr());
                     if let Some(ip) = ip {
                         out.push(Discovered {
                             instance: info.get_fullname().to_string(),

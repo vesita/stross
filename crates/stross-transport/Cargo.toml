@@ -7,25 +7,25 @@ license.workspace = true
 
 [dependencies]
 stross-proto = { path = "../stross-proto", version = "0.1.0" }
-async-trait = "0.1"
+async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 tracing.workspace = true
-axum = { version = "0.8", features = ["ws"] }
-futures-util = "0.3"
-local-ip-address = "0.6"
-mdns-sd = { version = "0.13", optional = true }
-tokio-tungstenite = "0.27"
-tungstenite = "0.27"
+axum.workspace = true
+futures-util.workspace = true
+local-ip-address.workspace = true
+mdns-sd = { workspace = true, optional = true }
+tokio-tungstenite.workspace = true
+tungstenite.workspace = true
 # 纯 Rust WebRTC（MIT/Apache-2.0）；rust-crypto 后端避免 C 构建依赖
-str0m = { version = "0.23", default-features = false, features = ["rust-crypto"] }
+str0m.workspace = true
 # 纯 Rust SRT（MIT/Apache-2.0，TSBPD/ARQ/HaiCrypt，零 C 依赖）
-rsrt = "0.3"
-quinn = "0.11"
-rcgen = "0.14.9"
-rustls = { version = "0.23", features = ["ring"] }
+rsrt.workspace = true
+quinn.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
 
 [features]
 default = []

@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use stross_proto::frame::Frame;
-use stross_proto::message::{ControlMessage, ReliabilityProfile};
+use stross_proto::message::{ControlMessage, ReliabilityProfile, TransportId};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -58,7 +58,7 @@ pub struct SessionParams {
 /// 对端地址。
 #[derive(Debug, Clone)]
 pub struct PeerAddr {
-    pub transport: String,
+    pub transport: TransportId,
     pub addr: String,
 }
 
@@ -87,8 +87,8 @@ pub enum TransportError {
 /// 可插拔传输。每个实现是一个无状态工厂 + 共享统计；会话由 [`DataSession`] 表示。
 #[async_trait]
 pub trait Transport: Send + Sync + 'static {
-    /// 传输 id（"ws" / "webrtc" / "quic" / "srt" / "memory"）。
-    fn id(&self) -> &'static str;
+    /// 传输 id（[`TransportId`]）。
+    fn id(&self) -> TransportId;
     /// 可靠性契约。
     fn profile(&self) -> ReliabilityProfile;
 

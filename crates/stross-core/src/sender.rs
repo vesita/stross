@@ -50,7 +50,7 @@ impl RelayClient {
             Box::new(WsTransport::new())
         };
         let peer = PeerAddr {
-            transport: transport.id().to_string(),
+            transport: transport.id(),
             addr: url.to_string(),
         };
         let params = SessionParams {

@@ -162,6 +162,19 @@ struct AudioPlan {
 }
 
 fn audio_plan(a: &AudioSourceConfig) -> Result<AudioPlan> {
+    if let Some(freq) = a.synthetic {
+        // 合成音源优先（无设备测试 / 演示）：lavfi sine 按配置采样率生成
+        return Ok(AudioPlan {
+            inputs: vec![vec![
+                "-f".into(),
+                "lavfi".into(),
+                "-i".into(),
+                format!("sine=frequency={freq}:sample_rate={}", a.sample_rate),
+            ]],
+            filter: None,
+            map: vec!["0:a".into()],
+        });
+    }
     let mut inputs: Vec<Vec<String>> = Vec::new();
     if a.mic.is_some() || a.system_audio.is_none() {
         // 采集麦克风（未指定时用默认输入）
@@ -297,6 +310,10 @@ pub fn audio_command(cfg: &StreamConfig) -> Result<Vec<String>> {
         args.push("-filter_complex".into());
         args.push(f.clone());
     }
+    if let Some(d) = cfg.duration_secs {
+        args.push("-t".into());
+        args.push(d.to_string());
+    }
     args.push("-map".into());
     args.extend(plan.map.iter().cloned());
     args.extend(audio_encode_args(a));
@@ -344,5 +361,25 @@ mod tests {
         assert!(joined.contains("-f adts pipe:1"), "args: {joined}");
         assert!(joined.contains("-c:a aac"), "args: {joined}");
         assert!(joined.contains("-map 0:a"), "args: {joined}");
+    }
+
+    #[test]
+    fn audio_command_synthetic_sine() {
+        let cfg = StreamConfig {
+            stream_id: "t".into(),
+            title: "t".into(),
+            video: None,
+            quality: Quality::LOW,
+            audio: Some(AudioSourceConfig {
+                synthetic: Some(440),
+                ..Default::default()
+            }),
+            duration_secs: Some(1),
+        };
+        let args = audio_command(&cfg).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("sine=frequency=440"), "args: {joined}");
+        assert!(joined.contains("-f adts pipe:1"), "args: {joined}");
+        assert!(joined.contains("-t 1"), "args: {joined}");
     }
 }

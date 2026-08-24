@@ -10,7 +10,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use stross_core::relay::RelayServer;
 use stross_proto::frame::{FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO};
-use stross_proto::message::{ControlMessage, TrackInfo};
+use stross_proto::message::{CodecId, ControlMessage, TrackInfo};
 use tokio_tungstenite::tungstenite::Message;
 
 fn video_frame(keyframe: bool) -> Vec<u8> {
@@ -48,7 +48,7 @@ fn hello() -> String {
         stream_id: "test-stream".into(),
         title: "测试串流".into(),
         video: Some(TrackInfo {
-            codec: "h264".into(),
+            codec: CodecId::H264,
             width: Some(640),
             height: Some(360),
             fps: Some(30),
@@ -56,7 +56,7 @@ fn hello() -> String {
             channels: None,
         }),
         audio: Some(TrackInfo {
-            codec: "aac".into(),
+            codec: CodecId::Aac,
             width: None,
             height: None,
             fps: None,

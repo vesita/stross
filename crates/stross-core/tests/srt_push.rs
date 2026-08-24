@@ -12,7 +12,7 @@ use stross_core::relay::RelayServer;
 use stross_core::transport::srt::SrtTransport;
 use stross_core::transport::{PeerAddr, SessionPacket, SessionParams, Transport};
 use stross_proto::frame::{CODEC_AAC, CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO};
-use stross_proto::message::{ControlMessage, TrackInfo};
+use stross_proto::message::{CodecId, ControlMessage, TrackInfo, TransportId};
 use tokio_tungstenite::tungstenite::Message;
 
 /// 大关键帧：5000 字节载荷（模拟 1080p IDR），SRT 单消息上限 1400B → 必分片。
@@ -26,7 +26,7 @@ fn hello() -> ControlMessage {
         stream_id: "srt-stream".into(),
         title: "SRT 测试流".into(),
         video: Some(TrackInfo {
-            codec: "h264".into(),
+            codec: CodecId::H264,
             width: Some(1920),
             height: Some(1080),
             fps: Some(30),
@@ -34,7 +34,7 @@ fn hello() -> ControlMessage {
             channels: None,
         }),
         audio: Some(TrackInfo {
-            codec: "aac".into(),
+            codec: CodecId::Aac,
             width: None,
             height: None,
             fps: None,
@@ -52,7 +52,7 @@ async fn srt_push_reaches_ws_watcher() {
     // ---- SRT 推流端 ----
     let transport = SrtTransport::new();
     let peer = PeerAddr {
-        transport: "srt".into(),
+        transport: TransportId::Srt,
         addr: format!("srt://127.0.0.1:{srt_port}"),
     };
     let params = SessionParams {

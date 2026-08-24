@@ -25,10 +25,11 @@ mod peers;
 
 pub use peers::PeerInfo;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
@@ -43,6 +44,22 @@ use crate::transport::{DataSession, SessionPacket};
 /// 默认中继端口。
 pub const DEFAULT_PORT: u16 = 8777;
 
+/// 中继数据面事件（内核订阅，用于控制面追踪流生命周期）。
+///
+/// 对应需求 F2.2「先会话后传输」与 D4「会话 id 内核签发」：受控模式下
+/// 只有内核预授权（[`RelayState::authorize_stream`]）的 stream_id 才能推流；
+/// 流的起止 / 观看人数变化通过本事件上报内核。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RelayEvent {
+    /// 推流端 Hello 成功建流。
+    StreamStarted { stream_id: String, info: StreamInfo },
+    /// 推流端 Bye / 断开，流被移除。
+    StreamEnded { stream_id: String },
+    /// 观看者数量变化（订阅 / 断开时上报）。
+    WatchersChanged { stream_id: String, watchers: u32 },
+}
+
 /// 单条流的内部状态。
 #[derive(Clone)]
 struct StreamEntry {
@@ -53,13 +70,32 @@ struct StreamEntry {
 }
 
 /// 中继共享状态。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RelayState {
     streams: Arc<Mutex<HashMap<String, StreamEntry>>>,
     /// 待完成信令的 WebRTC peer（`/api/webrtc/start` 与 `/answer` 之间）。
     webrtc_peers: Arc<Mutex<HashMap<String, crate::transport::webrtc::WebRtcPeer>>>,
     /// 局域网内其它中继（设备发现缓存；`/api/peers` 返回）。
     peers: Arc<Mutex<HashMap<String, PeerInfo>>>,
+    /// 受控模式允许接入的 stream id（内核预注册；非受控模式忽略）。
+    allowed: Arc<Mutex<HashSet<String>>>,
+    /// 是否受控：仅允许 [`Self::allowed`] 中的 stream id 推流。
+    controlled: bool,
+    /// 数据面事件广播（无人订阅时 send 返回 Err，忽略即可）。
+    events: broadcast::Sender<RelayEvent>,
+}
+
+impl Default for RelayState {
+    fn default() -> Self {
+        Self {
+            streams: Arc::new(Mutex::new(HashMap::new())),
+            webrtc_peers: Arc::new(Mutex::new(HashMap::new())),
+            peers: Arc::new(Mutex::new(HashMap::new())),
+            allowed: Arc::new(Mutex::new(HashSet::new())),
+            controlled: false,
+            events: broadcast::channel(64).0,
+        }
+    }
 }
 
 impl RelayState {
@@ -89,15 +125,22 @@ impl RelayState {
             .insert(entry.info.stream_id.clone(), entry);
     }
 
-    fn set_last_keyframe(&self, id: &str, frame: Frame) {
+    /// 转发一帧：关键帧时更新缓存，然后广播。
+    ///
+    /// 热路径：单次加锁完成「缓存更新 + 广播」，避免逐帧整体 clone `StreamEntry`
+    /// （旧实现每次 `get` 都会复制 `StreamInfo` 字符串与关键帧 Bytes）。
+    fn forward(&self, id: &str, frame: Frame) {
         let mut guard = self.streams.lock().unwrap();
         if let Some(entry) = guard.get_mut(id) {
-            entry.last_keyframe = Some(frame);
+            if frame.header.track == TRACK_VIDEO && frame.header.is_keyframe() {
+                entry.last_keyframe = Some(frame.clone());
+            }
+            let _ = entry.tx.send(frame);
         }
     }
 
-    fn remove(&self, id: &str) {
-        self.streams.lock().unwrap().remove(id);
+    fn remove(&self, id: &str) -> bool {
+        self.streams.lock().unwrap().remove(id).is_some()
     }
 
     /// 局域网设备列表（按名称排序）。
@@ -115,6 +158,43 @@ impl RelayState {
     /// 手动注册一台中继（调试 / 测试 / 手动补充跨网段设备）。
     pub fn insert_peer(&self, peer: PeerInfo) {
         self.peers.lock().unwrap().insert(peer.id.clone(), peer);
+    }
+
+    /// 预授权一个 stream id 接入（受控模式下 Hello 校验；非受控模式无效果）。
+    pub fn authorize_stream(&self, id: &str) {
+        self.allowed.lock().unwrap().insert(id.to_string());
+    }
+
+    /// 撤销预授权（会话拆除时调用）。
+    ///
+    /// 除移除授权外，**同步拆除仍在推送的流**（推流端下次 send 失败即断开）：
+    /// 会话拆除 = 数据面流停止，避免"会话已删、媒体仍流转"的泄漏。
+    pub fn revoke_stream(&self, id: &str) {
+        self.allowed.lock().unwrap().remove(id);
+        if self.remove(id) {
+            self.emit(RelayEvent::StreamEnded {
+                stream_id: id.to_string(),
+            });
+        }
+    }
+
+    /// 是否受控模式。
+    pub fn is_controlled(&self) -> bool {
+        self.controlled
+    }
+
+    fn is_authorized(&self, id: &str) -> bool {
+        self.allowed.lock().unwrap().contains(id)
+    }
+
+    /// 广播一条数据面事件（无订阅者时忽略）。
+    pub fn emit(&self, ev: RelayEvent) {
+        let _ = self.events.send(ev);
+    }
+
+    /// 订阅数据面事件（内核用）。
+    pub fn subscribe_events(&self) -> broadcast::Receiver<RelayEvent> {
+        self.events.subscribe()
     }
 }
 
@@ -147,6 +227,31 @@ impl RelayHandle {
         self.state.insert_peer(peer);
     }
 
+    /// 订阅数据面事件（内核用）。
+    pub fn subscribe_events(&self) -> broadcast::Receiver<RelayEvent> {
+        self.state.subscribe_events()
+    }
+
+    /// 预授权一个 stream id 接入（受控模式）。
+    pub fn authorize_stream(&self, id: &str) {
+        self.state.authorize_stream(id);
+    }
+
+    /// 撤销预授权。
+    pub fn revoke_stream(&self, id: &str) {
+        self.state.revoke_stream(id);
+    }
+
+    /// 是否受控模式（仅授权 id 可推流）。
+    pub fn is_controlled(&self) -> bool {
+        self.state.is_controlled()
+    }
+
+    /// 中继共享状态（克隆句柄，供数据面适配器等共享访问）。
+    pub fn state(&self) -> RelayState {
+        self.state.clone()
+    }
+
     /// 停止中继服务。
     pub async fn stop(self) {
         let _ = self.shutdown.send(true);
@@ -155,13 +260,27 @@ impl RelayHandle {
 }
 
 impl RelayServer {
-    /// 绑定并启动中继。
+    /// 绑定并启动中继（非受控：任意 stream id 可推流，现状行为）。
     ///
     /// `port == 0` 时由系统分配空闲端口（测试用），实际端口在
     /// 返回的 [`RelayHandle::port`] 上；SRT/QUIC 推流监听随机端口，
     /// 见 [`RelayHandle::srt_port`] / [`RelayHandle::quic_port`]。
     pub async fn start(port: u16) -> anyhow::Result<RelayHandle> {
-        let state = RelayState::default();
+        Self::start_inner(port, false).await
+    }
+
+    /// 启动**受控模式**中继：只有 [`RelayHandle::authorize_stream`] 预授权的
+    /// stream id 才能推流（对应需求 F2.2「先会话后传输」/ D4「id 内核签发」，
+    /// 内嵌中继由内核驱动时使用）。
+    pub async fn start_controlled(port: u16) -> anyhow::Result<RelayHandle> {
+        Self::start_inner(port, true).await
+    }
+
+    async fn start_inner(port: u16, controlled: bool) -> anyhow::Result<RelayHandle> {
+        let state = RelayState {
+            controlled,
+            ..RelayState::default()
+        };
         let app = http::router(state.clone());
 
         let listener = TcpListener::bind(("0.0.0.0", port)).await?;
@@ -256,7 +375,11 @@ pub struct RelayServer;
 // ---------------------------------------------------------------------------
 
 /// 观看端：等待 Ready，然后按关键帧对齐转发。
-pub(super) async fn handle_watch(session: Box<dyn DataSession>, stream_id: String, state: RelayState) {
+pub(super) async fn handle_watch(
+    session: Box<dyn DataSession>,
+    stream_id: String,
+    state: RelayState,
+) {
     let Some(entry) = state.get(&stream_id) else {
         let _ = session
             .send(SessionPacket::Control(ControlMessage::Error {
@@ -267,6 +390,10 @@ pub(super) async fn handle_watch(session: Box<dyn DataSession>, stream_id: Strin
     };
     let info = entry.info.clone();
     let mut rx = entry.tx.subscribe();
+    state.emit(RelayEvent::WatchersChanged {
+        stream_id: stream_id.clone(),
+        watchers: entry.tx.receiver_count() as u32,
+    });
     let _ = session
         .send(SessionPacket::Control(ControlMessage::Ready {
             stream_id: stream_id.clone(),
@@ -277,6 +404,12 @@ pub(super) async fn handle_watch(session: Box<dyn DataSession>, stream_id: Strin
     // 新观看者先收到最近一个关键帧（含 SPS/PPS），立刻可解码
     if let Some(kf) = entry.last_keyframe.clone() {
         if session.send(SessionPacket::Media(kf)).await.is_err() {
+            // 会话已死：补发观看数变化，避免计数泄漏
+            drop(rx);
+            state.emit(RelayEvent::WatchersChanged {
+                stream_id: stream_id.clone(),
+                watchers: entry.tx.receiver_count() as u32,
+            });
             return;
         }
         video_started = true;
@@ -310,6 +443,12 @@ pub(super) async fn handle_watch(session: Box<dyn DataSession>, stream_id: Strin
     }
     // 干净关闭会话（WS 发 Close 帧；WebRTC 触发 run loop 退出）
     let _ = session.close().await;
+    // 订阅端已断开，广播新的观看者数量
+    drop(rx);
+    state.emit(RelayEvent::WatchersChanged {
+        stream_id: stream_id.clone(),
+        watchers: entry.tx.receiver_count() as u32,
+    });
     tracing::debug!("观看端断开: {stream_id} ({})", info.title);
 }
 
@@ -335,6 +474,17 @@ pub(super) async fn handle_push(session: Box<dyn DataSession>, state: RelayState
                 video,
                 audio,
             }) => {
+                // 受控模式：未预授权的 stream id 拒绝接入（需求 F2.2「先会话后传输」）
+                if state.is_controlled() && !state.is_authorized(&id) {
+                    tracing::warn!("推流被拒绝: 流 {id} 未授权（请先创建会话）");
+                    let _ = session
+                        .send(SessionPacket::Control(ControlMessage::Error {
+                            message: format!("流 {id} 未授权，请先创建会话"),
+                        }))
+                        .await;
+                    let _ = session.close().await;
+                    return;
+                }
                 // 同名流冲突时拒绝新推流端
                 if state.get(&id).is_some() {
                     let _ = session
@@ -363,6 +513,10 @@ pub(super) async fn handle_push(session: Box<dyn DataSession>, state: RelayState
                     last_keyframe: None,
                 });
                 stream_id = Some(id.clone());
+                state.emit(RelayEvent::StreamStarted {
+                    stream_id: id.clone(),
+                    info: info.clone(),
+                });
                 tracing::info!("推流开始: {} ({})", id, info.title);
                 let _ = session
                     .send(SessionPacket::Control(ControlMessage::Welcome {
@@ -376,20 +530,20 @@ pub(super) async fn handle_push(session: Box<dyn DataSession>, state: RelayState
             SessionPacket::Control(_) => {}
             SessionPacket::Media(frame) => {
                 if let Some(id) = &stream_id {
-                    if frame.header.track == TRACK_VIDEO && frame.header.is_keyframe() {
-                        state.set_last_keyframe(id, frame.clone());
-                    }
-                    if let Some(entry) = state.get(id) {
-                        // 中继广播原样帧；观看端自己按关键帧对齐
-                        let _ = entry.tx.send(frame);
-                    }
+                    // 单次加锁完成关键帧缓存 + 广播（观看端自己按关键帧对齐）
+                    state.forward(id, frame);
                 }
             }
         }
     }
     if let Some(id) = stream_id {
-        state.remove(&id);
-        tracing::info!("推流结束: {id}");
+        // 若流已被 revoke_stream 拆除（会话拆除路径），这里不再重复发事件
+        if state.remove(&id) {
+            state.emit(RelayEvent::StreamEnded {
+                stream_id: id.clone(),
+            });
+            tracing::info!("推流结束: {id}");
+        }
     }
     let _ = session.close().await;
 }

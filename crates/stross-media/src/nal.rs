@@ -9,6 +9,13 @@ pub const NAL_SLICE_IDR: u8 = 5;
 pub const NAL_SPS: u8 = 7;
 pub const NAL_PPS: u8 = 8;
 
+/// Annex-B 流里单个段（两个起始码之间）的上限。
+///
+/// 超过即视为失同步：丢弃该段/缓冲重新同步，防止垃圾流（无起始码或伪起始码）
+/// 让内部缓冲无限增长。8 MiB 足够容纳正常编码的高码率关键帧
+/// （1080p@6Mbps、GOP 2s 的关键帧最坏约 1.5 MiB）。
+const MAX_PENDING_NAL: usize = 8 * 1024 * 1024;
+
 /// 提取 NAL 单元类型。
 pub fn nal_type(nal: &[u8]) -> Option<u8> {
     nal.first().map(|b| b & 0x1f)
@@ -31,7 +38,15 @@ impl AnnexBSplitter {
     pub fn feed(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
         self.buf.extend_from_slice(data);
         let mut out = Vec::new();
-        let mut prev = 0usize; // 上一个起始码之后的位置（当前 NAL 起点）
+        // 流开头就是 3 字节起始码（00 00 01）：主循环从 i=3 起扫，
+        // 只能命中"结束于 ≥3 位置"的码；开头的码需在此先行识别。
+        // （4 字节码 00 00 00 01 的"1"在 buf[3]，由主循环在 i=3 命中。）
+        let mut prev =
+            if self.buf.len() >= 3 && self.buf[0] == 0 && self.buf[1] == 0 && self.buf[2] == 1 {
+                3
+            } else {
+                0
+            };
         let mut i = 3usize;
         while i + 2 < self.buf.len() {
             if self.buf[i - 2] == 0 && self.buf[i - 1] == 0 && self.buf[i] == 1 {
@@ -42,13 +57,28 @@ impl AnnexBSplitter {
                     i - 2
                 };
                 if code_start > prev {
-                    out.push(self.buf[prev..code_start].to_vec());
+                    let seg = code_start - prev;
+                    if seg <= MAX_PENDING_NAL {
+                        out.push(self.buf[prev..code_start].to_vec());
+                    } else {
+                        // 单段超大（伪起始码 / 垃圾流）：丢弃该段，不产出
+                        tracing::warn!("Annex-B 单段过大（{seg} 字节），已丢弃");
+                    }
                 }
                 prev = i + 1;
                 i += 3;
             } else {
                 i += 1;
             }
+        }
+        // 防呆：长时间无起始码的可疑数据累积超过上限时整体丢弃重新同步
+        if prev == 0 && self.buf.len() > MAX_PENDING_NAL {
+            tracing::warn!(
+                "Annex-B 流长时间无起始码，丢弃 {} 字节重新同步",
+                self.buf.len()
+            );
+            self.buf.clear();
+            return out;
         }
         // 保留未完成的尾部，等待下一次 feed
         self.buf.drain(..prev);
@@ -77,7 +107,9 @@ pub struct AccessUnit {
 impl AccessUnit {
     /// 序列化为带起始码的 Annex-B 字节流。
     pub fn to_annex_b(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        // 精确预分配（起始码 3 字节 × NAL 数 + 载荷总长），避免逐 NAL 扩容拷贝
+        let total: usize = self.nals.iter().map(|n| n.len() + 3).sum();
+        let mut out = Vec::with_capacity(total);
         for nal in &self.nals {
             out.extend_from_slice(&[0, 0, 1]);
             out.extend_from_slice(nal);
@@ -148,6 +180,191 @@ fn first_mb_in_slice(nal: &[u8]) -> Option<u64> {
         p += 1;
     }
     Some((1u64 << m) - 1 + value)
+}
+
+/// 从 SPS NAL（不含起始码）解析图像宽高（含 `frame_cropping` 裁剪）。
+///
+/// rawvideo 解码输出需要"每帧字节数 = 宽 × 高 × 像素字节"，而编码分辨率
+/// 不随协议帧头传递，只能解码 SPS 得知——桌面播放后端
+/// （[`crate::playback::FfmpegPlaybackSink`]）依赖本函数确定帧大小。
+///
+/// 返回 `None` 表示无法解析（非法 / 截断的 SPS），调用方应保守处理。
+pub fn sps_dimensions(nal: &[u8]) -> Option<(u32, u32)> {
+    if nal_type(nal) != Some(NAL_SPS) || nal.len() < 4 {
+        return None;
+    }
+    let rbsp = de_emulation_prevention(&nal[1..]);
+    let mut bits = BitReader::new(&rbsp);
+
+    let profile_idc = bits.u(8)?;
+    bits.skip(8)?; // constraint_set0..5_flag + reserved_zero_2bits
+    bits.skip(8)?; // level_idc
+    bits.ue()?; // seq_parameter_set_id
+
+    // 高档次才显式携带色度格式；baseline/main 隐含 4:2:0（chroma_format_idc = 1）
+    let mut chroma_format_idc: u32 = 1;
+    if matches!(
+        profile_idc,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+    ) {
+        chroma_format_idc = bits.ue()?;
+        if chroma_format_idc == 3 {
+            bits.skip(1)?; // separate_colour_plane_flag
+        }
+        bits.ue()?; // bit_depth_luma_minus8
+        bits.ue()?; // bit_depth_chroma_minus8
+        bits.skip(1)?; // qpprime_y_zero_transform_bypass_flag
+        if bits.bit()? == 1 {
+            // seq_scaling_matrix_present_flag：跳过缩放矩阵（解码不需要其内容）
+            let count = if chroma_format_idc == 3 { 12 } else { 8 };
+            for i in 0..count {
+                if bits.bit()? == 1 {
+                    let size = if i < 6 { 16 } else { 64 };
+                    let mut last = 8i32;
+                    let mut next = 8i32;
+                    for _ in 0..size {
+                        if next != 0 {
+                            let delta = bits.se()?;
+                            next = (last + delta + 256) % 256;
+                        }
+                        last = if next == 0 { last } else { next };
+                    }
+                }
+            }
+        }
+    }
+
+    bits.ue()?; // log2_max_frame_num_minus4
+    match bits.ue()? {
+        0 => {
+            bits.ue()?; // log2_max_pic_order_cnt_lsb_minus4
+        }
+        1 => {
+            bits.skip(1)?; // delta_pic_order_always_zero_flag
+            bits.se()?; // offset_for_non_ref_pic
+            bits.se()?; // offset_for_top_to_bottom_field
+            let n = bits.ue()?;
+            for _ in 0..n {
+                bits.se()?; // offset_for_ref_frame[i]
+            }
+        }
+        _ => {}
+    }
+    bits.ue()?; // max_num_ref_frames
+    bits.skip(1)?; // gaps_in_frame_num_value_allowed_flag
+
+    let pic_width_in_mbs_minus1 = bits.ue()?;
+    let pic_height_in_map_units_minus1 = bits.ue()?;
+    let frame_mbs_only_flag = bits.bit()?;
+    if frame_mbs_only_flag == 0 {
+        bits.skip(1)?; // mb_adaptive_frame_field_flag
+    }
+    bits.skip(1)?; // direct_8x8_inference_flag
+
+    let mut crop = [0u32; 4]; // left, right, top, bottom
+    if bits.bit()? == 1 {
+        for c in &mut crop {
+            *c = bits.ue()?;
+        }
+    }
+
+    // 裁剪单位（H.264 7.4.2.1.1）：4:2:0 为 2 像素/单位
+    let (crop_unit_x, crop_unit_y) = if chroma_format_idc == 0 {
+        (1, 2 - frame_mbs_only_flag)
+    } else {
+        match chroma_format_idc {
+            1 => (2, 2), // 4:2:0
+            2 => (2, 1), // 4:2:2
+            _ => (1, 1), // 4:4:4 及以上
+        }
+    };
+    let width = (pic_width_in_mbs_minus1 + 1) * 16 - (crop[0] + crop[1]) * crop_unit_x;
+    let height = (pic_height_in_map_units_minus1 + 1) * (2 - frame_mbs_only_flag) * 16
+        - (crop[2] + crop[3]) * crop_unit_y;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((width, height))
+}
+
+/// 去掉防竞争字节（`00 00 03` → `00 00`），把 EBSP 转成 RBSP。
+fn de_emulation_prevention(ebsp: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ebsp.len());
+    let mut zeros = 0u8;
+    for &b in ebsp {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        if b == 0 {
+            zeros += 1;
+        } else {
+            zeros = 0;
+        }
+        out.push(b);
+    }
+    out
+}
+
+/// 逐位读取器（MSB 优先），用于解析 H.264 的 Exp-Golomb 码字。
+struct BitReader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    /// 读 1 位。
+    fn bit(&mut self) -> Option<u32> {
+        let byte = *self.buf.get(self.pos / 8)?;
+        let b = (byte >> (7 - (self.pos % 8))) & 1;
+        self.pos += 1;
+        Some(b as u32)
+    }
+
+    /// 跳过 n 位。
+    fn skip(&mut self, n: usize) -> Option<()> {
+        if self.pos + n > self.buf.len() * 8 {
+            return None;
+        }
+        self.pos += n;
+        Some(())
+    }
+
+    /// 读 n 位（n ≤ 32）为无符号整数。
+    fn u(&mut self, n: usize) -> Option<u32> {
+        let mut v = 0u32;
+        for _ in 0..n {
+            v = (v << 1) | self.bit()?;
+        }
+        Some(v)
+    }
+
+    /// 无符号 Exp-Golomb 码（ue）。
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0u32;
+        while self.bit()? == 0 {
+            zeros += 1;
+            if zeros > 31 {
+                return None; // 非法码字防呆
+            }
+        }
+        let mut v = 0u32;
+        for _ in 0..zeros {
+            v = (v << 1) | self.bit()?;
+        }
+        Some((1u32 << zeros) - 1 + v)
+    }
+
+    /// 有符号 Exp-Golomb 码（se）。
+    fn se(&mut self) -> Option<i32> {
+        let ue = self.ue()?;
+        let k = ue.div_ceil(2) as i32;
+        Some(if ue % 2 == 1 { k } else { -k })
+    }
 }
 
 /// 访问单元组装器：按 **帧** 拆分组装，SPS/PPS/SEI 挂在随后的首 slice 上。
@@ -254,6 +471,25 @@ mod tests {
         assert_eq!(out[1], b);
     }
 
+    /// 流以 3 字节起始码开头（`AccessUnit::to_annex_b` 的产物）时，
+    /// 第一个 NAL 必须被正确切出，且不含起始码前缀。
+    #[test]
+    fn split_with_leading_three_byte_start_code() {
+        let mut s = AnnexBSplitter::new();
+        let sps = nal(NAL_SPS, 3);
+        let pps = nal(NAL_PPS, 4);
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&[0, 0, 1]); // 3 字节码在 offset 0
+        stream.extend_from_slice(&sps);
+        stream.extend_from_slice(&[0, 0, 1]);
+        stream.extend_from_slice(&pps);
+        let mut out = s.feed(&stream);
+        out.extend(s.finish());
+        assert_eq!(out.len(), 2, "开头的 3 字节码应被识别: {out:?}");
+        assert_eq!(out[0], sps, "第一个 NAL 不应含起始码前缀");
+        assert_eq!(out[1], pps);
+    }
+
     #[test]
     fn access_unit_boundaries_and_keyframe() {
         let mut b = AccessUnitBuilder::new();
@@ -355,5 +591,187 @@ mod tests {
         s1.extend([0u8; 8]);
         assert_eq!(first_mb_in_slice(&s0), Some(0));
         assert_eq!(first_mb_in_slice(&s1), Some(1));
+    }
+
+    /// 确定性伪随机数（xorshift64*），保证测试可复现。
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    /// 纯垃圾（无任何起始码）不应 panic：超过上限后整体丢弃重新同步，
+    /// 且重同步后仍能正常切分真实流。
+    #[test]
+    fn splitter_bounded_and_resyncs_on_garbage() {
+        let mut s = AnnexBSplitter::new();
+        // 全零字节不含起始码（00 00 01），是"无起始码"的最坏情况
+        let garbage = vec![0u8; MAX_PENDING_NAL + 64];
+        let out = s.feed(&garbage);
+        assert!(out.is_empty(), "垃圾不应产出 NAL");
+        assert!(
+            s.buf.len() <= MAX_PENDING_NAL,
+            "无起始码时内部缓冲应被截断: {}",
+            s.buf.len()
+        );
+        // 重同步后：真实流仍能正常切分（feed 切中间段，finish 冲刷末尾段）
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&[0, 0, 0, 1]); // 4 字节起始码（扫描可识别）
+        stream.extend_from_slice(&nal(NAL_SPS, 7));
+        stream.extend_from_slice(&[0, 0, 1]);
+        stream.extend_from_slice(&nal(NAL_SLICE_NON_IDR, 8));
+        let out = s.feed(&stream);
+        assert_eq!(out.len(), 1, "SPS 应作为第一段切出");
+        assert_eq!(s.finish().len(), 1, "末尾 slice 应由 finish 冲刷");
+    }
+
+    /// 随机 NAL（覆盖全部类型，含非法值）不应 panic，且 pending 有界。
+    #[test]
+    fn au_builder_never_panics_on_random_nals() {
+        let mut rng = Rng(0xdead_beef_cafe_f00d);
+        let mut b = AccessUnitBuilder::new();
+        let mut produced = 0usize;
+        for _ in 0..50_000 {
+            let kind = (rng.next() % 32) as u8; // 覆盖 0..31 全部 NAL 类型
+            let len = (rng.next() % 64) as usize;
+            let mut nal = vec![kind];
+            for _ in 0..len {
+                nal.push(rng.next() as u8);
+            }
+            if b.push(nal).is_some() {
+                produced += 1;
+            }
+            assert!(
+                b.pending.len() <= 32,
+                "pending 应保持有界: {}",
+                b.pending.len()
+            );
+        }
+        assert!(produced > 0);
+        let _ = b.finish();
+    }
+
+    /// 超大伪段（起始码之间超过上限）应被丢弃而不是产出 / 撑爆缓冲。
+    #[test]
+    fn oversized_segment_dropped() {
+        let mut s = AnnexBSplitter::new();
+        // 起始码 + 超大伪段 + 起始码 + 小段
+        let mut stream = Vec::with_capacity(MAX_PENDING_NAL + 64);
+        stream.extend_from_slice(&[0, 0, 1]);
+        stream.resize(MAX_PENDING_NAL + 8, 0xAA); // 无起始码的巨型段
+        stream.extend_from_slice(&[0, 0, 1, 0x65, 0x88]); // 正常小段
+        let out = s.feed(&stream);
+        assert!(
+            out.iter().all(|nal| nal.len() <= MAX_PENDING_NAL),
+            "不应产出超大 NAL"
+        );
+        assert!(s.buf.len() <= MAX_PENDING_NAL, "缓冲应保持有界");
+    }
+
+    /// 测试用逐位写入器（MSB 优先），构造合法 SPS 码流。
+    struct BitWriter {
+        bits: Vec<u8>,
+        pos: usize,
+    }
+
+    impl BitWriter {
+        fn new() -> Self {
+            Self {
+                bits: Vec::new(),
+                pos: 0,
+            }
+        }
+        fn bit(&mut self, b: u32) {
+            if self.pos.is_multiple_of(8) {
+                self.bits.push(0);
+            }
+            let byte = self.bits.last_mut().unwrap();
+            *byte |= ((b & 1) as u8) << (7 - (self.pos % 8));
+            self.pos += 1;
+        }
+        fn u(&mut self, v: u32, n: usize) {
+            for i in (0..n).rev() {
+                self.bit((v >> i) & 1);
+            }
+        }
+        fn ue(&mut self, v: u32) {
+            let m = 32 - (v + 1).leading_zeros();
+            for _ in 0..(m - 1) {
+                self.bit(0);
+            }
+            self.u(v + 1, m as usize);
+        }
+        fn finish(&mut self) -> Vec<u8> {
+            std::mem::take(&mut self.bits)
+        }
+    }
+
+    /// 构造 baseline SPS NAL（帧率无关，只带宽高与裁剪）。
+    fn make_sps(width_mbs: u32, height_map_units: u32, crop_bottom: u32) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.u(66, 8); // profile_idc = baseline
+        w.u(0, 8); // constraint_set 标志
+        w.u(31, 8); // level_idc
+        w.ue(0); // seq_parameter_set_id
+        w.ue(0); // log2_max_frame_num_minus4
+        w.ue(0); // pic_order_cnt_type = 0
+        w.ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        w.ue(1); // max_num_ref_frames
+        w.bit(0); // gaps_in_frame_num_value_allowed_flag
+        w.ue(width_mbs - 1); // pic_width_in_mbs_minus1
+        w.ue(height_map_units - 1); // pic_height_in_map_units_minus1
+        w.bit(1); // frame_mbs_only_flag
+        w.bit(1); // direct_8x8_inference_flag
+        w.bit(u32::from(crop_bottom > 0)); // frame_cropping_flag
+        if crop_bottom > 0 {
+            w.ue(0); // crop_left
+            w.ue(0); // crop_right
+            w.ue(0); // crop_top
+            w.ue(crop_bottom);
+        }
+        let mut rbsp = w.finish();
+        rbsp.push(0x80); // rbsp_trailing_bits（stop bit）
+        let mut nal = vec![0x67]; // NAL header（type 7）
+        nal.extend(rbsp);
+        nal
+    }
+
+    #[test]
+    fn sps_dimensions_640x360() {
+        // 640x360 = 40x23 宏块，底部裁剪 4 单位（×2 = 8 像素，4:2:0）
+        let sps = make_sps(40, 23, 4);
+        assert_eq!(sps_dimensions(&sps), Some((640, 360)));
+    }
+
+    #[test]
+    fn sps_dimensions_1280x720_no_crop() {
+        // 1280x720 = 80x45 宏块，无裁剪
+        let sps = make_sps(80, 45, 0);
+        assert_eq!(sps_dimensions(&sps), Some((1280, 720)));
+    }
+
+    #[test]
+    fn sps_dimensions_rejects_non_sps_or_truncated() {
+        assert_eq!(sps_dimensions(&[]), None);
+        assert_eq!(sps_dimensions(&[0x67, 0x00]), None, "截断的 SPS");
+        assert_eq!(sps_dimensions(&[0x65, 0x88]), None, "slice NAL 不是 SPS");
+    }
+
+    /// 真实 x264 编码（high profile level 3.0，`zerolatency` 参数）的 SPS：
+    /// 640x360，含防竞争字节（`00 00 03`），验证解析器对真实码流的兼容性。
+    #[test]
+    fn sps_dimensions_real_x264_high_profile() {
+        let sps: Vec<u8> = vec![
+            0x67, 0x64, 0x00, 0x1e, 0xac, 0xb4, 0x05, 0x01, 0x7f, 0xcb, 0x80, 0x88, 0x00, 0x00,
+            0x03, 0x00, 0x08, 0x00, 0x00, 0x03, 0x01, 0x84, 0x78, 0xb1, 0x75,
+        ];
+        assert_eq!(sps_dimensions(&sps), Some((640, 360)));
     }
 }

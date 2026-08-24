@@ -19,11 +19,13 @@
 //! +-----------+                        +--------+               +---------+
 //! ```
 
-pub mod embedded;
 #[cfg(feature = "discovery")]
 pub mod discovery;
+pub mod embedded;
+pub mod jitter;
 pub mod relay;
 pub mod sender;
+pub mod session_channel;
 
 // 传输层（独立 crate stross-transport，阶段 2 拆分）：
 // `stross_core::transport::*` 与 `stross_core::net::*` 路径保持兼容。

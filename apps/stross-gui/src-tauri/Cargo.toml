@@ -13,7 +13,7 @@ name = "stross_gui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri.workspace = true
 stross-app = { path = "../../../crates/stross-app", version = "0.1.0" }
 stross-media = { path = "../../../crates/stross-media", version = "0.1.0" }
 stross-core = { path = "../../../crates/stross-core", version = "0.1.0", features = ["discovery"] }
@@ -24,5 +24,5 @@ tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-open = "5"
-base64 = "0.22"
+open.workspace = true
+base64.workspace = true

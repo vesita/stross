@@ -13,7 +13,7 @@ use bytes::Bytes;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
-use stross_proto::message::ReliabilityProfile;
+use stross_proto::message::{ReliabilityProfile, TransportId};
 
 use super::{
     DataSession, PeerAddr, SessionPacket, SessionParams, SharedStats, Transport, TransportError,
@@ -49,8 +49,8 @@ impl WsTransport {
 
 #[async_trait]
 impl Transport for WsTransport {
-    fn id(&self) -> &'static str {
-        "ws"
+    fn id(&self) -> TransportId {
+        TransportId::Ws
     }
 
     fn profile(&self) -> ReliabilityProfile {

@@ -18,9 +18,10 @@ use stross_core::net::local_ips;
 use stross_core::relay::{DEFAULT_PORT, RelayHandle, RelayServer};
 use stross_media::capture::CaptureBackend;
 use stross_media::pipeline::{StreamConfig, ffmpeg_available};
+use stross_proto::message::TransportId;
 
 use crate::engine::SenderEngine;
-use crate::kernel::{Kernel, NodeInfo, NodeRole};
+use crate::kernel::{Kernel, NodeInfo, NodeRole, RelayDataPlane};
 
 /// 运行平台（UI 层注入）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,17 +112,36 @@ impl StrossApp {
     // -----------------------------------------------------------------------
 
     /// 启动/复用本机中继（"先连接"步骤的本机选项）。
+    ///
+    /// 本机中继以**受控模式**启动（需求 F2.2「先会话后传输」）：只有内核
+    /// 创建的会话 id 才能推流；中继作为数据面后端接入内核
+    /// （[`Kernel::attach_data_plane`]），流生命周期事件转发为 [`KernelEvent`]。
     pub async fn start_relay(&self) -> Result<RelayInfo, String> {
+        self.start_relay_on(DEFAULT_PORT).await
+    }
+
+    /// 在指定端口启动中继（受内核控制的数据面）；被占用时回退随机端口。
+    pub async fn start_relay_on(&self, port: u16) -> Result<RelayInfo, String> {
         {
             let guard = self.relay.lock().unwrap();
             if let Some(r) = guard.as_ref() {
                 return Ok(relay_info(r.port));
             }
         }
-        let handle = RelayServer::start(DEFAULT_PORT)
-            .await
-            .map_err(|e| e.to_string())?;
+        // 优先指定端口；被占用时回退随机端口（本机中继"能用就行"，不因端口冲突失败）
+        let handle = match RelayServer::start_controlled(port).await {
+            Ok(h) => h,
+            Err(_) => {
+                tracing::warn!("端口 {port} 被占用，本机中继回退到随机端口");
+                RelayServer::start_controlled(0)
+                    .await
+                    .map_err(|e| e.to_string())?
+            }
+        };
         let port = handle.port;
+        // 中继接入内核（数据面后端）：订阅流事件、会话预授权
+        self.kernel
+            .attach_data_plane(Arc::new(RelayDataPlane::new(&handle)));
         *self.relay.lock().unwrap() = Some(handle);
         // 把本机注册进内核设备图（含采集能力，供会话协商）
         self.register_local_node();
@@ -193,6 +213,11 @@ impl StrossApp {
                         })
                         .unwrap_or_default()
                 };
+                // TXT 字符串 → 枚举；未知传输忽略（编译期穷尽，前端序列化仍为字符串）
+                let transports = split("transports")
+                    .iter()
+                    .filter_map(|s| TransportId::from_txt(s))
+                    .collect();
                 let url = format!("http://{}:{}/", d.ip, d.port);
                 RelayInfo {
                     port: d.port,
@@ -200,7 +225,7 @@ impl StrossApp {
                     name: txt("name"),
                     kind: txt("kind"),
                     roles: split("roles"),
-                    transports: split("transports"),
+                    transports,
                     ip: Some(d.ip.to_string()),
                 }
             })
@@ -216,9 +241,13 @@ impl StrossApp {
     /// * `cfg`：采集配置（视频源 / 画质 / 音频）
     /// * `relay_url`：`Some` 推到指定中继（连接阶段得到的 ws 地址）；
     ///   `None` 推到常驻本机中继
+    ///
+    /// 已接入数据面（本机受控中继）时，若 `cfg.stream_id` 还不是内核会话
+    /// （旧 UI 直接推流的兜底），自动创建本机会话并由内核签发 id（D4）；
+    /// 新 UI 应先 `create_session` 再传对应 id。
     pub async fn start_stream(
         &self,
-        cfg: StreamConfig,
+        mut cfg: StreamConfig,
         relay_url: Option<String>,
     ) -> Result<StartResult, String> {
         if self.engine.lock().unwrap().is_some() {
@@ -230,6 +259,19 @@ impl StrossApp {
             .unwrap()
             .clone()
             .ok_or("采集后端未初始化")?;
+        // 会话兜底：受控中继只接受内核会话 id；未建会话时自动创建
+        if self.kernel.has_data_plane() && !self.kernel.has_session(&cfg.stream_id) {
+            tracing::info!(
+                "stream_id {} 未关联内核会话，自动创建本机会话",
+                cfg.stream_id
+            );
+            let session = self
+                .kernel
+                .create_session("local", &["local".into()], &crate::SessionPrefs::default())
+                .await
+                .map_err(|e| format!("创建会话失败: {e}"))?;
+            cfg.stream_id = session.id;
+        }
         // 未指定中继时，推到已连接（常驻）的本机中继
         let relay_url = match relay_url {
             Some(u) => Some(u),
@@ -323,6 +365,11 @@ impl StrossApp {
             .map(|s| s.relay_port)
             .unwrap_or(DEFAULT_PORT)
     }
+
+    /// 本机主中继端口（`start_relay` / `start_relay_on` 启动的那个）。
+    pub fn relay_port(&self) -> Option<u16> {
+        self.relay.lock().unwrap().as_ref().map(|r| r.port)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -358,8 +405,8 @@ pub struct RelayInfo {
     pub kind: Option<String>,
     /// 角色（mDNS TXT `roles`：sender / viewer / relay）。
     pub roles: Vec<String>,
-    /// 支持的传输（mDNS TXT `transports`：ws / webrtc / srt / quic）。
-    pub transports: Vec<String>,
+    /// 支持的传输（mDNS TXT `transports`；序列化后与字符串时代一致）。
+    pub transports: Vec<TransportId>,
     /// 中继 IP（本机中继时为 `None`，用 urls 展示）。
     pub ip: Option<String>,
 }
@@ -404,7 +451,12 @@ fn relay_info(port: u16) -> RelayInfo {
         name: Some("Stross 本机中继".into()),
         kind: Some("relay".into()),
         roles: vec!["sender".into(), "viewer".into(), "relay".into()],
-        transports: vec!["ws".into(), "webrtc".into(), "srt".into(), "quic".into()],
+        transports: vec![
+            TransportId::Ws,
+            TransportId::WebRtc,
+            TransportId::Srt,
+            TransportId::Quic,
+        ],
         ip: None,
     }
 }

@@ -1,0 +1,205 @@
+//! 播放侧（接收 / 输出）抽象：把协议帧流变成画面与声音。
+//!
+//! 对称于采集侧 [`crate::capture::CaptureBackend`]（采集 = 设备 → 帧；
+//! 播放 = 帧 → 设备），见 docs/requirements.md §9 适配层与决策 D6：
+//! 平台无关 trait + 每平台实现。桌面实现是 ffmpeg 子进程解码 + cpal 输出
+//! （[`FfmpegPlaybackSink`]）；Android（一期 1f）用 MediaCodec + AudioTrack
+//! 实现同一 trait。
+//!
+//! 使用方式：
+//!
+//! ```ignore
+//! let sink: Arc<dyn PlaybackSink> = Arc::new(FfmpegPlaybackSink);
+//! let session = sink.open(cfg)?;                 // 启动解码与输出
+//! let mut frames = session.take_video_frames();  // 解码画面通道（GUI 消费）
+//! loop { session.push(frame)?; }                 // 喂协议帧（同步、非阻塞）
+//! session.stop();
+//! ```
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use stross_proto::frame::Frame;
+use stross_proto::message::{CapabilityDescriptor, CodecId};
+
+pub mod audio_out;
+pub mod ffmpeg;
+
+pub use ffmpeg::FfmpegPlaybackSink;
+
+/// 视频输出配置。
+#[derive(Debug, Clone, Copy)]
+pub struct VideoOut {
+    /// 显示目标尺寸（保持宽高比）；`None` = 原始分辨率（GUI 侧再缩放）。
+    pub display: Option<(u32, u32)>,
+}
+
+/// 音频输出方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioOut {
+    /// 默认输出设备（扬声器 / 录音设备，D3 反向麦克风的关键路径）。
+    Device,
+    /// 解码但丢弃（无声卡环境 / 测试）。
+    Discard,
+}
+
+/// 音频输出配置。
+#[derive(Debug, Clone, Copy)]
+pub struct AudioOutSpec {
+    /// 声道数（解码输出；设备模式下以设备为准）。
+    pub channels: u8,
+    /// 采样率（解码输出；设备模式下以设备为准）。
+    pub sample_rate: u32,
+    /// 输出方式。
+    pub out: AudioOut,
+}
+
+/// 播放会话配置。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlaybackConfig {
+    /// 视频轨（H264）；`None` = 不播放视频。
+    pub video: Option<VideoOut>,
+    /// 音频轨（AAC）；`None` = 不播放音频。
+    pub audio: Option<AudioOutSpec>,
+}
+
+/// 一帧解码后的画面（RGBA8888，可直接交给 GUI 绘制）。
+#[derive(Debug)]
+pub struct RenderedFrame {
+    /// 源帧时间戳（毫秒，来自协议帧头）。
+    pub pts_ms: u32,
+    pub width: u32,
+    pub height: u32,
+    /// RGBA8888，长度 = width × height × 4。
+    pub rgba: Vec<u8>,
+}
+
+/// 播放会话统计（可观测、可测试）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackStats {
+    /// 收到的视频帧数。
+    pub video_frames_in: u64,
+    /// 解码产出的画面帧数。
+    pub video_frames_out: u64,
+    /// 视频解码失步重对齐次数（子进程重建）。
+    pub video_resyncs: u64,
+    /// 收到的音频块数（1 块 = 1 个 ADTS 帧）。
+    pub audio_blocks_in: u64,
+    /// 解码产出的音频块数。
+    pub audio_blocks_out: u64,
+    /// 音频输出设备是否可用（false = 静音回退）。
+    pub audio_device_ok: bool,
+    /// 内部缓冲满被丢弃的帧数（内存有界保障）。
+    pub dropped_push: u64,
+}
+
+/// 播放错误。
+#[derive(Debug, thiserror::Error)]
+pub enum PlaybackError {
+    #[error("未找到 ffmpeg（可设置 STROSS_FFMPEG 环境变量）")]
+    NoFfmpeg,
+    #[error("不支持的视频编码: {0:?}")]
+    UnsupportedVideo(CodecId),
+    #[error("不支持的音频编码: {0:?}")]
+    UnsupportedAudio(CodecId),
+    #[error("播放会话已停止")]
+    Closed,
+    #[error("启动播放失败: {0}")]
+    Spawn(String),
+    #[error("IO 错误: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// 播放后端：把帧流变成画面与声音。
+///
+/// 与 [`CaptureBackend`](crate::capture::CaptureBackend) 对称：
+/// 同步方法 + `Box<dyn>` 友好，重活都在后台线程。
+pub trait PlaybackSink: Send + Sync {
+    /// 能力描述（能力广播 / 协商用）。
+    fn descriptor(&self) -> CapabilityDescriptor;
+    /// 打开一个播放会话（按配置启动解码与输出）。
+    fn open(&self, cfg: PlaybackConfig) -> Result<PlaybackSession, PlaybackError>;
+}
+
+/// 一次播放会话：`push` 帧 → 后台解码输出。
+///
+/// * [`PlaybackSession::push`] 是同步廉价入口（有界队列，满则丢弃并计数）；
+/// * 视频解码帧经 [`PlaybackSession::take_video_frames`] 的通道交给 GUI；
+/// * 音频直接输出到设备（或丢弃），无需上层干预。
+#[derive(Clone)]
+pub struct PlaybackSession {
+    inner: Arc<SessionInner>,
+}
+
+pub(crate) struct SessionInner {
+    pub(crate) stats: Arc<Mutex<PlaybackStats>>,
+    pub(crate) stopped: Arc<AtomicBool>,
+    pub(crate) video_tx: Mutex<Option<std::sync::mpsc::SyncSender<Frame>>>,
+    pub(crate) audio_tx: Mutex<Option<std::sync::mpsc::SyncSender<Frame>>>,
+    pub(crate) video_rx_out: Mutex<Option<tokio::sync::mpsc::Receiver<RenderedFrame>>>,
+    pub(crate) threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+impl PlaybackSession {
+    /// 喂入一帧（按轨道分流）。同步、非阻塞；队列满则丢弃并计入
+    /// [`PlaybackStats::dropped_push`]（内存有界，不反向阻塞调用方）。
+    pub fn push(&self, frame: Frame) -> Result<(), PlaybackError> {
+        if self.inner.stopped.load(Ordering::Relaxed) {
+            return Err(PlaybackError::Closed);
+        }
+        use stross_proto::frame::{TRACK_AUDIO, TRACK_VIDEO};
+        // 先绑定锁守卫再取引用，避免临时守卫被提前释放（E0716）
+        let video_tx = self.inner.video_tx.lock().unwrap();
+        let audio_tx = self.inner.audio_tx.lock().unwrap();
+        let tx = match frame.header.track {
+            TRACK_VIDEO => video_tx.as_ref(),
+            TRACK_AUDIO => audio_tx.as_ref(),
+            _ => None, // 未知轨道：静默忽略
+        };
+        match tx {
+            Some(tx) => match tx.try_send(frame) {
+                Ok(()) => Ok(()),
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    self.inner.stats.lock().unwrap().dropped_push += 1;
+                    Ok(())
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err(PlaybackError::Closed),
+            },
+            None => Ok(()),
+        }
+    }
+
+    /// 取出解码画面通道（每会话一次；`None` = 已取过或未配置视频轨）。
+    pub fn take_video_frames(&self) -> Option<tokio::sync::mpsc::Receiver<RenderedFrame>> {
+        self.inner.video_rx_out.lock().unwrap().take()
+    }
+
+    /// 当前统计。
+    pub fn stats(&self) -> PlaybackStats {
+        *self.inner.stats.lock().unwrap()
+    }
+
+    /// 停止播放并等待后台线程收尾（子进程一并结束）。
+    pub fn stop(&self) {
+        if self.inner.stopped.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        // 关闭帧入口 → 写线程退出 → 关 stdin → 子进程 EOF 退出
+        drop(self.inner.video_tx.lock().unwrap().take());
+        drop(self.inner.audio_tx.lock().unwrap().take());
+        let threads = std::mem::take(&mut *self.inner.threads.lock().unwrap());
+        for t in threads {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for SessionInner {
+    fn drop(&mut self) {
+        // 未显式 stop 就 drop：关闭帧入口，后台线程自行收尾（不 join，进程退出兜底）
+        if !self.stopped.swap(true, Ordering::Relaxed) {
+            drop(self.video_tx.lock().unwrap().take());
+            drop(self.audio_tx.lock().unwrap().take());
+        }
+    }
+}

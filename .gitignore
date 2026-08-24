@@ -3,9 +3,3 @@
 node_modules
 .DS_Store
 *.log
-apps/stross-sender/src-tauri/gen/schemas
-apps/stross-sender/src-tauri/gen/android/.gradle
-apps/stross-sender/src-tauri/gen/android/build
-apps/stross-sender/src-tauri/gen/android/app/build
-apps/stross-sender/src-tauri/gen/android/local.properties
-apps/stross-sender/src-tauri/gen/android/app/src/main/gen

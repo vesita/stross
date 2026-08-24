@@ -2,9 +2,12 @@
 //!
 //! 用法:
 //! ```text
-//! cargo run -p stross-app --example demo_push -- 10          # 纯视频
-//! cargo run -p stross-app --example demo_push -- 10 --audio  # 加正弦波音频
-//! # 然后局域网内打开 http://<本机IP>:8777/ 观看
+//! cargo run -p stross-app --example demo_push -- 10               # 纯视频
+//! cargo run -p stross-app --example demo_push -- 10 --audio       # 加正弦波音频
+//! cargo run -p stross-app --example demo_push -- 10 --port 18777  # 内嵌中继固定端口
+//! cargo run -p stross-app --example demo_push -- 10 --stream-id demo  # 固定流 id
+//! # 然后局域网内打开 http://<本机IP>:8777/ 观看；
+//! # 或配合 demo_receive 做本地双实例串流测试（见 /home/vesita/AI/run_stream_test.sh）
 //! ```
 
 use std::sync::Arc;
@@ -25,10 +28,14 @@ async fn main() -> anyhow::Result<()> {
 
     let mut secs: u64 = 15;
     let mut with_audio = false;
-    let args = std::env::args().skip(1);
-    for a in args {
+    let mut relay_port: u16 = 0; // 0 = 随机端口
+    let mut stream_id = format!("demo-{}", std::process::id());
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
         match a.as_str() {
             "--audio" => with_audio = true,
+            "--port" => relay_port = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--stream-id" => stream_id = args.next().unwrap_or_default(),
             _ => {
                 if let Ok(n) = a.parse() {
                     secs = n;
@@ -38,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut cfg = StreamConfig {
-        stream_id: format!("demo-{}", std::process::id()),
+        stream_id: stream_id.clone(),
         title: "演示串流（测试画面）".into(),
         video: Some(VideoSource::Synthetic {
             pattern: "testsrc2".into(),
@@ -55,26 +62,31 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let engine =
-        match SenderEngine::start(cfg.clone(), Arc::new(FfmpegBackend::new()), None, 0).await {
-            Ok(e) => e,
-            Err(_) if with_audio => {
-                eprintln!("（音频启动失败，退回纯视频）");
-                cfg.audio = None;
-                SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), None, 0).await?
-            }
-            Err(e) => return Err(e),
-        };
+    let engine = match SenderEngine::start(
+        cfg.clone(),
+        Arc::new(FfmpegBackend::new()),
+        None,
+        relay_port,
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(_) if with_audio => {
+            tracing::warn!("音频启动失败，退回纯视频");
+            cfg.audio = None;
+            SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), None, relay_port).await?
+        }
+        Err(e) => return Err(e),
+    };
     let port = engine.relay_port().unwrap();
     let ips = stross_core::net::local_ips();
-    println!("\n  📡 演示推流中（{} 秒）…", secs);
+    tracing::info!("📡 演示推流中（{} 秒）…", secs);
     for ip in ips {
-        println!("     观看地址: http://{ip}:{port}/");
+        tracing::info!("观看地址: http://{ip}:{port}/");
     }
-    println!();
 
     tokio::time::sleep(Duration::from_secs(secs)).await;
     engine.stop().await;
-    println!("演示结束");
+    tracing::info!("演示结束");
     Ok(())
 }

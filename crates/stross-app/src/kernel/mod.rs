@@ -12,20 +12,23 @@
 //! 不接真实传输协商（阶段 1 落地）；所有变更通过 [`KernelEvent`] 广播给 UI。
 
 mod auth;
+mod data_plane;
 mod graph;
 mod session;
 
 pub use auth::{AuthError, AuthPolicy, PinAuthPolicy};
+pub use data_plane::{DataPlaneBackend, RelayDataPlane};
 pub use graph::{Endpoint, NodeInfo, NodeRole};
 pub use session::{Negotiated, Session, SessionPrefs};
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
+use stross_core::relay::RelayEvent;
+use stross_proto::message::{CapabilityDescriptor, CodecId, RoutePath, StreamInfo, TransportId};
 use tokio::sync::broadcast;
-
-use stross_proto::message::{CapabilityDescriptor, RoutePath};
+use tokio::task::JoinHandle;
 
 use self::graph::DeviceGraph;
 use self::session::{Router, SessionManager};
@@ -34,9 +37,30 @@ use self::session::{Router, SessionManager};
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum KernelEvent {
-    SessionStarted { session: Session },
-    SessionRouted { session_id: String, path: RoutePath },
-    SessionEnded { session_id: String },
+    SessionStarted {
+        session: Session,
+    },
+    SessionRouted {
+        session_id: String,
+        path: RoutePath,
+    },
+    SessionEnded {
+        session_id: String,
+    },
+    /// 数据面流启动（内嵌中继上报；D4：session_id 与 stream_id 合一）。
+    StreamStarted {
+        session_id: String,
+        info: StreamInfo,
+    },
+    /// 数据面流结束。
+    StreamEnded {
+        session_id: String,
+    },
+    /// 观看者数量变化。
+    WatchersChanged {
+        session_id: String,
+        watchers: u32,
+    },
 }
 
 /// 内核门面。
@@ -46,6 +70,10 @@ pub struct Kernel {
     auth: Arc<dyn AuthPolicy>,
     next_id: AtomicU64,
     events: broadcast::Sender<KernelEvent>,
+    /// 数据面后端（内嵌受控中继等；`None` = 未接线，会话不驱动数据面）。
+    data_plane: std::sync::Mutex<Option<Arc<dyn DataPlaneBackend>>>,
+    /// 数据面事件转发任务（[`RelayEvent`] → [`KernelEvent`]）。
+    data_plane_task: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Default for Kernel {
@@ -68,7 +96,53 @@ impl Kernel {
             auth,
             next_id: AtomicU64::new(1),
             events,
+            data_plane: std::sync::Mutex::new(None),
+            data_plane_task: std::sync::Mutex::new(None),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 数据面接线
+    // -----------------------------------------------------------------------
+
+    /// 接入数据面后端（内嵌受控中继）：订阅其流生命周期事件并转发为
+    /// [`KernelEvent`]（StreamStarted / StreamEnded / WatchersChanged）。
+    pub fn attach_data_plane(&self, backend: Arc<dyn DataPlaneBackend>) {
+        *self.data_plane.lock().unwrap() = Some(backend.clone());
+        let mut rx = backend.events();
+        let events = self.events.clone();
+        let task = tokio::spawn(async move {
+            while let Ok(ev) = rx.recv().await {
+                let kernel_ev = match ev {
+                    RelayEvent::StreamStarted { stream_id, info } => KernelEvent::StreamStarted {
+                        session_id: stream_id,
+                        info,
+                    },
+                    RelayEvent::StreamEnded { stream_id } => KernelEvent::StreamEnded {
+                        session_id: stream_id,
+                    },
+                    RelayEvent::WatchersChanged {
+                        stream_id,
+                        watchers,
+                    } => KernelEvent::WatchersChanged {
+                        session_id: stream_id,
+                        watchers,
+                    },
+                };
+                let _ = events.send(kernel_ev);
+            }
+        });
+        *self.data_plane_task.lock().unwrap() = Some(task);
+    }
+
+    /// 是否已接入数据面。
+    pub fn has_data_plane(&self) -> bool {
+        self.data_plane.lock().unwrap().is_some()
+    }
+
+    /// 会话是否存在（id 已由内核签发且未拆除）。
+    pub fn has_session(&self, id: &str) -> bool {
+        self.sessions.sessions.lock().unwrap().contains_key(id)
     }
 
     // -----------------------------------------------------------------------
@@ -111,7 +185,10 @@ impl Kernel {
     /// 阶段 1：根据源节点能力做**最简协商**（传输偏好 ∩ 源能力、编解码取源能力
     /// 第一项），填充 [`Session::negotiated`]；完整的线上 Offer/Answer 在
     /// 传输信令层完成（如 WebRTC 的 `/api/webrtc/*`）。
-    pub fn create_session(
+    ///
+    /// 已接入数据面（[`Kernel::attach_data_plane`]）时，会话 id 由内核签发并
+    /// **预授权**给受控中继（需求 F2.2「先会话后传输」/ D4：id 与 stream_id 合一）。
+    pub async fn create_session(
         &self,
         src: &str,
         sinks: &[String],
@@ -124,6 +201,14 @@ impl Kernel {
         let requires_pin = prefs.access_code.is_some();
         if requires_pin {
             self.auth.set_code(&id, prefs.access_code.as_deref());
+        }
+        // 数据面预授权：先授权成功再登记会话，避免"会话已建但无法推流"的中间态
+        // （先 clone 出 Arc 再 await，避免 MutexGuard 跨 await 使 future 非 Send）
+        let dp = self.data_plane.lock().unwrap().clone();
+        if let Some(dp) = dp {
+            dp.authorize_stream(&id)
+                .await
+                .map_err(|e| format!("数据面预授权失败: {e}"))?;
         }
         let session = Session {
             id,
@@ -204,27 +289,27 @@ impl Kernel {
             .get(src)
             .map(|n| n.caps.clone())
             .unwrap_or_default();
-        let mut transports: Vec<String> = caps
+        let mut transports: Vec<TransportId> = caps
             .iter()
-            .flat_map(|c| c.transports.iter().cloned())
+            .flat_map(|c| c.transports.iter().copied())
             .collect();
         transports.sort();
         transports.dedup();
         let transport = match &prefs.preferred_transport {
-            Some(t) if transports.is_empty() || transports.contains(t) => t.clone(),
+            Some(t) if transports.is_empty() || transports.contains(t) => *t,
             _ => {
-                if transports.iter().any(|t| t == "webrtc") {
-                    "webrtc".to_string()
+                if transports.contains(&TransportId::WebRtc) {
+                    TransportId::WebRtc
                 } else {
-                    "ws".to_string()
+                    TransportId::Ws
                 }
             }
         };
         let codec = caps
             .iter()
-            .flat_map(|c| c.codecs.iter().cloned())
+            .flat_map(|c| c.codecs.iter().copied())
             .next()
-            .unwrap_or_else(|| "h264".to_string());
+            .unwrap_or(CodecId::H264);
         Negotiated {
             transport,
             codec,
@@ -232,8 +317,8 @@ impl Kernel {
         }
     }
 
-    /// 拆除会话（同样受访问码鉴权约束）。
-    pub fn teardown(&self, id: &str) -> Result<(), String> {
+    /// 拆除会话（同样受访问码鉴权约束）；已接入数据面时撤销流预授权。
+    pub async fn teardown(&self, id: &str) -> Result<(), String> {
         {
             let mut guard = self.sessions.sessions.lock().unwrap();
             let session = guard
@@ -243,6 +328,12 @@ impl Kernel {
             guard.remove(id);
         }
         self.auth.set_code(id, None); // 清理访问码
+        let dp = self.data_plane.lock().unwrap().clone();
+        if let Some(dp) = dp {
+            dp.revoke_stream(id)
+                .await
+                .map_err(|e| format!("数据面撤销失败: {e}"))?;
+        }
         let _ = self.events.send(KernelEvent::SessionEnded {
             session_id: id.to_string(),
         });
@@ -283,22 +374,24 @@ mod tests {
         assert_eq!(a.caps.len(), 1);
     }
 
-    #[test]
-    fn create_session_requires_sinks() {
+    #[tokio::test]
+    async fn create_session_requires_sinks() {
         let k = Kernel::new();
         assert!(
             k.create_session("a", &[], &SessionPrefs::default())
+                .await
                 .is_err()
         );
     }
 
-    #[test]
-    fn session_lifecycle_events() {
+    #[tokio::test]
+    async fn session_lifecycle_events() {
         let k = Kernel::new();
         let mut rx = k.subscribe();
 
         let s = k
             .create_session("a", &["b".into()], &SessionPrefs::default())
+            .await
             .unwrap();
         assert_eq!(s.path, RoutePath::Direct { node: "b".into() });
         match rx.recv().now_or_never().unwrap().unwrap() {
@@ -309,6 +402,7 @@ mod tests {
         // 多接收端 → 组播（会再发一个 SessionStarted，先消费掉）
         let m = k
             .create_session("a", &["b".into(), "c".into()], &SessionPrefs::default())
+            .await
             .unwrap();
         assert!(matches!(m.path, RoutePath::Mesh { .. }));
         match rx.recv().now_or_never().unwrap().unwrap() {
@@ -336,7 +430,7 @@ mod tests {
         }
 
         // 拆除
-        k.teardown(&s.id).unwrap();
+        k.teardown(&s.id).await.unwrap();
         assert!(k.session(&s.id).is_none());
         match rx.recv().now_or_never().unwrap().unwrap() {
             KernelEvent::SessionEnded { session_id } => assert_eq!(session_id, s.id),
@@ -344,18 +438,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn route_unknown_session_fails() {
+    #[tokio::test]
+    async fn route_unknown_session_fails() {
         let k = Kernel::new();
         assert!(
             k.route("nope", RoutePath::Direct { node: "b".into() })
                 .is_err()
         );
-        assert!(k.teardown("nope").is_err());
+        assert!(k.teardown("nope").await.is_err());
     }
 
-    #[test]
-    fn negotiate_picks_transport_and_codec() {
+    #[tokio::test]
+    async fn negotiate_picks_transport_and_codec() {
         use stross_proto::message::{CapabilityKind, MediaKind};
         let k = Kernel::new();
         k.upsert_node(NodeInfo {
@@ -365,8 +459,8 @@ mod tests {
             caps: vec![CapabilityDescriptor {
                 kind: CapabilityKind::Source,
                 media: vec![MediaKind::Screen],
-                codecs: vec!["h264".into(), "aac".into()],
-                transports: vec!["ws".into()],
+                codecs: vec![CodecId::H264, CodecId::Aac],
+                transports: vec![TransportId::Ws],
                 max_width: Some(1920),
                 max_height: Some(1080),
                 preferred_profile: ReliabilityProfile::Lossy,
@@ -376,21 +470,22 @@ mod tests {
         // 源只支持 ws → 协商出 ws + h264
         let s = k
             .create_session("a", &["b".into()], &SessionPrefs::default())
+            .await
             .unwrap();
-        assert_eq!(s.negotiated.transport, "ws");
-        assert_eq!(s.negotiated.codec, "h264");
+        assert_eq!(s.negotiated.transport, TransportId::Ws);
+        assert_eq!(s.negotiated.codec, CodecId::H264);
         // 显式偏好 webrtc 但源不支持 → 回退 ws
         let prefs = SessionPrefs {
             profile: ReliabilityProfile::Lossy,
-            preferred_transport: Some("webrtc".into()),
+            preferred_transport: Some(TransportId::WebRtc),
             access_code: None,
         };
-        let s2 = k.create_session("a", &["b".into()], &prefs).unwrap();
-        assert_eq!(s2.negotiated.transport, "ws");
+        let s2 = k.create_session("a", &["b".into()], &prefs).await.unwrap();
+        assert_eq!(s2.negotiated.transport, TransportId::Ws);
     }
 
-    #[test]
-    fn pin_gates_control_operations() {
+    #[tokio::test]
+    async fn pin_gates_control_operations() {
         use stross_proto::message::RoutePath;
         let k = Kernel::new();
         // 设置访问码创建会话
@@ -399,7 +494,7 @@ mod tests {
             preferred_transport: None,
             access_code: Some("1234".into()),
         };
-        let s = k.create_session("a", &["b".into()], &prefs).unwrap();
+        let s = k.create_session("a", &["b".into()], &prefs).await.unwrap();
         assert!(s.requires_pin);
         // 未授权：route / teardown 都被拒绝
         assert!(
@@ -407,7 +502,7 @@ mod tests {
                 .is_err(),
             "未授权 route 应被拒绝"
         );
-        assert!(k.teardown(&s.id).is_err(), "未授权 teardown 应被拒绝");
+        assert!(k.teardown(&s.id).await.is_err(), "未授权 teardown 应被拒绝");
         // 错误访问码
         assert!(k.authorize(&s.id, Some("9999")).is_err());
         assert!(
@@ -420,16 +515,17 @@ mod tests {
             k.route(&s.id, RoutePath::ViaRelay { node: "r".into() })
                 .is_ok()
         );
-        assert!(k.teardown(&s.id).is_ok());
+        assert!(k.teardown(&s.id).await.is_ok());
         // 会话不存在
         assert!(k.authorize("nope", Some("1234")).is_err());
     }
 
-    #[test]
-    fn no_pin_session_stays_open() {
+    #[tokio::test]
+    async fn no_pin_session_stays_open() {
         let k = Kernel::new();
         let s = k
             .create_session("a", &["b".into()], &SessionPrefs::default())
+            .await
             .unwrap();
         assert!(!s.requires_pin);
         assert!(

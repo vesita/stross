@@ -1,10 +1,12 @@
 # Stross 文档
 
-Stross 的设计与使用文档。建议阅读顺序：先 `architecture.md` 了解整体分层，
+Stross 的设计与使用文档。建议阅读顺序：先 [requirements.md](requirements.md) 明确需求
+（v2 定位下，roadmap 中的浏览器观看端等条目已被取代），再读 `architecture.md` 了解整体分层，
 再按需查阅协议、插件化架构与平台指南。
 
 | 文档 | 内容 |
 |---|---|
+| [requirements.md](requirements.md) | **需求文档 v2（唯一需求输入）**：一站式设备共享定位、决策记录、功能/非功能需求、阶段验收 |
 | [architecture.md](architecture.md) | 五层模块化架构、数据流、Android 采集、历史设计决策 |
 | [protocol.md](protocol.md) | 线上协议：24 字节 v2 帧头 + JSON 控制消息（能力协商 / 路由） |
 | [plugin-architecture.md](plugin-architecture.md) | 插件化架构：可插拔传输层、内核控制面（设备图/会话/路由/鉴权）、四传输落地记录 |

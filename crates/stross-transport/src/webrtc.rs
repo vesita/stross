@@ -28,7 +28,7 @@ use str0m::{Candidate, Event, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc, watch};
 
-use stross_proto::message::ReliabilityProfile;
+use stross_proto::message::{ReliabilityProfile, TransportId};
 
 use super::{
     DataSession, PeerAddr, SessionPacket, SessionParams, SharedStats, Transport, TransportError,
@@ -135,8 +135,8 @@ impl WebRtcTransport {
 
 #[async_trait]
 impl Transport for WebRtcTransport {
-    fn id(&self) -> &'static str {
-        "webrtc"
+    fn id(&self) -> TransportId {
+        TransportId::WebRtc
     }
 
     fn profile(&self) -> ReliabilityProfile {
@@ -234,9 +234,19 @@ impl WebRtcPeer {
         let media_id = self.media_id;
         let open_tx = self.open_tx.clone();
         let stats_loop = stats.clone();
-        tokio::spawn(peer_run_loop(
-            udp, rtc, cmd_rx, inbound_tx, control_id, media_id, stats_loop, open_tx,
-        ));
+        tokio::spawn(
+            PeerLoop {
+                udp,
+                rtc,
+                cmd_rx,
+                inbound_tx,
+                control_id,
+                media_id,
+                stats: stats_loop,
+                open_tx,
+            }
+            .run(),
+        );
 
         let session: Box<dyn DataSession> = Box::new(WebRtcDataSession {
             cmd: close_tx.clone(),
@@ -279,157 +289,164 @@ impl DataSession for WebRtcDataSession {
     }
 }
 
-/// run loop：UDP ↔ str0m 泵送 + 通道分发。
-///
-/// 终止条件：`Event::Closed`、命令通道关闭、UDP/协议错误。
-async fn peer_run_loop(
+/// run loop 的上下文（参数较多，收进结构体避免 clippy::too_many_arguments）。
+struct PeerLoop {
     udp: Arc<UdpSocket>,
-    mut rtc: Rtc,
-    mut cmd_rx: mpsc::Receiver<PeerCommand>,
+    rtc: Rtc,
+    cmd_rx: mpsc::Receiver<PeerCommand>,
     inbound_tx: mpsc::Sender<SessionPacket>,
     control_id: ChannelId,
     media_id: ChannelId,
     stats: SharedStats,
     open_tx: watch::Sender<bool>,
-) {
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut next_timeout: Option<Instant> = None;
-    let mut control_open = false;
-    let mut media_open = false;
-    let mut opened_sent = false;
+}
 
-    loop {
-        // 1) 排空命令
+impl PeerLoop {
+    /// run loop：UDP ↔ str0m 泵送 + 通道分发。
+    ///
+    /// 终止条件：`Event::Closed`、命令通道关闭、UDP/协议错误。
+    async fn run(mut self) {
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut next_timeout: Option<Instant> = None;
+        let mut control_open = false;
+        let mut media_open = false;
+        let mut opened_sent = false;
+
         loop {
-            match cmd_rx.try_recv() {
-                Ok(PeerCommand::Send(pkt)) => {
-                    let (cid, binary, bytes) = match &pkt {
-                        SessionPacket::Control(c) => (control_id, false, c.to_text().into_bytes()),
-                        SessionPacket::Media(f) => (media_id, true, f.to_bytes().to_vec()),
-                    };
-                    // 注意：先写完再更新统计，避免跨 await 持有 Rtc 借用
-                    let sent = match rtc.channel(cid) {
-                        Some(mut ch) => match ch.write(binary, &bytes) {
-                            Ok(_) => Some(bytes.len()),
-                            Err(e) => {
-                                tracing::warn!("webrtc 通道写失败: {e}");
+            // 1) 排空命令
+            loop {
+                match self.cmd_rx.try_recv() {
+                    Ok(PeerCommand::Send(pkt)) => {
+                        let (cid, binary, bytes) = match &pkt {
+                            SessionPacket::Control(c) => {
+                                (self.control_id, false, c.to_text().into_bytes())
+                            }
+                            SessionPacket::Media(f) => (self.media_id, true, f.to_bytes().to_vec()),
+                        };
+                        // 注意：先写完再更新统计，避免跨 await 持有 Rtc 借用
+                        let sent = match self.rtc.channel(cid) {
+                            Some(mut ch) => match ch.write(binary, &bytes) {
+                                Ok(_) => Some(bytes.len()),
+                                Err(e) => {
+                                    tracing::warn!("webrtc 通道写失败: {e}");
+                                    None
+                                }
+                            },
+                            None => {
+                                tracing::debug!("webrtc 通道未打开，丢弃 {} 字节", bytes.len());
                                 None
                             }
-                        },
-                        None => {
-                            tracing::debug!("webrtc 通道未打开，丢弃 {} 字节", bytes.len());
-                            None
+                        };
+                        if let Some(n) = sent {
+                            self.stats.lock().await.add_sent(n);
                         }
-                    };
-                    if let Some(n) = sent {
-                        stats.lock().await.add_sent(n);
+                    }
+                    Ok(PeerCommand::Close) => {
+                        let _ = self.rtc.close();
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        let _ = self.rtc.close();
                     }
                 }
-                Ok(PeerCommand::Close) => {
-                    let _ = rtc.close();
-                }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    let _ = rtc.close();
-                }
             }
-        }
 
-        // 2) 等待 UDP 数据或超时
-        let wait = next_timeout
-            .map(|t| t.saturating_duration_since(Instant::now()))
-            .unwrap_or(Duration::from_secs(1));
-        tokio::select! {
-            res = udp.recv_from(&mut buf) => {
-                match res {
-                    Ok((n, from)) => {
-                        let local = udp.local_addr().unwrap_or(from);
-                        if let Ok(recv) = Receive::new(Protocol::Udp, from, local, &buf[..n]) {
-                            if let Err(e) = rtc.handle_input(Input::Receive(Instant::now(), recv)) {
+            // 2) 等待 UDP 数据或超时
+            let wait = next_timeout
+                .map(|t| t.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::from_secs(1));
+            tokio::select! {
+                res = self.udp.recv_from(&mut buf) => {
+                    match res {
+                        Ok((n, from)) => {
+                            let local = self.udp.local_addr().unwrap_or(from);
+                            if let Ok(recv) = Receive::new(Protocol::Udp, from, local, &buf[..n])
+                                && let Err(e) = self.rtc.handle_input(Input::Receive(Instant::now(), recv))
+                            {
                                 tracing::warn!("webrtc handle_input: {e}");
                             }
                         }
+                        Err(e) => {
+                            tracing::warn!("webrtc udp recv: {e}");
+                            break;
+                        }
                     }
+                }
+                _ = tokio::time::sleep(wait) => {
+                    let _ = self.rtc.handle_input(Input::Timeout(Instant::now()));
+                }
+            }
+
+            // 3) 排空输出
+            loop {
+                match self.rtc.poll_output() {
+                    Ok(Output::Transmit(t)) => {
+                        let n = t.contents.len();
+                        if let Err(e) = self.udp.send_to(&t.contents[..], t.destination).await {
+                            tracing::warn!("webrtc udp send_to: {e}");
+                        }
+                        self.stats.lock().await.add_sent(n);
+                    }
+                    Ok(Output::Timeout(t)) => {
+                        next_timeout = Some(t);
+                        break;
+                    }
+                    Ok(Output::Event(ev)) => match ev {
+                        Event::Connected => tracing::info!("webrtc 已连接（DTLS/ICE 就绪）"),
+                        Event::IceConnectionStateChange(s) => {
+                            tracing::debug!("webrtc ICE 状态: {s:?}");
+                        }
+                        Event::ChannelOpen(id, label) => {
+                            tracing::info!("webrtc 通道打开: {label}");
+                            if id == self.control_id {
+                                control_open = true;
+                            }
+                            if id == self.media_id {
+                                media_open = true;
+                            }
+                            if !opened_sent && control_open && media_open {
+                                opened_sent = true;
+                                let _ = self.open_tx.send(true);
+                            }
+                        }
+                        Event::ChannelData(d) => {
+                            let pkt = if d.id == self.control_id {
+                                String::from_utf8(d.data.to_vec())
+                                    .ok()
+                                    .and_then(|s| {
+                                        stross_proto::message::ControlMessage::from_text(&s).ok()
+                                    })
+                                    .map(SessionPacket::Control)
+                            } else if d.id == self.media_id {
+                                stross_proto::frame::Frame::from_bytes(&d.data)
+                                    .ok()
+                                    .map(SessionPacket::Media)
+                            } else {
+                                None
+                            };
+                            if let Some(pkt) = pkt {
+                                self.stats.lock().await.add_recv(d.data.len());
+                                let _ = self.inbound_tx.send(pkt).await;
+                            }
+                        }
+                        Event::ChannelClose(id) => {
+                            tracing::debug!("webrtc 通道关闭: {id:?}");
+                        }
+                        Event::Closed => {
+                            tracing::info!("webrtc 会话关闭");
+                            return;
+                        }
+                        _ => {}
+                    },
                     Err(e) => {
-                        tracing::warn!("webrtc udp recv: {e}");
+                        tracing::warn!("webrtc poll_output: {e}");
                         break;
                     }
                 }
             }
-            _ = tokio::time::sleep(wait) => {
-                let _ = rtc.handle_input(Input::Timeout(Instant::now()));
-            }
         }
-
-        // 3) 排空输出
-        loop {
-            match rtc.poll_output() {
-                Ok(Output::Transmit(t)) => {
-                    let n = t.contents.len();
-                    if let Err(e) = udp.send_to(&t.contents[..], t.destination).await {
-                        tracing::warn!("webrtc udp send_to: {e}");
-                    }
-                    stats.lock().await.add_sent(n);
-                }
-                Ok(Output::Timeout(t)) => {
-                    next_timeout = Some(t);
-                    break;
-                }
-                Ok(Output::Event(ev)) => match ev {
-                    Event::Connected => tracing::info!("webrtc 已连接（DTLS/ICE 就绪）"),
-                    Event::IceConnectionStateChange(s) => {
-                        tracing::debug!("webrtc ICE 状态: {s:?}");
-                    }
-                    Event::ChannelOpen(id, label) => {
-                        tracing::info!("webrtc 通道打开: {label}");
-                        if id == control_id {
-                            control_open = true;
-                        }
-                        if id == media_id {
-                            media_open = true;
-                        }
-                        if !opened_sent && control_open && media_open {
-                            opened_sent = true;
-                            let _ = open_tx.send(true);
-                        }
-                    }
-                    Event::ChannelData(d) => {
-                        let pkt = if d.id == control_id {
-                            String::from_utf8(d.data.to_vec())
-                                .ok()
-                                .and_then(|s| {
-                                    stross_proto::message::ControlMessage::from_text(&s).ok()
-                                })
-                                .map(SessionPacket::Control)
-                        } else if d.id == media_id {
-                            stross_proto::frame::Frame::from_bytes(&d.data)
-                                .ok()
-                                .map(SessionPacket::Media)
-                        } else {
-                            None
-                        };
-                        if let Some(pkt) = pkt {
-                            stats.lock().await.add_recv(d.data.len());
-                            let _ = inbound_tx.send(pkt).await;
-                        }
-                    }
-                    Event::ChannelClose(id) => {
-                        tracing::debug!("webrtc 通道关闭: {id:?}");
-                    }
-                    Event::Closed => {
-                        tracing::info!("webrtc 会话关闭");
-                        return;
-                    }
-                    _ => {}
-                },
-                Err(e) => {
-                    tracing::warn!("webrtc poll_output: {e}");
-                    break;
-                }
-            }
-        }
+        tracing::debug!("webrtc run loop 退出");
     }
-    tracing::debug!("webrtc run loop 退出");
 }
 
 // ---------------------------------------------------------------------------
@@ -468,7 +485,7 @@ async fn resolve_mdns_candidates(sdp: &str) -> String {
                     while tokio::time::Instant::now() < deadline {
                         match rx.recv_async().await {
                             Ok(mdns_sd::HostnameResolutionEvent::AddressesFound(_, addrs)) => {
-                                found = pick_first(addrs);
+                                found = pick_first(&addrs);
                                 break;
                             }
                             Ok(mdns_sd::HostnameResolutionEvent::SearchTimeout(_))
@@ -510,13 +527,13 @@ async fn resolve_mdns_candidates(sdp: &str) -> String {
 }
 
 #[cfg(feature = "discovery")]
-fn pick_first(addrs: HashSet<std::net::IpAddr>) -> Option<std::net::IpAddr> {
-    // 优先 IPv4（局域网常见）
+fn pick_first(addrs: &HashSet<mdns_sd::ScopedIp>) -> Option<std::net::IpAddr> {
+    // 优先 IPv4（局域网常见）；mdns-sd 0.21 地址带接口信息（ScopedIp）
     addrs
         .iter()
-        .copied()
         .find(|a| a.is_ipv4())
-        .or_else(|| addrs.iter().next().copied())
+        .or_else(|| addrs.iter().next())
+        .map(|a| a.to_ip_addr())
 }
 
 /// 若 `a=candidate:` 行第 5 个 token 是 `.local` 名则返回它，否则 None。

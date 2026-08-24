@@ -12,7 +12,7 @@ use async_trait::async_trait;
 
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
-use stross_proto::message::ReliabilityProfile;
+use stross_proto::message::{ReliabilityProfile, TransportId};
 
 use super::{
     DataSession, PeerAddr, SessionPacket, SessionParams, Transport, TransportError, TransportStats,
@@ -49,8 +49,8 @@ impl MemoryTransport {
 
 #[async_trait]
 impl Transport for MemoryTransport {
-    fn id(&self) -> &'static str {
-        "memory"
+    fn id(&self) -> TransportId {
+        TransportId::Memory
     }
 
     fn profile(&self) -> ReliabilityProfile {
@@ -150,7 +150,7 @@ mod tests {
         let server = MemoryTransport::new(hub.clone(), "memory://relay");
         let client = MemoryTransport::new(hub, "memory://client");
         let peer = PeerAddr {
-            transport: "memory".into(),
+            transport: TransportId::Memory,
             addr: "memory://relay".into(),
         };
         let params = SessionParams {

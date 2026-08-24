@@ -27,7 +27,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::sync::Mutex;
 
 use stross_proto::frame::Frame;
-use stross_proto::message::{ControlMessage, ReliabilityProfile};
+use stross_proto::message::{ControlMessage, ReliabilityProfile, TransportId};
 
 use super::{
     DataSession, PeerAddr, SessionPacket, SessionParams, SharedStats, Transport, TransportError,
@@ -68,8 +68,8 @@ impl QuicTransport {
 
 #[async_trait]
 impl Transport for QuicTransport {
-    fn id(&self) -> &'static str {
-        "quic"
+    fn id(&self) -> TransportId {
+        TransportId::Quic
     }
 
     fn profile(&self) -> ReliabilityProfile {
@@ -242,26 +242,25 @@ impl DataSession for QuicDataSession {
     }
 
     async fn recv(&self) -> Result<Option<SessionPacket>, TransportError> {
-        loop {
-            tokio::select! {
-                // 偏向 control：控制消息（Welcome/Error）优先处理
-                biased;
-                r = self.recv_control() => {
-                    let Some(bytes) = r? else { return Ok(None) };
-                    self.stats.lock().await.add_recv(LEN_BYTES + bytes.len());
-                    let text = std::str::from_utf8(&bytes)
-                        .map_err(|e| TransportError::Protocol(e.to_string()))?;
-                    let msg = ControlMessage::from_text(text)
-                        .map_err(|e| TransportError::Protocol(e.to_string()))?;
-                    return Ok(Some(SessionPacket::Control(msg)));
-                }
-                r = self.recv_media() => {
-                    let Some(bytes) = r? else { return Ok(None) };
-                    self.stats.lock().await.add_recv(LEN_BYTES + bytes.len());
-                    let frame = Frame::from_bytes(&bytes)
-                        .map_err(|e| TransportError::Protocol(e.to_string()))?;
-                    return Ok(Some(SessionPacket::Media(frame)));
-                }
+        // 两个分支都直接返回（控制流优先），无需外层 loop
+        tokio::select! {
+            // 偏向 control：控制消息（Welcome/Error）优先处理
+            biased;
+            r = self.recv_control() => {
+                let Some(bytes) = r? else { return Ok(None) };
+                self.stats.lock().await.add_recv(LEN_BYTES + bytes.len());
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|e| TransportError::Protocol(e.to_string()))?;
+                let msg = ControlMessage::from_text(text)
+                    .map_err(|e| TransportError::Protocol(e.to_string()))?;
+                Ok(Some(SessionPacket::Control(msg)))
+            }
+            r = self.recv_media() => {
+                let Some(bytes) = r? else { return Ok(None) };
+                self.stats.lock().await.add_recv(LEN_BYTES + bytes.len());
+                let frame = Frame::from_bytes(&bytes)
+                    .map_err(|e| TransportError::Protocol(e.to_string()))?;
+                Ok(Some(SessionPacket::Media(frame)))
             }
         }
     }
@@ -277,7 +276,7 @@ impl QuicDataSession {
     async fn recv_control(&self) -> Result<Option<Bytes>, TransportError> {
         let mut guard = self.control_rx.lock().await;
         loop {
-            match read_msg(&mut *guard).await? {
+            match read_msg(&mut guard).await? {
                 Some(b) if b.is_empty() => continue,
                 other => return Ok(other),
             }
@@ -288,7 +287,7 @@ impl QuicDataSession {
     async fn recv_media(&self) -> Result<Option<Bytes>, TransportError> {
         let mut guard = self.media_rx.lock().await;
         loop {
-            match read_msg(&mut *guard).await? {
+            match read_msg(&mut guard).await? {
                 Some(b) if b.is_empty() => continue,
                 other => return Ok(other),
             }
@@ -452,7 +451,7 @@ mod tests {
         });
 
         let peer = PeerAddr {
-            transport: "quic".into(),
+            transport: TransportId::Quic,
             addr: format!("quic://127.0.0.1:{}", addr.port()),
         };
         let params = SessionParams {
@@ -521,6 +520,6 @@ mod tests {
     #[test]
     fn profile_is_lossless() {
         assert_eq!(QuicTransport::new().profile(), ReliabilityProfile::Lossless);
-        assert_eq!(QuicTransport::new().id(), "quic");
+        assert_eq!(QuicTransport::new().id(), TransportId::Quic);
     }
 }

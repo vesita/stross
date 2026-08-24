@@ -1,0 +1,632 @@
+//! 桌面播放后端（D6）：ffmpeg 子进程解码 + cpal 输出。
+//!
+//! 对称于采集侧 [`crate::pipeline`]：同一 ffmpeg 二进制、同一子进程编排
+//! （`STROSS_FFMPEG` 环境变量复用）、零新增原生构建依赖。
+//!
+//! 每轨两个线程：
+//! * **写线程**：接收协议帧 → 写入子进程 stdin。视频关键帧同时解析 SPS
+//!   得帧大小、处理失步重建（子进程异常退出 → 等关键帧重建）；
+//! * **读线程**（随子进程代际）：从 stdout 持续读取，视频按"帧大小"切出
+//!   RGBA 帧（pts 由写线程的队列按 1:1 带入，编码侧 `zerolatency` ⇒
+//!   无 B 帧保证输出序与输入一致），音频按"块大小"切出 PCM 推给设备。
+//!
+//! 内存有界：内部帧队列、解码帧通道、音频 PCM 队列均有上限，满则丢弃计数。
+
+use std::collections::VecDeque;
+use std::io::{Read, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+
+use stross_proto::frame::Frame;
+use stross_proto::message::{
+    CapabilityDescriptor, CapabilityKind, CodecId, MediaKind, ReliabilityProfile, TransportId,
+};
+use tokio::sync::mpsc;
+
+use crate::nal::{AnnexBSplitter, NAL_SPS, nal_type, sps_dimensions};
+use crate::pipeline::{ffmpeg_available, ffmpeg_bin};
+use crate::playback::audio_out::AudioSink;
+use crate::playback::{
+    AudioOut, AudioOutSpec, PlaybackConfig, PlaybackError, PlaybackSession, PlaybackSink,
+    PlaybackStats, RenderedFrame, SessionInner,
+};
+
+/// AAC 每帧固定 1024 个采样。
+const AAC_FRAME_SAMPLES: u32 = 1024;
+/// 解码输出单帧 / 单块的上限（防呆，正常远小于此）。
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// 桌面播放后端（D6）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FfmpegPlaybackSink;
+
+impl PlaybackSink for FfmpegPlaybackSink {
+    fn descriptor(&self) -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            kind: CapabilityKind::Sink,
+            media: vec![
+                MediaKind::Screen,
+                MediaKind::Camera,
+                MediaKind::Mic,
+                MediaKind::SystemAudio,
+            ],
+            codecs: vec![CodecId::H264, CodecId::Aac],
+            transports: vec![TransportId::Ws, TransportId::WebRtc, TransportId::Srt],
+            max_width: Some(1920),
+            max_height: Some(1080),
+            preferred_profile: ReliabilityProfile::Lossy,
+        }
+    }
+
+    fn open(&self, cfg: PlaybackConfig) -> Result<PlaybackSession, PlaybackError> {
+        if !ffmpeg_available() {
+            return Err(PlaybackError::NoFfmpeg);
+        }
+        let stats = Arc::new(Mutex::new(PlaybackStats::default()));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let mut threads = Vec::new();
+        let mut video_tx = None;
+        let mut audio_tx = None;
+        let mut video_rx_out = None;
+
+        if cfg.video.is_some() {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Frame>(64);
+            let (out_tx, out_rx) = mpsc::channel::<RenderedFrame>(32);
+            let shared = Arc::new(VideoShared {
+                size: Mutex::new(None),
+                frame_size: Mutex::new(None),
+                pts: Mutex::new(VecDeque::new()),
+                resync: AtomicBool::new(false),
+                out_tx,
+                stats: stats.clone(),
+                stopped: stopped.clone(),
+            });
+            video_rx_out = Some(out_rx);
+            let h = std::thread::Builder::new()
+                .name("stross-video-writer".into())
+                .spawn(move || video_writer_loop(rx, shared))
+                .map_err(|e| PlaybackError::Spawn(e.to_string()))?;
+            threads.push(h);
+            video_tx = Some(tx);
+        }
+
+        if let Some(spec) = cfg.audio {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Frame>(64);
+            let sink = if spec.out == AudioOut::Device {
+                match AudioSink::open() {
+                    Ok(s) => {
+                        stats.lock().unwrap().audio_device_ok = true;
+                        Some(Arc::new(s))
+                    }
+                    Err(e) => {
+                        tracing::warn!("音频输出设备不可用，静音回退: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let st = stats.clone();
+            let sp = stopped.clone();
+            let h = std::thread::Builder::new()
+                .name("stross-audio-writer".into())
+                .spawn(move || audio_writer_loop(rx, spec, sink, st, sp))
+                .map_err(|e| PlaybackError::Spawn(e.to_string()))?;
+            threads.push(h);
+            audio_tx = Some(tx);
+        }
+
+        Ok(PlaybackSession {
+            inner: Arc::new(SessionInner {
+                stats,
+                stopped,
+                video_tx: Mutex::new(video_tx),
+                audio_tx: Mutex::new(audio_tx),
+                video_rx_out: Mutex::new(video_rx_out),
+                threads: Mutex::new(threads),
+            }),
+        })
+    }
+}
+
+/// 视频解码的跨线程共享状态。
+struct VideoShared {
+    /// 源分辨率（SPS 解析；关键帧时更新）。
+    size: Mutex<Option<(u32, u32)>>,
+    /// 输出帧字节数 = 宽 × 高 × 4（RGBA）。
+    frame_size: Mutex<Option<usize>>,
+    /// 已写入子进程的 pts 队列（读线程每产出一帧弹出一个）。
+    pts: Mutex<VecDeque<u32>>,
+    /// 失步标记：子进程异常退出后置位，写线程等关键帧重建。
+    resync: AtomicBool,
+    /// 解码画面输出通道。
+    out_tx: mpsc::Sender<RenderedFrame>,
+    stats: Arc<Mutex<PlaybackStats>>,
+    stopped: Arc<AtomicBool>,
+}
+
+/// 视频写线程：帧 → 子进程 stdin；关键帧解析 SPS、处理失步重建。
+fn video_writer_loop(rx: std::sync::mpsc::Receiver<Frame>, shared: Arc<VideoShared>) {
+    let mut child: Option<Child> = None;
+    let mut stdin: Option<ChildStdin> = None;
+    let mut reader: Option<JoinHandle<()>> = None;
+    loop {
+        let frame = match rx.recv() {
+            Ok(f) => f,
+            Err(_) => break, // 帧入口关闭（stop）→ 收尾
+        };
+        if shared.stopped.load(Ordering::Relaxed) {
+            break;
+        }
+        let keyframe = frame.header.is_keyframe();
+        if keyframe {
+            // 关键帧携带 SPS（编码侧 repeat_headers=1）：解析分辨率 → 帧大小
+            if let Some((w, h)) = parse_sps_size(&frame.payload) {
+                let mut size = shared.size.lock().unwrap();
+                if *size != Some((w, h)) {
+                    *size = Some((w, h));
+                    *shared.frame_size.lock().unwrap() = Some(w as usize * h as usize * 4);
+                }
+            }
+            // 失步或子进程缺失 → 以关键帧为对齐点重建
+            if stdin.is_none() || shared.resync.load(Ordering::Relaxed) {
+                kill_child(child.take());
+                drop(stdin.take());
+                if let Some(r) = reader.take() {
+                    let _ = r.join();
+                }
+                match spawn_video_decode() {
+                    Ok((c, si, so)) => {
+                        shared.resync.store(false, Ordering::Relaxed);
+                        shared.stats.lock().unwrap().video_resyncs += 1;
+                        let s2 = shared.clone();
+                        reader = Some(
+                            std::thread::Builder::new()
+                                .name("stross-video-reader".into())
+                                .spawn(move || video_reader_gen(so, s2))
+                                .expect("spawn video reader"),
+                        );
+                        child = Some(c);
+                        stdin = Some(si);
+                    }
+                    Err(e) => {
+                        // 重建失败：保持失步，等下一个关键帧再试
+                        tracing::warn!("视频解码进程启动失败: {e}");
+                        continue;
+                    }
+                }
+            }
+        }
+        // 失步期间（等关键帧）：丢弃非关键帧
+        if shared.resync.load(Ordering::Relaxed) && !keyframe {
+            continue;
+        }
+        let Some(si) = stdin.as_mut() else { continue };
+        if si.write_all(&frame.payload).is_err() {
+            // 子进程已退出 → 置失步，等下一个关键帧重建
+            shared.resync.store(true, Ordering::Relaxed);
+            continue;
+        }
+        shared.pts.lock().unwrap().push_back(frame.header.pts_ms);
+        shared.stats.lock().unwrap().video_frames_in += 1;
+    }
+    // 收尾：杀子进程、关 stdin、join 读线程
+    kill_child(child.take());
+    drop(stdin.take());
+    if let Some(r) = reader.take() {
+        let _ = r.join();
+    }
+}
+
+/// 视频读线程（一个子进程代际）：持续读 stdout，按帧大小切出 RGBA 帧。
+fn video_reader_gen(mut stdout: ChildStdout, shared: Arc<VideoShared>) {
+    let mut acc: Vec<u8> = Vec::with_capacity(1 << 20);
+    let mut last_size: Option<(u32, u32)> = None;
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match stdout.read(&mut buf) {
+            Ok(0) => break, // 子进程结束
+            Ok(n) => {
+                acc.extend_from_slice(&buf[..n]);
+                // 分辨率变化 → 丢弃未对齐的残留字节
+                let size = *shared.size.lock().unwrap();
+                if size != last_size {
+                    acc.clear();
+                    last_size = size;
+                }
+                let Some((w, h)) = size else {
+                    if acc.len() > MAX_FRAME_BYTES {
+                        acc.clear();
+                    }
+                    continue;
+                };
+                let need = w as usize * h as usize * 4;
+                while acc.len() >= need {
+                    let rgba: Vec<u8> = acc.drain(..need).collect();
+                    let pts_ms = shared.pts.lock().unwrap().pop_front().unwrap_or(0);
+                    let rendered = RenderedFrame {
+                        pts_ms,
+                        width: w,
+                        height: h,
+                        rgba,
+                    };
+                    if shared.out_tx.try_send(rendered).is_err() {
+                        // 消费者慢 → 丢帧（显示可跳帧，不反压阻塞解码）
+                        shared.stats.lock().unwrap().dropped_push += 1;
+                    } else {
+                        shared.stats.lock().unwrap().video_frames_out += 1;
+                    }
+                }
+                if acc.len() > MAX_FRAME_BYTES {
+                    acc.clear();
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if !shared.stopped.load(Ordering::Relaxed) {
+        // 子进程异常退出 → 置失步，写线程等关键帧重建
+        shared.resync.store(true, Ordering::Relaxed);
+    }
+}
+
+/// 音频写线程：ADTS 帧 → 子进程 stdin；设备按需重建。
+fn audio_writer_loop(
+    rx: std::sync::mpsc::Receiver<Frame>,
+    spec: AudioOutSpec,
+    sink: Option<Arc<AudioSink>>,
+    stats: Arc<Mutex<PlaybackStats>>,
+    stopped: Arc<AtomicBool>,
+) {
+    // 解码输出参数：设备模式以设备为准（ffmpeg -ac/-ar 重采样对齐）
+    let (channels, rate) = match &sink {
+        Some(s) => (s.channels, s.rate),
+        None => (spec.channels, spec.sample_rate),
+    };
+    let block_size = AAC_FRAME_SAMPLES as usize * channels as usize * 4; // f32le
+    let mut child: Option<Child> = None;
+    let mut stdin: Option<ChildStdin> = None;
+    let mut reader: Option<JoinHandle<()>> = None;
+    loop {
+        let frame = match rx.recv() {
+            Ok(f) => f,
+            Err(_) => break,
+        };
+        if stopped.load(Ordering::Relaxed) {
+            break;
+        }
+        if stdin.is_none() {
+            match spawn_audio_decode(channels, rate) {
+                Ok((c, si, so)) => {
+                    let s2 = sink.clone();
+                    let st = stats.clone();
+                    let sp = stopped.clone();
+                    reader = Some(
+                        std::thread::Builder::new()
+                            .name("stross-audio-reader".into())
+                            .spawn(move || audio_reader_gen(so, block_size, s2, st, sp))
+                            .expect("spawn audio reader"),
+                    );
+                    child = Some(c);
+                    stdin = Some(si);
+                }
+                Err(e) => {
+                    tracing::warn!("音频解码进程启动失败: {e}");
+                    continue; // 下一帧再试
+                }
+            }
+        }
+        let Some(si) = stdin.as_mut() else { continue };
+        if si.write_all(&frame.payload).is_err() {
+            // 子进程已退出 → 杀旧进程、等下一帧重建
+            kill_child(child.take());
+            drop(stdin.take());
+            if let Some(r) = reader.take() {
+                let _ = r.join();
+            }
+            continue;
+        }
+        stats.lock().unwrap().audio_blocks_in += 1;
+    }
+    kill_child(child.take());
+    drop(stdin.take());
+    if let Some(r) = reader.take() {
+        let _ = r.join();
+    }
+}
+
+/// 音频读线程（一个子进程代际）：按块大小切出 PCM 推给设备。
+fn audio_reader_gen(
+    mut stdout: ChildStdout,
+    block_size: usize,
+    sink: Option<Arc<AudioSink>>,
+    stats: Arc<Mutex<PlaybackStats>>,
+    _stopped: Arc<AtomicBool>,
+) {
+    let mut acc: Vec<u8> = Vec::with_capacity(block_size * 4);
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match stdout.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                acc.extend_from_slice(&buf[..n]);
+                while acc.len() >= block_size {
+                    let block: Vec<u8> = acc.drain(..block_size).collect();
+                    if let Some(s) = &sink {
+                        // f32le → f32 样本（交织声道；块大小恒为 4 的倍数）
+                        let (chunks, _rest) = block.as_chunks::<4>();
+                        let samples: Vec<f32> =
+                            chunks.iter().map(|b| f32::from_le_bytes(*b)).collect();
+                        s.push(&samples);
+                    }
+                    stats.lock().unwrap().audio_blocks_out += 1;
+                }
+            }
+        }
+    }
+}
+
+/// 从关键帧载荷（Annex-B：SPS/PPS/IDR…）解析分辨率。
+fn parse_sps_size(payload: &[u8]) -> Option<(u32, u32)> {
+    let mut splitter = AnnexBSplitter::new();
+    for nal in splitter.feed(payload) {
+        if nal_type(&nal) == Some(NAL_SPS)
+            && let Some(d) = sps_dimensions(&nal)
+        {
+            return Some(d);
+        }
+    }
+    for nal in splitter.finish() {
+        if nal_type(&nal) == Some(NAL_SPS)
+            && let Some(d) = sps_dimensions(&nal)
+        {
+            return Some(d);
+        }
+    }
+    None
+}
+
+fn kill_child(child: Option<Child>) {
+    if let Some(mut c) = child {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}
+
+/// 启动视频解码子进程：H264（Annex-B）→ RGBA rawvideo。
+///
+/// `-probesize 32 -analyzeduration 0`：限制解复用器预读，保证实时吐帧
+/// （实测默认 5MB 预读会把管道内容全读完才开解，输出积压到 EOF）。
+/// 注意：不能加 `-fflags nobuffer` / `-flags low_delay`——实测会破坏
+/// h264 解复用器初始化（0 帧输出）。
+fn spawn_video_decode() -> std::io::Result<(Child, ChildStdin, ChildStdout)> {
+    let args = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-probesize",
+        "32",
+        "-analyzeduration",
+        "0",
+        "-f",
+        "h264",
+        "-i",
+        "pipe:0",
+        "-an",
+        "-sn",
+        "-pix_fmt",
+        "rgba",
+        "-f",
+        "rawvideo",
+        "pipe:1",
+    ];
+    spawn_decode(&args)
+}
+
+/// 启动音频解码子进程：AAC（ADTS）→ f32le PCM（按设备参数重采样）。
+///
+/// 输入格式名是 `aac`（"raw ADTS AAC" 解复用器）；`adts` 在本构建里只是
+/// muxer 名，用作输入会报 Unknown input format。输出 `-f f32le` 已隐含
+/// f32 采样格式，不要显式 `-sample_fmt f32`（ffmpeg 不认该名，应写 flt）。
+fn spawn_audio_decode(
+    channels: u8,
+    rate: u32,
+) -> std::io::Result<(Child, ChildStdin, ChildStdout)> {
+    let ch = channels.to_string();
+    let rt = rate.to_string();
+    let args = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-probesize",
+        "32",
+        "-analyzeduration",
+        "0",
+        "-f",
+        "aac",
+        "-i",
+        "pipe:0",
+        "-vn",
+        "-sn",
+        "-ac",
+        &ch,
+        "-ar",
+        &rt,
+        "-f",
+        "f32le",
+        "pipe:1",
+    ];
+    spawn_decode(&args)
+}
+
+fn spawn_decode(args: &[&str]) -> std::io::Result<(Child, ChildStdin, ChildStdout)> {
+    let mut cmd = Command::new(ffmpeg_bin());
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("解码进程没有 stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("解码进程没有 stdout"))?;
+    Ok((child, stdin, stdout))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::{AudioSourceConfig, Quality, StreamConfig, StreamSession, VideoSource};
+    use crate::playback::VideoOut;
+    use std::time::{Duration, Instant};
+
+    /// 用采集管线生成一段协议帧（合成源，时长 cfg.duration_secs）。
+    async fn capture_frames(cfg: StreamConfig) -> Vec<Frame> {
+        let (tx, mut rx) = mpsc::channel::<Frame>(256);
+        let session = StreamSession::spawn(&cfg, tx).unwrap();
+        let mut frames = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
+                Ok(Some(f)) => frames.push(f),
+                Ok(None) => break,
+                Err(_) => {
+                    if !frames.is_empty() {
+                        break; // 采集结束（子进程已退出）
+                    }
+                }
+            }
+        }
+        drop(session); // 释放内部 tx，读循环彻底收尾
+        frames
+    }
+
+    #[test]
+    fn descriptor_is_sink() {
+        let d = FfmpegPlaybackSink.descriptor();
+        assert_eq!(d.kind, CapabilityKind::Sink);
+        assert!(d.codecs.contains(&CodecId::H264));
+        assert!(d.codecs.contains(&CodecId::Aac));
+    }
+
+    #[test]
+    fn open_without_ffmpeg_fails() {
+        if !ffmpeg_available() {
+            let err = FfmpegPlaybackSink
+                .open(PlaybackConfig {
+                    video: Some(VideoOut { display: None }),
+                    audio: None,
+                })
+                .err()
+                .expect("无 ffmpeg 时 open 应失败");
+            assert!(matches!(err, PlaybackError::NoFfmpeg));
+        }
+    }
+
+    #[tokio::test]
+    async fn video_decode_roundtrip() {
+        if !ffmpeg_available() {
+            eprintln!("跳过：未找到 ffmpeg");
+            return;
+        }
+        // 采集侧合成源（testsrc2，LOW = 640x360@24fps，1 秒）
+        let cfg = StreamConfig {
+            stream_id: "t".into(),
+            title: "t".into(),
+            video: Some(VideoSource::Synthetic {
+                pattern: "testsrc2".into(),
+            }),
+            quality: Quality::LOW,
+            audio: None,
+            duration_secs: Some(1),
+        };
+        let frames = capture_frames(cfg).await;
+        assert!(!frames.is_empty(), "采集管线应产出帧");
+        assert!(frames.iter().any(|f| f.header.is_keyframe()));
+
+        let session = FfmpegPlaybackSink
+            .open(PlaybackConfig {
+                video: Some(VideoOut { display: None }),
+                audio: None,
+            })
+            .unwrap();
+        let mut out_rx = session.take_video_frames().unwrap();
+        for f in frames {
+            session.push(f).unwrap();
+        }
+        // 收集解码帧：直到 800ms 无新帧
+        let mut rendered = Vec::new();
+        while let Ok(Some(f)) =
+            tokio::time::timeout(Duration::from_millis(800), out_rx.recv()).await
+        {
+            rendered.push(f);
+        }
+        session.stop();
+        assert!(!rendered.is_empty(), "应解码出画面帧");
+        let first = &rendered[0];
+        assert_eq!(
+            (first.width, first.height),
+            (640, 360),
+            "LOW 质量为 640x360（SPS 解析验证）"
+        );
+        assert_eq!(first.rgba.len(), 640 * 360 * 4);
+        let s = session.stats();
+        assert!(s.video_frames_in >= 10, "应收到足够视频帧: {s:?}");
+        assert!(
+            s.video_frames_out >= rendered.len() as u64 / 2,
+            "解码产出应基本对齐: {s:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_decode_roundtrip() {
+        if !ffmpeg_available() {
+            eprintln!("跳过：未找到 ffmpeg");
+            return;
+        }
+        // 采集侧合成音源（lavfi sine 440Hz，1 秒），解码但丢弃（无需声卡）
+        let cfg = StreamConfig {
+            stream_id: "t".into(),
+            title: "t".into(),
+            video: None,
+            quality: Quality::LOW,
+            audio: Some(AudioSourceConfig {
+                synthetic: Some(440),
+                ..Default::default()
+            }),
+            duration_secs: Some(1),
+        };
+        let frames = capture_frames(cfg).await;
+        assert!(!frames.is_empty(), "采集管线应产出音频帧");
+
+        let session = FfmpegPlaybackSink
+            .open(PlaybackConfig {
+                video: None,
+                audio: Some(AudioOutSpec {
+                    channels: 2,
+                    sample_rate: 48_000,
+                    out: AudioOut::Discard,
+                }),
+            })
+            .unwrap();
+        for f in frames {
+            session.push(f).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while session.stats().audio_blocks_out < 5 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        session.stop();
+        let s = session.stats();
+        assert!(s.audio_blocks_in >= 5, "应收到音频块: {s:?}");
+        assert!(s.audio_blocks_out >= 5, "应解码出音频块: {s:?}");
+    }
+}

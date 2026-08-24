@@ -277,4 +277,38 @@ mod tests {
     fn rejects_short_buffer() {
         assert!(Frame::from_bytes(&[0u8; 4]).is_err());
     }
+
+    /// 确定性伪随机（xorshift64*）：任意字节不应 panic，只返回 Ok/Err。
+    #[test]
+    fn never_panics_on_random_bytes() {
+        let mut x = 0x0123_4567_89ab_cdefu64;
+        let mut next = move || {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            x = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            x
+        };
+        let mut ok = 0usize;
+        for _ in 0..20_000 {
+            let len = (next() as usize) % 512;
+            let mut buf = vec![0u8; len];
+            for b in buf.iter_mut() {
+                *b = next() as u8;
+            }
+            // 合法魔数 + 版本；长度字段取一个放得进缓冲的值（其余字段仍随机）
+            if len >= HEADER_LEN {
+                buf[0..4].copy_from_slice(MAGIC);
+                buf[4] = VERSION;
+                let payload = (next() as usize) % (len - HEADER_LEN + 1);
+                buf[18..22].copy_from_slice(&(payload as u32).to_le_bytes());
+            }
+            if let Ok(f) = Frame::from_bytes(&buf) {
+                ok += 1;
+                assert_eq!(f.header.len as usize, f.payload.len());
+                assert_eq!(f.header.len as usize + HEADER_LEN, f.to_bytes().len());
+            }
+        }
+        assert!(ok > 0, "合法头应能被解析");
+    }
 }

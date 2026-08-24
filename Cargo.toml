@@ -7,6 +7,7 @@ members = [
     "crates/stross-media",
     "crates/stross-app",
     "apps/stross-relay",
+    "apps/stross-cli",
     "apps/stross-gui/src-tauri",
 ]
 
@@ -22,10 +23,36 @@ anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+# tokio 特性裁剪：按全工作区实际用法（net/sync/time/process/fs/io/signal/
+# rt/macros）取最小集，不启用 full（省编译时间与依赖面）。
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# 播放侧音频输出（桌面 PlaybackSink，D6）；Android 交叉编译可编译（AAudio/OpenSLES）
+cpal = "0.18.2"
+
+# ---------------------------------------------------------------------------
+# 依赖版本统一在此管理；各 crate 一律 `xxx.workspace = true` 引用
+# （optional 依赖在 crate 内补 `optional = true`，版本仍以本文件为准）。
+# ---------------------------------------------------------------------------
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.23.1"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+hostname = "0.4"
+local-ip-address = "0.6"
+mdns-sd = "0.21.0"
+open = "5.4.2"
+quinn = "0.11"
+rcgen = "0.14.9"
+rsrt = "0.3"
+rustls = { version = "0.23", features = ["ring"] }
+str0m = { version = "0.23", default-features = false, features = ["rust-crypto"] }
+tauri = { version = "2", features = [] }
+tokio-tungstenite = "0.30.0"
+tungstenite = "0.30.0"
 
 [profile.release]
 codegen-units = 1

@@ -59,7 +59,13 @@ impl AdtsSplitter {
                     self.buf.drain(..len);
                     out.push(frame);
                 }
-                _ => break, // 帧不完整，等待更多数据
+                Some(_) => break, // 帧不完整，等待更多数据
+                None => {
+                    // 伪同步头（长度字段非法 < 7）：跳过 1 字节继续找同步字，
+                    // 防止垃圾流让缓冲无限累积（正常流不会触发）
+                    self.buf.drain(..1);
+                    continue;
+                }
             }
         }
         out
@@ -139,5 +145,43 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0], f1);
         assert_eq!(out[1], f2);
+    }
+
+    /// 确定性伪随机数（xorshift64*），保证测试可复现。
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn fill(&mut self, buf: &mut [u8]) {
+            for b in buf.iter_mut() {
+                *b = self.next() as u8;
+            }
+        }
+    }
+
+    /// 随机字节不应 panic，且内部缓冲受 13 位长度字段约束（≤ 8191 + 余量）。
+    #[test]
+    fn splitter_bounded_on_random_bytes() {
+        let mut rng = Rng(0xabcd_ef01_2345_6789);
+        let mut s = AdtsSplitter::new();
+        let mut chunk = [0u8; 1024];
+        for _ in 0..10_000 {
+            rng.fill(&mut chunk);
+            let _ = s.feed(&chunk);
+            assert!(
+                s.buf.len() <= 8191 + 64,
+                "ADTS 缓冲应受 13 位长度字段约束: {}",
+                s.buf.len()
+            );
+        }
+        let _ = s.finish();
     }
 }

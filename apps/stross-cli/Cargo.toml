@@ -1,0 +1,29 @@
+[package]
+name = "stross-cli"
+description = "Stross command-line tool: relay / serve / ctrl / push / receive for headless testing and scripting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "stross"
+path = "src/main.rs"
+
+[dependencies]
+stross-app = { path = "../../crates/stross-app", version = "0.1.0" }
+stross-core = { path = "../../crates/stross-core", version = "0.1.0", features = ["discovery"] }
+stross-media = { path = "../../crates/stross-media", version = "0.1.0" }
+stross-proto = { path = "../../crates/stross-proto", version = "0.1.0" }
+anyhow.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+default = ["discovery"]
+# mDNS 广播 + 局域网设备发现（浏览其它中继，供 /api/peers 展示）
+discovery = []

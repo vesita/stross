@@ -103,7 +103,7 @@ fn kernel_sessions(state: State<'_, StrossApp>) -> Vec<stross_app::kernel::Sessi
 /// `access_code` 可选：设置后该会话启用访问码（PIN），控制操作
 /// （route / teardown）需先 `authorize_session`（设计文档 §7）。
 #[tauri::command]
-fn create_session(
+async fn create_session(
     state: State<'_, StrossApp>,
     src: String,
     sinks: Vec<String>,
@@ -114,7 +114,7 @@ fn create_session(
         preferred_transport: None,
         access_code,
     };
-    state.kernel().create_session(&src, &sinks, &prefs)
+    state.kernel().create_session(&src, &sinks, &prefs).await
 }
 
 /// 会话鉴权：校验访问码（PIN）；成功后该会话的控制操作放行。
@@ -141,8 +141,8 @@ fn route_session(
 
 /// 拆除会话。
 #[tauri::command]
-fn teardown_session(state: State<'_, StrossApp>, session_id: String) -> Result<(), String> {
-    state.kernel().teardown(&session_id)
+async fn teardown_session(state: State<'_, StrossApp>, session_id: String) -> Result<(), String> {
+    state.kernel().teardown(&session_id).await
 }
 
 // ---------------------------------------------------------------------------
@@ -259,20 +259,20 @@ pub fn run_relay_only(args: &[String]) {
         let handle = match RelayServer::start(port).await {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("中继启动失败: {e}");
+                tracing::error!("中继启动失败: {e}");
                 return;
             }
         };
         let ips = local_ips();
-        println!("\n  📡 Stross 中继（无界面模式）已启动\n");
-        for ip in &ips {
-            println!("     观看地址: http://{ip}:{}/", handle.port);
-        }
+        tracing::info!("📡 Stross 中继（无界面模式）已启动");
         if ips.is_empty() {
-            println!("     观看地址: http://127.0.0.1:{}/", handle.port);
+            tracing::info!("观看地址: http://127.0.0.1:{}/", handle.port);
         }
-        println!("\n     推流地址: ws://<中继IP>:{}/ws/push", handle.port);
-        println!("     Ctrl+C 退出\n");
+        for ip in &ips {
+            tracing::info!("观看地址: http://{ip}:{}/", handle.port);
+        }
+        tracing::info!("推流地址: ws://<中继IP>:{}/ws/push", handle.port);
+        tracing::info!("Ctrl+C 退出");
 
         let _discovery = if advertise {
             match local_ips().into_iter().next() {
@@ -290,7 +290,7 @@ pub fn run_relay_only(args: &[String]) {
                         ],
                     ) {
                         Ok(d) => {
-                            println!("  mDNS 广播中…");
+                            tracing::info!("mDNS 广播中…");
                             Some(d)
                         }
                         Err(e) => {
@@ -306,7 +306,7 @@ pub fn run_relay_only(args: &[String]) {
         };
 
         tokio::signal::ctrl_c().await.ok();
-        println!("正在停止…");
+        tracing::info!("正在停止…");
         handle.stop().await;
         drop(_discovery);
     });

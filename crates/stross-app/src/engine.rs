@@ -37,7 +37,16 @@ impl SenderEngine {
     ) -> Result<Self> {
         let relay = match &relay_url {
             Some(_) => None,
-            None => Some(RelayServer::start(bind_port).await?),
+            None => {
+                // 优先指定端口；被占用时回退随机端口，保证内嵌中继必然可用
+                match RelayServer::start(bind_port).await {
+                    Ok(h) => Some(h),
+                    Err(_) => {
+                        tracing::warn!("端口 {bind_port} 被占用，内嵌中继回退到随机端口");
+                        Some(RelayServer::start(0).await?)
+                    }
+                }
+            }
         };
         let url = match &relay_url {
             Some(u) => u.clone(),

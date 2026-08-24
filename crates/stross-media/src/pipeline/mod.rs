@@ -31,6 +31,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
 use stross_proto::frame::{CODEC_AAC, CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO};
+use stross_proto::message::CodecId;
 
 use crate::adts::AdtsSplitter;
 use crate::nal::{AccessUnitBuilder, AnnexBSplitter};
@@ -106,6 +107,10 @@ pub struct AudioSourceConfig {
     pub mic: Option<String>,
     /// 系统声音（回环采集设备）；`None` = 不采集。
     pub system_audio: Option<String>,
+    /// 合成音源（lavfi `sine`，频率 Hz）；`Some` 时取代真实采集，
+    /// 无设备环境测试 / 演示用（见播放侧解码回路的集成测试）。
+    #[serde(default)]
+    pub synthetic: Option<u32>,
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
     #[serde(default = "default_channels")]
@@ -129,6 +134,7 @@ impl Default for AudioSourceConfig {
         Self {
             mic: None,
             system_audio: None,
+            synthetic: None,
             sample_rate: default_sample_rate(),
             channels: default_channels(),
             bitrate_kbps: default_audio_bitrate(),
@@ -169,7 +175,7 @@ impl StreamConfig {
         self.video
             .as_ref()
             .map(|_| stross_proto::message::TrackInfo {
-                codec: "h264".into(),
+                codec: CodecId::H264,
                 width: Some(self.quality.width),
                 height: Some(self.quality.height),
                 fps: Some(self.quality.fps),
@@ -182,7 +188,7 @@ impl StreamConfig {
         self.audio
             .as_ref()
             .map(|a| stross_proto::message::TrackInfo {
-                codec: "aac".into(),
+                codec: CodecId::Aac,
                 width: None,
                 height: None,
                 fps: None,

@@ -18,7 +18,9 @@ use std::sync::Mutex;
 use tokio::sync::mpsc;
 
 use stross_proto::frame::Frame;
-use stross_proto::message::{CapabilityDescriptor, CapabilityKind, MediaKind, ReliabilityProfile};
+use stross_proto::message::{
+    CapabilityDescriptor, CapabilityKind, CodecId, MediaKind, ReliabilityProfile, TransportId,
+};
 
 use crate::pipeline::{StreamConfig, StreamSession};
 
@@ -82,8 +84,8 @@ impl CaptureBackend for FfmpegBackend {
                 MediaKind::Mic,
                 MediaKind::SystemAudio,
             ],
-            codecs: vec!["h264".into(), "aac".into()],
-            transports: vec!["ws".into()],
+            codecs: vec![CodecId::H264, CodecId::Aac],
+            transports: vec![TransportId::Ws],
             max_width: Some(1920),
             max_height: Some(1080),
             preferred_profile: ReliabilityProfile::Lossy,

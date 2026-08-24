@@ -5,14 +5,14 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-use stross_proto::message::{ReliabilityProfile, RoutePath};
+use stross_proto::message::{CodecId, ReliabilityProfile, RoutePath, TransportId};
 
 /// 会话协商结果（阶段 1 起由 Offer/Answer 填充）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Negotiated {
-    pub transport: String,
-    pub codec: String,
+    pub transport: TransportId,
+    pub codec: CodecId,
     pub profile: ReliabilityProfile,
 }
 
@@ -36,7 +36,7 @@ pub struct Session {
 #[derive(Debug, Clone, Default)]
 pub struct SessionPrefs {
     pub profile: ReliabilityProfile,
-    pub preferred_transport: Option<String>,
+    pub preferred_transport: Option<TransportId>,
     /// 会话访问码（PIN，可选）：设置后控制操作（route / teardown）需先
     /// [`crate::kernel::Kernel::authorize`]（设计文档 §7 会话级访问码）。
     pub access_code: Option<String>,

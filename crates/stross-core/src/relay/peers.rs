@@ -12,6 +12,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use serde::Serialize;
+use stross_proto::message::TransportId;
 #[cfg(feature = "discovery")]
 use tokio::sync::watch;
 
@@ -30,8 +31,8 @@ pub struct PeerInfo {
     pub port: u16,
     /// 角色（TXT `roles`，逗号分隔：sender / viewer / relay）。
     pub roles: Vec<String>,
-    /// 支持的传输（TXT `transports`：ws / webrtc / srt / quic）。
-    pub transports: Vec<String>,
+    /// 支持的传输（TXT `transports`，解析为枚举）。
+    pub transports: Vec<TransportId>,
     /// 观看页地址（`http://ip:port/`）。
     pub url: String,
 }
@@ -106,6 +107,11 @@ fn peer_from_discovered(d: crate::discovery::Discovered) -> PeerInfo {
             })
             .unwrap_or_default()
     };
+    // TXT 字符串 → 枚举；未知传输忽略
+    let transports = split("transports")
+        .iter()
+        .filter_map(|s| TransportId::from_txt(s))
+        .collect();
     let name = txt("name")
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{}:{}", d.ip, d.port));
@@ -115,7 +121,7 @@ fn peer_from_discovered(d: crate::discovery::Discovered) -> PeerInfo {
         ip: d.ip.to_string(),
         port: d.port,
         roles: split("roles"),
-        transports: split("transports"),
+        transports,
         url: format!("http://{}:{}/", d.ip, d.port),
     }
 }
@@ -207,7 +213,15 @@ mod tests {
         assert_eq!(p.ip, "192.168.1.9");
         assert_eq!(p.port, 8777);
         assert_eq!(p.roles, vec!["sender", "viewer", "relay"]);
-        assert_eq!(p.transports, vec!["ws", "webrtc", "srt", "quic"]);
+        assert_eq!(
+            p.transports,
+            vec![
+                TransportId::Ws,
+                TransportId::WebRtc,
+                TransportId::Srt,
+                TransportId::Quic
+            ]
+        );
         assert_eq!(p.url, "http://192.168.1.9:8777/");
     }
 

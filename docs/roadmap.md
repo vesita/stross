@@ -2,6 +2,8 @@
 
 > 汇总自实测反馈与架构讨论，按优先级排序。当前版本（0.1.0）已完成五层架构重构
 > （proto / core / media / app / sender）与 Android 端到端推流验证。
+> 本路线图中「设备路由 / 流解耦 / WebRTC」的统一抽象见
+> [plugin-architecture.md](plugin-architecture.md)（内核 + 可插拔传输，三阶段实施）。
 
 ## 交互模型愿景：设备路由（类似投屏）
 

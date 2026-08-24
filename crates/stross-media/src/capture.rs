@@ -18,6 +18,7 @@ use std::sync::Mutex;
 use tokio::sync::mpsc;
 
 use stross_proto::frame::Frame;
+use stross_proto::message::{CapabilityDescriptor, CapabilityKind, MediaKind, ReliabilityProfile};
 
 use crate::pipeline::{StreamConfig, StreamSession};
 
@@ -33,6 +34,12 @@ pub struct CaptureStatus {
 
 /// 采集后端：把本机媒体源变成协议帧流。
 pub trait CaptureBackend: Send + Sync {
+    /// 能力描述（能力广播 / 协商用；默认实现返回未知）。
+    ///
+    /// 见 docs/plugin-architecture.md §6.1——Source 能力向内核能力注册表上报。
+    fn descriptor(&self) -> CapabilityDescriptor {
+        CapabilityDescriptor::unknown()
+    }
     /// 启动采集，帧送入 `tx`。
     ///
     /// 返回 `Ok` 只代表采集已发起；真实是否就绪由 [`CaptureBackend::status`] 回报
@@ -66,6 +73,23 @@ impl Default for FfmpegBackend {
 }
 
 impl CaptureBackend for FfmpegBackend {
+    fn descriptor(&self) -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            kind: CapabilityKind::Source,
+            media: vec![
+                MediaKind::Screen,
+                MediaKind::Camera,
+                MediaKind::Mic,
+                MediaKind::SystemAudio,
+            ],
+            codecs: vec!["h264".into(), "aac".into()],
+            transports: vec!["ws".into()],
+            max_width: Some(1920),
+            max_height: Some(1080),
+            preferred_profile: ReliabilityProfile::Lossy,
+        }
+    }
+
     fn start(&self, cfg: &StreamConfig, tx: mpsc::Sender<Frame>) -> anyhow::Result<()> {
         let session = StreamSession::spawn(cfg, tx)?;
         let mut status = self.status.lock().unwrap();

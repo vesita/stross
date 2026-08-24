@@ -8,23 +8,27 @@
 ┌──────────────────────────────────────────────────────────────────┐
 │ apps/stross-sender  ⑤ UI 模块：Tauri 薄命令层 + web/ + android/(Kotlin) │
 ├──────────────────────────────────────────────────────────────────┤
-│ crates/stross-app   ③ 核心封装模块：StrossApp 状态机 / SenderEngine 组合 │
+│ crates/stross-app   ③ 核心封装模块：StrossApp 状态机 / SenderEngine / Kernel │
 ├───────────────────────────────┬──────────────────────────────────┤
 │ crates/stross-core           │ crates/stross-media               │
 │ ② 核心局域网共享模块          │ ④ 系统适配模块                    │
 │ 中继 / 推流客户端 / mDNS      │ ffmpeg 管线 / 设备枚举            │
-│ / 本机 IP / 观看端页面        │ / NAL·ADTS 解析 / CaptureBackend  │
+│ / 观看端页面                  │ / NAL·ADTS 解析 / Source+Sink 能力 │
 ├───────────────────────────────┴──────────────────────────────────┤
+│ crates/stross-transport ①½ 传输插件层：Transport/DataSession 抽象   │
+│            ws（无损）/ webrtc（有损）/ memory（测试）实现          │
+├──────────────────────────────────────────────────────────────────┤
 │ crates/stross-proto   ① 协议模块：帧头 + 控制消息（serde）                │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 | 层 | crate | 职责 | 依赖 |
 |---|---|---|---|
-| ① 协议 | `stross-proto` | 线上契约：16 字节帧头 + JSON 控制消息 | 无内部依赖 |
-| ② 共享 | `stross-core` | 纯数据共享逻辑：中继、WS 推流客户端、mDNS、本机 IP、观看端页面 | proto |
-| ④ 适配 | `stross-media` | 系统适配：ffmpeg 采集管线、设备枚举、H.264/AAC 切帧、`CaptureBackend` trait | proto |
-| ③ 封装 | `stross-app` | 应用状态机 + 引擎组合，无 UI 依赖、可单测 | core + media |
+| ① 协议 | `stross-proto` | 线上契约：24 字节 v2 帧头（含 seq/分片）+ JSON 控制消息（含能力协商与路由） | 无内部依赖 |
+| ①½ 传输 | `stross-transport` | 可插拔传输层：`Transport`/`DataSession` 抽象 + ws/webrtc/memory 实现 + 本机 IP | proto |
+| ② 共享 | `stross-core` | 纯数据共享逻辑：中继、推流客户端、mDNS、观看端页面（re-export transport/net） | proto + transport |
+| ④ 适配 | `stross-media` | 系统适配：ffmpeg 采集管线、设备枚举、H.264/AAC 切帧、`CaptureBackend`（Source）/ `Sink`（录制） | proto |
+| ③ 封装 | `stross-app` | 应用状态机 + 引擎组合 + 内核（设备图/会话/路由/鉴权），无 UI 依赖、可单测 | core + media |
 | ⑤ UI | `stross-sender` | Tauri 薄命令层 + Web 前端 + Android Kotlin 桥 | app |
 
 > 协议为何保持独立小 crate：共享模块与系统适配模块**都**要使用 `Frame`/`ControlMessage`，
@@ -76,16 +80,18 @@
 ### 媒体帧（二进制 WebSocket 消息）
 
 ```
-+--------+---------+-------+-------+---------+---------+---------+
-| magic  | version | track | codec | flags   | pts_ms  | len     | payload ... |
-| "STR1" |  u8     |  u8   |  u8   |  u8     | u32 LE  | u32 LE  |
-+--------+---------+-------+-------+---------+---------+---------+
++--------+---------+-------+-------+---------+---------+---------+----------+----------+----------+----------+
+| magic  | version | track | codec | flags   | pts_ms  | seq     | frag_idx | frag_cnt | len      | reserved |
+| "STR2" |  u8     |  u8   |  u8   |  u8     | u32 LE  | u32 LE  | u8       | u8       | u32 LE   | u8[2]    |
++--------+---------+-------+-------+---------+---------+---------+----------+----------+----------+----------+
 ```
 
 - `track`：0 视频 / 1 音频
 - `codec`：1 H.264(Annex-B) / 2 AAC(ADTS)
 - `flags`：`0x01` 关键帧 / `0x02` 配置数据 / `0x04` 开始 / `0x08` 结束
 - `pts_ms`：相对会话起点的演示时间戳
+- `seq`：会话内帧序号（有损传输乱序检测；无损传输取 0）
+- `frag_idx` / `frag_cnt`：分片位置/总数（`0` = 未分片）
 
 ### 控制消息（JSON 文本帧）
 
@@ -139,6 +145,9 @@ Rust 侧用 `AnnexBSplitter`（状态机切 NAL）→ `AccessUnitBuilder`
 
 ## 4. 中继（crates/stross-core/src/relay.rs）
 
+- 数据面转发（`handle_push` / `handle_watch`）只依赖传输抽象
+  （`stross-transport` 的 `Transport`/`DataSession`），ws 与 webrtc 共用同一套
+  关键帧对齐逻辑（见 docs/plugin-architecture.md §4）。
 - 每条流一个 `broadcast::Sender<Bytes>`，容量 1024。
 - **关键帧对齐**：观看端任务只转发关键帧之后的视频帧；掉帧（Lagged）时
   重新等关键帧，避免从 GOP 中间开始导致花屏。
@@ -203,4 +212,6 @@ UI 层（桌面 / Android）只把 `invoke` 命令转发到这里，因此命令
 | 每帧一个 WS 消息 | 观看端按帧统计、按帧对齐，无需解析容器 |
 | 中继独立于推流端 | 多机推流到同一中继；观看端页面由中继托管 |
 | 协议独立 crate | media 与 core 都要用 `Frame`，独立成 crate 让适配层不反向依赖共享层 |
+| 传输层独立 crate（阶段 2） | 传输实现（str0m/未来 quic/srt）的重依赖不进入 core/media/app 的依赖树；core re-export 保持路径兼容 |
 | `CaptureBackend` trait | 桌面 ffmpeg 与 Android 原生采集统一抽象，UI 命令面两边一致 |
+| `Sink` trait（阶段 2） | 录制/渲染/注入统一为接收侧能力，与 Source 共用能力描述与协商 |

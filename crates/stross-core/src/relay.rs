@@ -7,31 +7,38 @@
 //! * `GET /api/streams`：流列表（观看端页面拉取）
 //! * `GET /`：内嵌的观看端页面
 //!
+//! 数据面转发（[`handle_push`] / [`handle_watch`]）只依赖
+//! [`Transport`](crate::transport::Transport) 抽象，不感知具体传输；
+//! 当前经 [`WsTransport`](crate::transport::ws::WsTransport) 从 HTTP 升级处接入
+//! （见 docs/plugin-architecture.md §4）。
+//!
 //! 观看端接入时机：视频只在关键帧（IDR）后开始转发（ffmpeg 已在关键帧前重复
 //! SPS/PPS，因此等待关键帧即可）；音频 ADTS 自带配置，可直接转发。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Query, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-use axum::http::HeaderValue;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
-use stross_proto::frame::{FrameHeader, TRACK_VIDEO};
+use stross_proto::frame::{Frame, TRACK_VIDEO};
 use stross_proto::message::{ControlMessage, StreamInfo};
 
 use crate::assets;
+use crate::transport::webrtc::{PeerCommand, WebRtcPeer, WebRtcTransport};
+use crate::transport::ws::WsTransport;
+use crate::transport::{DataSession, SessionPacket};
 
 /// CORS 中间件：Stross 桌面/Android 前端运行在 Tauri 的本地源
 /// （`tauri://localhost` / `http://tauri.localhost`），连接阶段会跨源
@@ -55,15 +62,17 @@ pub const DEFAULT_PORT: u16 = 8777;
 #[derive(Clone)]
 struct StreamEntry {
     info: StreamInfo,
-    tx: broadcast::Sender<Bytes>,
+    tx: broadcast::Sender<Frame>,
     /// 最近一个视频关键帧（含 SPS/PPS），供新观看者立即对齐 GOP。
-    last_keyframe: Option<Bytes>,
+    last_keyframe: Option<Frame>,
 }
 
 /// 中继共享状态。
 #[derive(Clone, Default)]
 pub struct RelayState {
     streams: Arc<Mutex<HashMap<String, StreamEntry>>>,
+    /// 待完成信令的 WebRTC peer（`/api/webrtc/start` 与 `/answer` 之间）。
+    webrtc_peers: Arc<Mutex<HashMap<String, WebRtcPeer>>>,
 }
 
 impl RelayState {
@@ -87,13 +96,16 @@ impl RelayState {
     }
 
     fn insert(&self, entry: StreamEntry) {
-        self.streams.lock().unwrap().insert(entry.info.stream_id.clone(), entry);
+        self.streams
+            .lock()
+            .unwrap()
+            .insert(entry.info.stream_id.clone(), entry);
     }
 
-    fn set_last_keyframe(&self, id: &str, bytes: Bytes) {
+    fn set_last_keyframe(&self, id: &str, frame: Frame) {
         let mut guard = self.streams.lock().unwrap();
         if let Some(entry) = guard.get_mut(id) {
-            entry.last_keyframe = Some(bytes);
+            entry.last_keyframe = Some(frame);
         }
     }
 
@@ -138,6 +150,8 @@ impl RelayServer {
             .route("/jmuxer.js", get(serve_jmuxer))
             .route("/healthz", get(|| async { "ok" }))
             .route("/api/streams", get(api_streams))
+            .route("/api/webrtc/start", post(api_webrtc_start))
+            .route("/api/webrtc/answer", post(api_webrtc_answer))
             .route("/ws/push", get(ws_push))
             .route("/ws/watch", get(ws_watch))
             .layer(axum::middleware::from_fn(cors_layer))
@@ -188,7 +202,8 @@ async fn serve_jmuxer() -> Response {
 
 fn static_html(body: &'static str, mime: &'static str) -> Response {
     let mut resp = Response::new(body.into());
-    resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static(mime));
+    resp.headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(mime));
     resp.headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     resp
@@ -196,6 +211,98 @@ fn static_html(body: &'static str, mime: &'static str) -> Response {
 
 async fn api_streams(State(state): State<RelayState>) -> Json<Vec<StreamInfo>> {
     Json(state.streams())
+}
+
+// ---------------------------------------------------------------------------
+// WebRTC 观看端信令（数据面与 WS 观看端共用 handle_watch）
+// ---------------------------------------------------------------------------
+
+static NEXT_WEBRTC_PEER: AtomicU64 = AtomicU64::new(1);
+
+type ApiErr = (StatusCode, Json<serde_json::Value>);
+
+fn api_err(status: StatusCode, msg: impl Into<String>) -> ApiErr {
+    (status, Json(serde_json::json!({ "error": msg.into() })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebRtcStartReq {
+    stream_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebRtcStartResp {
+    peer_id: String,
+    sdp: String,
+}
+
+/// 开始 WebRTC 观看信令：创建 peer（control + media 双通道），返回 SDP offer。
+async fn api_webrtc_start(
+    State(state): State<RelayState>,
+    Json(req): Json<WebRtcStartReq>,
+) -> Result<Json<WebRtcStartResp>, ApiErr> {
+    let transport = WebRtcTransport::new();
+    let bind = "0.0.0.0:0".parse().expect("静态地址");
+    let (sdp, peer) = transport
+        .start_peer(&req.stream_id, bind)
+        .await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let peer_id = format!("w{:x}", NEXT_WEBRTC_PEER.fetch_add(1, Ordering::Relaxed));
+    state
+        .webrtc_peers
+        .lock()
+        .unwrap()
+        .insert(peer_id.clone(), peer);
+    tracing::info!("webrtc 信令开始: peer={peer_id} stream={}", req.stream_id);
+    Ok(Json(WebRtcStartResp { peer_id, sdp }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebRtcAnswerReq {
+    peer_id: String,
+    sdp: String,
+}
+
+/// 提交观看端 answer：接入 peer，双通道打开后启动与 WS 完全相同的转发逻辑。
+async fn api_webrtc_answer(
+    State(state): State<RelayState>,
+    Json(req): Json<WebRtcAnswerReq>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    let mut peer = state
+        .webrtc_peers
+        .lock()
+        .unwrap()
+        .remove(&req.peer_id)
+        .ok_or_else(|| {
+            api_err(
+                StatusCode::NOT_FOUND,
+                format!("peer 不存在或已使用: {}", req.peer_id),
+            )
+        })?;
+    let stream_id = peer.session_id().to_string();
+    let (session, mut channels_open, close_tx) = peer
+        .accept_answer(&req.sdp)
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    tokio::spawn(async move {
+        // 等待 control/media 双通道打开（最多 15s），然后复用 WS 观看端转发逻辑
+        if !*channels_open.borrow() {
+            if tokio::time::timeout(Duration::from_secs(15), channels_open.changed())
+                .await
+                .is_err()
+            {
+                tracing::warn!("webrtc 通道 15s 未打开，关闭 peer（stream={stream_id}）");
+                let _ = close_tx.send(PeerCommand::Close).await;
+                return;
+            }
+        }
+        handle_watch(session, stream_id, state).await;
+    });
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]
@@ -208,51 +315,49 @@ async fn ws_watch(
     Query(q): Query<WatchQuery>,
     State(state): State<RelayState>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_watch(socket, q.stream, state))
+    ws.on_upgrade(move |socket| {
+        let session = WsTransport::new().from_upgraded(socket);
+        handle_watch(session, q.stream, state)
+    })
 }
 
 async fn ws_push(ws: WebSocketUpgrade, State(state): State<RelayState>) -> Response {
-    ws.on_upgrade(move |socket| handle_push(socket, state))
+    ws.on_upgrade(move |socket| {
+        let session = WsTransport::new().from_upgraded(socket);
+        handle_push(session, state)
+    })
 }
 
 /// 观看端：等待 Ready，然后按关键帧对齐转发。
-async fn handle_watch(mut ws: WebSocket, stream_id: String, state: RelayState) {
+async fn handle_watch(session: Box<dyn DataSession>, stream_id: String, state: RelayState) {
     let Some(entry) = state.get(&stream_id) else {
-        let _ = ws
-            .send(Message::Text(
-                ControlMessage::Error {
-                    message: format!("流 {stream_id} 不存在"),
-                }
-                .to_text()
-                .into(),
-            ))
+        let _ = session
+            .send(SessionPacket::Control(ControlMessage::Error {
+                message: format!("流 {stream_id} 不存在"),
+            }))
             .await;
         return;
     };
     let info = entry.info.clone();
     let mut rx = entry.tx.subscribe();
-    let _ = ws
-        .send(Message::Text(
-            ControlMessage::Ready {
-                stream_id: stream_id.clone(),
-            }
-            .to_text()
-            .into(),
-        ))
+    let _ = session
+        .send(SessionPacket::Control(ControlMessage::Ready {
+            stream_id: stream_id.clone(),
+        }))
         .await;
 
     let mut video_started = false;
     // 新观看者先收到最近一个关键帧（含 SPS/PPS），立刻可解码
     if let Some(kf) = entry.last_keyframe.clone() {
-        if ws.send(Message::Binary(kf)).await.is_err() {
+        if session.send(SessionPacket::Media(kf)).await.is_err() {
             return;
         }
         video_started = true;
     }
 
     loop {
-        let bytes = match rx.recv().await {
-            Ok(b) => b,
+        let frame = match rx.recv().await {
+            Ok(f) => f,
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 // 掉帧：重新等下一个关键帧，避免从 GOP 中间开始
                 video_started = false;
@@ -260,113 +365,104 @@ async fn handle_watch(mut ws: WebSocket, stream_id: String, state: RelayState) {
             }
             Err(broadcast::error::RecvError::Closed) => break,
         };
-        let Ok(header) = FrameHeader::decode(&bytes) else {
-            continue;
-        };
-        if header.track == TRACK_VIDEO && !video_started && !header.is_keyframe() && !header.is_config()
+        if frame.header.track == TRACK_VIDEO
+            && !video_started
+            && !frame.header.is_keyframe()
+            && !frame.header.is_config()
         {
             continue;
         }
-        if header.track == TRACK_VIDEO && (header.is_keyframe() || header.is_config()) {
+        if frame.header.track == TRACK_VIDEO
+            && (frame.header.is_keyframe() || frame.header.is_config())
+        {
             video_started = true;
         }
-        if ws.send(Message::Binary(bytes)).await.is_err() {
+        if session.send(SessionPacket::Media(frame)).await.is_err() {
             break;
         }
     }
+    // 干净关闭会话（WS 发 Close 帧；WebRTC 触发 run loop 退出）
+    let _ = session.close().await;
     tracing::debug!("观看端断开: {stream_id} ({})", info.title);
 }
 
 /// 推流端：Hello → 建流 → 转发帧；Bye / 断开 → 删流。
-async fn handle_push(mut ws: WebSocket, state: RelayState) {
+async fn handle_push(session: Box<dyn DataSession>, state: RelayState) {
     let mut stream_id: Option<String> = None;
     loop {
-        let Some(msg) = ws.next().await else {
-            tracing::warn!("推流端连接已断开（无更多消息）");
-            break;
-        };
-        let msg = match msg {
-            Ok(m) => m,
+        let pkt = match session.recv().await {
+            Ok(Some(pkt)) => pkt,
+            Ok(None) => {
+                tracing::warn!("推流端连接已断开（无更多消息）");
+                break;
+            }
             Err(e) => {
                 tracing::warn!("推流端连接异常: {e}");
                 break;
             }
         };
-        match msg {
-            Message::Text(text) => {
-                let Ok(ctrl) = ControlMessage::from_text(&text) else {
-                    continue;
-                };
-                match ctrl {
-                    ControlMessage::Hello {
-                        stream_id: id,
-                        title,
-                        video,
-                        audio,
-                    } => {
-                        // 同名流冲突时拒绝新推流端
-                        if state.get(&id).is_some() {
-                            let _ = ws
-                                .send(Message::Text(
-                                    ControlMessage::Error {
-                                        message: format!("流 {id} 已存在"),
-                                    }
-                                    .to_text()
-                                    .into(),
-                                ))
-                                .await;
-                            let _ = ws.close().await;
-                            return;
-                        }
-                        let (tx, _rx) = broadcast::channel(1024);
-                        let info = StreamInfo {
-                            stream_id: id.clone(),
-                            title,
-                            video,
-                            audio,
-                            started_at: SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0),
-                            watchers: 0,
-                        };
-                        state.insert(StreamEntry {
-                            info: info.clone(),
-                            tx,
-                            last_keyframe: None,
-                        });
-                        stream_id = Some(id.clone());
-                        tracing::info!("推流开始: {} ({})", id, info.title);
-                        let _ = ws
-                            .send(Message::Text(
-                                ControlMessage::Welcome { stream_id: id }.to_text().into(),
-                            ))
-                            .await;
-                    }
-                    ControlMessage::Bye => {
-                        break;
-                    }
-                    _ => {}
+        match pkt {
+            SessionPacket::Control(ControlMessage::Hello {
+                stream_id: id,
+                title,
+                video,
+                audio,
+            }) => {
+                // 同名流冲突时拒绝新推流端
+                if state.get(&id).is_some() {
+                    let _ = session
+                        .send(SessionPacket::Control(ControlMessage::Error {
+                            message: format!("流 {id} 已存在"),
+                        }))
+                        .await;
+                    let _ = session.close().await;
+                    return;
                 }
+                let (tx, _rx) = broadcast::channel(1024);
+                let info = StreamInfo {
+                    stream_id: id.clone(),
+                    title,
+                    video,
+                    audio,
+                    started_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    watchers: 0,
+                };
+                state.insert(StreamEntry {
+                    info: info.clone(),
+                    tx,
+                    last_keyframe: None,
+                });
+                stream_id = Some(id.clone());
+                tracing::info!("推流开始: {} ({})", id, info.title);
+                let _ = session
+                    .send(SessionPacket::Control(ControlMessage::Welcome {
+                        stream_id: id,
+                    }))
+                    .await;
             }
-            Message::Binary(bytes) => {
-                if let (Some(id), Ok(header)) = (&stream_id, FrameHeader::decode(&bytes)) {
-                    if header.track == TRACK_VIDEO && header.is_keyframe() {
-                        state.set_last_keyframe(id, bytes.clone());
+            SessionPacket::Control(ControlMessage::Bye) => {
+                break;
+            }
+            SessionPacket::Control(_) => {}
+            SessionPacket::Media(frame) => {
+                if let Some(id) = &stream_id {
+                    if frame.header.track == TRACK_VIDEO && frame.header.is_keyframe() {
+                        state.set_last_keyframe(id, frame.clone());
                     }
                     if let Some(entry) = state.get(id) {
-                        // 中继广播原样字节；观看端自己按关键帧对齐
-                        let _ = entry.tx.send(bytes);
+                        // 中继广播原样帧；观看端自己按关键帧对齐
+                        let _ = entry.tx.send(frame);
                     }
                 }
             }
-            Message::Close(_) => break,
-            _ => {}
         }
     }
     if let Some(id) = stream_id {
         state.remove(&id);
         tracing::info!("推流结束: {id}");
     }
-    let _ = ws.close().await;
+    let _ = session.close().await;
 }

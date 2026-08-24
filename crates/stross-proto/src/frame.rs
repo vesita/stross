@@ -1,13 +1,14 @@
-//! 二进制媒体帧格式。
+//! 二进制媒体帧格式（协议 v2）。
 //!
-//! 每个 WebSocket 二进制消息是一个完整的帧：
+//! 每个二进制消息是一个完整的帧（WS 上即一个 Binary 消息；UDP 类传输按
+//! `frag_*` 字段分片/重组，这是传输实现的事务）：
 //!
 //! ```text
-//! +--------+---------+-------+-------+---------+---------+---------+
-//! | magic  | version | track | codec | flags   | pts_ms  | len     | payload ... |
-//! | "STR1" |  u8     |  u8   |  u8   |  u8     | u32 LE  | u32 LE  |
-//! +--------+---------+-------+-------+---------+---------+---------+
-//! | 4      | 1       | 1     | 1     | 1       | 4       | 4       | len
+//! +--------+---------+-------+-------+---------+---------+---------+----------+----------+----------+----------+
+//! | magic  | version | track | codec | flags   | pts_ms  | seq     | frag_idx | frag_cnt | len      | reserved |
+//! | "STR2" |  u8     |  u8   |  u8   |  u8     | u32 LE  | u32 LE  | u8       | u8       | u32 LE   | u8[2]    |
+//! +--------+---------+-------+-------+---------+---------+---------+----------+----------+----------+----------+
+//! | 4      | 1       | 1     | 1     | 1       | 4       | 4       | 1        | 1        | 4        | 2        |
 //! ```
 //!
 //! * `track`: 0=视频, 1=音频
@@ -18,20 +19,23 @@
 //!   * `0x04` START    —— 推流会话开始
 //!   * `0x08` END      —— 推流会话结束
 //! * `pts_ms`: 演示时间戳（毫秒，相对会话起点）
+//! * `seq`: 会话内单调递增帧序号——有损传输乱序检测与丢包统计；无损传输取 0
+//! * `frag_idx` / `frag_cnt`: 分片位置/总数；`frag_cnt == 0` 表示未分片
 //! * `len`: 载荷长度
 //!
-//! 头部小端序，共 16 字节，与平台无关。
+//! 头部小端序，共 24 字节，与平台无关。v2 在 WS 上取 `seq=0, frag_cnt=0`
+//! 时语义与 v1 等价（见 docs/plugin-architecture.md §5）。
 
 use bytes::Bytes;
 use thiserror::Error;
 
 /// 魔数，用于快速校验帧完整性。
-pub const MAGIC: &[u8; 4] = b"STR1";
+pub const MAGIC: &[u8; 4] = b"STR2";
 /// 协议版本。
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 /// 头部固定长度。
-pub const HEADER_LEN: usize = 16;
+pub const HEADER_LEN: usize = 24;
 
 // ---- track ----
 pub const TRACK_VIDEO: u8 = 0;
@@ -65,11 +69,17 @@ pub struct FrameHeader {
     pub codec: u8,
     pub flags: u8,
     pub pts_ms: u32,
+    /// 会话内单调递增帧序号（有损传输用；无损传输为 0）。
+    pub seq: u32,
+    /// 分片位置（`frag_cnt == 0` 时无意义）。
+    pub frag_idx: u8,
+    /// 分片总数（`0` = 未分片）。
+    pub frag_cnt: u8,
     pub len: u32,
 }
 
 impl FrameHeader {
-    /// 把帧头编码为 16 字节缓冲区。
+    /// 把帧头编码为 24 字节缓冲区。
     pub fn encode(&self) -> [u8; HEADER_LEN] {
         let mut buf = [0u8; HEADER_LEN];
         buf[0..4].copy_from_slice(MAGIC);
@@ -78,7 +88,11 @@ impl FrameHeader {
         buf[6] = self.codec;
         buf[7] = self.flags;
         buf[8..12].copy_from_slice(&self.pts_ms.to_le_bytes());
-        buf[12..16].copy_from_slice(&self.len.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.seq.to_le_bytes());
+        buf[16] = self.frag_idx;
+        buf[17] = self.frag_cnt;
+        buf[18..22].copy_from_slice(&self.len.to_le_bytes());
+        // [22..24] reserved：留作 flags 扩展
         buf
     }
 
@@ -100,7 +114,10 @@ impl FrameHeader {
             codec: buf[6],
             flags: buf[7],
             pts_ms: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
-            len: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
+            seq: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
+            frag_idx: buf[16],
+            frag_cnt: buf[17],
+            len: u32::from_le_bytes(buf[18..22].try_into().unwrap()),
         })
     }
 
@@ -116,6 +133,10 @@ impl FrameHeader {
     pub fn is_end(&self) -> bool {
         self.flags & FLAG_END != 0
     }
+    /// 是否未分片（`frag_cnt == 0`）。
+    pub fn is_whole(&self) -> bool {
+        self.frag_cnt == 0
+    }
 }
 
 /// 一帧媒体数据（头 + 载荷）。
@@ -126,6 +147,7 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// 构造未分片帧（`seq = 0`，`frag_cnt = 0`）。
     pub fn new(track: u8, codec: u8, flags: u8, pts_ms: u32, payload: impl Into<Bytes>) -> Self {
         let payload = payload.into();
         Frame {
@@ -134,6 +156,34 @@ impl Frame {
                 codec,
                 flags,
                 pts_ms,
+                seq: 0,
+                frag_idx: 0,
+                frag_cnt: 0,
+                len: payload.len() as u32,
+            },
+            payload,
+        }
+    }
+
+    /// 构造带帧序号的帧（有损传输会话内单调递增）。
+    pub fn with_seq(
+        track: u8,
+        codec: u8,
+        flags: u8,
+        pts_ms: u32,
+        seq: u32,
+        payload: impl Into<Bytes>,
+    ) -> Self {
+        let payload = payload.into();
+        Frame {
+            header: FrameHeader {
+                track,
+                codec,
+                flags,
+                pts_ms,
+                seq,
+                frag_idx: 0,
+                frag_cnt: 0,
                 len: payload.len() as u32,
             },
             payload,
@@ -173,15 +223,20 @@ mod tests {
             codec: CODEC_H264,
             flags: FLAG_KEYFRAME | FLAG_START,
             pts_ms: 1234,
+            seq: 42,
+            frag_idx: 1,
+            frag_cnt: 3,
             len: 5678,
         };
         let buf = h.encode();
         assert_eq!(buf.len(), HEADER_LEN);
+        assert_eq!(&buf[0..4], MAGIC);
         let h2 = FrameHeader::decode(&buf).unwrap();
         assert_eq!(h, h2);
         assert!(h2.is_keyframe());
         assert!(h2.is_start());
         assert!(!h2.is_end());
+        assert!(!h2.is_whole());
     }
 
     #[test]
@@ -195,8 +250,25 @@ mod tests {
     }
 
     #[test]
+    fn seq_frame_roundtrip() {
+        let f = Frame::with_seq(
+            TRACK_VIDEO,
+            CODEC_H264,
+            FLAG_KEYFRAME,
+            100,
+            7,
+            vec![9u8; 16],
+        );
+        let f2 = Frame::from_bytes(&f.to_bytes()).unwrap();
+        assert_eq!(f2.header.seq, 7);
+        assert_eq!(f2.header.pts_ms, 100);
+    }
+
+    #[test]
     fn rejects_bad_magic() {
-        let mut buf = Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![]).to_bytes().to_vec();
+        let mut buf = Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![])
+            .to_bytes()
+            .to_vec();
         buf[0] = b'X';
         assert!(Frame::from_bytes(&buf).is_err());
     }

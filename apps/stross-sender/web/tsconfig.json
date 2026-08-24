@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "strict": true,
+    "noEmitOnError": true,
+    "skipLibCheck": true,
+    "useUnknownInCatchVariables": false,
+    "types": []
+  },
+  "files": ["app.ts"]
+}

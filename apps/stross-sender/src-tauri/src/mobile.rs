@@ -31,8 +31,9 @@ use tauri::{AppHandle, Manager, Wry};
 use stross_media::capture::{CaptureBackend, CaptureStatus};
 use stross_media::pipeline::StreamConfig;
 use stross_proto::frame::{
-    Frame, CODEC_AAC, CODEC_H264, FLAG_CONFIG, FLAG_KEYFRAME, TRACK_AUDIO, TRACK_VIDEO,
+    CODEC_AAC, CODEC_H264, FLAG_CONFIG, FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO,
 };
+use stross_proto::message::{CapabilityDescriptor, CapabilityKind, MediaKind, ReliabilityProfile};
 use tokio::sync::mpsc;
 
 /// setup 阶段注册的 Android 插件句柄（托管状态，命令通过它调用 Kotlin）。
@@ -84,6 +85,18 @@ impl AndroidCapture {
 }
 
 impl CaptureBackend for AndroidCapture {
+    fn descriptor(&self) -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            kind: CapabilityKind::Source,
+            media: vec![MediaKind::Screen, MediaKind::Mic],
+            codecs: vec!["h264".into(), "aac".into()],
+            transports: vec!["ws".into()],
+            max_width: Some(1920),
+            max_height: Some(1080),
+            preferred_profile: ReliabilityProfile::Lossy,
+        }
+    }
+
     fn start(&self, cfg: &StreamConfig, tx: mpsc::Sender<Frame>) -> anyhow::Result<()> {
         *self.tx.lock().unwrap() = Some(tx);
         *self.status.lock().unwrap() = CaptureStatus::default();

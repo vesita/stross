@@ -73,24 +73,31 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 ┌────────────────────────────────────────────────────────────┐
 │ apps/stross-sender       ⑤ UI 模块：Tauri 薄命令层 + web/ + android/(Kotlin) │
 ├────────────────────────────────────────────────────────────┤
-│ crates/stross-app        ③ 核心封装模块：StrossApp 状态机 / SenderEngine 组合 │
+│ crates/stross-app        ③ 核心封装模块：StrossApp 状态机 / SenderEngine / Kernel │
 ├──────────────────────────────┬─────────────────────────────┤
 │ crates/stross-core          │ crates/stross-media          │
 │ ② 核心局域网共享模块        │ ④ 系统适配模块               │
 │ 中继 / 推流客户端 / mDNS    │ ffmpeg 管线 / 设备枚举        │
-│ / 本机 IP / 观看端页面      │ / NAL·ADTS 解析 / CaptureBackend│
+│ / 观看端页面                │ / NAL·ADTS 解析 / Source+Sink │
 ├──────────────────────────────┴─────────────────────────────┤
+│ crates/stross-transport   ①½ 传输插件层：Transport/DataSession 抽象      │
+│              ws / webrtc / memory 实现                      │
+├────────────────────────────────────────────────────────────┤
 │ crates/stross-proto        ① 协议模块：帧头 + 控制消息（serde）        │
 └────────────────────────────────────────────────────────────┘
 ```
 
-- **① 协议模块**（`stross-proto`）：线上契约（16 字节帧头 + JSON 控制消息），
-  保持独立小 crate —— 共享模块与系统适配模块都依赖它，但互不依赖。
-- **② 共享模块**（`stross-core`）：纯数据共享逻辑 —— 中继服务器（axum + WS）、
-  推流客户端、mDNS 发现、本机 IP、内嵌观看端页面。不含任何采集/平台代码。
+- **① 协议模块**（`stross-proto`）：线上契约（24 字节 v2 帧头 + JSON 控制消息，
+  含能力协商与路由控制），保持独立小 crate —— 共享模块与系统适配模块都依赖它，但互不依赖。
+- **①½ 传输插件层**（`stross-transport`）：可插拔传输抽象（`Transport`/`DataSession`）
+  与实现 —— ws（无损，现状）、webrtc（有损低延迟，str0m datachannel）、memory（测试）。
+  `stross-core` re-export 保持路径兼容。
+- **② 共享模块**（`stross-core`）：纯数据共享逻辑 —— 中继服务器（axum + WS/WebRTC）、
+  推流客户端、mDNS 发现、内嵌观看端页面。不含任何采集/平台代码。
 - **④ 系统适配模块**（`stross-media`）：把"本机媒体源变成协议帧"的平台适配 ——
   ffmpeg 采集管线、设备枚举、H.264/AAC 流切帧，以及统一的
-  [`CaptureBackend`](crates/stross-media/src/capture.rs) trait。
+  [`CaptureBackend`](crates/stross-media/src/capture.rs) trait（Source）与
+  [`Sink`](crates/stross-media/src/sink.rs) trait（录制/注入，§6.2）。
 - **③ 核心封装模块**（`stross-app`）：组合共享 + 适配 —— `SenderEngine`
   （中继 + 推流客户端 + 采集后端）、`StrossApp` 状态机（先连接再收/发、mDNS、
   状态查询）。**不依赖任何 UI 框架**，可独立单元测试。
@@ -115,15 +122,17 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 
 详细设计见 [docs/architecture.md](docs/architecture.md)、[docs/protocol.md](docs/protocol.md)。
 下一阶段规划（设备路由 / 原生播放器 / AV 同步）见 [docs/roadmap.md](docs/roadmap.md)。
+内核 + 可插拔传输的插件化架构设计（方向已确认，三阶段实施）见 [docs/plugin-architecture.md](docs/plugin-architecture.md)。
 
 ## 目录结构
 
 ```
 crates/
   stross-proto/      ① 协议：帧头 + 控制消息（serde）
-  stross-core/       ② 局域网共享：中继 / 推流客户端 / mDNS 发现 / 本机 IP / 观看端页面
-  stross-media/      ④ 系统适配：ffmpeg 管线 / 设备枚举 / NAL·ADTS 解析 / CaptureBackend
-  stross-app/        ③ 核心封装：StrossApp 状态机 / SenderEngine（无 UI 依赖，可单测）
+  stross-transport/  ①½ 传输插件层：Transport/DataSession + ws/webrtc/memory 实现
+  stross-core/       ② 局域网共享：中继 / 推流客户端 / mDNS 发现 / 观看端页面
+  stross-media/      ④ 系统适配：ffmpeg 管线 / 设备枚举 / NAL·ADTS 解析 / CaptureBackend / Sink
+  stross-app/        ③ 核心封装：StrossApp 状态机 / SenderEngine / Kernel（无 UI 依赖，可单测）
 apps/
   stross-relay/      独立中继二进制（纯 Rust，薄壳）
   stross-sender/     ⑤ UI：Tauri 推流端（桌面 + Android）

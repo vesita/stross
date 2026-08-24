@@ -15,11 +15,12 @@ use serde::Serialize;
 
 use stross_core::discovery::Discovery;
 use stross_core::net::local_ips;
-use stross_core::relay::{RelayHandle, RelayServer, DEFAULT_PORT};
+use stross_core::relay::{DEFAULT_PORT, RelayHandle, RelayServer};
 use stross_media::capture::CaptureBackend;
-use stross_media::pipeline::{ffmpeg_available, StreamConfig};
+use stross_media::pipeline::{StreamConfig, ffmpeg_available};
 
 use crate::engine::SenderEngine;
+use crate::kernel::{Kernel, NodeInfo, NodeRole};
 
 /// 运行平台（UI 层注入）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +48,8 @@ pub struct StrossApp {
     discovery: Mutex<Option<Discovery>>,
     /// 采集后端（平台相关，UI 层注入；`Arc` 使其可被引擎复用）。
     backend: Mutex<Option<Arc<dyn CaptureBackend>>>,
+    /// 内核（控制面）：设备图 / 会话管理 / 路由（设计文档 §3）。
+    kernel: Kernel,
 }
 
 /// 运行中的推流。
@@ -66,7 +69,13 @@ impl StrossApp {
             relay: Mutex::new(None),
             discovery: Mutex::new(None),
             backend: Mutex::new(None),
+            kernel: Kernel::new(),
         }
+    }
+
+    /// 内核（控制面）引用。
+    pub fn kernel(&self) -> &Kernel {
+        &self.kernel
     }
 
     /// 注入采集后端（UI 层在启动时调用一次）。
@@ -109,9 +118,13 @@ impl StrossApp {
                 return Ok(relay_info(r.port));
             }
         }
-        let handle = RelayServer::start(DEFAULT_PORT).await.map_err(|e| e.to_string())?;
+        let handle = RelayServer::start(DEFAULT_PORT)
+            .await
+            .map_err(|e| e.to_string())?;
         let port = handle.port;
         *self.relay.lock().unwrap() = Some(handle);
+        // 把本机注册进内核设备图（含采集能力，供会话协商）
+        self.register_local_node();
         // mDNS 广播本机中继，局域网内其它设备（如电脑端 Stross）可扫描发现
         if let Some(ip) = local_ips().into_iter().next() {
             let instance = format!("sender-{port}");
@@ -119,7 +132,13 @@ impl StrossApp {
                 &instance,
                 ip,
                 port,
-                &[("kind", "relay"), ("name", "Stross 本机中继")],
+                &[
+                    ("kind", "relay"),
+                    ("name", "Stross 本机中继"),
+                    ("roles", "sender,viewer,relay"),
+                    ("transports", "ws,webrtc"),
+                    ("codecs", "h264,aac"),
+                ],
             ) {
                 Ok(d) => {
                     *self.discovery.lock().unwrap() = Some(d);
@@ -128,6 +147,23 @@ impl StrossApp {
             }
         }
         Ok(relay_info(port))
+    }
+
+    /// 把本机节点（含采集能力）注册进内核设备图。
+    pub fn register_local_node(&self) {
+        let kernel = &self.kernel;
+        kernel.upsert_node(NodeInfo {
+            node_id: "local".into(),
+            name: hostname::get()
+                .map(|h| h.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "本机".into()),
+            roles: vec![NodeRole::Sender, NodeRole::Viewer, NodeRole::Relay],
+            caps: vec![],
+            endpoints: vec![],
+        });
+        if let Some(backend) = self.backend.lock().unwrap().as_ref() {
+            kernel.register_capability("local", backend.descriptor());
+        }
     }
 
     /// mDNS 扫描局域网内的其它中继。
@@ -318,7 +354,10 @@ pub struct CaptureStatusView {
 
 fn relay_info(port: u16) -> RelayInfo {
     let ips = local_ips();
-    let mut urls: Vec<String> = ips.iter().map(|ip| format!("http://{ip}:{port}/")).collect();
+    let mut urls: Vec<String> = ips
+        .iter()
+        .map(|ip| format!("http://{ip}:{port}/"))
+        .collect();
     if urls.is_empty() {
         urls.push(format!("http://127.0.0.1:{port}/"));
     }
@@ -332,7 +371,10 @@ fn relay_info(port: u16) -> RelayInfo {
 fn watch_urls(relay_url: Option<&str>, relay_port: u16) -> Vec<String> {
     if let Some(url) = relay_url {
         // ws://host:port/ws/push → http://host:port/
-        if let Some(rest) = url.strip_prefix("ws://").or_else(|| url.strip_prefix("wss://")) {
+        if let Some(rest) = url
+            .strip_prefix("ws://")
+            .or_else(|| url.strip_prefix("wss://"))
+        {
             let host_port: String = rest.split('/').next().unwrap_or("").to_string();
             if !host_port.starts_with("127.0.0.1")
                 && !host_port.starts_with("localhost")
@@ -348,8 +390,8 @@ fn watch_urls(relay_url: Option<&str>, relay_port: u16) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
     use stross_proto::frame::Frame;
+    use tokio::sync::mpsc;
 
     /// 测试用假后端：记录是否被调用。
     struct MockBackend(std::sync::atomic::AtomicBool);
@@ -389,7 +431,9 @@ mod tests {
     #[test]
     fn set_backend_then_query() {
         let app = StrossApp::new(Platform::Android);
-        app.set_backend(Arc::new(MockBackend(std::sync::atomic::AtomicBool::new(false))));
+        app.set_backend(Arc::new(MockBackend(std::sync::atomic::AtomicBool::new(
+            false,
+        ))));
         let st = app.capture_status();
         assert!(!st.active); // 未推流
     }

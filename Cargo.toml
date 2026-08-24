@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/stross-proto",
+    "crates/stross-transport",
     "crates/stross-core",
     "crates/stross-media",
     "crates/stross-app",

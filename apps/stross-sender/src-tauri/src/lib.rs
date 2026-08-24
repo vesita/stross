@@ -16,14 +16,10 @@ use stross_app::{CaptureStatusView, Platform, StrossApp};
 #[cfg(not(mobile))]
 use stross_media::capture::FfmpegBackend;
 use stross_media::pipeline::StreamConfig;
-use tauri::State;
-
-#[cfg(mobile)]
-use tauri::Manager;
+use tauri::{Emitter, Manager, State};
 
 #[cfg(mobile)]
 mod mobile;
-
 // ---------------------------------------------------------------------------
 // 命令面（桌面与 Android 完全一致）
 // ---------------------------------------------------------------------------
@@ -44,7 +40,9 @@ async fn start_relay(state: State<'_, StrossApp>) -> Result<stross_app::app::Rel
 }
 
 #[tauri::command]
-async fn scan_relays(state: State<'_, StrossApp>) -> Result<Vec<stross_app::app::RelayInfo>, String> {
+async fn scan_relays(
+    state: State<'_, StrossApp>,
+) -> Result<Vec<stross_app::app::RelayInfo>, String> {
     state.scan_relays().await
 }
 
@@ -85,6 +83,69 @@ fn open_viewer(state: State<'_, StrossApp>) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// 内核命令（控制面：设备图 / 会话 / 路由，设计文档 §3）
+// ---------------------------------------------------------------------------
+
+/// 设备图快照（本机能力 + 发现结果）。
+#[tauri::command]
+fn kernel_nodes(state: State<'_, StrossApp>) -> Vec<stross_app::kernel::NodeInfo> {
+    state.kernel().nodes()
+}
+
+/// 会话列表快照。
+#[tauri::command]
+fn kernel_sessions(state: State<'_, StrossApp>) -> Vec<stross_app::kernel::Session> {
+    state.kernel().sessions()
+}
+
+/// 创建会话（「从 `src` 推送到 `sinks`」）。
+///
+/// `access_code` 可选：设置后该会话启用访问码（PIN），控制操作
+/// （route / teardown）需先 `authorize_session`（设计文档 §7）。
+#[tauri::command]
+fn create_session(
+    state: State<'_, StrossApp>,
+    src: String,
+    sinks: Vec<String>,
+    access_code: Option<String>,
+) -> Result<stross_app::kernel::Session, String> {
+    let prefs = stross_app::SessionPrefs {
+        profile: stross_proto::message::ReliabilityProfile::Lossy,
+        preferred_transport: None,
+        access_code,
+    };
+    state.kernel().create_session(&src, &sinks, &prefs)
+}
+
+/// 会话鉴权：校验访问码（PIN）；成功后该会话的控制操作放行。
+#[tauri::command]
+fn authorize_session(
+    state: State<'_, StrossApp>,
+    session_id: String,
+    access_code: Option<String>,
+) -> Result<(), String> {
+    state
+        .kernel()
+        .authorize(&session_id, access_code.as_deref())
+}
+
+/// 控制传输方向（会话存续期间动态改道）。
+#[tauri::command]
+fn route_session(
+    state: State<'_, StrossApp>,
+    session_id: String,
+    path: stross_proto::message::RoutePath,
+) -> Result<(), String> {
+    state.kernel().route(&session_id, path)
+}
+
+/// 拆除会话。
+#[tauri::command]
+fn teardown_session(state: State<'_, StrossApp>, session_id: String) -> Result<(), String> {
+    state.kernel().teardown(&session_id)
+}
+
+// ---------------------------------------------------------------------------
 
 fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
@@ -96,7 +157,13 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         stop_stream,
         stream_status,
         capture_status,
-        open_viewer
+        open_viewer,
+        kernel_nodes,
+        kernel_sessions,
+        create_session,
+        authorize_session,
+        route_session,
+        teardown_session
     ]
 }
 
@@ -129,8 +196,17 @@ pub fn run() {
                 let backend = Arc::new(mobile::AndroidCapture::from_app(app.handle()));
                 app.state::<StrossApp>().set_backend(backend);
             }
-            #[cfg(not(mobile))]
-            let _ = app;
+            // 内核事件桥：订阅 KernelEvent，转发为 Tauri 事件「kernel-event」
+            // （前端可订阅替代轮询；设计文档 §3.2）
+            {
+                let mut rx = app.state::<StrossApp>().kernel().subscribe();
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    while let Ok(ev) = rx.recv().await {
+                        let _ = handle.emit("kernel-event", ev);
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(invoke_handler());
@@ -151,7 +227,7 @@ pub fn run() {
 pub fn run_relay_only(args: &[String]) {
     use stross_core::discovery::Discovery;
     use stross_core::net::local_ips;
-    use stross_core::relay::{RelayServer, DEFAULT_PORT};
+    use stross_core::relay::{DEFAULT_PORT, RelayServer};
 
     tracing_subscriber::fmt()
         .with_env_filter(

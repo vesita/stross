@@ -16,6 +16,7 @@ pub mod app;
 pub mod control;
 pub mod engine;
 pub mod kernel;
+pub mod receiver;
 
 pub use app::{CaptureStatusView, Platform, StrossApp};
 pub use control::{CtrlRequest, CtrlResponse, CtrlServer, DEFAULT_CTRL_PORT};
@@ -24,3 +25,4 @@ pub use kernel::{
     AuthError, AuthPolicy, DataPlaneBackend, Kernel, KernelEvent, NodeInfo, NodeRole,
     PinAuthPolicy, RelayDataPlane, Session, SessionPrefs,
 };
+pub use receiver::{ReceiveStats, Receiver};

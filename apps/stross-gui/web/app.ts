@@ -13,7 +13,6 @@ const $ = (id: string): HTMLElement => document.getElementById(id) as HTMLElemen
 const $input = (id: string): HTMLInputElement => $(id) as HTMLInputElement;
 const $select = (id: string): HTMLSelectElement => $(id) as HTMLSelectElement;
 const $btn = (id: string): HTMLButtonElement => $(id) as HTMLButtonElement;
-const $iframe = (id: string): HTMLIFrameElement => $(id) as HTMLIFrameElement;
 
 const invoke: Invoke | undefined = (window as any).__TAURI__?.core?.invoke;
 
@@ -49,12 +48,17 @@ interface RelayInfo {
   transports: string[];
   ip: string | null;
 }
-interface StartResult { relayPort: number; watchUrls: string[]; }
+interface StartResult { relayPort: number; watchUrls: string[]; streamId: string; }
 interface StreamStatus {
   running: boolean; streamId: string | null; title: string | null;
   relayPort: number | null; startedAt: number | null;
 }
 interface CaptureStatus { active: boolean; started: boolean; error: string | null; }
+interface ReceiveStats {
+  running: boolean; received: number; decodedVideo: number;
+  audioBlocks: number; dropped: number; error: string | null;
+}
+interface RemoteStream { streamId: string; title: string; watchers: number; }
 type VideoSource =
   | { kind: 'screen' }
   | { kind: 'camera'; device: string | null }
@@ -259,7 +263,7 @@ function enterApp(): void {
     renderUrls(connection!.relayUrls);
   }
   setTab('send');
-  loadWatchFrame();
+  void loadRemoteStreams();
   void pollStatus();
 }
 
@@ -273,7 +277,7 @@ function disconnect(): void {
   $('conn-badge').textContent = '未连接';
   $('conn-badge').classList.remove('ok');
   $('disconnect-btn').classList.add('hidden');
-  $iframe('watch-frame').src = 'about:blank';
+  void stopReceive();
   setRunning(false);
 }
 
@@ -285,14 +289,7 @@ function setTab(tab: 'send' | 'watch'): void {
   $('tab-watch-btn').classList.toggle('active', tab === 'watch');
   $('tab-send').classList.toggle('hidden', tab !== 'send');
   $('tab-watch').classList.toggle('hidden', tab !== 'watch');
-  if (tab === 'watch') loadWatchFrame();
-}
-
-/** 加载（或刷新）观看页 iframe。 */
-function loadWatchFrame(): void {
-  if (!connection) return;
-  $('watch-loading').classList.remove('hidden');
-  $iframe('watch-frame').src = connection.url + '/';
+  if (tab === 'watch') void loadRemoteStreams();
 }
 
 // ---------------------------------------------------------------- 设备
@@ -449,6 +446,9 @@ async function startStream(): Promise<void> {
     }
     const res = (await call('start_stream', { cfg: buildConfig(), relayUrl: connection.wsUrl })) as StartResult;
     renderUrls(res.watchUrls);
+    // D4：内核签发流 id —— 预填接收面板，本机可立即原生接收
+    $input('recv-stream-input').value = res.streamId || '';
+    void loadRemoteStreams();
     if (IS_ANDROID) {
       void pollMobileStatus(); // 立即查一次真实采集状态
     } else {
@@ -576,6 +576,159 @@ function renderUrls(urls: string[]): void {
   });
 }
 
+// ---------------------------------------------------------------- 接收（原生播放，1e）
+
+/** Tauri 事件监听（__TAURI__.event.listen）。 */
+function listen<T>(event: string, cb: (payload: T) => void): Promise<() => void> {
+  const api = (window as any).__TAURI__?.event;
+  if (!api?.listen) return Promise.resolve(() => {});
+  return api.listen(event, (e: { payload: T }) => cb(e.payload));
+}
+
+let receiving = false;
+let recvFrameCount = 0;
+let recvUnlisten: (() => void) | null = null;
+
+/** 拉取当前中继的在线串流列表（GET /api/streams），渲染可选卡片。 */
+async function loadRemoteStreams(): Promise<void> {
+  const box = $('recv-streams');
+  if (!connection) {
+    box.innerHTML = '';
+    return;
+  }
+  try {
+    const resp = await fetch(connection.url + '/api/streams', { cache: 'no-store' });
+    if (!resp.ok) {
+      box.innerHTML = '<p class="hint">中继未提供串流列表（HTTP ' + resp.status + '）</p>';
+      return;
+    }
+    const data = (await resp.json()) as { streams?: RemoteStream[] } | RemoteStream[];
+    const list = Array.isArray(data) ? data : (data.streams || []);
+    if (!list.length) {
+      box.innerHTML = '<p class="hint">该中继暂无在线串流。可先在「📤 推流」页开始推流。</p>';
+      return;
+    }
+    box.innerHTML = '';
+    for (const s of list) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'scan-card';
+      const name = document.createElement('div');
+      name.className = 'scan-name';
+      name.textContent = s.title || s.streamId;
+      const meta = document.createElement('div');
+      meta.className = 'scan-meta';
+      meta.textContent = s.streamId + (s.watchers ? '  ·  ' + s.watchers + ' 人观看' : '');
+      card.appendChild(name);
+      card.appendChild(meta);
+      card.title = '点击接收 ' + s.streamId;
+      card.onclick = () => {
+        $input('recv-stream-input').value = s.streamId;
+        void startReceive();
+      };
+      box.appendChild(card);
+    }
+  } catch (e) {
+    box.innerHTML = '<p class="hint">拉取串流列表失败：' + (e as Error).message + '</p>';
+  }
+}
+
+function showRecvError(msg: string): void {
+  const box = $('recv-error');
+  box.textContent = msg;
+  box.classList.remove('hidden');
+}
+function hideRecvError(): void {
+  $('recv-error').classList.add('hidden');
+}
+
+/** 开始原生接收：WS watch → 解码 → canvas 绘制。 */
+async function startReceive(): Promise<void> {
+  hideRecvError();
+  if (!connection) {
+    showRecvError('请先连接中继');
+    return;
+  }
+  const streamId = $input('recv-stream-input').value.trim();
+  if (!streamId) {
+    showRecvError('请输入流 id，或从上方选择一串流');
+    return;
+  }
+  $btn('recv-start-btn').disabled = true;
+  try {
+    await call('start_receive', { relay: connection.wsUrl.replace('/ws/push', ''), stream: streamId });
+    receiving = true;
+    recvFrameCount = 0;
+    $('recv-status').textContent = '接收中…';
+    $('recv-dot').className = 'dot starting';
+    $btn('recv-stop-btn').disabled = false;
+    // 订阅解码帧事件 → canvas
+    recvUnlisten = await listen('receive-frame', (p: { pts: number; width: number; height: number; data: number[] }) => {
+      drawReceiveFrame(p.width, p.height, p.data);
+      recvFrameCount += 1;
+    });
+    void pollReceiveStatus();
+  } catch (e) {
+    showRecvError('接收失败：' + (e as Error).message);
+    setReceiving(false);
+  }
+}
+
+/** 停止接收并清空画面。 */
+async function stopReceive(): Promise<void> {
+  try {
+    await call('stop_receive');
+  } catch (_) { /* ignore */ }
+  if (recvUnlisten) {
+    recvUnlisten();
+    recvUnlisten = null;
+  }
+  setReceiving(false);
+  const ctx = canvasCtx();
+  if (ctx) ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+}
+
+function canvasCtx(): CanvasRenderingContext2D | null {
+  const c = $('recv-canvas') as HTMLCanvasElement;
+  return c.getContext('2d');
+}
+
+/** 把 RGBA 帧画到 canvas（宽度自适应，等比缩放）。 */
+function drawReceiveFrame(w: number, h: number, data: number[]): void {
+  const ctx = canvasCtx();
+  if (!ctx) return;
+  const canvas = ctx.canvas;
+  if (canvas.width !== w) canvas.width = w;
+  if (canvas.height !== h) canvas.height = h;
+  const img = new ImageData(new Uint8ClampedArray(data), w, h);
+  ctx.putImageData(img, 0, 0);
+}
+
+function setReceiving(r: boolean): void {
+  receiving = r;
+  $btn('recv-start-btn').disabled = r;
+  $btn('recv-stop-btn').disabled = !r;
+  $('recv-dot').className = 'dot ' + (r ? 'live' : 'idle');
+  $('recv-status').textContent = r ? '接收中 ✓' : '未接收';
+  if (!r) $('recv-meta').textContent = '';
+}
+
+/** 轮询接收统计（帧数 / 解码 / 音频块）。 */
+async function pollReceiveStatus(): Promise<void> {
+  if (!receiving || !connection) return;
+  try {
+    const s = (await call('receive_status')) as ReceiveStats;
+    if (!s.running && recvFrameCount === 0 && !s.error) {
+      $('recv-dot').className = 'dot starting';
+      $('recv-status').textContent = '等待流数据…';
+    }
+    $('recv-meta').textContent = s.error
+      ? '错误：' + s.error
+      : `收到 ${s.received} 帧 · 解码 ${s.decodedVideo} 帧 · 音频 ${s.audioBlocks} 块 · 已绘制 ${recvFrameCount} 帧`;
+  } catch (_) { /* ignore */ }
+  if (receiving) setTimeout(() => void pollReceiveStatus(), 1000);
+}
+
 // ---------------------------------------------------------------- 事件
 
 document.querySelectorAll<HTMLInputElement>('input[name="conn"]').forEach((r) =>
@@ -594,15 +747,11 @@ $btn('scan-btn').onclick = () => void scanRelays();
 $btn('disconnect-btn').onclick = disconnect;
 $btn('tab-send-btn').onclick = () => setTab('send');
 $btn('tab-watch-btn').onclick = () => setTab('watch');
-$btn('watch-refresh-btn').onclick = loadWatchFrame;
 $btn('start-btn').onclick = () => void startStream();
 $btn('stop-btn').onclick = () => void stopStream();
 $btn('viewer-btn').onclick = () => void call('open_viewer').catch((e) => showFatal(String(e)));
-
-// iframe 加载完成后隐藏 loading
-$iframe('watch-frame').addEventListener('load', () => {
-  $('watch-loading').classList.add('hidden');
-});
+$btn('recv-start-btn').onclick = () => void startReceive();
+$btn('recv-stop-btn').onclick = () => void stopReceive();
 
 void init();
 setInterval(() => void pollStatus(), 2000);

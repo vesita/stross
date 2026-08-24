@@ -10,7 +10,6 @@ const $ = (id) => document.getElementById(id);
 const $input = (id) => $(id);
 const $select = (id) => $(id);
 const $btn = (id) => $(id);
-const $iframe = (id) => $(id);
 const invoke = window.__TAURI__?.core?.invoke;
 /** invoke 的安全封装：非 Tauri 环境下返回明确错误而非未定义调用。 */
 function call(cmd, args) {
@@ -214,7 +213,7 @@ function enterApp() {
         renderUrls(connection.relayUrls);
     }
     setTab('send');
-    loadWatchFrame();
+    void loadRemoteStreams();
     void pollStatus();
 }
 function disconnect() {
@@ -227,7 +226,7 @@ function disconnect() {
     $('conn-badge').textContent = '未连接';
     $('conn-badge').classList.remove('ok');
     $('disconnect-btn').classList.add('hidden');
-    $iframe('watch-frame').src = 'about:blank';
+    void stopReceive();
     setRunning(false);
 }
 // ---------------------------------------------------------------- 模式切换
@@ -238,14 +237,7 @@ function setTab(tab) {
     $('tab-send').classList.toggle('hidden', tab !== 'send');
     $('tab-watch').classList.toggle('hidden', tab !== 'watch');
     if (tab === 'watch')
-        loadWatchFrame();
-}
-/** 加载（或刷新）观看页 iframe。 */
-function loadWatchFrame() {
-    if (!connection)
-        return;
-    $('watch-loading').classList.remove('hidden');
-    $iframe('watch-frame').src = connection.url + '/';
+        void loadRemoteStreams();
 }
 // ---------------------------------------------------------------- 设备
 async function loadDevices() {
@@ -394,6 +386,9 @@ async function startStream() {
         }
         const res = (await call('start_stream', { cfg: buildConfig(), relayUrl: connection.wsUrl }));
         renderUrls(res.watchUrls);
+        // D4：内核签发流 id —— 预填接收面板，本机可立即原生接收
+        $input('recv-stream-input').value = res.streamId || '';
+        void loadRemoteStreams();
         if (IS_ANDROID) {
             void pollMobileStatus(); // 立即查一次真实采集状态
         }
@@ -524,6 +519,160 @@ function renderUrls(urls) {
         ul.appendChild(li);
     });
 }
+// ---------------------------------------------------------------- 接收（原生播放，1e）
+/** Tauri 事件监听（__TAURI__.event.listen）。 */
+function listen(event, cb) {
+    const api = window.__TAURI__?.event;
+    if (!api?.listen)
+        return Promise.resolve(() => { });
+    return api.listen(event, (e) => cb(e.payload));
+}
+let receiving = false;
+let recvFrameCount = 0;
+let recvUnlisten = null;
+/** 拉取当前中继的在线串流列表（GET /api/streams），渲染可选卡片。 */
+async function loadRemoteStreams() {
+    const box = $('recv-streams');
+    if (!connection) {
+        box.innerHTML = '';
+        return;
+    }
+    try {
+        const resp = await fetch(connection.url + '/api/streams', { cache: 'no-store' });
+        if (!resp.ok) {
+            box.innerHTML = '<p class="hint">中继未提供串流列表（HTTP ' + resp.status + '）</p>';
+            return;
+        }
+        const data = (await resp.json());
+        const list = Array.isArray(data) ? data : (data.streams || []);
+        if (!list.length) {
+            box.innerHTML = '<p class="hint">该中继暂无在线串流。可先在「📤 推流」页开始推流。</p>';
+            return;
+        }
+        box.innerHTML = '';
+        for (const s of list) {
+            const card = document.createElement('button');
+            card.type = 'button';
+            card.className = 'scan-card';
+            const name = document.createElement('div');
+            name.className = 'scan-name';
+            name.textContent = s.title || s.streamId;
+            const meta = document.createElement('div');
+            meta.className = 'scan-meta';
+            meta.textContent = s.streamId + (s.watchers ? '  ·  ' + s.watchers + ' 人观看' : '');
+            card.appendChild(name);
+            card.appendChild(meta);
+            card.title = '点击接收 ' + s.streamId;
+            card.onclick = () => {
+                $input('recv-stream-input').value = s.streamId;
+                void startReceive();
+            };
+            box.appendChild(card);
+        }
+    }
+    catch (e) {
+        box.innerHTML = '<p class="hint">拉取串流列表失败：' + e.message + '</p>';
+    }
+}
+function showRecvError(msg) {
+    const box = $('recv-error');
+    box.textContent = msg;
+    box.classList.remove('hidden');
+}
+function hideRecvError() {
+    $('recv-error').classList.add('hidden');
+}
+/** 开始原生接收：WS watch → 解码 → canvas 绘制。 */
+async function startReceive() {
+    hideRecvError();
+    if (!connection) {
+        showRecvError('请先连接中继');
+        return;
+    }
+    const streamId = $input('recv-stream-input').value.trim();
+    if (!streamId) {
+        showRecvError('请输入流 id，或从上方选择一串流');
+        return;
+    }
+    $btn('recv-start-btn').disabled = true;
+    try {
+        await call('start_receive', { relay: connection.wsUrl.replace('/ws/push', ''), stream: streamId });
+        receiving = true;
+        recvFrameCount = 0;
+        $('recv-status').textContent = '接收中…';
+        $('recv-dot').className = 'dot starting';
+        $btn('recv-stop-btn').disabled = false;
+        // 订阅解码帧事件 → canvas
+        recvUnlisten = await listen('receive-frame', (p) => {
+            drawReceiveFrame(p.width, p.height, p.data);
+            recvFrameCount += 1;
+        });
+        void pollReceiveStatus();
+    }
+    catch (e) {
+        showRecvError('接收失败：' + e.message);
+        setReceiving(false);
+    }
+}
+/** 停止接收并清空画面。 */
+async function stopReceive() {
+    try {
+        await call('stop_receive');
+    }
+    catch (_) { /* ignore */ }
+    if (recvUnlisten) {
+        recvUnlisten();
+        recvUnlisten = null;
+    }
+    setReceiving(false);
+    const ctx = canvasCtx();
+    if (ctx)
+        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+}
+function canvasCtx() {
+    const c = $('recv-canvas');
+    return c.getContext('2d');
+}
+/** 把 RGBA 帧画到 canvas（宽度自适应，等比缩放）。 */
+function drawReceiveFrame(w, h, data) {
+    const ctx = canvasCtx();
+    if (!ctx)
+        return;
+    const canvas = ctx.canvas;
+    if (canvas.width !== w)
+        canvas.width = w;
+    if (canvas.height !== h)
+        canvas.height = h;
+    const img = new ImageData(new Uint8ClampedArray(data), w, h);
+    ctx.putImageData(img, 0, 0);
+}
+function setReceiving(r) {
+    receiving = r;
+    $btn('recv-start-btn').disabled = r;
+    $btn('recv-stop-btn').disabled = !r;
+    $('recv-dot').className = 'dot ' + (r ? 'live' : 'idle');
+    $('recv-status').textContent = r ? '接收中 ✓' : '未接收';
+    if (!r)
+        $('recv-meta').textContent = '';
+}
+/** 轮询接收统计（帧数 / 解码 / 音频块）。 */
+async function pollReceiveStatus() {
+    if (!receiving || !connection)
+        return;
+    try {
+        const s = (await call('receive_status'));
+        if (!s.running && recvFrameCount === 0 && !s.error) {
+            $('recv-dot').className = 'dot starting';
+            $('recv-status').textContent = '等待流数据…';
+        }
+        $('recv-meta').textContent = s.error
+            ? '错误：' + s.error
+            : `收到 ${s.received} 帧 · 解码 ${s.decodedVideo} 帧 · 音频 ${s.audioBlocks} 块 · 已绘制 ${recvFrameCount} 帧`;
+    }
+    catch (_) { /* ignore */ }
+    if (receiving)
+        setTimeout(() => void pollReceiveStatus(), 1000);
+}
 // ---------------------------------------------------------------- 事件
 document.querySelectorAll('input[name="conn"]').forEach((r) => r.addEventListener('change', () => {
     $('remote-row').classList.toggle('hidden', r.value !== 'remote');
@@ -536,13 +685,10 @@ $btn('scan-btn').onclick = () => void scanRelays();
 $btn('disconnect-btn').onclick = disconnect;
 $btn('tab-send-btn').onclick = () => setTab('send');
 $btn('tab-watch-btn').onclick = () => setTab('watch');
-$btn('watch-refresh-btn').onclick = loadWatchFrame;
 $btn('start-btn').onclick = () => void startStream();
 $btn('stop-btn').onclick = () => void stopStream();
 $btn('viewer-btn').onclick = () => void call('open_viewer').catch((e) => showFatal(String(e)));
-// iframe 加载完成后隐藏 loading
-$iframe('watch-frame').addEventListener('load', () => {
-    $('watch-loading').classList.add('hidden');
-});
+$btn('recv-start-btn').onclick = () => void startReceive();
+$btn('recv-stop-btn').onclick = () => void stopReceive();
 void init();
 setInterval(() => void pollStatus(), 2000);

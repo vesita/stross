@@ -133,7 +133,8 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
             };
             let payload = request(&args.connect, req).await?;
             tracing::info!(
-                "推流已启动: relayPort={} watchUrls={:?}",
+                "推流已启动: streamId={} relayPort={} watchUrls={:?}",
+                payload["streamId"].as_str().unwrap_or("?"),
                 payload["relayPort"],
                 payload["watchUrls"]
             );

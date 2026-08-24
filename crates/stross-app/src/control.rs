@@ -181,6 +181,7 @@ async fn handle_request(app: &StrossApp, text: &str) -> CtrlResponse {
                 Ok(r) => CtrlResponse::ok(json!({
                     "relayPort": r.relay_port,
                     "watchUrls": r.watch_urls,
+                    "streamId": r.stream_id,
                 })),
                 Err(e) => CtrlResponse::err(e),
             }

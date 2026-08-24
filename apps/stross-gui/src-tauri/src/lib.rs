@@ -147,6 +147,64 @@ async fn teardown_session(state: State<'_, StrossApp>, session_id: String) -> Re
 }
 
 // ---------------------------------------------------------------------------
+// 接收播放（1e）：WS 收流 → SessionDataManager → PlaybackSink → 前端 canvas
+// ---------------------------------------------------------------------------
+
+/// 开始接收 `relay` 上的 `stream`，解码帧缩放后经 `receive-frame` 事件推到前端。
+#[tauri::command]
+async fn start_receive(
+    app: tauri::AppHandle,
+    state: State<'_, StrossApp>,
+    relay: String,
+    stream: String,
+) -> Result<(), String> {
+    state.start_receive(relay, stream).await?;
+    let mut frames = match state.take_receive_frames() {
+        Some(r) => r,
+        None => return Err("接收会话已启动但没有帧通道".into()),
+    };
+    // 帧转发：RGBA 最近邻缩放到宽度 ≤ 480 → 事件（显示可跳帧，不反压）
+    tokio::spawn(async move {
+        while let Some(f) = frames.recv().await {
+            let (w, h, data) = scale_rgba(&f.rgba, f.width, f.height, 480);
+            let _ = app.emit(
+                "receive-frame",
+                serde_json::json!({ "pts": f.pts_ms, "width": w, "height": h, "data": data }),
+            );
+        }
+    });
+    Ok(())
+}
+
+/// 停止接收。
+#[tauri::command]
+fn stop_receive(state: State<'_, StrossApp>) {
+    state.stop_receive();
+}
+
+/// 接收统计（帧数 / 解码 / 音频块）。
+#[tauri::command]
+fn receive_status(state: State<'_, StrossApp>) -> stross_app::ReceiveStats {
+    state.receive_status()
+}
+
+/// RGBA 最近邻缩放（显示用；保持宽高比，宽度 ≤ `max_w`）。
+fn scale_rgba(src: &[u8], w: u32, h: u32, max_w: u32) -> (u32, u32, Vec<u8>) {
+    let tw = w.min(max_w);
+    let th = (h * tw / w).max(1);
+    let mut out = Vec::with_capacity((tw * th * 4) as usize);
+    for y in 0..th {
+        let sy = (y * h / th) as usize;
+        for x in 0..tw {
+            let sx = (x * w / tw) as usize;
+            let si = (sy * w as usize + sx) * 4;
+            out.extend_from_slice(&src[si..si + 4]);
+        }
+    }
+    (tw, th, out)
+}
+
+// ---------------------------------------------------------------------------
 
 fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
@@ -164,7 +222,10 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         create_session,
         authorize_session,
         route_session,
-        teardown_session
+        teardown_session,
+        start_receive,
+        stop_receive,
+        receive_status
     ]
 }
 
@@ -317,4 +378,26 @@ pub fn run_relay_only(args: &[String]) {
         handle.stop().await;
         drop(_discovery);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scale_rgba;
+
+    #[test]
+    fn scale_rgba_keeps_aspect_and_size() {
+        // 1280x720 → 宽度上限 480 → 480x270
+        let src = vec![0u8; 1280 * 720 * 4];
+        let (w, h, out) = scale_rgba(&src, 1280, 720, 480);
+        assert_eq!((w, h), (480, 270));
+        assert_eq!(out.len(), 480 * 270 * 4);
+        // 不超过上限时原样
+        let (w2, h2, out2) = scale_rgba(&src, 320, 240, 480);
+        assert_eq!((w2, h2), (320, 240));
+        assert_eq!(out2.len(), 320 * 240 * 4);
+        // 像素值按最近邻拷贝（抽查四角）
+        let tiny = vec![0u8; 2 * 2 * 4];
+        let (_, _, out3) = scale_rgba(&tiny, 2, 2, 4);
+        assert_eq!(out3, tiny);
+    }
 }

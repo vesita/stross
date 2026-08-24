@@ -18,6 +18,10 @@ use stross_core::net::local_ips;
 use stross_core::relay::{DEFAULT_PORT, RelayHandle, RelayServer};
 use stross_media::capture::CaptureBackend;
 use stross_media::pipeline::{StreamConfig, ffmpeg_available};
+use stross_media::playback::RenderedFrame;
+use tokio::sync::mpsc;
+
+use crate::receiver::{ReceiveStats, Receiver};
 use stross_proto::message::{CodecId, DiscoveryInfo, MediaKind, RoleId, TransportId};
 
 use crate::engine::SenderEngine;
@@ -51,6 +55,8 @@ pub struct StrossApp {
     backend: Mutex<Option<Arc<dyn CaptureBackend>>>,
     /// 内核（控制面）：设备图 / 会话管理 / 路由（设计文档 §3）。
     kernel: Kernel,
+    /// 接收播放（1e）：WS 收流 → SessionDataManager → PlaybackSink 解码。
+    receiver: Mutex<Option<Arc<Receiver>>>,
 }
 
 /// 运行中的推流。
@@ -71,6 +77,7 @@ impl StrossApp {
             discovery: Mutex::new(None),
             backend: Mutex::new(None),
             kernel: Kernel::new(),
+            receiver: Mutex::new(None),
         }
     }
 
@@ -296,6 +303,7 @@ impl StrossApp {
         Ok(StartResult {
             relay_port,
             watch_urls: watch_urls(relay_url.as_deref(), relay_port),
+            stream_id: cfg.stream_id.clone(),
         })
     }
 
@@ -362,6 +370,56 @@ impl StrossApp {
     pub fn relay_port(&self) -> Option<u16> {
         self.relay.lock().unwrap().as_ref().map(|r| r.port)
     }
+
+    // -----------------------------------------------------------------------
+    // 接收播放（1e）
+    // -----------------------------------------------------------------------
+
+    /// 开始接收 `relay_url` 上的 `stream_id`（WS watch → 抖动缓冲 → 原生解码）。
+    ///
+    /// 返回的 [`Receiver`] 解码帧通道经 [`StrossApp::take_receive_frames`]
+    /// 交给上层（GUI 绘制）；同时只允许一个接收会话。
+    pub async fn start_receive(
+        &self,
+        relay_url: String,
+        stream_id: String,
+    ) -> Result<Arc<Receiver>, String> {
+        {
+            let guard = self.receiver.lock().unwrap();
+            if let Some(r) = guard.as_ref() {
+                r.stop(); // 先停旧的
+            }
+        }
+        let r = Receiver::start(relay_url, stream_id).await?;
+        *self.receiver.lock().unwrap() = Some(r.clone());
+        Ok(r)
+    }
+
+    /// 停止接收。
+    pub fn stop_receive(&self) {
+        if let Some(r) = self.receiver.lock().unwrap().take() {
+            r.stop();
+        }
+    }
+
+    /// 取出当前接收会话的解码帧通道（每会话一次）。
+    pub fn take_receive_frames(&self) -> Option<mpsc::Receiver<RenderedFrame>> {
+        self.receiver
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|r| r.take_frames())
+    }
+
+    /// 当前接收统计。
+    pub fn receive_status(&self) -> ReceiveStats {
+        self.receiver
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|r| r.stats())
+            .unwrap_or_default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +466,8 @@ pub struct RelayInfo {
 pub struct StartResult {
     pub relay_port: u16,
     pub watch_urls: Vec<String>,
+    /// 实际流 id（内核签发，D4：与 session id 合一；接收端据此订阅）。
+    pub stream_id: String,
 }
 
 #[derive(Serialize)]

@@ -4,7 +4,7 @@
 //! 上层（推流引擎 / 应用状态机）只依赖这个 trait，不关心具体平台：
 //!
 //! * **桌面**：[`FfmpegBackend`] —— ffmpeg 子进程采集（见 [`super::pipeline`]）
-//! * **Android**：UI 层用 MediaProjection + MediaCodec 实现（见 `apps/stross-sender` 的 `mobile.rs`）
+//! * **Android**：UI 层用 MediaProjection + MediaCodec 实现（见 `apps/stross-gui` 的 `mobile.rs`）
 //!
 //! 约定：
 //!

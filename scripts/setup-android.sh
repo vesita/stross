@@ -12,7 +12,7 @@
 #   4. 注入 AndroidManifest 权限与前台服务声明
 #
 # 之后构建:
-#   cd apps/stross-sender/src-tauri
+#   cd apps/stross-gui/src-tauri
 #   cargo tauri android build --apk        # 或 --apk --debug
 #
 # 前置条件: Android SDK + NDK、JDK 17+、Rust Android 目标
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TAURI_DIR="$ROOT/apps/stross-sender/src-tauri"
+TAURI_DIR="$ROOT/apps/stross-gui/src-tauri"
 GEN="$TAURI_DIR/gen/android"
 
 echo "==> 1/4 cargo tauri android init"
@@ -71,10 +71,10 @@ echo ""
 echo "==> 4/4 完成 ✅"
 echo ""
 echo "接下来构建 APK:"
-echo "  cd apps/stross-sender/src-tauri"
+echo "  cd apps/stross-gui/src-tauri"
 echo "  cargo tauri android build --apk --debug"
 echo ""
-echo "构建产物: apps/stross-sender/src-tauri/gen/android/app/build/outputs/apk/"
+echo "构建产物: apps/stross-gui/src-tauri/gen/android/app/build/outputs/apk/"
 
 # 顺带把 Rust Android 目标补上（已存在则跳过）
 rustup target list --installed | grep -q aarch64-linux-android || \

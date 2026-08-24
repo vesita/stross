@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 
 TSC_VERSION="5.9.3"
 
-for d in crates/stross-core/assets/viewer apps/stross-sender/web; do
+for d in crates/stross-core/assets/viewer apps/stross-gui/web; do
   npx -y -p "typescript@${TSC_VERSION}" tsc -p "$d/tsconfig.json" --pretty false
   if ! git diff --quiet -- "$d/app.js"; then
     echo "✗ $d/app.js 与 app.ts 不一致 —— 请运行："

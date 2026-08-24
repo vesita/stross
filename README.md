@@ -24,15 +24,15 @@
 ### 运行推流端
 
 ```bash
-cargo run -p stross-sender          # 桌面应用（Tauri）
+cargo run -p stross-gui          # 桌面应用（Tauri）
 ```
 
-**PC 端是整合的单一应用**（`stross-sender`），两种模式：
+**PC 端是整合的单一应用**（`stross-gui`），两种模式：
 
 ```bash
-stross-sender                      # 桌面应用：连接 → 推流（发）/ 观看（收）
-stross-sender --relay-only         # 无界面中继（服务器/常驻部署，不依赖图形环境）
-stross-sender --relay-only --port 9000 --no-advertise   # 自定义端口 / 关闭 mDNS 广播
+stross-gui                      # 桌面应用：连接 → 推流（发）/ 观看（收）
+stross-gui --relay-only         # 无界面中继（服务器/常驻部署，不依赖图形环境）
+stross-gui --relay-only --port 9000 --no-advertise   # 自定义端口 / 关闭 mDNS 广播
 ```
 
 应用采用「**先连接，再收/发**」的交互：
@@ -71,7 +71,7 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ apps/stross-sender       ⑤ UI 模块：Tauri 薄命令层 + web/ + android/(Kotlin) │
+│ apps/stross-gui       ⑤ UI 模块：Tauri 薄命令层 + web/ + android/(Kotlin) │
 ├────────────────────────────────────────────────────────────┤
 │ crates/stross-app        ③ 核心封装模块：StrossApp 状态机 / SenderEngine / Kernel │
 ├──────────────────────────────┬─────────────────────────────┤
@@ -102,7 +102,7 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 - **③ 核心封装模块**（`stross-app`）：组合共享 + 适配 —— `SenderEngine`
   （中继 + 推流客户端 + 采集后端）、`StrossApp` 状态机（先连接再收/发、mDNS、
   状态查询）。**不依赖任何 UI 框架**，可独立单元测试。
-- **⑤ UI 模块**（`apps/stross-sender`）：Tauri 壳只做两件事 —— 把 `StrossApp`
+- **⑤ UI 模块**（`apps/stross-gui`）：Tauri 壳只做两件事 —— 把 `StrossApp`
   注入托管状态、把前端命令转发给它；Android 原生采集以 `CaptureBackend`
   实现（`mobile.rs`）藏在适配层后面，命令面与桌面完全一致。
 
@@ -132,18 +132,27 @@ crates/
   stross-proto/      ① 协议：帧头 + 控制消息（serde）
   stross-transport/  ①½ 传输插件层：Transport/DataSession + ws/webrtc/srt/quic 实现
   stross-core/       ② 局域网共享：中继 / 推流客户端 / mDNS 发现 / 观看端页面
-  stross-media/      ④ 系统适配：ffmpeg 管线 / 设备枚举 / NAL·ADTS 解析 / CaptureBackend / Sink
+    src/relay/        中继：mod（转发）/ http（路由·API·信令）/ peers（设备发现）
+    src/embedded.rs   内嵌观看端页面（编译期 include_str!）
+  stross-media/      ④ 系统适配：ffmpeg 管线 / 设备枚举 / NAL·ADTS / CaptureBackend / Sink
+    src/pipeline/     管线：mod（配置·会话）/ args（ffmpeg 命令构建）
   stross-app/        ③ 核心封装：StrossApp 状态机 / SenderEngine / Kernel（无 UI 依赖，可单测）
+    src/kernel/       内核控制面：mod（门面）/ graph / session / auth
 apps/
   stross-relay/      独立中继二进制（纯 Rust，薄壳）
-  stross-sender/     ⑤ UI：Tauri 推流端（桌面 + Android）
+  stross-gui/     ⑤ UI：Tauri 客户端（桌面 + Android）
     src-tauri/
       android/       Kotlin 插件源码（MediaProjection + MediaCodec）
-      web/           推流端界面（零构建步骤的 HTML/JS/CSS）
+      src/mobile.rs  Android 采集后端桥（CaptureBackend 实现）
+    web/             客户端界面（TS 真源 → app.js 构建产物）
 scripts/
   setup-android.sh   Android 工程装配脚本
+  check-frontend.sh  前端 app.js 防漂移检查
 crates/stross-core/assets/viewer/   观看端页面（编译期内嵌进中继）
 ```
+
+> 命名约定：`apps/` 放二进制（`stross-relay` 中继、`stross-gui` 客户端），
+> `crates/` 放库；大模块超过约 500 行时拆为目录（`mod.rs` + 领域子文件）。
 
 ## 平台指南
 

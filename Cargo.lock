@@ -4749,6 +4749,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "stross-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "open",
+ "serde",
+ "serde_json",
+ "stross-app",
+ "stross-core",
+ "stross-media",
+ "stross-proto",
+ "tauri",
+ "tauri-build",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "stross-media"
 version = "0.1.0"
 dependencies = [
@@ -4781,26 +4801,6 @@ dependencies = [
  "clap",
  "stross-core",
  "stross-proto",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "stross-sender"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "open",
- "serde",
- "serde_json",
- "stross-app",
- "stross-core",
- "stross-media",
- "stross-proto",
- "tauri",
- "tauri-build",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -19,7 +19,7 @@
 //! +-----------+                        +--------+               +---------+
 //! ```
 
-pub mod assets;
+pub mod embedded;
 #[cfg(feature = "discovery")]
 pub mod discovery;
 pub mod relay;

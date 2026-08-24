@@ -37,7 +37,7 @@ WebRTC 低延迟通道是同一个方向的统一抽象。
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ UI 层（薄消费方）                                                      │
-│   apps/stross-sender（Tauri 壳）/ 观看端页面 /（远期）stross-viewer    │
+│   apps/stross-gui（Tauri 壳）/ 观看端页面 /（远期）stross-viewer    │
 │   只调内核命令 + 订阅内核事件，不直接碰传输与采集                        │
 ├──────────────────────────────────────────────────────────────────────┤
 │ 内核（控制面）stross-kernel                                            │
@@ -265,7 +265,7 @@ pub enum ControlMessage {
 
 ### 5.4 前端 TypeScript（决策记录，2026-08 更新）
 
-两个前端（观看端 `stross-core/assets/viewer/`、推流端 `apps/stross-sender/web/`）
+两个前端（观看端 `stross-core/assets/viewer/`、推流端 `apps/stross-gui/web/`）
 已从手写 JS 迁移为 **TypeScript 真源**（`app.ts`）：
 
 - **约束**：观看端资源由 Rust `include_str!` 编译期内嵌、推流端由 index.html 直接
@@ -343,7 +343,7 @@ pub trait Sink: Send + Sync {
 | relay 数据面转发改为消费 `Transport` trait（单一 ws 实现，行为不变） | `stross-core/src/relay.rs` |
 | `CaptureBackend` 增加 `descriptor()` | `stross-media/src/capture.rs`、`mobile.rs` |
 | Kernel 骨架：`DeviceGraph` + `SessionManager` + `Router`（先支持 Direct / ViaRelay 两种 path）+ `route()` 命令 | `stross-app/src/`（新增 `kernel/` 模块） |
-| Tauri 命令面加 `route_session` / 内核事件（`KernelEvent` 订阅替代/补充 `stream_status` 轮询） | `apps/stross-sender/src-tauri/src/lib.rs` |
+| Tauri 命令面加 `route_session` / 内核事件（`KernelEvent` 订阅替代/补充 `stream_status` 轮询） | `apps/stross-gui/src-tauri/src/lib.rs` |
 | 测试：`transport-memory` 假实现 + Transport 层单测 | `stross-core/tests/` |
 
 **验收**：现有 150 个测试全绿；桌面端到端推流→观看行为与体验不变；帧头 v2 在 WS 上等价 v1。

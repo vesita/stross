@@ -33,7 +33,7 @@
       "icons/icon.ico"
     ],
     "category": "Utility",
-    "shortDescription": "Stross LAN streaming sender",
+    "shortDescription": "Stross LAN streaming client",
     "longDescription": "Stream screen, camera, microphone and system audio over your LAN. Watch from any browser."
   }
 }

@@ -6,7 +6,7 @@
 
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
-│ apps/stross-sender  ⑤ UI 模块：Tauri 薄命令层 + web/ + android/(Kotlin) │
+│ apps/stross-gui  ⑤ UI 模块：Tauri 薄命令层 + web/ + android/(Kotlin) │
 ├──────────────────────────────────────────────────────────────────┤
 │ crates/stross-app   ③ 核心封装模块：StrossApp 状态机 / SenderEngine / Kernel │
 ├───────────────────────────────┬──────────────────────────────────┤
@@ -29,7 +29,7 @@
 | ② 共享 | `stross-core` | 纯数据共享逻辑：中继、推流客户端、mDNS、观看端页面（re-export transport/net） | proto + transport |
 | ④ 适配 | `stross-media` | 系统适配：ffmpeg 采集管线、设备枚举、H.264/AAC 切帧、`CaptureBackend`（Source）/ `Sink`（录制） | proto |
 | ③ 封装 | `stross-app` | 应用状态机 + 引擎组合 + 内核（设备图/会话/路由/鉴权），无 UI 依赖、可单测 | core + media |
-| ⑤ UI | `stross-sender` | Tauri 薄命令层 + Web 前端 + Android Kotlin 桥 | app |
+| ⑤ UI | `stross-gui` | Tauri 薄命令层 + Web 前端 + Android Kotlin 桥 | app |
 
 > 协议为何保持独立小 crate：共享模块与系统适配模块**都**要使用 `Frame`/`ControlMessage`，
 > 独立成 crate 才能让 media 只依赖协议、而不反向依赖共享模块（否则 media 会拉进 axum 等中继依赖）。
@@ -192,7 +192,7 @@ Rust 侧用 `AnnexBSplitter`（状态机切 NAL）→ `AccessUnitBuilder`
 UI 层（桌面 / Android）只把 `invoke` 命令转发到这里，因此命令面两边完全一致：
 桌面 `start_stream` 与 Android 走同一条路径，平台差异被 `CaptureBackend` 隔离。
 
-## 7. Android 采集（apps/stross-sender/src-tauri/android/）
+## 7. Android 采集（apps/stross-gui/src-tauri/android/）
 
 - `MediaPlugin.kt`：`@TauriPlugin`，`@Command startCapture/stopCapture`。
 - 屏幕：`MediaProjectionManager.createScreenCaptureIntent()` 授权 →

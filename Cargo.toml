@@ -7,7 +7,7 @@ members = [
     "crates/stross-media",
     "crates/stross-app",
     "apps/stross-relay",
-    "apps/stross-sender/src-tauri",
+    "apps/stross-gui/src-tauri",
 ]
 
 [workspace.package]

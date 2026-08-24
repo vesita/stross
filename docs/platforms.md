@@ -23,14 +23,14 @@ Arch 系：`sudo pacman -S webkit2gtk-4.1 gtk3 ffmpeg pulseaudio`
 
 ```bash
 # 推流端（Tauri 桌面应用）—— PC 端整合的单一应用
-cargo run -p stross-sender
+cargo run -p stross-gui
 
 # 同一二进制的无界面中继模式（服务器/常驻部署，不依赖图形环境）
-cargo run -p stross-sender -- --relay-only
-cargo run -p stross-sender -- --relay-only --port 9000 --no-advertise
+cargo run -p stross-gui -- --relay-only
+cargo run -p stross-gui -- --relay-only --port 9000 --no-advertise
 
 # 打包安装包（桌面应用）
-cargo tauri build          # 在 apps/stross-sender/src-tauri 下执行
+cargo tauri build          # 在 apps/stross-gui/src-tauri 下执行
 
 # 可选：独立中继组件（多机部署场景）
 cargo run -p stross-relay -- -p 8777
@@ -70,11 +70,11 @@ rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-and
 ./scripts/setup-android.sh
 
 # 2) 构建 APK（可加 --target aarch64 只编 arm64，加快速度）
-cd apps/stross-sender/src-tauri
+cd apps/stross-gui/src-tauri
 cargo tauri android build --apk --debug
 ```
 
-APK 输出：`apps/stross-sender/src-tauri/gen/android/app/build/outputs/apk/`
+APK 输出：`apps/stross-gui/src-tauri/gen/android/app/build/outputs/apk/`
 
 > 已在 Linux 上验证：aarch64 debug APK 构建成功（minSdk 24 / targetSdk 36，
 > 含 `RECORD_AUDIO`、`FOREGROUND_SERVICE_MEDIA_PROJECTION` 等权限）。

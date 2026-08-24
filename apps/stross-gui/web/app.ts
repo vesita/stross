@@ -1,6 +1,6 @@
 // Stross 推流端控制界面（Tauri 前端，TypeScript 源文件，唯一真源）。
 //
-// 生成 app.js：`npx tsc -p apps/stross-sender/web/tsconfig.json`
+// 生成 app.js：`npx tsc -p apps/stross-gui/web/tsconfig.json`
 // （app.js 是构建产物，提交进仓库——Tauri 直接加载，Rust 构建不依赖 node）。
 // 修改本文件后必须重新生成 app.js 并提交两者。
 //

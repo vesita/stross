@@ -1,97 +1,34 @@
-//! 内核（控制面）骨架：设备图 / 会话管理 / 路由。
+//! 内核（控制面）骨架：设备图 / 会话管理 / 路由 / 鉴权。
 //!
 //! 见 docs/plugin-architecture.md §3——内核与编解码、传输完全解耦，
 //! 只负责：
 //!
-//! * **设备图**（[`DeviceGraph`]）：局域网内节点的能力注册与发现结果聚合
-//! * **会话管理**（[`SessionManager`]）：会话拓扑（source → sinks[]）与协商结果
-//! * **路由**（[`Router`]）：传输方向控制（直连 / 经中继 / 组播）
+//! * **设备图**（[`graph`]）：局域网内节点的能力注册与发现结果聚合
+//! * **会话管理**（[`session`]）：会话拓扑（source → sinks[]）与协商结果
+//! * **路由**（[`session::Router`]）：传输方向控制（直连 / 经中继 / 组播）
+//! * **鉴权**（[`auth`]）：会话级访问码（PIN）策略
 //!
 //! 阶段 0 仅提供骨架与路由 API（`create_session` / `route` / `teardown`），
 //! 不接真实传输协商（阶段 1 落地）；所有变更通过 [`KernelEvent`] 广播给 UI。
 
-use std::collections::HashMap;
+mod auth;
+mod graph;
+mod session;
+
+pub use auth::{AuthError, AuthPolicy, PinAuthPolicy};
+pub use graph::{Endpoint, NodeInfo, NodeRole};
+pub use session::{Negotiated, Session, SessionPrefs};
+
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use stross_proto::message::{CapabilityDescriptor, ReliabilityProfile, RoutePath};
+use stross_proto::message::{CapabilityDescriptor, RoutePath};
 
-/// 节点角色。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum NodeRole {
-    Sender,
-    Viewer,
-    Relay,
-    Controller,
-}
-
-/// 节点能力端点（传输 + 地址）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Endpoint {
-    pub transport: String,
-    pub addr: String,
-}
-
-/// 一个参与互联的节点。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NodeInfo {
-    pub node_id: String,
-    pub name: String,
-    pub roles: Vec<NodeRole>,
-    pub caps: Vec<CapabilityDescriptor>,
-    pub endpoints: Vec<Endpoint>,
-}
-
-/// 会话协商结果（阶段 1 起由 Offer/Answer 填充）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Negotiated {
-    pub transport: String,
-    pub codec: String,
-    pub profile: ReliabilityProfile,
-}
-
-/// 一条「从 A 推送到 B（可多个）」的互联会话。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Session {
-    pub id: String,
-    pub source: String,
-    pub sinks: Vec<String>,
-    pub path: RoutePath,
-    pub negotiated: Negotiated,
-    /// 会话是否启用访问码（PIN）——控制操作需先 [`Kernel::authorize`]。
-    pub requires_pin: bool,
-    /// 控制面是否已通过鉴权（内部状态，不序列化）。
-    #[serde(skip)]
-    authorized: bool,
-}
-
-/// 会话创建偏好。
-#[derive(Debug, Clone, Default)]
-pub struct SessionPrefs {
-    pub profile: ReliabilityProfile,
-    pub preferred_transport: Option<String>,
-    /// 会话访问码（PIN，可选）：设置后控制操作（route / teardown）需先
-    /// [`Kernel::authorize`]（设计文档 §7 会话级访问码）。
-    pub access_code: Option<String>,
-}
-
-impl Session {
-    /// 控制操作前的鉴权门禁：启用访问码且未通过 [`Kernel::authorize`] → 拒绝。
-    fn require_authorized(&self) -> Result<(), String> {
-        if self.requires_pin && !self.authorized {
-            return Err("会话需要访问码（PIN），请先 authorize".into());
-        }
-        Ok(())
-    }
-}
+use self::graph::DeviceGraph;
+use self::session::{Router, SessionManager};
 
 /// 内核事件（推给 UI，替代轮询）。
 #[derive(Debug, Clone, Serialize)]
@@ -100,99 +37,6 @@ pub enum KernelEvent {
     SessionStarted { session: Session },
     SessionRouted { session_id: String, path: RoutePath },
     SessionEnded { session_id: String },
-}
-
-/// 设备图：节点注册与能力聚合。
-#[derive(Default)]
-struct DeviceGraph {
-    nodes: Mutex<HashMap<String, NodeInfo>>,
-}
-
-/// 会话管理：会话拓扑与协商结果。
-#[derive(Default)]
-struct SessionManager {
-    sessions: Mutex<HashMap<String, Session>>,
-}
-
-/// 路由：传输方向选择策略。
-struct Router;
-
-impl Router {
-    /// 默认路径：单接收端直连；多接收端组播；无接收端经本机中继兜底。
-    fn default_path(sinks: &[String]) -> RoutePath {
-        match sinks {
-            [one] => RoutePath::Direct { node: one.clone() },
-            many => RoutePath::Mesh {
-                nodes: many.to_vec(),
-            },
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 控制面鉴权（设计文档 §7）
-// ---------------------------------------------------------------------------
-
-/// 会话鉴权错误。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthError {
-    /// 会话设置了访问码但未提供。
-    CodeRequired,
-    /// 访问码不匹配。
-    CodeMismatch,
-}
-
-impl std::fmt::Display for AuthError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AuthError::CodeRequired => write!(f, "会话需要访问码（PIN）"),
-            AuthError::CodeMismatch => write!(f, "访问码错误"),
-        }
-    }
-}
-
-impl std::error::Error for AuthError {}
-
-/// 控制面鉴权策略。
-///
-/// 阶段 2 内置 [`PinAuthPolicy`]；远期可换 WASM 策略插件（Extism）而不动内核。
-pub trait AuthPolicy: Send + Sync {
-    /// 校验访问码；返回 `Ok` 放行。
-    fn authorize(&self, session_id: &str, access_code: Option<&str>) -> Result<(), AuthError>;
-    /// 设置/清除会话访问码（`None` = 清除）。默认无操作（无状态策略）。
-    fn set_code(&self, _session_id: &str, _code: Option<&str>) {}
-}
-
-/// 内置 PIN 策略：会话创建者设置访问码，控制操作前必须通过 [`AuthPolicy::authorize`]。
-#[derive(Default)]
-pub struct PinAuthPolicy {
-    pins: std::sync::Mutex<HashMap<String, String>>,
-}
-
-impl AuthPolicy for PinAuthPolicy {
-    fn authorize(&self, session_id: &str, access_code: Option<&str>) -> Result<(), AuthError> {
-        let pin = self.pins.lock().unwrap().get(session_id).cloned();
-        match pin {
-            None => Ok(()), // 会话无访问码，放行
-            Some(pin) => match access_code {
-                None => Err(AuthError::CodeRequired),
-                Some(code) if code == pin => Ok(()),
-                Some(_) => Err(AuthError::CodeMismatch),
-            },
-        }
-    }
-
-    fn set_code(&self, session_id: &str, code: Option<&str>) {
-        let mut pins = self.pins.lock().unwrap();
-        match code {
-            Some(code) => {
-                pins.insert(session_id.to_string(), code.to_string());
-            }
-            None => {
-                pins.remove(session_id);
-            }
-        }
-    }
 }
 
 /// 内核门面。
@@ -330,7 +174,7 @@ impl Kernel {
         self.auth
             .authorize(id, access_code)
             .map_err(|e| e.to_string())?;
-        session.authorized = true;
+        session.mark_authorized();
         Ok(())
     }
 

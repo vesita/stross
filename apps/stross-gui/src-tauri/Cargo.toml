@@ -1,5 +1,5 @@
 [package]
-name = "stross-sender"
+name = "stross-gui"
 description = "Stross 推流端（Tauri 桌面 + Android）"
 version.workspace = true
 edition.workspace = true
@@ -9,7 +9,7 @@ license.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [lib]
-name = "stross_sender_lib"
+name = "stross_gui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]

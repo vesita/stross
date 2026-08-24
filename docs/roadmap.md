@@ -25,7 +25,7 @@
       控制 API 与观看页同端口
 - [ ] `stross-app`: `StrossApp::start_relay_with(extra)` + 节点信息接口
       （名称/角色/能力/当前流状态）
-- [ ] `stross-sender`: 控制 API 路由（`/api/node`、`stream start/stop/status`）
+- [ ] `stross-gui`: 控制 API 路由（`/api/node`、`stream start/stop/status`）
       —— 跨设备控制：设备 A 的 UI 直接调用设备 B 的控制 API，让 B 开始/停止推流
 - [ ] mDNS 广播增强：TXT 携带设备角色（sender/viewer）、能力、控制端口；
       发现列表展示设备名而非裸地址
@@ -59,7 +59,7 @@
 ## 已完成的架构基础（2026-08）
 
 - [x] 五层模块化：`stross-proto`（协议）/ `stross-core`（局域网共享）/
-      `stross-media`（系统适配）/ `stross-app`（核心封装）/ `stross-sender`（UI）
+      `stross-media`（系统适配）/ `stross-app`（核心封装）/ `stross-gui`（UI）
 - [x] `CaptureBackend` trait：桌面 ffmpeg 与 Android 原生采集统一抽象，
       命令面两边一致（`start_stream` / `capture_status`）
 - [x] Android 端到端验证：屏幕+麦克风推流 → 电脑观看（166 视频帧 + 260 音频帧/5s）

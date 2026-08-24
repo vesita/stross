@@ -15,8 +15,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import android.util.Log
 
 /**
  * MediaProjection 前台服务。
@@ -37,21 +36,51 @@ class ProjectionService : Service() {
         const val EXTRA_RESULT_CODE = "resultCode"
         const val EXTRA_RESULT_DATA = "resultData"
 
-        private val latch = CountDownLatch(1)
+        // 每次推流可复用：`ready` 标记 + 条件等待（CountDownLatch 一次性，
+        // 第二次推流会立即返回旧状态导致"伪超时"）。
+        private val lock = Object()
 
         @Volatile
         private var projection: MediaProjection? = null
+        private var ready = false
+
+        /** 重置等待状态（插件每次请求投影前调用）。 */
+        fun resetProjection() {
+            synchronized(lock) {
+                projection = null
+                ready = false
+            }
+        }
 
         /** 等待插件取走 MediaProjection（最多 [timeoutMs] 毫秒）。 */
         fun awaitProjection(timeoutMs: Long): MediaProjection? {
-            latch.await(timeoutMs, TimeUnit.MILLISECONDS)
-            return projection
+            synchronized(lock) {
+                if (!ready) {
+                    try {
+                        lock.wait(timeoutMs)
+                    } catch (e: InterruptedException) {
+                        return null
+                    }
+                }
+                return projection
+            }
+        }
+
+        /** 服务侧投递投影（成功或失败都通知等待方）。 */
+        fun provideProjection(p: MediaProjection?) {
+            synchronized(lock) {
+                projection = p
+                ready = true
+                lock.notifyAll()
+            }
         }
 
         fun consumeProjection(): MediaProjection? {
-            val p = projection
-            projection = null
-            return p
+            synchronized(lock) {
+                val p = projection
+                projection = null
+                return p
+            }
         }
     }
 
@@ -73,16 +102,24 @@ class ProjectionService : Service() {
 
         if (code == Activity.RESULT_OK && data != null) {
             val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            val proj = pm.getMediaProjection(code, data)
+            val proj = try {
+                pm.getMediaProjection(code, data)
+            } catch (e: Exception) {
+                Log.w(TAG, "getMediaProjection 失败: ${e.message}")
+                null
+            }
             if (proj != null) {
                 proj.registerCallback(object : MediaProjection.Callback() {
                     override fun onStop() {
                         stopSelf()
                     }
                 }, Handler(Looper.getMainLooper()))
-                projection = proj
-                latch.countDown()
+                provideProjection(proj)
+            } else {
+                provideProjection(null)
             }
+        } else {
+            provideProjection(null)
         }
         return START_NOT_STICKY
     }

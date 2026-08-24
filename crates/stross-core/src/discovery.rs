@@ -1,6 +1,6 @@
 //! mDNS 服务发现（可选 feature `discovery`）。
 //!
-//! 中继/推流端用 `_stross._tcp` 广播自己，局域网内其它设备可以发现观看地址。
+//! 中继/推流端用 `_stross._tcp` 广播自己，局域网内其它设备可以发现中继入口。
 //! 借鉴 [mdns-sd](https://crates.io/crates/mdns-sd) 的用法。
 //!
 //! 能力引导（F1.2）：TXT 单 key（`stross`）承载整个 [`DiscoveryInfo`]（JSON），

@@ -18,10 +18,13 @@ use stross_core::net::local_ips;
 use stross_core::relay::{DEFAULT_PORT, RelayHandle, RelayServer};
 use stross_media::capture::CaptureBackend;
 use stross_media::pipeline::{StreamConfig, ffmpeg_available};
+#[cfg(not(target_os = "android"))]
+use stross_media::playback::AudioOut;
 use stross_media::playback::RenderedFrame;
 use tokio::sync::mpsc;
 
 use crate::receiver::{ReceiveStats, Receiver};
+use stross_proto::frame::Frame;
 use stross_proto::message::{CodecId, DiscoveryInfo, MediaKind, RoleId, TransportId};
 
 use crate::engine::SenderEngine;
@@ -378,8 +381,32 @@ impl StrossApp {
     /// 开始接收 `relay_url` 上的 `stream_id`（WS watch → 抖动缓冲 → 原生解码）。
     ///
     /// 返回的 [`Receiver`] 解码帧通道经 [`StrossApp::take_receive_frames`]
-    /// 交给上层（GUI 绘制）；同时只允许一个接收会话。
+    /// 交给上层（GUI 绘制）；同时只允许一个接收会话。`audio_out` 决定音频去向
+    /// （设备播放 / 丢弃）。Android 请用 [`StrossApp::start_receive_raw`]
+    /// （编码帧 → Kotlin MediaCodec）。
+    #[cfg(not(target_os = "android"))]
     pub async fn start_receive(
+        &self,
+        relay_url: String,
+        stream_id: String,
+        audio_out: AudioOut,
+    ) -> Result<Arc<Receiver>, String> {
+        {
+            let guard = self.receiver.lock().unwrap();
+            if let Some(r) = guard.as_ref() {
+                r.stop(); // 先停旧的
+            }
+        }
+        let r = Receiver::start(relay_url, stream_id, audio_out).await?;
+        *self.receiver.lock().unwrap() = Some(r.clone());
+        Ok(r)
+    }
+
+    /// 开始接收 `relay_url` 上的 `stream_id`（WS watch → 抖动缓冲 → **不解码**）。
+    ///
+    /// 编码帧经 [`StrossApp::take_receive_raw_frames`] 交给上层（Android 播放：
+    /// Kotlin MediaCodec 解码）；同时只允许一个接收会话。
+    pub async fn start_receive_raw(
         &self,
         relay_url: String,
         stream_id: String,
@@ -390,7 +417,7 @@ impl StrossApp {
                 r.stop(); // 先停旧的
             }
         }
-        let r = Receiver::start(relay_url, stream_id).await?;
+        let r = Receiver::start_raw(relay_url, stream_id).await?;
         *self.receiver.lock().unwrap() = Some(r.clone());
         Ok(r)
     }
@@ -409,6 +436,15 @@ impl StrossApp {
             .unwrap()
             .as_ref()
             .and_then(|r| r.take_frames())
+    }
+
+    /// 取出当前接收会话的编码帧通道（`start_receive_raw`；每会话一次）。
+    pub fn take_receive_raw_frames(&self) -> Option<mpsc::Receiver<Frame>> {
+        self.receiver
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|r| r.take_raw_frames())
     }
 
     /// 当前接收统计。
@@ -513,13 +549,13 @@ fn relay_info(port: u16) -> RelayInfo {
     }
 }
 
-/// 局域网可访问的观看地址。
+/// 局域网可访问的中继入口（供其它设备连接数据面 / REST 端点）。
 ///
 /// * 推到外部中继（`relay_url` 非回环地址）→ 直接指向该中继
 /// * 本机中继（回环地址 / 未指定）→ 列出本机局域网 IP
 fn watch_urls(relay_url: Option<&str>, relay_port: u16) -> Vec<String> {
     if let Some(url) = relay_url {
-        // ws://host:port/ws/push → http://host:port/
+        // ws://host:port/ws/push → 中继入口 http://host:port/
         if let Some(rest) = url
             .strip_prefix("ws://")
             .or_else(|| url.strip_prefix("wss://"))

@@ -29,8 +29,14 @@ pub use pipeline::{
     AudioSourceConfig, Quality, StreamConfig, StreamSession, VideoSource, ffmpeg_available,
     ffmpeg_bin,
 };
+#[cfg(not(target_os = "android"))]
 pub use playback::{
     AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackError, PlaybackSession,
     PlaybackSink, PlaybackStats, RenderedFrame, VideoOut,
+};
+#[cfg(target_os = "android")]
+pub use playback::{
+    AudioOut, AudioOutSpec, PlaybackConfig, PlaybackError, PlaybackSession, PlaybackSink,
+    PlaybackStats, RenderedFrame, VideoOut,
 };
 pub use sink::{RecordingSink, Sink};

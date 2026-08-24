@@ -22,9 +22,14 @@ use std::sync::{Arc, Mutex};
 use stross_proto::frame::Frame;
 use stross_proto::message::{CapabilityDescriptor, CodecId};
 
+#[cfg(not(target_os = "android"))]
 pub mod audio_out;
+/// ffmpeg 子进程解码后端：仅桌面（Android 播放走 Kotlin MediaCodec，见
+/// `apps/stross-gui/src-tauri/android/PlaybackPlugin.kt`）。
+#[cfg(not(target_os = "android"))]
 pub mod ffmpeg;
 
+#[cfg(not(target_os = "android"))]
 pub use ffmpeg::FfmpegPlaybackSink;
 
 /// 视频输出配置。
@@ -35,7 +40,8 @@ pub struct VideoOut {
 }
 
 /// 音频输出方式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AudioOut {
     /// 默认输出设备（扬声器 / 录音设备，D3 反向麦克风的关键路径）。
     Device,

@@ -7,8 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Query, State};
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -16,7 +15,6 @@ use serde::{Deserialize, Serialize};
 
 use stross_proto::message::StreamInfo;
 
-use crate::embedded;
 use crate::relay::{PeerInfo, RelayState, handle_push, handle_watch};
 use crate::transport::webrtc::{PeerCommand, WebRtcTransport};
 use crate::transport::ws::WsTransport;
@@ -39,10 +37,6 @@ async fn cors_layer(
 /// 组装中继的 HTTP 路由（静态页面 + REST API + WebSocket 升级）。
 pub(super) fn router(state: RelayState) -> Router {
     Router::new()
-        .route("/", get(serve_index))
-        .route("/style.css", get(serve_style))
-        .route("/app.js", get(serve_app_js))
-        .route("/jmuxer.js", get(serve_jmuxer))
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/streams", get(api_streams))
         .route("/api/peers", get(api_peers))
@@ -52,31 +46,6 @@ pub(super) fn router(state: RelayState) -> Router {
         .route("/ws/watch", get(ws_watch))
         .layer(axum::middleware::from_fn(cors_layer))
         .with_state(state)
-}
-
-async fn serve_index() -> Response {
-    static_html(embedded::INDEX_HTML, "text/html; charset=utf-8")
-}
-
-async fn serve_style() -> Response {
-    static_html(embedded::STYLE_CSS, "text/css; charset=utf-8")
-}
-
-async fn serve_app_js() -> Response {
-    static_html(embedded::APP_JS, "text/javascript; charset=utf-8")
-}
-
-async fn serve_jmuxer() -> Response {
-    static_html(embedded::JMUXER_JS, "text/javascript; charset=utf-8")
-}
-
-fn static_html(body: &'static str, mime: &'static str) -> Response {
-    let mut resp = Response::new(body.into());
-    resp.headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static(mime));
-    resp.headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    resp
 }
 
 async fn api_streams(State(state): State<RelayState>) -> Json<Vec<StreamInfo>> {

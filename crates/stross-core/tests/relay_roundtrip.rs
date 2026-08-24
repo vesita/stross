@@ -1,8 +1,8 @@
-//! 中继集成测试：推流端 → 中继 → 观看端全链路。
+//! 中继集成测试：推流端 → 中继 → 接收端全链路。
 //!
 //! 测试不依赖 ffmpeg，直接构造协议帧推入，验证：
 //! * REST `/api/streams` 列出流
-//! * 观看端先收到 `Ready`，且视频只在关键帧后转发
+//! * 接收端先收到 `Ready`，且视频只在关键帧后转发
 //! * 推流端断开后流被移除
 
 use std::time::Duration;
@@ -157,15 +157,14 @@ async fn push_watch_relay_roundtrip() {
 }
 
 #[tokio::test]
-async fn healthz_and_index_served() {
+async fn healthz_served() {
     let handle = RelayServer::start(0).await.unwrap();
     let port = handle.port;
     let health = reqwest_lite(&format!("http://127.0.0.1:{port}/healthz")).await;
     assert_eq!(health, "ok");
+    // D1：无浏览器观看端，根路径与静态资产已移除（404 空 body）
     let index = reqwest_lite(&format!("http://127.0.0.1:{port}/")).await;
-    assert!(index.contains("Stross"));
-    let js = reqwest_lite(&format!("http://127.0.0.1:{port}/app.js")).await;
-    assert!(js.contains("JMuxer"));
+    assert!(index.is_empty(), "根路径应 404 空 body（观看端已移除），实际: {index}");
     handle.stop().await;
 }
 

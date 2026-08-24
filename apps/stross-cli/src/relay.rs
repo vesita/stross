@@ -21,10 +21,10 @@ pub async fn run(args: RelayArgs) -> anyhow::Result<()> {
     let ips = stross_core::net::local_ips();
     tracing::info!("📡 Stross 中继已启动");
     if ips.is_empty() {
-        tracing::info!("观看地址: http://127.0.0.1:{}/", handle.port);
+        tracing::info!("中继入口: http://127.0.0.1:{}/", handle.port);
     }
     for ip in &ips {
-        tracing::info!("观看地址: http://{ip}:{}/", handle.port);
+        tracing::info!("中继入口: http://{ip}:{}/", handle.port);
     }
     tracing::info!("推流地址: ws://<中继IP>:{}/ws/push", handle.port);
     tracing::info!("流列表API: /api/streams");

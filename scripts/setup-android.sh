@@ -31,6 +31,7 @@ PKG_DIR="$GEN/app/src/main/java/dev/stross/sender"
 echo "==> 2/4 复制 Kotlin 插件 -> $PKG_DIR"
 mkdir -p "$PKG_DIR"
 cp "$TAURI_DIR/android/MediaPlugin.kt" "$PKG_DIR/"
+cp "$TAURI_DIR/android/PlaybackPlugin.kt" "$PKG_DIR/"
 cp "$TAURI_DIR/android/ProjectionService.kt" "$PKG_DIR/"
 cp "$TAURI_DIR/android/MainActivity.kt" "$PKG_DIR/"
 

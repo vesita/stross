@@ -14,7 +14,7 @@ pub fn local_ips() -> Vec<IpAddr> {
         .collect()
 }
 
-/// 第一个可用的局域网 IP（用于展示观看地址）。
+/// 第一个可用的局域网 IP（用于展示中继入口）。
 pub fn local_ip() -> Option<IpAddr> {
     local_ips().into_iter().next()
 }

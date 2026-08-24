@@ -16,6 +16,7 @@ use stross_app::{CaptureStatusView, Platform, StrossApp};
 #[cfg(not(mobile))]
 use stross_media::capture::FfmpegBackend;
 use stross_media::pipeline::StreamConfig;
+#[cfg(not(mobile))]
 use stross_proto::message::{CodecId, DiscoveryInfo, RoleId, TransportId};
 use tauri::{Emitter, Manager, State};
 
@@ -69,18 +70,6 @@ fn stream_status(state: State<'_, StrossApp>) -> stross_app::app::StreamStatus {
 #[tauri::command]
 fn capture_status(state: State<'_, StrossApp>) -> CaptureStatusView {
     state.capture_status()
-}
-
-#[tauri::command]
-fn open_viewer(state: State<'_, StrossApp>) -> Result<(), String> {
-    if cfg!(target_os = "android") {
-        // Android 上 open crate 无法唤起系统浏览器（会报"没有文件或目录"），
-        // 请使用「观看」页的内嵌播放器
-        return Err("Android 请直接使用「观看」页".into());
-    }
-    let port = state.stream_relay_port();
-    let url = format!("http://127.0.0.1:{port}/");
-    open::that(&url).map_err(|e| format!("打开浏览器失败: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -151,29 +140,48 @@ async fn teardown_session(state: State<'_, StrossApp>, session_id: String) -> Re
 // ---------------------------------------------------------------------------
 
 /// 开始接收 `relay` 上的 `stream`，解码帧缩放后经 `receive-frame` 事件推到前端。
+/// `audio` 决定音频去向：`device` 扬声器播放 / `discard` 静音。
+///
+/// 平台差异（1f-3）：桌面用 ffmpeg 子进程解码（PlaybackSink）；Android 无
+/// ffmpeg，走编码帧转发 → Kotlin MediaCodec 解码（`mobile::spawn_android_playback`），
+/// 前端事件与绘制完全一致。
 #[tauri::command]
 async fn start_receive(
     app: tauri::AppHandle,
     state: State<'_, StrossApp>,
     relay: String,
     stream: String,
+    audio: stross_media::playback::AudioOut,
 ) -> Result<(), String> {
-    state.start_receive(relay, stream).await?;
-    let mut frames = match state.take_receive_frames() {
-        Some(r) => r,
-        None => return Err("接收会话已启动但没有帧通道".into()),
-    };
-    // 帧转发：RGBA 最近邻缩放到宽度 ≤ 480 → 事件（显示可跳帧，不反压）
-    tokio::spawn(async move {
-        while let Some(f) = frames.recv().await {
-            let (w, h, data) = scale_rgba(&f.rgba, f.width, f.height, 480);
-            let _ = app.emit(
-                "receive-frame",
-                serde_json::json!({ "pts": f.pts_ms, "width": w, "height": h, "data": data }),
-            );
-        }
-    });
-    Ok(())
+    #[cfg(target_os = "android")]
+    {
+        state.start_receive_raw(relay.clone(), stream.clone()).await?;
+        let frames = match state.take_receive_raw_frames() {
+            Some(r) => r,
+            None => return Err("接收会话已启动但没有编码帧通道".into()),
+        };
+        crate::mobile::spawn_android_playback(&app, frames, audio);
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        state.start_receive(relay, stream, audio).await?;
+        let mut frames = match state.take_receive_frames() {
+            Some(r) => r,
+            None => return Err("接收会话已启动但没有帧通道".into()),
+        };
+        // 帧转发：RGBA 最近邻缩放到宽度 ≤ 480 → 事件（显示可跳帧，不反压）
+        tokio::spawn(async move {
+            while let Some(f) = frames.recv().await {
+                let (w, h, data) = scale_rgba(&f.rgba, f.width, f.height, 480);
+                let _ = app.emit(
+                    "receive-frame",
+                    serde_json::json!({ "pts": f.pts_ms, "width": w, "height": h, "data": data }),
+                );
+            }
+        });
+        Ok(())
+    }
 }
 
 /// 停止接收。
@@ -189,6 +197,7 @@ fn receive_status(state: State<'_, StrossApp>) -> stross_app::ReceiveStats {
 }
 
 /// RGBA 最近邻缩放（显示用；保持宽高比，宽度 ≤ `max_w`）。
+#[cfg(not(target_os = "android"))]
 fn scale_rgba(src: &[u8], w: u32, h: u32, max_w: u32) -> (u32, u32, Vec<u8>) {
     let tw = w.min(max_w);
     let th = (h * tw / w).max(1);
@@ -216,7 +225,6 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         stop_stream,
         stream_status,
         capture_status,
-        open_viewer,
         kernel_nodes,
         kernel_sessions,
         create_session,
@@ -273,7 +281,9 @@ pub fn run() {
         })
         .invoke_handler(invoke_handler());
     #[cfg(mobile)]
-    let builder = builder.plugin(mobile::init());
+    let builder = builder
+        .plugin(mobile::init_capture())
+        .plugin(mobile::init_playback());
     builder
         .run(tauri::generate_context!())
         .expect("Stross 启动失败");
@@ -328,10 +338,10 @@ pub fn run_relay_only(args: &[String]) {
         let ips = local_ips();
         tracing::info!("📡 Stross 中继（无界面模式）已启动");
         if ips.is_empty() {
-            tracing::info!("观看地址: http://127.0.0.1:{}/", handle.port);
+            tracing::info!("中继入口: http://127.0.0.1:{}/", handle.port);
         }
         for ip in &ips {
-            tracing::info!("观看地址: http://{ip}:{}/", handle.port);
+            tracing::info!("中继入口: http://{ip}:{}/", handle.port);
         }
         tracing::info!("推流地址: ws://<中继IP>:{}/ws/push", handle.port);
         tracing::info!("Ctrl+C 退出");

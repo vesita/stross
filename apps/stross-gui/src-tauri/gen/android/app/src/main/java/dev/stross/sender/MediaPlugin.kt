@@ -94,46 +94,68 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
 
     @Command
     fun startCapture(invoke: Invoke) {
-        val args = invoke.parseArgs(CaptureArgs::class.java)
-        val chan = args.channel
-        if (chan == null) {
-            invoke.reject("缺少 channel 参数")
-            return
-        }
-        if (running.get()) {
-            invoke.reject("已经在采集")
-            return
-        }
-        channel = chan
-        width = args.width.coerceIn(320, 3840)
-        height = args.height.coerceIn(240, 2160)
-        fps = args.fps.coerceIn(10, 60)
-        bitrateKbps = args.bitrateKbps.coerceIn(200, 20_000)
-        withAudio = args.withAudio
+        Log.i(TAG, "startCapture 进入 thread=${Thread.currentThread().name}")
+        try {
+            val args = invoke.parseArgs(CaptureArgs::class.java)
+            Log.i(TAG, "startCapture args: chan=${args.channel != null} w=${args.width} h=${args.height} audio=${args.withAudio} running=$running")
+            val chan = args.channel
+            if (chan == null) {
+                invoke.reject("缺少 channel 参数")
+                return
+            }
+            if (running.get()) {
+                invoke.reject("已经在采集")
+                return
+            }
+            channel = chan
+            width = args.width.coerceIn(320, 3840)
+            height = args.height.coerceIn(240, 2160)
+            fps = args.fps.coerceIn(10, 60)
+            bitrateKbps = args.bitrateKbps.coerceIn(200, 20_000)
+            withAudio = args.withAudio
 
-        // 屏幕录制授权（系统弹窗）。注意：OPPO 等 ROM 会把前台服务启动延迟
-        // 数秒（startForegroundDelayMs），因此立即 resolve 并在后台线程等待投影，
-        // 避免阻塞主线程与 Rust 侧的 run_mobile_plugin 等待。
-        pendingInvoke = invoke
-        val pm = host.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        PluginManager.startActivityForResult(pm.createScreenCaptureIntent()) { result ->
-            val pend = pendingInvoke
-            pendingInvoke = null
-            if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-                pend?.resolve(JSObject().apply { put("started", true) })
-                val code = result.resultCode
-                val data = result.data!!
-                Thread {
-                    startProjectionService(code, data)
-                }.start()
-            } else {
-                pend?.reject("用户拒绝了屏幕录制授权")
-                // 同步回报前端：采集未启动及原因（前端靠 t=9 控制帧更新状态）
-                sendControl(JSObject().apply {
-                    put("t", 9)
-                    put("started", false)
-                    put("err", "用户拒绝了屏幕录制授权")
-                })
+            // 屏幕录制授权（系统弹窗）。注意：startActivityForResult 必须在主线程
+            // （Rust 侧 run_mobile_plugin 在 blocking 线程调用本命令），否则不弹窗；
+            // OPPO 等 ROM 会把前台服务启动延迟数秒（startForegroundDelayMs），
+            // 因此立即 resolve 并在后台线程等待投影，避免阻塞主线程与 Rust 侧。
+            pendingInvoke = invoke
+            Log.i(TAG, "startCapture 请求屏幕录制授权")
+            val pm = host.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            host.runOnUiThread {
+                try {
+                    PluginManager.startActivityForResult(pm.createScreenCaptureIntent()) { result ->
+                        val pend = pendingInvoke
+                        pendingInvoke = null
+                        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+                            Log.i(TAG, "屏幕录制授权通过")
+                            pend?.resolve(JSObject().apply { put("started", true) })
+                            val code = result.resultCode
+                            val data = result.data!!
+                            Thread {
+                                startProjectionService(code, data)
+                            }.start()
+                        } else {
+                            Log.w(TAG, "屏幕录制授权被拒绝")
+                            pend?.reject("用户拒绝了屏幕录制授权")
+                            // 同步回报前端：采集未启动及原因（前端靠 t=9 控制帧更新状态）
+                            sendControl(JSObject().apply {
+                                put("t", 9)
+                                put("started", false)
+                                put("err", "用户拒绝了屏幕录制授权")
+                            })
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.e(TAG, "startActivityForResult 异常: ${e.message}", e)
+                    pendingInvoke?.reject("授权请求异常: ${e.message}")
+                    pendingInvoke = null
+                }
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "startCapture 异常: ${e.message}", e)
+            try {
+                invoke.reject("startCapture 异常: ${e.message}")
+            } catch (_: Exception) {
             }
         }
     }
@@ -150,6 +172,8 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
 
     /** API 34+ 要求先启动 mediaProjection 类型的前台服务再 getMediaProjection。 */
     private fun startProjectionService(resultCode: Int, data: Intent) {
+        // 先重置等待状态（服务端 static 状态可能残留上次推流）
+        ProjectionService.resetProjection()
         val intent = Intent(host, ProjectionService::class.java).apply {
             putExtra(ProjectionService.EXTRA_RESULT_CODE, resultCode)
             putExtra(ProjectionService.EXTRA_RESULT_DATA, data)

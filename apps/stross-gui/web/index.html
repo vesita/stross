@@ -128,7 +128,6 @@
           <div class="actions">
             <button id="start-btn" class="primary" type="button">▶ 开始推流</button>
             <button id="stop-btn" type="button" disabled>⏹ 停止</button>
-            <button id="viewer-btn" type="button" disabled>🌐 打开观看端</button>
           </div>
         </section>
 
@@ -140,10 +139,10 @@
             <div id="error-box" class="error hidden"></div>
           </div>
 
-          <h2>观看地址</h2>
-          <p class="hint">局域网内任意设备（手机 / 平板 / 电脑）用浏览器打开：</p>
+          <h2>中继入口</h2>
+          <p class="hint">本机中继入口地址（数据面 ws://ip:port/ws/*，REST /api/*）：</p>
           <ul id="url-list" class="url-list">
-            <li class="hint">开始推流后显示地址</li>
+            <li class="hint">连接中继后显示入口地址</li>
           </ul>
         </section>
       </div>
@@ -157,6 +156,10 @@
           <div id="recv-streams" class="recv-streams"></div>
           <div class="row">
             <input id="recv-stream-input" type="text" placeholder="流 id（如 sess-1 或 demo-1234）" class="grow" />
+            <select id="recv-audio-select" title="音频输出方式">
+              <option value="device" selected>🔊 设备播放</option>
+              <option value="discard">🔇 静音</option>
+            </select>
             <button id="recv-start-btn" class="primary" type="button">▶ 开始接收</button>
             <button id="recv-stop-btn" type="button" disabled>⏹ 停止</button>
           </div>

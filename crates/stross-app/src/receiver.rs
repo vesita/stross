@@ -4,8 +4,8 @@
 //! （1b）→ [`FfmpegPlaybackSink`] 解码（1c，D6）→ 解码帧通道交给上层
 //! （GUI 绘制 / 录制）。与发送侧对称，是"接收端有选择权"（F2.1）的实现基础。
 //!
-//! 音频轨解码但丢弃（`AudioOut::Discard`，无声卡环境可跑），统计块数；
-//! 播放到设备由上层按需打开（D3 反向音频路径）。
+//! 音频轨解码后输出到设备（`AudioOut::Device`，D3 反向音频路径：电脑扬声器播手机
+//! 麦克风）或丢弃（`AudioOut::Discard`，无声卡环境可跑），统计块数。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,10 +13,14 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use stross_core::session_channel::{ChannelKind, SessionDataManager};
+// 桌面解码播放路径（ffmpeg 子进程）；Android 走 `start_raw` 编码帧转发，
+// 由 Kotlin MediaCodec 解码（见 stross-gui `mobile::spawn_android_playback`）。
+#[cfg(not(target_os = "android"))]
 use stross_media::playback::{
     AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackSession, PlaybackSink,
-    RenderedFrame, VideoOut,
+    VideoOut,
 };
+use stross_media::playback::RenderedFrame;
 use stross_proto::frame::Frame;
 use stross_proto::message::ControlMessage;
 use tokio::sync::mpsc;
@@ -49,19 +53,29 @@ struct ReceiverInner {
     stopped: AtomicBool,
     stats: Mutex<ReceiveStats>,
     frames: Mutex<Option<mpsc::Receiver<RenderedFrame>>>,
+    /// 编码帧转发通道（`start_raw` 用；Android 播放路径，Kotlin MediaCodec 解码）。
+    raw_frames: Mutex<Option<mpsc::Receiver<Frame>>>,
 }
 
 impl Receiver {
     /// 开始接收 `relay_url` 上的 `stream_id`，解码帧经
     /// [`Receiver::take_frames`] 的通道交给上层。
-    pub async fn start(relay_url: String, stream_id: String) -> Result<Arc<Self>, String> {
+    ///
+    /// `audio_out` 决定音频去向：设备（扬声器，D3 反向音频）或丢弃。
+    #[cfg(not(target_os = "android"))]
+    pub async fn start(
+        relay_url: String,
+        stream_id: String,
+        audio_out: AudioOut,
+    ) -> Result<Arc<Self>, String> {
         let (frame_tx, frame_rx) = mpsc::channel::<RenderedFrame>(16);
         let inner = Arc::new(ReceiverInner {
             stopped: AtomicBool::new(false),
             stats: Mutex::new(ReceiveStats::default()),
             frames: Mutex::new(Some(frame_rx)),
+            raw_frames: Mutex::new(None),
         });
-        // 播放会话：视频 → 帧通道；音频 → 解码丢弃（统计块数）
+        // 播放会话：视频 → 帧通道；音频 → 设备播放或丢弃（统计块数）
         let sink = FfmpegPlaybackSink;
         let session = sink
             .open(PlaybackConfig {
@@ -69,7 +83,7 @@ impl Receiver {
                 audio: Some(AudioOutSpec {
                     channels: 2,
                     sample_rate: 48_000,
-                    out: AudioOut::Discard,
+                    out: audio_out,
                 }),
             })
             .map_err(|e| e.to_string())?;
@@ -83,9 +97,29 @@ impl Receiver {
         Ok(Arc::new(Self { inner }))
     }
 
+    /// 开始接收 `relay_url` 上的 `stream_id`，**不解码**：编码帧（Annex-B / ADTS）
+    /// 经 [`Receiver::take_raw_frames`] 的通道交给上层。Android 播放路径用
+    /// （桌面 PlaybackSink 依赖 ffmpeg 子进程，Android 上由 Kotlin MediaCodec 解码）。
+    pub async fn start_raw(relay_url: String, stream_id: String) -> Result<Arc<Self>, String> {
+        let (frame_tx, frame_rx) = mpsc::channel::<Frame>(32);
+        let inner = Arc::new(ReceiverInner {
+            stopped: AtomicBool::new(false),
+            stats: Mutex::new(ReceiveStats::default()),
+            frames: Mutex::new(None),
+            raw_frames: Mutex::new(Some(frame_rx)),
+        });
+        tokio::spawn(receive_raw_loop(inner.clone(), relay_url, stream_id, frame_tx));
+        Ok(Arc::new(Self { inner }))
+    }
+
     /// 取出解码帧通道（每会话一次；`None` = 已取过）。
     pub fn take_frames(&self) -> Option<mpsc::Receiver<RenderedFrame>> {
         self.inner.frames.lock().unwrap().take()
+    }
+
+    /// 取出编码帧通道（`start_raw` 会话；每会话一次）。
+    pub fn take_raw_frames(&self) -> Option<mpsc::Receiver<Frame>> {
+        self.inner.raw_frames.lock().unwrap().take()
     }
 
     /// 当前统计。
@@ -100,6 +134,7 @@ impl Receiver {
 }
 
 /// 接收主循环：watch 收帧 → 无损通道 → 播放；统计同步到共享状态。
+#[cfg(not(target_os = "android"))]
 async fn receive_loop(
     inner: Arc<ReceiverInner>,
     relay_url: String,
@@ -172,5 +207,58 @@ async fn receive_loop(
     }
     session.stop();
     fwd.abort();
+    inner.stats.lock().unwrap().running = false;
+}
+
+/// 编码帧转发主循环：watch 收帧 → 无损通道 → 直接转发（不解码）。
+async fn receive_raw_loop(
+    inner: Arc<ReceiverInner>,
+    relay_url: String,
+    stream_id: String,
+    frame_tx: mpsc::Sender<Frame>,
+) {
+    let url = format!("{relay_url}/ws/watch?stream={stream_id}");
+    let (mut ws, _) = match connect_async(&url).await {
+        Ok(v) => v,
+        Err(e) => {
+            inner.stats.lock().unwrap().error = Some(format!("连接中继失败: {e}"));
+            return;
+        }
+    };
+    let mut mgr = SessionDataManager::default();
+    loop {
+        if inner.stopped.load(Ordering::Relaxed) {
+            break;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            msg = ws.next() => match msg {
+                Some(Ok(m)) => {
+                    if m.is_text() {
+                        let text = m.into_text().unwrap_or_default();
+                        if let Ok(ControlMessage::Ready { .. }) = ControlMessage::from_text(&text) {
+                            tracing::info!("接收就绪（编码帧转发）: {stream_id}");
+                        }
+                    } else if m.is_binary() {
+                        let data = m.into_data();
+                        if let Ok(frame) = Frame::from_bytes(&data) {
+                            inner.stats.lock().unwrap().received += 1;
+                            mgr.channel(&stream_id, ChannelKind::Lossless)
+                                .push(frame, Instant::now());
+                        }
+                    }
+                }
+                Some(Err(_)) | None => break,
+            },
+        }
+        // 通道 → 转发（lossless 直通，按序产出；消费者慢则丢帧，不反压）
+        let channel = mgr.channel(&stream_id, ChannelKind::Lossless);
+        for f in channel.poll(Instant::now()) {
+            if frame_tx.try_send(f).is_err() {
+                inner.stats.lock().unwrap().dropped += 1;
+            }
+        }
+        inner.stats.lock().unwrap().running = true;
+    }
     inner.stats.lock().unwrap().running = false;
 }

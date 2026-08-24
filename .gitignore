@@ -1,5 +1,18 @@
+# Rust 构建产物
 /target
 **/target
+
+# 前端依赖与产物（web/ 由 tsc 编译，app.js 受版本控制）
 node_modules
+apps/stross-gui/web/node_modules/
+
+# IDE / 编辑器
+.idea/
+*.iml
+.vscode/
+
+# 系统
 .DS_Store
+
+# 日志
 *.log

@@ -10,6 +10,12 @@
 //! * **Kotlin**（`android/MediaPlugin.kt`）：MediaProjection 屏幕采集 + MediaCodec
 //!   H.264 编码、AudioRecord + MediaCodec AAC 编码。
 //!
+//! 播放方向（D3 反向音频 / 1f-3 Android 播放）：桌面由 ffmpeg 子进程解码
+//! （PlaybackSink）；Android 无 ffmpeg，走 [`spawn_android_playback`]：
+//! 编码帧（raw）→ Kotlin `PlaybackPlugin`（MediaCodec 解码，视频 I420→RGBA 缩放
+//! 回传、音频 → AudioTrack）→ 缩放 RGBA 经事件 `receive-frame` 推到前端 canvas，
+//! 与桌面接收路径共用同一前端。
+//!
 //! 帧消息格式（Kotlin → Rust，JSON）：
 //! `{"t": 0|1, "k": true|false, "c": true|false, "p": pts_ms, "d": "<base64>"}`
 //! * `t` track：0 视频 / 1 音频；`t=9` 为采集状态控制帧
@@ -26,27 +32,52 @@ use base64::Engine as _;
 use serde_json::Value;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::plugin::PluginHandle;
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 
 use stross_media::capture::{CaptureBackend, CaptureStatus};
 use stross_media::pipeline::StreamConfig;
+use stross_media::playback::AudioOut;
 use stross_proto::frame::{
     CODEC_AAC, CODEC_H264, FLAG_CONFIG, FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO,
 };
-use stross_proto::message::{CapabilityDescriptor, CapabilityKind, MediaKind, ReliabilityProfile};
+use stross_proto::message::{
+    CapabilityDescriptor, CapabilityKind, CodecId, MediaKind, ReliabilityProfile, TransportId,
+};
 use tokio::sync::mpsc;
 
-/// setup 阶段注册的 Android 插件句柄（托管状态，命令通过它调用 Kotlin）。
-pub struct MobilePluginHandle(pub PluginHandle<Wry>);
+/// setup 阶段注册的 Android 采集插件句柄（`MediaPlugin`）。
+pub struct CapturePluginHandle(pub PluginHandle<Wry>);
 
-/// 注册 Android 原生插件（在 `lib.rs::run` 中装配）。
-pub fn init() -> tauri::plugin::TauriPlugin<Wry> {
+/// setup 阶段注册的 Android 播放插件句柄（`PlaybackPlugin`）。
+pub struct PlaybackPluginHandle(pub PluginHandle<Wry>);
+
+/// 注册 Android 采集插件（`MediaPlugin`；在 `lib.rs::run` 中装配）。
+///
+/// 注意：tauri 的 Android 插件注册按 **Rust 插件名** 索引 Kotlin 插件
+/// （`PluginManager.load(name, plugin)` 同名覆盖），因此采集与播放必须用
+/// **不同的插件名**，否则后注册的类会覆盖先注册的（命令找不到）。
+pub fn init_capture() -> tauri::plugin::TauriPlugin<Wry> {
     tauri::plugin::Builder::new("stross-media")
         .setup(|app, api| {
             #[cfg(target_os = "android")]
             {
-                let handle = api.register_android_plugin("dev.stross.sender", "MediaPlugin")?;
-                app.manage(MobilePluginHandle(handle));
+                let capture = api.register_android_plugin("dev.stross.sender", "MediaPlugin")?;
+                app.manage(CapturePluginHandle(capture));
+            }
+            Ok(())
+        })
+        .build()
+}
+
+/// 注册 Android 播放插件（`PlaybackPlugin`；1f-3，见 [`spawn_android_playback`]）。
+pub fn init_playback() -> tauri::plugin::TauriPlugin<Wry> {
+    tauri::plugin::Builder::new("stross-media-playback")
+        .setup(|app, api| {
+            #[cfg(target_os = "android")]
+            {
+                let playback = api
+                    .register_android_plugin("dev.stross.sender", "PlaybackPlugin")?;
+                app.manage(PlaybackPluginHandle(playback));
             }
             Ok(())
         })
@@ -71,7 +102,7 @@ pub struct AndroidCapture {
 impl AndroidCapture {
     /// 从托管状态的插件句柄构造。
     pub fn from_app(app: &AppHandle<Wry>) -> Self {
-        let handle = app.state::<MobilePluginHandle>().0.clone();
+        let handle = app.state::<CapturePluginHandle>().0.clone();
         Self::new(handle)
     }
 
@@ -89,8 +120,8 @@ impl CaptureBackend for AndroidCapture {
         CapabilityDescriptor {
             kind: CapabilityKind::Source,
             media: vec![MediaKind::Screen, MediaKind::Mic],
-            codecs: vec!["h264".into(), "aac".into()],
-            transports: vec!["ws".into()],
+            codecs: vec![CodecId::H264, CodecId::Aac],
+            transports: vec![TransportId::Ws],
             max_width: Some(1920),
             max_height: Some(1080),
             preferred_profile: ReliabilityProfile::Lossy,
@@ -174,7 +205,10 @@ impl CaptureBackend for AndroidCapture {
             "channel": channel,
         });
         tokio::task::spawn_blocking(move || {
-            let _ = handle.run_mobile_plugin::<serde_json::Value>("startCapture", payload);
+            match handle.run_mobile_plugin::<serde_json::Value>("startCapture", payload) {
+                Ok(v) => tracing::info!("startCapture 命令返回: {v}"),
+                Err(e) => tracing::error!("startCapture 命令失败: {e}"),
+            }
         });
         Ok(())
     }
@@ -191,4 +225,95 @@ impl CaptureBackend for AndroidCapture {
     fn status(&self) -> CaptureStatus {
         self.status.lock().unwrap().clone()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Android 播放桥（1f-3）：编码帧 → Kotlin MediaCodec → 缩放 RGBA → 前端 canvas
+// ---------------------------------------------------------------------------
+
+/// 启动 Android 播放链路：
+///
+/// 1. 通知 Kotlin `PlaybackPlugin.startPlayback`（建解码器 + AudioTrack；`audio`
+///    为 `Device` 时音频输出到扬声器，否则 Kotlin 侧跳过音频）。
+/// 2. 消费 `rx` 里的编码帧：视频帧 → `feedVideo`、音频帧 → `feedAudio`
+///    （`run_mobile_plugin` 同步阻塞，因此放 `spawn_blocking`，与采集侧一致）。
+/// 3. Kotlin 解码后把**缩放好的 RGBA**（宽 ≤ 480）经 Channel 回传，这里
+///    转发为 Tauri 事件 `receive-frame`——与桌面接收路径同一前端事件。
+///
+/// 调用方（`start_receive` 命令）在停止接收时自行结束 `rx`（会话 stop）。
+pub fn spawn_android_playback(
+    app: &AppHandle<Wry>,
+    rx: mpsc::Receiver<Frame>,
+    audio: AudioOut,
+) {
+    let handle = app.state::<PlaybackPluginHandle>().0.clone();
+
+    // Kotlin → Rust：解码缩放后的 RGBA 帧（base64）→ 事件 → 前端 canvas
+    let app_emit = app.clone();
+    let channel: Channel<Value> = Channel::new(move |body| {
+        let v: Value = match body {
+            InvokeResponseBody::Json(s) => match serde_json::from_str(&s) {
+                Ok(v) => v,
+                Err(_) => return Ok(()),
+            },
+            InvokeResponseBody::Raw(_) => return Ok(()),
+        };
+        let Some(w) = v.get("w").and_then(|x| x.as_u64()) else {
+            return Ok(());
+        };
+        let Some(h) = v.get("h").and_then(|x| x.as_u64()) else {
+            return Ok(());
+        };
+        let Some(data) = v.get("d").and_then(|x| x.as_str()) else {
+            return Ok(());
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+            return Ok(());
+        };
+        let pts = v.get("pts").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+        let _ = app_emit.emit(
+            "receive-frame",
+            serde_json::json!({ "pts": pts, "width": w, "height": h, "data": bytes }),
+        );
+        Ok(())
+    });
+
+    // 启动 Kotlin 播放器（同步等待 resolve；放 blocking 线程避免冻结 runtime）
+    {
+        let handle = handle.clone();
+        let chan = channel;
+        tokio::task::spawn_blocking(move || {
+            let _ = handle.run_mobile_plugin::<serde_json::Value>(
+                "startPlayback",
+                serde_json::json!({
+                    "audio": audio == AudioOut::Device,
+                    "channel": chan,
+                }),
+            );
+        });
+    }
+
+    // 编码帧 → Kotlin（放 blocking 线程：run_mobile_plugin 同步阻塞）
+    tokio::task::spawn_blocking(move || {
+        let mut rx = rx;
+        while let Some(f) = rx.blocking_recv() {
+            let is_config = f.header.flags & FLAG_CONFIG != 0;
+            let keyframe = f.header.flags & FLAG_KEYFRAME != 0;
+            let payload = serde_json::json!({
+                "d": base64::engine::general_purpose::STANDARD.encode(&f.payload),
+                "k": keyframe,
+                "c": is_config,
+                "p": f.header.pts_ms,
+            });
+            let cmd = match f.header.track {
+                TRACK_VIDEO => "feedVideo",
+                TRACK_AUDIO if audio == AudioOut::Device => "feedAudio",
+                _ => continue,
+            };
+            let _ = handle.run_mobile_plugin::<serde_json::Value>(cmd, payload);
+        }
+        // 接收结束：通知 Kotlin 释放解码器 / AudioTrack
+        let _ = handle.run_mobile_plugin::<serde_json::Value>("stopPlayback", serde_json::json!({}));
+        tracing::info!("Android 播放链路结束");
+    });
 }

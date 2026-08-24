@@ -1,7 +1,7 @@
 //! stross-relay —— 独立的局域网串流中继。
 //!
-//! 内嵌观看端页面，局域网内任意设备（Linux / Windows / Android 浏览器）打开
-//! `http://<本机IP>:<端口>` 即可观看。
+//! 只承载数据面（/ws/push、/ws/watch）与 REST 端点（/api/*）；无内置观看页，
+//! 接收端用原生播放（GUI「接收」页 / stross 命令），见 docs/requirements.md D1。
 //!
 //! ```text
 //! 用法:
@@ -42,10 +42,10 @@ async fn main() -> anyhow::Result<()> {
     let ips = local_ips();
     tracing::info!("📡 Stross 中继已启动");
     if ips.is_empty() {
-        tracing::info!("观看地址: http://127.0.0.1:{}/", handle.port);
+        tracing::info!("中继入口: http://127.0.0.1:{}/", handle.port);
     }
     for ip in &ips {
-        tracing::info!("观看地址: http://{ip}:{}/", handle.port);
+        tracing::info!("中继入口: http://{ip}:{}/", handle.port);
     }
     tracing::info!("推流地址: ws://<中继IP>:{}/ws/push", handle.port);
     tracing::info!("流列表API: /api/streams");

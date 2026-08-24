@@ -12,7 +12,9 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use serde::Serialize;
-use stross_proto::message::{DiscoveryInfo, RoleId, TransportId};
+#[cfg(feature = "discovery")]
+use stross_proto::message::DiscoveryInfo;
+use stross_proto::message::{RoleId, TransportId};
 #[cfg(feature = "discovery")]
 use tokio::sync::watch;
 
@@ -33,7 +35,7 @@ pub struct PeerInfo {
     pub roles: Vec<RoleId>,
     /// 支持的传输（TXT `transports`，解析为枚举）。
     pub transports: Vec<TransportId>,
-    /// 观看页地址（`http://ip:port/`）。
+    /// 中继入口地址（`http://ip:port/`，数据面端点在 `ws://ip:port/ws/*`）。
     pub url: String,
 }
 

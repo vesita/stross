@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "dev.stross.sender",
   "build": {
-    "frontendDist": "../web"
+    "frontendDist": ["../web/index.html", "../web/app.js", "../web/style.css"]
   },
   "app": {
     "withGlobalTauri": true,

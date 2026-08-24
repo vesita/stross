@@ -11,6 +11,7 @@ use stross_app::{Platform, StrossApp};
 use stross_media::capture::FfmpegBackend;
 use stross_media::pipeline::ffmpeg_available;
 use stross_media::pipeline::{Quality, StreamConfig, VideoSource};
+use stross_media::playback::AudioOut;
 
 fn cfg(stream_id: &str, secs: u32) -> StreamConfig {
     StreamConfig {
@@ -43,9 +44,9 @@ async fn receive_decodes_live_stream() {
         .expect("推流启动");
     assert!(!started.stream_id.is_empty(), "应返回内核签发的 stream id");
 
-    // 开始接收：解码帧通道可取
+    // 开始接收：解码帧通道可取（测试环境音频丢弃，无声卡依赖）
     let recv = app
-        .start_receive(relay_ws, started.stream_id.clone())
+        .start_receive(relay_ws, started.stream_id.clone(), AudioOut::Discard)
         .await
         .expect("接收启动");
     let mut frames = recv.take_frames().expect("应有帧通道");

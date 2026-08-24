@@ -6,7 +6,7 @@
 //! cargo run -p stross-app --example demo_push -- 10 --audio       # 加正弦波音频
 //! cargo run -p stross-app --example demo_push -- 10 --port 18777  # 内嵌中继固定端口
 //! cargo run -p stross-app --example demo_push -- 10 --stream-id demo  # 固定流 id
-//! # 然后局域网内打开 http://<本机IP>:8777/ 观看；
+//! # 接收端用原生播放：GUI「接收」页 / demo_receive / stross receive（D1 无浏览器观看端）
 //! # 或配合 demo_receive 做本地双实例串流测试（见 /home/vesita/AI/run_stream_test.sh）
 //! ```
 
@@ -58,6 +58,8 @@ async fn main() -> anyhow::Result<()> {
         cfg.audio = Some(AudioSourceConfig {
             mic: None,
             system_audio: None,
+            // lavfi sine（无设备环境可跑，验证解码+播放链路；真实麦克风走手机推流）
+            synthetic: Some(440),
             ..Default::default()
         });
     }
@@ -82,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
     let ips = stross_core::net::local_ips();
     tracing::info!("📡 演示推流中（{} 秒）…", secs);
     for ip in ips {
-        tracing::info!("观看地址: http://{ip}:{port}/");
+        tracing::info!("中继入口: http://{ip}:{port}/");
     }
 
     tokio::time::sleep(Duration::from_secs(secs)).await;

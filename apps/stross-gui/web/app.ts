@@ -98,12 +98,10 @@ async function init(): Promise<void> {
     if (IS_ANDROID) {
       fb.textContent = '原生采集';
       fb.classList.add('ok');
-      // Android：视频源固定为屏幕（MediaProjection），无系统声音采集；
-      // 「打开观看端」依赖系统浏览器，Android 上隐藏（用「观看」页内嵌播放器）
+      // Android：视频源固定为屏幕（MediaProjection），无系统声音采集
       $('video-seg-row').classList.add('hidden');
       $('android-video-note').classList.remove('hidden');
       $('sys-row').classList.add('hidden');
-      $('viewer-btn').classList.add('hidden');
       $('mic-hint').textContent = '需要麦克风权限；拒绝则仅推流屏幕';
     } else if (info.ffmpeg) {
       fb.textContent = 'ffmpeg ✓';
@@ -258,7 +256,7 @@ function enterApp(): void {
   $('disconnect-btn').classList.remove('hidden');
   $('tab-conn-label').textContent = '已连接：' + connection!.url;
   $('watch-relay-url').textContent = connection!.url;
-  // 连接成功即可展示中继观看地址（推流前页面显示"暂无串流"）
+  // 连接成功即可展示中继入口地址（供其它设备连接数据面）
   if (connection!.relayUrls && connection!.relayUrls.length) {
     renderUrls(connection!.relayUrls);
   }
@@ -529,7 +527,6 @@ function setRunning(r: boolean, phase: 'idle' | 'starting' | 'live' = r ? 'live'
   const text = $('status-text');
   $btn('start-btn').disabled = r || starting;
   $btn('stop-btn').disabled = !(r || starting);
-  $btn('viewer-btn').disabled = !r;
   if (phase === 'starting') {
     dot.className = 'dot starting';
     text.textContent = '采集中…';
@@ -537,11 +534,8 @@ function setRunning(r: boolean, phase: 'idle' | 'starting' | 'live' = r ? 'live'
   } else if (phase === 'live') {
     dot.className = 'dot live';
     text.textContent = IS_ANDROID ? '采集中 ✓ 推流中' : '推流中';
-    // 明确告知观看地址，避免"不知道是否真的在推"
-    const first = document.querySelector('#url-list li');
-    $('stream-meta').textContent = first && first.textContent!.includes('http')
-      ? `屏幕采集已就绪 ✅ 局域网内浏览器打开 ${first.textContent!.trim().replace('▶', '')} 即可观看`
-      : '推流中，请在「📥 观看」页查看';
+    // 明确告知去向（D1：无浏览器观看端，接收走「观看（收）」页原生播放）
+    $('stream-meta').textContent = '推流中 ✅ 局域网设备可在「📥 观看（收）」页选择本机流接收';
   } else {
     dot.className = 'dot idle';
     text.textContent = '未推流';
@@ -656,7 +650,12 @@ async function startReceive(): Promise<void> {
   }
   $btn('recv-start-btn').disabled = true;
   try {
-    await call('start_receive', { relay: connection.wsUrl.replace('/ws/push', ''), stream: streamId });
+    const audio = $select('recv-audio-select').value; // 'device' | 'discard'（与 AudioOut serde 一致）
+    await call('start_receive', {
+      relay: connection.wsUrl.replace('/ws/push', ''),
+      stream: streamId,
+      audio,
+    });
     receiving = true;
     recvFrameCount = 0;
     $('recv-status').textContent = '接收中…';
@@ -749,7 +748,6 @@ $btn('tab-send-btn').onclick = () => setTab('send');
 $btn('tab-watch-btn').onclick = () => setTab('watch');
 $btn('start-btn').onclick = () => void startStream();
 $btn('stop-btn').onclick = () => void stopStream();
-$btn('viewer-btn').onclick = () => void call('open_viewer').catch((e) => showFatal(String(e)));
 $btn('recv-start-btn').onclick = () => void startReceive();
 $btn('recv-stop-btn').onclick = () => void stopReceive();
 

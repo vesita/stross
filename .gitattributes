@@ -1,0 +1,7 @@
+# 生成产物：tsc 发射的 JS（app.ts 为真源，scripts/check-frontend.sh 防漂移）
+# linguist-generated 让 GitHub 默认折叠 diff/统计，文件仍需提交（include_str!/index.html 构建依赖）
+apps/stross-sender/web/app.js       linguist-generated=true
+crates/stross-core/assets/viewer/app.js linguist-generated=true
+
+# vendored 三方库
+crates/stross-core/assets/viewer/jmuxer.js linguist-generated=true

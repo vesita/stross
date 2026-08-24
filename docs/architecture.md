@@ -16,7 +16,7 @@
 │ / 观看端页面                  │ / NAL·ADTS 解析 / Source+Sink 能力 │
 ├───────────────────────────────┴──────────────────────────────────┤
 │ crates/stross-transport ①½ 传输插件层：Transport/DataSession 抽象   │
-│            ws（无损）/ webrtc（有损）/ memory（测试）实现          │
+│   ws（无损）/ webrtc（有损）/ srt（自适应）/ quic（无损多路复用）    │
 ├──────────────────────────────────────────────────────────────────┤
 │ crates/stross-proto   ① 协议模块：帧头 + 控制消息（serde）                │
 └──────────────────────────────────────────────────────────────────┘
@@ -25,7 +25,7 @@
 | 层 | crate | 职责 | 依赖 |
 |---|---|---|---|
 | ① 协议 | `stross-proto` | 线上契约：24 字节 v2 帧头（含 seq/分片）+ JSON 控制消息（含能力协商与路由） | 无内部依赖 |
-| ①½ 传输 | `stross-transport` | 可插拔传输层：`Transport`/`DataSession` 抽象 + ws/webrtc/memory 实现 + 本机 IP | proto |
+| ①½ 传输 | `stross-transport` | 可插拔传输层：`Transport`/`DataSession` 抽象 + ws/webrtc/srt/quic/memory 实现 + 本机 IP | proto |
 | ② 共享 | `stross-core` | 纯数据共享逻辑：中继、推流客户端、mDNS、观看端页面（re-export transport/net） | proto + transport |
 | ④ 适配 | `stross-media` | 系统适配：ffmpeg 采集管线、设备枚举、H.264/AAC 切帧、`CaptureBackend`（Source）/ `Sink`（录制） | proto |
 | ③ 封装 | `stross-app` | 应用状态机 + 引擎组合 + 内核（设备图/会话/路由/鉴权），无 UI 依赖、可单测 | core + media |

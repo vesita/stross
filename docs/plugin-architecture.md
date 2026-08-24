@@ -1,11 +1,13 @@
 # Stross 插件化架构设计（内核 + 可插拔传输）
 
-> 状态：**阶段 2 核心闭环已完成**（阶段 1 已完成：transport-webrtc（str0m，
-> datachannel 双通道）、relay WebRTC 信令端点、同一 handle_watch 驱动
-> ws/webrtc 集成测试通过、能力协商落地、观看端 WebRTC 路径带回退）
+> 状态：**阶段 2 完成，四传输落地**（阶段 1：transport-webrtc（str0m，datachannel
+> 双通道）、relay WebRTC 信令端点、同一 handle_watch 驱动 ws/webrtc 集成测试通过、
+> 能力协商落地、观看端 WebRTC 路径带回退）
 > · 阶段 2 已落地：拆 `stross-transport` crate、首个 Sink（录制 RecordingSink）、
-> 控制面鉴权（`AuthPolicy`/`PinAuthPolicy`）· 决策推迟：quic/srt/WASM 策略插件/
-> 跨设备控制闭环（见 §8 与 §5.5 决策记录）
+> 控制面鉴权（`AuthPolicy`/`PinAuthPolicy`）、`transport-srt`（rsrt 纯 Rust，
+> Adaptive）、`transport-quic`（quinn + rustls-ring，control/media 多路复用）——
+> 四种传输共用同一 `handle_push`/`handle_watch`（抽象价值四重证明）
+> · 决策推迟：WASM 策略插件、跨设备控制闭环、Sink 其余（见 §5.5 决策记录）
 > 关联：[architecture.md](architecture.md)（五层架构）· [protocol.md](protocol.md)（线上协议）· [roadmap.md](roadmap.md)（P0 设备路由 / P2 流解耦 / WebRTC 低延迟）
 
 ## 1. 背景与目标
@@ -201,8 +203,8 @@ impl DataSession {
 |---|---|---|---|
 | `transport-ws` | Lossless | ✅ 已落地（现状包一层） | 控制通道 + 媒体兜底 + 零安装观看端 |
 | `transport-webrtc` | Lossy | ✅ 阶段 1 已落地（str0m；control 可靠 / media 不可靠 datachannel） | 低延迟媒体通道，观看端 WebRTC 播放（带 WS 回退） |
-| `transport-quic` | Lossless | 阶段 2 决策推迟（见 §5.5） | 一条连接多路复用（控制/媒体/输入），NAT 友好 |
-| `transport-srt` | Adaptive | 阶段 2 决策推迟（见 §5.5） | 跨 NAT / 弱网自适应 |
+| `transport-srt` | Adaptive | ✅ 阶段 2 已落地（rsrt 纯 Rust，TSBPD/ARQ/零 C 依赖） | 弱网/跨 NAT 推流（relay `srt_port`；分片/重组用 v2 头 `frag_*`） |
+| `transport-quic` | Lossless | ✅ 阶段 2 已落地（quinn 0.11 + rustls-ring；自签名证书） | 一条连接 control/media 双 stream 多路复用（relay `quic_port`），NAT 友好 |
 
 `TransportStats` 直接喂给观看端现有 stats UI（`st-rate` / `st-latency`），不需要新 UI。
 
@@ -282,10 +284,10 @@ pub enum ControlMessage {
 
 | 项 | 决策 | 理由 |
 |---|---|---|
-| 拆 `stross-transport` crate | ✅ 落地 | 阶段 1 已证明抽象价值（同一 `handle_watch` 驱动 ws/webrtc）；传输实现的重依赖（str0m，未来 quic/srt）不再进入 core/media/app 的依赖树；`stross_core::transport` / `stross_core::net` 路径 re-export 保持兼容 |
+| 拆 `stross-transport` crate | ✅ 落地 | 阶段 1 已证明抽象价值（同一 `handle_watch` 驱动 ws/webrtc）；传输实现的重依赖（str0m，未来 quic）不再进入 core/media/app 的依赖树；`stross_core::transport` / `stross_core::net` 路径 re-export 保持兼容 |
+| `transport-srt` | ✅ 落地 | [rsrt 0.3](https://github.com/cesbo/rsrt) 是**纯 Rust SRT**（`#![deny(unsafe_code)]`，TSBPD/ARQ/HaiCrypt，依赖全为 RustCrypto/tokio，零 C 依赖，MIT/Apache-2.0）——推翻此前「无纯 Rust 实现」的过时结论；补上 `Adaptive` 可靠性契约（设计 §4.1 的第三个 profile），弱网/跨 NAT 推流通道；大帧按 v2 头 `frag_*` 分片/重组（SRT 单消息 ≤ 协商 MSS−44≈1456B），relay 开独立 UDP 端口（`RelayHandle::srt_port`），`RelayClient` 按 `srt://` scheme 选传输；集成测试证明同一 `handle_push` 驱动 ws/srt |
+| `transport-quic` | ✅ 落地 | **quinn 0.11 默认 features 即 `rustls-ring`**（ring 只需 cc 无 cmake，本机满足，MIT/Apache-2.0、rust-version 1.85）——「接受 ring」前提成立即落地；线格式：control/media **两条双向 stream**（stream 即类型，无需消息类型前缀），长度前缀分帧（QUIC 流是 lazy 的，客户端 open 后发空消息作就绪信号），大帧整体发送（无单消息大小限制，不需要 `frag_*`）；自签名证书（rcgen，进程内一次）+ 客户端接受任意证书（局域网可信模型，与 ws:// 明文同级）；relay 开独立 UDP 端口（`RelayHandle::quic_port`），`RelayClient` 按 `quic://` scheme 选传输；集成测试证明同一 `handle_push` 驱动 ws/quic |
 | 拆 `stross-kernel` crate | ⏸ 暂不拆 | 内核已与传输解耦（只依赖 proto 类型），留在 stross-app 内耦合度可接受；待出现第二个内核消费方（如独立 stross-viewer）再拆 |
-| `transport-quic`（quinn） | ⏸ 推迟 | quinn 的 TLS 后端是 ring / aws-lc-rs——引入 C 构建依赖，与「str0m 选 rust-crypto 后端避免 C 构建依赖」的既有约定冲突（本机有 cc 但无 cmake，aws-lc-rs 不可构建）；且浏览器观看端在明文 http 源下无法使用 WebTransport（需 https），QUIC 的消费方只剩原生客户端，当前收益不足。若未来需要原生端多路复用，可在接受 ring 构建的前提下重新评估 |
-| `transport-srt` | ⏸ 推迟 | Rust 生态无维护良好的纯 Rust SRT 实现，只有 libsrt C 绑定——与零 C 构建依赖约定冲突；弱网自适应可用 WebRTC（重传控制）替代 |
 | 控制面 WASM 插件（Extism） | ⏸ 推迟 | 设计自标「远期可选」；阶段 2 已落地 `AuthPolicy` trait + 内置 `PinAuthPolicy`（设计 §7 承诺的内置实现），WASM 只需实现同一 trait，不动内核 |
 | 跨设备控制闭环（A 控制 B 推流） | ⏸ 推迟 | roadmap P0 级独立功能（远程控制 API + 鉴权 + UI），体量另立阶段；内核 `authorize`/`route` 命令面已为其留好接口 |
 
@@ -360,7 +362,7 @@ A/B 两条传输共享同一内核测试套件。
 
 **已落地**：
 
-- ✅ 拆 `stross-transport` crate：`Transport`/`DataSession` 抽象 + ws/webrtc/memory
+- ✅ 拆 `stross-transport` crate：`Transport`/`DataSession` 抽象 + ws/webrtc/srt/quic/memory
   实现 + `net` 迁入独立 crate；`stross-core` re-export 保持路径兼容
   （`stross_core::transport` / `stross_core::net`）；feature 传递（`discovery`
   同时启用传输层 mDNS 候选解析）；
@@ -368,12 +370,20 @@ A/B 两条传输共享同一内核测试套件。
   无外部依赖，可测）；
 - ✅ 控制面鉴权：`AuthPolicy` trait + 内置 `PinAuthPolicy`（会话级访问码，
   控制操作 route/teardown 前强制校验），Tauri 命令 `authorize_session`；
-- ✅ 测试：传输拆分回归（43+ 测试全绿）、Sink 单测、Kernel 鉴权单测。
+- ✅ `transport-srt`：rsrt 纯 Rust（TSBPD/ARQ/HaiCrypt，零 C 依赖），补上
+  `Adaptive` 契约；线格式 1B 类型前缀 + v2 帧头 `frag_*` 分片/重组（SRT 单
+  消息 ≤ MSS−44）；relay 开独立 UDP 端口（`RelayHandle::srt_port`），
+  `RelayClient` 按 `srt://` scheme 选传输；集成测试证明同一 `handle_push`
+  驱动 ws/srt（SRT 分片推流 → relay 重组 → WS 观看端逐字节一致）；
+- ✅ `transport-quic`：quinn 0.11 + rustls-ring（接受 ring 构建依赖）；
+  control/media 双 stream 多路复用（stream 即类型）+ 长度前缀分帧 + 空消息
+  就绪信号（QUIC 流 lazy）；自签名证书 + 客户端接受任意证书（局域网可信
+  模型）；relay 开独立 UDP 端口（`RelayHandle::quic_port`），`RelayClient`
+  按 `quic://` scheme 选传输；集成测试证明同一 `handle_push` 驱动 ws/quic；
+- ✅ 测试：54 全绿（传输拆分回归、Sink、Kernel 鉴权、SRT/QUIC 单测 + 集成）。
 
 **决策推迟**（详见 §5.5 决策记录）：
 
-- ⏸ `transport-quic`（quinn 引入 C 构建依赖；浏览器 http 源无法用 WebTransport）；
-- ⏸ `transport-srt`（无维护良好的纯 Rust 实现）；
 - ⏸ 控制面 WASM 策略插件（Extism，远期可选；`AuthPolicy` 接口已留好）；
 - ⏸ 跨设备控制闭环（roadmap P0 级独立功能，另立阶段）；
 - ⏸ Sink 其余：原生播放器（Tauri 侧）、键鼠注入/剪贴板（Deskflow 方向，平台适配重）。

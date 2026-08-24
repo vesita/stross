@@ -4,15 +4,19 @@
 //!
 //! * [`ws::WsTransport`]：WebSocket 传输（现状，无损，控制通道 + 媒体兜底）
 //! * [`webrtc::WebRtcTransport`]：WebRTC 传输（有损低延迟；信令经 HTTP 建立）
+//! * [`srt::SrtTransport`]：SRT 传输（自适应，rsrt 纯 Rust；弱网/跨 NAT 推流）
+//! * [`quic::QuicTransport`]：QUIC 传输（无损，quinn；一条连接 control/media 多路复用）
 //! * [`memory::MemoryTransport`]：内存传输（测试 / 示例用）
 //!
 //! 传输实现负责把 [`SessionPacket`] 映射到具体线格式——分片/重组是传输实现的
-//! 内部事务（UDP 类传输用帧头的 `frag_*` 字段切大关键帧；WS 整帧发送）。
+//! 内部事务（UDP 类传输用帧头的 `frag_*` 字段切大关键帧；WS/QUIC 整帧发送）。
 //!
 //! [`net`]：本机局域网 IP（原 `stross_core::net`，随传输层下沉）。
 
 pub mod memory;
 pub mod net;
+pub mod quic;
+pub mod srt;
 pub mod webrtc;
 pub mod ws;
 

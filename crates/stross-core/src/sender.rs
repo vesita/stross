@@ -5,8 +5,8 @@
 //! └── client_loop（Hello → 转发帧 → 通道关闭或停止信号时 Bye）
 //! ```
 //!
-//! 基于传输抽象（[`Transport`](crate::transport::Transport)）拨号，
-//! 当前使用 [`WsTransport`](crate::transport::ws::WsTransport)（无损，现状实现）。
+//! 基于传输抽象（[`Transport`](crate::transport::Transport)）拨号：
+//! `ws://`（无损，现状）/ `srt://`（自适应，弱网/跨 NAT）/ `quic://`（无损，多路复用）。
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
@@ -16,6 +16,8 @@ use tokio::task::JoinHandle;
 use stross_proto::frame::Frame;
 use stross_proto::message::ControlMessage;
 
+use crate::transport::quic::QuicTransport;
+use crate::transport::srt::SrtTransport;
 use crate::transport::ws::WsTransport;
 use crate::transport::{DataSession, PeerAddr, SessionPacket, SessionParams, Transport};
 
@@ -31,12 +33,22 @@ impl RelayClient {
     ///
     /// `hello` 由调用方构造（如 `StreamConfig::hello()`），
     /// 这样本模块不需要依赖任何采集配置类型。
+    ///
+    /// `url` 支持三种传输：`ws://host/ws/push`（无损，现状）、
+    /// `srt://host:port`（自适应，relay 的 [`RelayHandle::srt_port`]）与
+    /// `quic://host:port`（无损多路复用，relay 的 [`RelayHandle::quic_port`]）。
     pub async fn connect(url: &str, hello: ControlMessage) -> Result<(Self, mpsc::Sender<Frame>)> {
         let stream_id = match &hello {
             ControlMessage::Hello { stream_id, .. } => stream_id.clone(),
             _ => String::new(),
         };
-        let transport = WsTransport::new();
+        let transport: Box<dyn Transport> = if url.starts_with("srt://") {
+            Box::new(SrtTransport::new())
+        } else if url.starts_with("quic://") {
+            Box::new(QuicTransport::new())
+        } else {
+            Box::new(WsTransport::new())
+        };
         let peer = PeerAddr {
             transport: transport.id().to_string(),
             addr: url.to_string(),

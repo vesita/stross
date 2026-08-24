@@ -21,8 +21,16 @@ tokio-tungstenite = "0.27"
 tungstenite = "0.27"
 # 纯 Rust WebRTC（MIT/Apache-2.0）；rust-crypto 后端避免 C 构建依赖
 str0m = { version = "0.23", default-features = false, features = ["rust-crypto"] }
+# 纯 Rust SRT（MIT/Apache-2.0，TSBPD/ARQ/HaiCrypt，零 C 依赖）
+rsrt = "0.3"
+quinn = "0.11"
+rcgen = "0.14.9"
+rustls = { version = "0.23", features = ["ring"] }
 
 [features]
 default = []
 # 启用 mDNS 候选解析（浏览器 WebRTC 的 .local 主机名；随 stross-core 的 discovery 传递）
 discovery = ["dep:mdns-sd"]
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

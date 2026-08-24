@@ -36,6 +36,8 @@ use stross_proto::frame::{Frame, TRACK_VIDEO};
 use stross_proto::message::{ControlMessage, StreamInfo};
 
 use crate::assets;
+use crate::transport::quic::QuicTransport;
+use crate::transport::srt::SrtTransport;
 use crate::transport::webrtc::{PeerCommand, WebRtcPeer, WebRtcTransport};
 use crate::transport::ws::WsTransport;
 use crate::transport::{DataSession, SessionPacket};
@@ -118,6 +120,10 @@ impl RelayState {
 pub struct RelayHandle {
     /// 实际监听端口（绑定 0 时由系统分配）。
     pub port: u16,
+    /// SRT 推流端口（随中继启动，独立 UDP；`None` = 未启用）。
+    pub srt_port: Option<u16>,
+    /// QUIC 推流端口（随中继启动，独立 UDP；`None` = 未启用）。
+    pub quic_port: Option<u16>,
     state: RelayState,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
@@ -140,7 +146,8 @@ impl RelayServer {
     /// 绑定并启动中继。
     ///
     /// `port == 0` 时由系统分配空闲端口（测试用），实际端口在
-    /// 返回的 [`RelayHandle::port`] 上。
+    /// 返回的 [`RelayHandle::port`] 上；SRT/QUIC 推流监听随机端口，
+    /// 见 [`RelayHandle::srt_port`] / [`RelayHandle::quic_port`]。
     pub async fn start(port: u16) -> anyhow::Result<RelayHandle> {
         let state = RelayState::default();
         let app = Router::new()
@@ -160,6 +167,65 @@ impl RelayServer {
         let listener = TcpListener::bind(("0.0.0.0", port)).await?;
         let actual_port = listener.local_addr()?.port();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+        // SRT 推流监听：原生推流端可经 srt://<host>:<srt_port> 推流，
+        // 数据面与 WS 推流完全一致（handle_push；传输抽象第三次验证）
+        let mut srt_listener = SrtTransport::new()
+            .bind("0.0.0.0:0")
+            .await
+            .map_err(|e| anyhow::anyhow!("SRT 监听失败: {e}"))?;
+        let srt_port = srt_listener.local_addr().port();
+        tracing::info!("SRT 推流监听: 0.0.0.0:{srt_port}");
+        let srt_state = state.clone();
+        let mut srt_shutdown = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    res = srt_listener.accept() => match res {
+                        Ok(session) => {
+                            let state = srt_state.clone();
+                            tokio::spawn(async move { handle_push(session, state).await });
+                        }
+                        Err(e) => {
+                            tracing::warn!("SRT accept 失败: {e}");
+                            break;
+                        }
+                    },
+                    _ = srt_shutdown.changed() => break,
+                }
+            }
+            tracing::debug!("SRT 监听已停止");
+        });
+
+        // QUIC 推流监听：一条连接 control/media 双 stream 多路复用
+        // （Lossless；自签名证书 + 客户端接受任意证书，局域网可信模型）
+        let mut quic_listener = QuicTransport::new()
+            .bind("0.0.0.0:0".parse().expect("静态地址"))
+            .await
+            .map_err(|e| anyhow::anyhow!("QUIC 监听失败: {e}"))?;
+        let quic_port = quic_listener.local_addr().port();
+        tracing::info!("QUIC 推流监听: 0.0.0.0:{quic_port}");
+        let quic_state = state.clone();
+        let mut quic_shutdown = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    res = quic_listener.accept() => match res {
+                        Ok(session) => {
+                            let state = quic_state.clone();
+                            tokio::spawn(async move { handle_push(session, state).await });
+                        }
+                        Err(e) => {
+                            tracing::warn!("QUIC accept 失败: {e}");
+                            break;
+                        }
+                    },
+                    _ = quic_shutdown.changed() => break,
+                }
+            }
+            tracing::debug!("QUIC 监听已停止");
+        });
+
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
@@ -170,6 +236,8 @@ impl RelayServer {
         tracing::info!("中继已启动: 0.0.0.0:{actual_port}");
         Ok(RelayHandle {
             port: actual_port,
+            srt_port: Some(srt_port),
+            quic_port: Some(quic_port),
             state,
             shutdown: shutdown_tx,
             task,

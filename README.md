@@ -81,7 +81,7 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 │ / 观看端页面                │ / NAL·ADTS 解析 / Source+Sink │
 ├──────────────────────────────┴─────────────────────────────┤
 │ crates/stross-transport   ①½ 传输插件层：Transport/DataSession 抽象      │
-│              ws / webrtc / memory 实现                      │
+│            ws / webrtc / srt / quic 实现                      │
 ├────────────────────────────────────────────────────────────┤
 │ crates/stross-proto        ① 协议模块：帧头 + 控制消息（serde）        │
 └────────────────────────────────────────────────────────────┘
@@ -90,7 +90,8 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 - **① 协议模块**（`stross-proto`）：线上契约（24 字节 v2 帧头 + JSON 控制消息，
   含能力协商与路由控制），保持独立小 crate —— 共享模块与系统适配模块都依赖它，但互不依赖。
 - **①½ 传输插件层**（`stross-transport`）：可插拔传输抽象（`Transport`/`DataSession`）
-  与实现 —— ws（无损，现状）、webrtc（有损低延迟，str0m datachannel）、memory（测试）。
+  与实现 —— ws（无损，现状）、webrtc（有损低延迟，str0m datachannel）、
+  srt（自适应，rsrt 纯 Rust）、quic（无损多路复用，quinn）。
   `stross-core` re-export 保持路径兼容。
 - **② 共享模块**（`stross-core`）：纯数据共享逻辑 —— 中继服务器（axum + WS/WebRTC）、
   推流客户端、mDNS 发现、内嵌观看端页面。不含任何采集/平台代码。
@@ -129,7 +130,7 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 ```
 crates/
   stross-proto/      ① 协议：帧头 + 控制消息（serde）
-  stross-transport/  ①½ 传输插件层：Transport/DataSession + ws/webrtc/memory 实现
+  stross-transport/  ①½ 传输插件层：Transport/DataSession + ws/webrtc/srt/quic 实现
   stross-core/       ② 局域网共享：中继 / 推流客户端 / mDNS 发现 / 观看端页面
   stross-media/      ④ 系统适配：ffmpeg 管线 / 设备枚举 / NAL·ADTS 解析 / CaptureBackend / Sink
   stross-app/        ③ 核心封装：StrossApp 状态机 / SenderEngine / Kernel（无 UI 依赖，可单测）

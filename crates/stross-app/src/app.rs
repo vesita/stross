@@ -136,7 +136,7 @@ impl StrossApp {
                     ("kind", "relay"),
                     ("name", "Stross 本机中继"),
                     ("roles", "sender,viewer,relay"),
-                    ("transports", "ws,webrtc"),
+                    ("transports", "ws,webrtc,srt,quic"),
                     ("codecs", "h264,aac"),
                 ],
             ) {
@@ -167,15 +167,42 @@ impl StrossApp {
     }
 
     /// mDNS 扫描局域网内的其它中继。
+    ///
+    /// 返回的 [`RelayInfo`] 透传 mDNS TXT 信息（设备名 / 角色 / 传输），
+    /// 供前端直接展示设备卡片，无需再手动输入地址。
     pub async fn scan_relays(&self) -> Result<Vec<RelayInfo>, String> {
         let found = Discovery::browse(Duration::from_secs(2))
             .await
             .map_err(|e| e.to_string())?;
         Ok(found
             .into_iter()
-            .map(|d| RelayInfo {
-                port: d.port,
-                urls: vec![format!("http://{}:{}/", d.ip, d.port)],
+            .map(|d| {
+                let txt = |k: &str| {
+                    d.txt
+                        .iter()
+                        .find(|(key, _)| key == k)
+                        .map(|(_, v)| v.clone())
+                };
+                let split = |k: &str| -> Vec<String> {
+                    txt(k)
+                        .map(|v| {
+                            v.split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let url = format!("http://{}:{}/", d.ip, d.port);
+                RelayInfo {
+                    port: d.port,
+                    urls: vec![url],
+                    name: txt("name"),
+                    kind: txt("kind"),
+                    roles: split("roles"),
+                    transports: split("transports"),
+                    ip: Some(d.ip.to_string()),
+                }
             })
             .collect())
     }
@@ -325,6 +352,16 @@ pub struct DeviceList {
 pub struct RelayInfo {
     pub port: u16,
     pub urls: Vec<String>,
+    /// 设备名（mDNS TXT `name`；本机中继或缺失时为 `None`）。
+    pub name: Option<String>,
+    /// 类型（mDNS TXT `kind`：relay / sender / …）。
+    pub kind: Option<String>,
+    /// 角色（mDNS TXT `roles`：sender / viewer / relay）。
+    pub roles: Vec<String>,
+    /// 支持的传输（mDNS TXT `transports`：ws / webrtc / srt / quic）。
+    pub transports: Vec<String>,
+    /// 中继 IP（本机中继时为 `None`，用 urls 展示）。
+    pub ip: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -361,7 +398,15 @@ fn relay_info(port: u16) -> RelayInfo {
     if urls.is_empty() {
         urls.push(format!("http://127.0.0.1:{port}/"));
     }
-    RelayInfo { port, urls }
+    RelayInfo {
+        port,
+        urls,
+        name: Some("Stross 本机中继".into()),
+        kind: Some("relay".into()),
+        roles: vec!["sender".into(), "viewer".into(), "relay".into()],
+        transports: vec!["ws".into(), "webrtc".into(), "srt".into(), "quic".into()],
+        ip: None,
+    }
 }
 
 /// 局域网可访问的观看地址。

@@ -176,10 +176,18 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .connect-card { max-width: 720px; margin: 0 auto; }
 
 .scan-results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
-.scan-results button {
+.scan-card {
   text-align: left;
-  font-family: ui-monospace, monospace;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: border-color .15s;
 }
+.scan-card:hover { border-color: var(--accent); }
+.scan-card .scan-name { font-weight: 600; font-size: 14px; }
+.scan-card .scan-meta { color: var(--muted); font-size: 12px; margin-top: 2px; font-family: ui-monospace, monospace; }
 .err-text { color: var(--err); }
 
 /* ---------------- 主界面 Tabs ---------------- */

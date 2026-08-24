@@ -16,6 +16,24 @@ interface StreamInfo {
   watchers?: number;
 }
 
+/** 局域网设备（`/api/peers` 返回；由中继周期 mDNS 发现）。 */
+interface PeerInfo {
+  id: string;
+  name: string;
+  ip: string;
+  port: number;
+  roles: string[];
+  transports: string[];
+  url: string;
+}
+
+/** 角色英文 → 中文显示（TXT `roles` 取值）。 */
+const ROLE_LABELS: Record<string, string> = {
+  sender: '推流',
+  viewer: '观看',
+  relay: '中继',
+};
+
 /** 观看端运行状态。 */
 interface ViewerState {
   ws: WebSocket | null;
@@ -38,6 +56,7 @@ declare const JMuxer: any;
 
 const $ = (id: string): HTMLElement => document.getElementById(id) as HTMLElement;
 const listEl = $('stream-list');
+const peerListEl = $('peer-list');
 const logEl = $('log');
 const connBadge = $('conn-state');
 const placeholder = $('placeholder');
@@ -126,6 +145,58 @@ function renderList(streams: StreamInfo[]): void {
       <div class="meta">${esc(fmtMeta(s))}</div>`;
     card.onclick = () => connect(s);
     listEl.appendChild(card);
+  }
+}
+
+// ---------------------------------------------------------------- 局域网设备
+
+/** 拉取局域网设备列表（`/api/peers`，中继周期 mDNS 发现）。 */
+async function refreshPeers(): Promise<void> {
+  try {
+    const resp = await fetch('/api/peers', { cache: 'no-store' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    renderPeers(await resp.json());
+  } catch (e) {
+    log('刷新设备列表失败: ' + (e as Error).message, 'err');
+  }
+}
+
+function roleLabel(r: string): string {
+  return ROLE_LABELS[r] || r;
+}
+
+/** 渲染局域网设备卡片：点击打开该设备的观看页。 */
+function renderPeers(peers: PeerInfo[]): void {
+  peerListEl.innerHTML = '';
+  if (!peers.length) {
+    peerListEl.innerHTML = '<p class="hint">未发现其它设备<br>（本机中继不在此列）</p>';
+    return;
+  }
+  for (const p of peers) {
+    const card = document.createElement('div');
+    card.className = 'peer-card';
+    card.title = '打开该设备的观看页';
+    const name = document.createElement('div');
+    name.className = 'title';
+    name.textContent = p.name;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = p.ip + ':' + p.port;
+    if (p.roles && p.roles.length) {
+      const tags = document.createElement('div');
+      tags.className = 'meta';
+      p.roles.forEach((r) => {
+        const tag = document.createElement('span');
+        tag.className = 'role-tag';
+        tag.textContent = roleLabel(r);
+        tags.appendChild(tag);
+      });
+      card.appendChild(tags);
+    }
+    card.appendChild(name);
+    card.appendChild(meta);
+    card.onclick = () => { location.href = p.url; };
+    peerListEl.appendChild(card);
   }
 }
 
@@ -350,3 +421,5 @@ setInterval(() => {
 $('refresh-btn').onclick = () => void refresh();
 void refresh();
 setInterval(() => void refresh(), 5000);
+void refreshPeers();
+setInterval(() => void refreshPeers(), 10000);

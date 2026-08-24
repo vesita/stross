@@ -24,9 +24,9 @@ struct Args {
     #[arg(short, long, default_value_t = DEFAULT_PORT)]
     port: u16,
 
-    /// 是否通过 mDNS 广播自己（需要 discovery feature）
+    /// 关闭 mDNS 广播（默认广播自己，便于局域网内设备自动发现）
     #[arg(long)]
-    advertise: bool,
+    no_advertise: bool,
 }
 
 #[tokio::main]
@@ -54,17 +54,24 @@ async fn main() -> anyhow::Result<()> {
     println!("\n  Ctrl+C 退出\n");
 
     #[cfg(feature = "discovery")]
-    if args.advertise {
+    if !args.no_advertise {
         let mut discovery = stross_core::discovery::Discovery::start(
             &format!("relay-{}", handle.port),
             local_ips().first().copied().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
             handle.port,
-            &[("kind", "relay")],
+            &[
+                ("kind", "relay"),
+                ("name", "Stross 中继"),
+                ("roles", "sender,viewer,relay"),
+                ("transports", "ws,webrtc,srt,quic"),
+                ("codecs", "h264,aac"),
+            ],
         )?;
         println!("  mDNS 广播中…");
         tokio::signal::ctrl_c().await?;
         discovery.stop();
     } else {
+        println!("  mDNS 广播已关闭");
         tokio::signal::ctrl_c().await?;
     }
 

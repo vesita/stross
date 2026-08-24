@@ -281,7 +281,13 @@ pub fn run_relay_only(args: &[String]) {
                         &format!("sender-relay-{}", handle.port),
                         ip,
                         handle.port,
-                        &[("kind", "relay")],
+                        &[
+                            ("kind", "relay"),
+                            ("name", "Stross 中继"),
+                            ("roles", "sender,viewer,relay"),
+                            ("transports", "ws,webrtc,srt,quic"),
+                            ("codecs", "h264,aac"),
+                        ],
                     ) {
                         Ok(d) => {
                             println!("  mDNS 广播中…");

@@ -76,6 +76,29 @@ main {
 .stream-card .live { color: var(--err); font-weight: 700; }
 .stream-card .live:empty { display: none; }
 
+.peer-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+
+.peer-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color .15s;
+}
+.peer-card:hover { border-color: var(--accent); }
+.peer-card .title { font-weight: 600; font-size: 14px; }
+.peer-card .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.peer-card .role-tag {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 0 6px;
+  margin-right: 4px;
+}
+
 .hint { color: var(--muted); font-size: 13px; }
 
 #refresh-btn {

@@ -69,6 +69,8 @@ async function init() {
         renderIps(info.ips);
         restorePrefs();
         await loadDevices();
+        // 打开即自动扫描局域网设备，免去手动输入地址
+        void scanRelays();
     }
     catch (e) {
         showFatal(String(e));
@@ -290,30 +292,52 @@ function renderIps(ips) {
         ul.innerHTML = '<li class="hint">未获取到局域网 IP</li>';
 }
 // ---------------------------------------------------------------- 扫描局域网
+/** 角色英文 → 中文显示（mDNS TXT `roles`）。 */
+const ROLE_LABELS = {
+    sender: '推流',
+    viewer: '观看',
+    relay: '中继',
+};
+function roleLabel(r) {
+    return ROLE_LABELS[r] || r;
+}
+/** 扫描局域网内其它设备（mDNS）；打开应用时自动执行一次，也可手动重扫。 */
 async function scanRelays() {
     const box = $('scan-results');
     box.classList.remove('hidden');
     box.innerHTML = '<p class="hint">扫描中（2 秒）…</p>';
     try {
         const relays = (await call('scan_relays'));
-        if (!relays.length) {
-            box.innerHTML = '<p class="hint">未发现局域网内其它中继（mDNS）。可手动输入地址。</p>';
+        // 剔除本机（本机中继走「🖥️ 本机」选项）
+        const others = relays.filter((r) => !r.ip || MY_IPS.indexOf(r.ip) === -1);
+        if (!others.length) {
+            box.innerHTML = '<p class="hint">未发现局域网内其它设备（mDNS）。可手动输入地址。</p>';
             return;
         }
         box.innerHTML = '';
-        relays.forEach((r) => {
+        others.forEach((r) => {
             const url = r.urls[0];
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.textContent = '📍 ' + url;
-            btn.title = '点击直接连接';
-            btn.onclick = () => {
+            const card = document.createElement('button');
+            card.type = 'button';
+            card.className = 'scan-card';
+            const nameLine = document.createElement('div');
+            nameLine.className = 'scan-name';
+            nameLine.textContent = r.name || 'Stross 设备';
+            const metaLine = document.createElement('div');
+            metaLine.className = 'scan-meta';
+            metaLine.textContent =
+                (r.ip ? r.ip + ':' + r.port : url) +
+                    (r.roles && r.roles.length ? '  ·  ' + r.roles.map(roleLabel).join(' / ') : '');
+            card.appendChild(nameLine);
+            card.appendChild(metaLine);
+            card.title = '点击连接 ' + url;
+            card.onclick = () => {
                 $input('relay-addr').value = url;
                 document.querySelector('input[name="conn"][value="remote"]').checked = true;
                 $('remote-row').classList.remove('hidden');
                 void connect();
             };
-            box.appendChild(btn);
+            box.appendChild(card);
         });
     }
     catch (e) {

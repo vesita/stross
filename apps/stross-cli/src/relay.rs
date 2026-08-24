@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use clap::Args;
 use stross_core::relay::{DEFAULT_PORT, RelayServer};
+use stross_proto::message::{CodecId, DiscoveryInfo, RoleId, TransportId};
 
 #[derive(Args, Debug)]
 pub struct RelayArgs {
@@ -37,13 +38,19 @@ pub async fn run(args: RelayArgs) -> anyhow::Result<()> {
                 .copied()
                 .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             handle.port,
-            &[
-                ("kind", "relay"),
-                ("name", "Stross 中继"),
-                ("roles", "sender,viewer,relay"),
-                ("transports", "ws,webrtc,srt,quic"),
-                ("codecs", "h264,aac"),
-            ],
+            &DiscoveryInfo {
+                v: DiscoveryInfo::VERSION,
+                name: "Stross 中继".into(),
+                roles: vec![RoleId::Relay, RoleId::Sender, RoleId::Viewer],
+                media: vec![],
+                transports: vec![
+                    TransportId::Ws,
+                    TransportId::WebRtc,
+                    TransportId::Srt,
+                    TransportId::Quic,
+                ],
+                codecs: vec![CodecId::H264, CodecId::Aac],
+            },
         )?;
         tracing::info!("mDNS 广播中…");
         tokio::signal::ctrl_c().await?;

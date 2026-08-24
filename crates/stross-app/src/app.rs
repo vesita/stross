@@ -18,7 +18,7 @@ use stross_core::net::local_ips;
 use stross_core::relay::{DEFAULT_PORT, RelayHandle, RelayServer};
 use stross_media::capture::CaptureBackend;
 use stross_media::pipeline::{StreamConfig, ffmpeg_available};
-use stross_proto::message::TransportId;
+use stross_proto::message::{CodecId, DiscoveryInfo, MediaKind, RoleId, TransportId};
 
 use crate::engine::SenderEngine;
 use crate::kernel::{Kernel, NodeInfo, NodeRole, RelayDataPlane};
@@ -145,21 +145,29 @@ impl StrossApp {
         *self.relay.lock().unwrap() = Some(handle);
         // 把本机注册进内核设备图（含采集能力，供会话协商）
         self.register_local_node();
-        // mDNS 广播本机中继，局域网内其它设备（如电脑端 Stross）可扫描发现
+        // mDNS 广播本机中继，局域网内其它设备（如电脑端 Stross）可扫描发现。
+        // 能力描述统一走 DiscoveryInfo 单 key JSON（F1.2 / 1d）
         if let Some(ip) = local_ips().into_iter().next() {
             let instance = format!("sender-{port}");
-            match Discovery::start(
-                &instance,
-                ip,
-                port,
-                &[
-                    ("kind", "relay"),
-                    ("name", "Stross 本机中继"),
-                    ("roles", "sender,viewer,relay"),
-                    ("transports", "ws,webrtc,srt,quic"),
-                    ("codecs", "h264,aac"),
+            let info = DiscoveryInfo {
+                v: DiscoveryInfo::VERSION,
+                name: "Stross 本机中继".into(),
+                roles: vec![RoleId::Relay, RoleId::Sender, RoleId::Viewer],
+                media: vec![
+                    MediaKind::Screen,
+                    MediaKind::Camera,
+                    MediaKind::Mic,
+                    MediaKind::SystemAudio,
                 ],
-            ) {
+                transports: vec![
+                    TransportId::Ws,
+                    TransportId::WebRtc,
+                    TransportId::Srt,
+                    TransportId::Quic,
+                ],
+                codecs: vec![CodecId::H264, CodecId::Aac],
+            };
+            match Discovery::start(&instance, ip, port, &info) {
                 Ok(d) => {
                     *self.discovery.lock().unwrap() = Some(d);
                 }
@@ -188,7 +196,7 @@ impl StrossApp {
 
     /// mDNS 扫描局域网内的其它中继。
     ///
-    /// 返回的 [`RelayInfo`] 透传 mDNS TXT 信息（设备名 / 角色 / 传输），
+    /// 返回的 [`RelayInfo`] 透传 mDNS 能力引导信息（设备名 / 角色 / 传输），
     /// 供前端直接展示设备卡片，无需再手动输入地址。
     pub async fn scan_relays(&self) -> Result<Vec<RelayInfo>, String> {
         let found = Discovery::browse(Duration::from_secs(2))
@@ -197,35 +205,19 @@ impl StrossApp {
         Ok(found
             .into_iter()
             .map(|d| {
-                let txt = |k: &str| {
-                    d.txt
-                        .iter()
-                        .find(|(key, _)| key == k)
-                        .map(|(_, v)| v.clone())
-                };
-                let split = |k: &str| -> Vec<String> {
-                    txt(k)
-                        .map(|v| {
-                            v.split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                };
-                // TXT 字符串 → 枚举；未知传输忽略（编译期穷尽，前端序列化仍为字符串）
-                let transports = split("transports")
-                    .iter()
-                    .filter_map(|s| TransportId::from_txt(s))
-                    .collect();
+                // 单 key JSON 解码（F1.2）；旧设备 / 缺失时回退默认值
+                let info = DiscoveryInfo::from_txt(&d.txt);
                 let url = format!("http://{}:{}/", d.ip, d.port);
                 RelayInfo {
                     port: d.port,
                     urls: vec![url],
-                    name: txt("name"),
-                    kind: txt("kind"),
-                    roles: split("roles"),
-                    transports,
+                    name: info.as_ref().map(|i| i.name.clone()),
+                    kind: info.as_ref().map(|_| "relay".into()),
+                    roles: info.as_ref().map(|i| i.roles.clone()).unwrap_or_default(),
+                    transports: info
+                        .as_ref()
+                        .map(|i| i.transports.clone())
+                        .unwrap_or_default(),
                     ip: Some(d.ip.to_string()),
                 }
             })
@@ -399,13 +391,13 @@ pub struct DeviceList {
 pub struct RelayInfo {
     pub port: u16,
     pub urls: Vec<String>,
-    /// 设备名（mDNS TXT `name`；本机中继或缺失时为 `None`）。
+    /// 设备名（mDNS 能力引导 `name`；本机中继或缺失时为 `None`）。
     pub name: Option<String>,
-    /// 类型（mDNS TXT `kind`：relay / sender / …）。
+    /// 类型（relay / sender / …）。
     pub kind: Option<String>,
-    /// 角色（mDNS TXT `roles`：sender / viewer / relay）。
-    pub roles: Vec<String>,
-    /// 支持的传输（mDNS TXT `transports`；序列化后与字符串时代一致）。
+    /// 角色（mDNS 能力引导 `roles`；枚举，序列化与字符串时代一致）。
+    pub roles: Vec<RoleId>,
+    /// 支持的传输（mDNS 能力引导 `transports`；序列化后与字符串时代一致）。
     pub transports: Vec<TransportId>,
     /// 中继 IP（本机中继时为 `None`，用 urls 展示）。
     pub ip: Option<String>,
@@ -450,7 +442,7 @@ fn relay_info(port: u16) -> RelayInfo {
         urls,
         name: Some("Stross 本机中继".into()),
         kind: Some("relay".into()),
-        roles: vec!["sender".into(), "viewer".into(), "relay".into()],
+        roles: vec![RoleId::Sender, RoleId::Viewer, RoleId::Relay],
         transports: vec![
             TransportId::Ws,
             TransportId::WebRtc,

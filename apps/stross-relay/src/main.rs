@@ -13,6 +13,7 @@
 use clap::Parser;
 use stross_core::net::local_ips;
 use stross_core::relay::{DEFAULT_PORT, RelayServer};
+use stross_proto::message::{CodecId, DiscoveryInfo, RoleId, TransportId};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -59,13 +60,19 @@ async fn main() -> anyhow::Result<()> {
                 .copied()
                 .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
             handle.port,
-            &[
-                ("kind", "relay"),
-                ("name", "Stross 中继"),
-                ("roles", "sender,viewer,relay"),
-                ("transports", "ws,webrtc,srt,quic"),
-                ("codecs", "h264,aac"),
-            ],
+            &DiscoveryInfo {
+                v: DiscoveryInfo::VERSION,
+                name: "Stross 中继".into(),
+                roles: vec![RoleId::Relay, RoleId::Sender, RoleId::Viewer],
+                media: vec![],
+                transports: vec![
+                    TransportId::Ws,
+                    TransportId::WebRtc,
+                    TransportId::Srt,
+                    TransportId::Quic,
+                ],
+                codecs: vec![CodecId::H264, CodecId::Aac],
+            },
         )?;
         tracing::info!("mDNS 广播中…");
         tokio::signal::ctrl_c().await?;

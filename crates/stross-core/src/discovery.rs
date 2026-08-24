@@ -2,11 +2,15 @@
 //!
 //! 中继/推流端用 `_stross._tcp` 广播自己，局域网内其它设备可以发现观看地址。
 //! 借鉴 [mdns-sd](https://crates.io/crates/mdns-sd) 的用法。
+//!
+//! 能力引导（F1.2）：TXT 单 key（`stross`）承载整个 [`DiscoveryInfo`]（JSON），
+//! 见 [`stross_proto::message::DiscoveryInfo`]——注册侧传结构体，浏览侧解码结构体。
 
 use std::net::IpAddr;
 use std::time::Duration;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use stross_proto::message::DiscoveryInfo;
 
 /// mDNS 服务类型。
 pub const SERVICE_TYPE: &str = "_stross._tcp.local.";
@@ -26,21 +30,19 @@ pub struct Discovery {
 }
 
 impl Discovery {
-    /// 以 `instance` 名义广播服务。
+    /// 以 `instance` 名义广播服务（能力描述见 [`DiscoveryInfo`]）。
     pub fn start(
         instance: &str,
         ip: IpAddr,
         port: u16,
-        txt: &[(&str, &str)],
+        info: &DiscoveryInfo,
     ) -> anyhow::Result<Self> {
         let daemon = ServiceDaemon::new()?;
         let hostname = hostname::get().unwrap_or_else(|_| "stross".into());
         let host = format!("{}.local.", hostname.to_string_lossy());
-        // mdns-sd 0.21：TXT 属性走 IntoTxtProperties（HashMap<String, String>）
-        let props: std::collections::HashMap<String, String> = txt
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+        // mdns-sd 0.21：TXT 属性走 IntoTxtProperties（HashMap<String, String>）；
+        // 能力描述由 DiscoveryInfo 单 key JSON 编码（新增字段零维护）
+        let props: std::collections::HashMap<String, String> = info.to_txt().into_iter().collect();
         let mut info = ServiceInfo::new(SERVICE_TYPE, instance, &host, ip, port, props)
             .map_err(|e| anyhow::anyhow!("ServiceInfo: {e}"))?;
         info = info.enable_addr_auto();

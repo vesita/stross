@@ -4,7 +4,7 @@
 //! mDNS 浏览本身依赖真实局域网，这里通过 `insert_peer` 手动注入验证整条链路。
 
 use stross_core::relay::{PeerInfo, RelayServer};
-use stross_proto::message::TransportId;
+use stross_proto::message::{RoleId, TransportId};
 
 #[tokio::test]
 async fn peers_api_lists_inserted_peers() {
@@ -22,7 +22,7 @@ async fn peers_api_lists_inserted_peers() {
         name: "客厅电脑".into(),
         ip: "192.168.1.9".into(),
         port: 8777,
-        roles: vec!["sender".into(), "relay".into()],
+        roles: vec![RoleId::Sender, RoleId::Relay],
         transports: vec![TransportId::Ws, TransportId::WebRtc],
         url: "http://192.168.1.9:8777/".into(),
     });

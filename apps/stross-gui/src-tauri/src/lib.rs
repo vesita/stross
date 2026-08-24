@@ -16,6 +16,7 @@ use stross_app::{CaptureStatusView, Platform, StrossApp};
 #[cfg(not(mobile))]
 use stross_media::capture::FfmpegBackend;
 use stross_media::pipeline::StreamConfig;
+use stross_proto::message::{CodecId, DiscoveryInfo, RoleId, TransportId};
 use tauri::{Emitter, Manager, State};
 
 #[cfg(mobile)]
@@ -281,13 +282,19 @@ pub fn run_relay_only(args: &[String]) {
                         &format!("sender-relay-{}", handle.port),
                         ip,
                         handle.port,
-                        &[
-                            ("kind", "relay"),
-                            ("name", "Stross 中继"),
-                            ("roles", "sender,viewer,relay"),
-                            ("transports", "ws,webrtc,srt,quic"),
-                            ("codecs", "h264,aac"),
-                        ],
+                        &DiscoveryInfo {
+                            v: DiscoveryInfo::VERSION,
+                            name: "Stross 中继".into(),
+                            roles: vec![RoleId::Relay, RoleId::Sender, RoleId::Viewer],
+                            media: vec![],
+                            transports: vec![
+                                TransportId::Ws,
+                                TransportId::WebRtc,
+                                TransportId::Srt,
+                                TransportId::Quic,
+                            ],
+                            codecs: vec![CodecId::H264, CodecId::Aac],
+                        },
                     ) {
                         Ok(d) => {
                             tracing::info!("mDNS 广播中…");

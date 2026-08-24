@@ -12,7 +12,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use serde::Serialize;
-use stross_proto::message::TransportId;
+use stross_proto::message::{DiscoveryInfo, RoleId, TransportId};
 #[cfg(feature = "discovery")]
 use tokio::sync::watch;
 
@@ -29,8 +29,8 @@ pub struct PeerInfo {
     pub name: String,
     pub ip: String,
     pub port: u16,
-    /// 角色（TXT `roles`，逗号分隔：sender / viewer / relay）。
-    pub roles: Vec<String>,
+    /// 角色（能力引导 `roles`；枚举，序列化与字符串时代一致）。
+    pub roles: Vec<RoleId>,
     /// 支持的传输（TXT `transports`，解析为枚举）。
     pub transports: Vec<TransportId>,
     /// 观看页地址（`http://ip:port/`）。
@@ -88,40 +88,25 @@ fn filter_self(
     out
 }
 
-/// 把一条 mDNS 浏览记录映射为 [`PeerInfo`]（TXT 缺失时回退默认值）。
+/// 把一条 mDNS 浏览记录映射为 [`PeerInfo`]（能力引导缺失时回退默认值）。
 #[cfg(feature = "discovery")]
 fn peer_from_discovered(d: crate::discovery::Discovered) -> PeerInfo {
-    let txt = |k: &str| {
-        d.txt
-            .iter()
-            .find(|(key, _)| key == k)
-            .map(|(_, v)| v.clone())
-    };
-    let split = |k: &str| -> Vec<String> {
-        txt(k)
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    // TXT 字符串 → 枚举；未知传输忽略
-    let transports = split("transports")
-        .iter()
-        .filter_map(|s| TransportId::from_txt(s))
-        .collect();
-    let name = txt("name")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{}:{}", d.ip, d.port));
+    // 单 key JSON 解码（F1.2 / 1d）；旧设备 / 缺失时回退默认
+    let info = DiscoveryInfo::from_txt(&d.txt);
     PeerInfo {
         id: format!("{}:{}", d.ip, d.port),
-        name,
+        name: info
+            .as_ref()
+            .map(|i| i.name.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("{}:{}", d.ip, d.port)),
         ip: d.ip.to_string(),
         port: d.port,
-        roles: split("roles"),
-        transports,
+        roles: info.as_ref().map(|i| i.roles.clone()).unwrap_or_default(),
+        transports: info
+            .as_ref()
+            .map(|i| i.transports.clone())
+            .unwrap_or_default(),
         url: format!("http://{}:{}/", d.ip, d.port),
     }
 }
@@ -131,17 +116,15 @@ mod tests {
     use super::*;
     use crate::relay::RelayState;
     use std::collections::HashMap;
+    use stross_proto::message::CodecId;
 
     #[cfg(feature = "discovery")]
-    fn discovered(ip: &str, port: u16, txt: &[(&str, &str)]) -> crate::discovery::Discovered {
+    fn discovered(ip: &str, port: u16, txt: Vec<(String, String)>) -> crate::discovery::Discovered {
         crate::discovery::Discovered {
             instance: format!("relay-{port}._stross._tcp.local."),
             ip: ip.parse().expect("测试 IP"),
             port,
-            txt: txt
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
+            txt,
         }
     }
 
@@ -153,7 +136,7 @@ mod tests {
             name: "Beta".into(),
             ip: "10.0.0.2".into(),
             port: 9000,
-            roles: vec!["relay".into()],
+            roles: vec![RoleId::Relay],
             transports: vec![],
             url: "http://10.0.0.2:9000/".into(),
         });
@@ -199,20 +182,24 @@ mod tests {
     #[cfg(feature = "discovery")]
     #[test]
     fn peer_from_discovered_parses_txt() {
-        let p = peer_from_discovered(discovered(
-            "192.168.1.9",
-            8777,
-            &[
-                ("kind", "relay"),
-                ("name", "客厅电脑"),
-                ("roles", "sender,viewer,relay"),
-                ("transports", "ws,webrtc,srt,quic"),
+        let info = DiscoveryInfo {
+            v: DiscoveryInfo::VERSION,
+            name: "客厅电脑".into(),
+            roles: vec![RoleId::Sender, RoleId::Viewer, RoleId::Relay],
+            media: vec![],
+            transports: vec![
+                TransportId::Ws,
+                TransportId::WebRtc,
+                TransportId::Srt,
+                TransportId::Quic,
             ],
-        ));
+            codecs: vec![CodecId::H264, CodecId::Aac],
+        };
+        let p = peer_from_discovered(discovered("192.168.1.9", 8777, info.to_txt()));
         assert_eq!(p.name, "客厅电脑");
         assert_eq!(p.ip, "192.168.1.9");
         assert_eq!(p.port, 8777);
-        assert_eq!(p.roles, vec!["sender", "viewer", "relay"]);
+        assert_eq!(p.roles, vec![RoleId::Sender, RoleId::Viewer, RoleId::Relay]);
         assert_eq!(
             p.transports,
             vec![
@@ -228,7 +215,7 @@ mod tests {
     #[cfg(feature = "discovery")]
     #[test]
     fn peer_from_discovered_falls_back_without_txt() {
-        let p = peer_from_discovered(discovered("10.0.0.7", 9001, &[]));
+        let p = peer_from_discovered(discovered("10.0.0.7", 9001, vec![]));
         assert_eq!(p.name, "10.0.0.7:9001");
         assert!(p.roles.is_empty());
         assert!(p.transports.is_empty());
@@ -239,10 +226,10 @@ mod tests {
     fn filter_self_drops_own_broadcast() {
         let self_ip: IpAddr = "192.168.1.5".parse().unwrap();
         let found = vec![
-            discovered("192.168.1.5", 8777, &[]), // 自己（本机 IP + 本机端口）
-            discovered("192.168.1.5", 9000, &[]), // 本机另一实例（不同端口，保留）
-            discovered("192.168.1.8", 8777, &[]), // 其它设备同端口（保留）
-            discovered("192.168.1.9", 9001, &[]), // 其它设备（保留）
+            discovered("192.168.1.5", 8777, vec![]), // 自己（本机 IP + 本机端口）
+            discovered("192.168.1.5", 9000, vec![]), // 本机另一实例（不同端口，保留）
+            discovered("192.168.1.8", 8777, vec![]), // 其它设备同端口（保留）
+            discovered("192.168.1.9", 9001, vec![]), // 其它设备（保留）
         ];
         let peers = filter_self(found, 8777, &[self_ip]);
         assert_eq!(peers.len(), 3);

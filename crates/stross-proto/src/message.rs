@@ -27,20 +27,6 @@ pub enum TransportId {
     Memory,
 }
 
-impl TransportId {
-    /// 从 mDNS TXT 字符串解析（未知值返回 `None`，调用方忽略）。
-    pub fn from_txt(s: &str) -> Option<Self> {
-        match s {
-            "ws" => Some(Self::Ws),
-            "webrtc" => Some(Self::WebRtc),
-            "srt" => Some(Self::Srt),
-            "quic" => Some(Self::Quic),
-            "memory" => Some(Self::Memory),
-            _ => None,
-        }
-    }
-}
-
 /// 编解码标识（有限集合，可扩展）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -50,19 +36,6 @@ pub enum CodecId {
     Opus,
     /// AV1（预留；传输/编码器支持后启用）。
     Av1,
-}
-
-impl CodecId {
-    /// 从 mDNS TXT 字符串解析（未知值返回 `None`）。
-    pub fn from_txt(s: &str) -> Option<Self> {
-        match s {
-            "h264" => Some(Self::H264),
-            "aac" => Some(Self::Aac),
-            "opus" => Some(Self::Opus),
-            "av1" => Some(Self::Av1),
-            _ => None,
-        }
-    }
 }
 
 /// 传输可靠性契约（设计文档 §4.1）。
@@ -259,6 +232,65 @@ impl ControlMessage {
     }
 }
 
+/// 设备角色（发现广播 F1.2 用；有限集合）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoleId {
+    /// 可作源（推流）。
+    Sender,
+    /// 可作汇（接收播放）。
+    Viewer,
+    /// 中继（转发数据面）。
+    Relay,
+    /// 控制者（控制面；D7 远程控制阶段开放）。
+    Controller,
+}
+
+/// mDNS TXT 中承载 [`DiscoveryInfo`] 的固定 key。
+pub const TXT_KEY_DISCOVERY: &str = "stross";
+
+/// 发现能力引导载荷（需求 F1.2；设计见 docs/requirements.md D7 旁注）。
+///
+/// 整个描述序列化进**单个 TXT key `stross`**（JSON）：注册侧 `to_txt` 一键编码、
+/// 浏览侧 `from_txt` 一键解码——**新增字段零维护**，枚举经 serde 保持 wire
+/// 格式稳定（lowercase，与旧逗号串时代一致）。设备名同时出现在 mDNS 实例名中
+/// （第三方浏览器可读）；不再逐 key 手工拼 `name/roles/transports`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryInfo {
+    /// 描述版本（自描述演进；当前 [`DiscoveryInfo::VERSION`]）。
+    pub v: u8,
+    /// 设备名。
+    pub name: String,
+    /// 角色。
+    pub roles: Vec<RoleId>,
+    /// 可共享的媒体类型。
+    pub media: Vec<MediaKind>,
+    /// 支持的传输。
+    pub transports: Vec<TransportId>,
+    /// 支持的编解码。
+    pub codecs: Vec<CodecId>,
+}
+
+impl DiscoveryInfo {
+    /// 当前描述版本。
+    pub const VERSION: u8 = 1;
+
+    /// 编码为 mDNS TXT 条目（单 key）。
+    pub fn to_txt(&self) -> Vec<(String, String)> {
+        vec![(
+            TXT_KEY_DISCOVERY.to_string(),
+            serde_json::to_string(self).expect("DiscoveryInfo 序列化不应失败"),
+        )]
+    }
+
+    /// 从 mDNS TXT 条目解码；缺失 / 非法返回 `None`（调用方回退默认值）。
+    pub fn from_txt(txt: &[(String, String)]) -> Option<Self> {
+        let json = txt.iter().find(|(k, _)| k == TXT_KEY_DISCOVERY)?.1.as_str();
+        serde_json::from_str(json).ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +411,52 @@ mod tests {
         };
         let back: ControlMessage = serde_json::from_str(&ev.to_text()).unwrap();
         assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn discovery_info_txt_roundtrip() {
+        let info = DiscoveryInfo {
+            v: DiscoveryInfo::VERSION,
+            name: "卧室电脑".into(),
+            roles: vec![RoleId::Relay, RoleId::Sender, RoleId::Viewer],
+            media: vec![MediaKind::Screen, MediaKind::Mic],
+            transports: vec![TransportId::Ws, TransportId::WebRtc],
+            codecs: vec![CodecId::H264, CodecId::Aac],
+        };
+        let txt = info.to_txt();
+        assert_eq!(txt.len(), 1, "单 key 承载全部能力");
+        assert_eq!(txt[0].0, TXT_KEY_DISCOVERY);
+        assert!(
+            txt[0]
+                .1
+                .contains("\"roles\":[\"relay\",\"sender\",\"viewer\"]"),
+            "wire: {}",
+            txt[0].1
+        );
+        let back = DiscoveryInfo::from_txt(&txt).expect("roundtrip 解码");
+        assert_eq!(info, back);
+    }
+
+    #[test]
+    fn discovery_info_from_txt_tolerant() {
+        // 缺失 key → None（调用方回退默认）
+        assert_eq!(DiscoveryInfo::from_txt(&[]), None);
+        assert_eq!(
+            DiscoveryInfo::from_txt(&[("name".into(), "x".into())]),
+            None
+        );
+        // 坏 JSON → None
+        assert_eq!(
+            DiscoveryInfo::from_txt(&[(TXT_KEY_DISCOVERY.into(), "{oops".into())]),
+            None
+        );
+        // 未知枚举值 → 解码失败（枚举穷尽，未知值拒绝）
+        assert_eq!(
+            DiscoveryInfo::from_txt(&[(
+                TXT_KEY_DISCOVERY.into(),
+                r#"{"v":1,"name":"x","roles":["hacker"]}"#.into()
+            )]),
+            None
+        );
     }
 }

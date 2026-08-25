@@ -458,6 +458,24 @@ function buildConfig() {
         durationSecs: null,
     };
 }
+/** 推流端按媒体类型自动选传输（与接收端 auto 同规则）：
+ *  含视频 → SRT（Adaptive：丢包不阻塞、关键帧自愈）> QUIC > WS
+ *  纯音频 → QUIC（无损：音频不可丢）> WS */
+function pushRelayUrl(cfg) {
+    if (!connection)
+        return '';
+    const hasVideo = !!cfg.video;
+    if (hasVideo) {
+        if (connection.srtUrl)
+            return connection.srtUrl;
+        if (connection.quicUrl)
+            return connection.quicUrl;
+    }
+    else if (connection.quicUrl) {
+        return connection.quicUrl;
+    }
+    return connection.wsUrl;
+}
 /** Android：与桌面统一走 start_stream（cfg 携带画质/音频；原生采集在 Rust 后端适配）。 */
 async function startStream() {
     hideError();
@@ -474,7 +492,8 @@ async function startStream() {
             setRunning(true, 'starting');
             // Android 原生采集启动需要系统授权，真实状态由 capture_status 轮询回报
         }
-        const res = (await call('start_stream', { cfg: buildConfig(), relayUrl: connection.wsUrl }));
+        const cfg = buildConfig();
+        const res = (await call('start_stream', { cfg, relayUrl: pushRelayUrl(cfg) }));
         renderUrls(res.watchUrls);
         // D4：内核签发流 id —— 预填接收面板，本机可立即原生接收
         $input('recv-stream-input').value = res.streamId || '';

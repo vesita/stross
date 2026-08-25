@@ -27,8 +27,10 @@ impl SenderEngine {
     /// 启动推流。
     ///
     /// * `backend`：平台相关的采集后端（桌面 ffmpeg / Android 原生），以 `Arc` 共享
-    /// * `relay_url`：`Some("ws://host:port")` 表示推到外部中继；
-    ///   `None` 表示启动内嵌中继（绑定 `bind_port`，0 = 自动分配）。
+    /// * `relay_url`：`Some("ws://host:port/ws/push")` / `srt://host:port` /
+    ///   `quic://host:port` 表示推到外部中继（按 scheme 选传输）；
+    ///   `None` 表示启动内嵌中继（绑定 `bind_port`，0 = 自动分配），
+    ///   推流地址按媒体类型自动选传输。
     pub async fn start(
         cfg: StreamConfig,
         backend: Arc<dyn CaptureBackend>,
@@ -50,10 +52,10 @@ impl SenderEngine {
         };
         let url = match &relay_url {
             Some(u) => u.clone(),
-            None => format!(
-                "ws://127.0.0.1:{}/ws/push",
-                relay.as_ref().expect("内嵌中继必然存在").port
-            ),
+            None => {
+                let relay = relay.as_ref().expect("内嵌中继必然存在");
+                relay.auto_push_url(cfg.video.is_some())
+            }
         };
         let (client, tx) = RelayClient::connect(&url, cfg.hello()).await?;
         // 采集启动失败时回滚已建立的推流连接，避免留下半开会话

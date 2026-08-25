@@ -38,7 +38,8 @@ pub struct PushArgs {
     /// 内嵌中继端口（0 = 随机；设了 --relay 时忽略）
     #[arg(long, default_value_t = 0)]
     pub port: u16,
-    /// 推往外部中继（如 ws://127.0.0.1:18777）；设了则不再启动内嵌中继
+    /// 推往外部中继（ws://host:port/ws/push / srt://host:port / quic://host:port，
+    /// 按 scheme 选传输；设了则不再启动内嵌中继）
     #[arg(long)]
     pub relay: Option<String>,
     /// 流 id（默认 demo-<pid>）
@@ -79,7 +80,7 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
         Err(_) if args.audio => {
             tracing::warn!("音频启动失败，退回纯视频");
             cfg.audio = None;
-            SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), args.relay, args.port).await?
+            SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), args.relay.clone(), args.port).await?
         }
         Err(e) => return Err(e),
     };
@@ -87,12 +88,13 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
     match engine.relay_port() {
         Some(port) => {
             tracing::info!(
-                "📡 推流中（{} 秒）: {stream_id} @ ws://<本机IP>:{port}",
+                "📡 推流中（{} 秒）: {stream_id} @ 内嵌中继 ws://<本机IP>:{port}（自动选传输）",
                 args.secs
             );
         }
         None => {
-            tracing::info!("📡 推流中（{} 秒）: {stream_id}", args.secs);
+            let url = args.relay.as_deref().unwrap_or("<自动>");
+            tracing::info!("📡 推流中（{} 秒）: {stream_id} → {url}", args.secs);
         }
     }
     tokio::time::sleep(Duration::from_secs(args.secs)).await;

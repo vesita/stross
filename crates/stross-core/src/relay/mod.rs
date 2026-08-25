@@ -247,6 +247,27 @@ impl RelayHandle {
         self.state.authorize_stream(id);
     }
 
+    /// 按媒体类型自动选择推流地址（与接收端 auto 模式同规则）：
+    ///
+    /// * 含视频 → `srt://host:port`（Adaptive：丢包不阻塞、关键帧自愈）> QUIC > WS
+    /// * 纯音频 → `quic://host:port`（无损：音频不可丢）> WS
+    ///
+    /// `has_video = false` 且无 QUIC 端口时回退 WS；端口缺失时逐级回退。
+    /// 返回的是可拨号 URL（WS 带 `/ws/push` 路径，UDP 无路径）。
+    pub fn auto_push_url(&self, has_video: bool) -> String {
+        if has_video {
+            if let Some(p) = self.srt_port {
+                return format!("srt://127.0.0.1:{p}");
+            }
+            if let Some(p) = self.quic_port {
+                return format!("quic://127.0.0.1:{p}");
+            }
+        } else if let Some(p) = self.quic_port {
+            return format!("quic://127.0.0.1:{p}");
+        }
+        format!("ws://127.0.0.1:{}/ws/push", self.port)
+    }
+
     /// 撤销预授权。
     pub fn revoke_stream(&self, id: &str) {
         self.state.revoke_stream(id);

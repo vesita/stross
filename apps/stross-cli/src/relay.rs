@@ -27,7 +27,14 @@ pub async fn run(args: RelayArgs) -> anyhow::Result<()> {
         tracing::info!("中继入口: http://{ip}:{}/", handle.port);
     }
     tracing::info!("推流地址: ws://<中继IP>:{}/ws/push", handle.port);
+    if let Some(p) = handle.srt_port {
+        tracing::info!("SRT 推流地址: srt://<中继IP>:{p}（视频默认，UDP 自适应）");
+    }
+    if let Some(p) = handle.quic_port {
+        tracing::info!("QUIC 推流地址: quic://<中继IP>:{p}（音频默认，UDP 无损）");
+    }
     tracing::info!("流列表API: /api/streams");
+    tracing::info!("中继信息API: /api/info（srtPort/quicPort 自动发现）");
     tracing::info!("Ctrl+C 退出");
 
     #[cfg(feature = "discovery")]

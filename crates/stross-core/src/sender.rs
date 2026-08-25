@@ -6,7 +6,10 @@
 //! ```
 //!
 //! 基于传输抽象（[`Transport`](crate::transport::Transport)）拨号：
-//! `ws://`（无损，现状）/ `srt://`（自适应，弱网/跨 NAT）/ `quic://`（无损，多路复用）。
+//! `ws://`（无损）/ `srt://`（自适应，弱网/跨 NAT）/ `quic://`（无损，多路复用）。
+//! 连接后等待 relay 回 `Welcome` 才返回，保证推流端注册完成（观看端不会竞态）。
+
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
@@ -34,7 +37,7 @@ impl RelayClient {
     /// `hello` 由调用方构造（如 `StreamConfig::hello()`），
     /// 这样本模块不需要依赖任何采集配置类型。
     ///
-    /// `url` 支持三种传输：`ws://host/ws/push`（无损，现状）、
+    /// `url` 支持三种传输：`ws://host/ws/push`（无损）、
     /// `srt://host:port`（自适应，relay 的 [`RelayHandle::srt_port`]）与
     /// `quic://host:port`（无损多路复用，relay 的 [`RelayHandle::quic_port`]）。
     pub async fn connect(url: &str, hello: ControlMessage) -> Result<(Self, mpsc::Sender<Frame>)> {
@@ -64,8 +67,27 @@ impl RelayClient {
         let (tx, rx) = mpsc::channel::<Frame>(256);
         let (connected_tx, connected_rx) = watch::channel(true);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (welcome_tx, mut welcome_rx) = watch::channel(false);
 
-        let task = tokio::spawn(client_loop(session, rx, hello, connected_tx, shutdown_rx));
+        let task = tokio::spawn(client_loop(
+            session,
+            rx,
+            hello,
+            connected_tx,
+            shutdown_rx,
+            welcome_tx,
+        ));
+        // 等 relay 回 Welcome：`start_stream` 返回时流已注册、可被观看端发现。
+        // （SRT/QUIC 握手慢于 WS watch，不等待会竞态：观看端先到报「流不存在」）
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !*welcome_rx.borrow() {
+                if welcome_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("等待中继 Welcome 超时（中继可能未回确认）"))?;
         Ok((
             Self {
                 task,
@@ -95,6 +117,7 @@ async fn client_loop(
     hello: ControlMessage,
     connected: watch::Sender<bool>,
     mut shutdown: watch::Receiver<bool>,
+    welcome: watch::Sender<bool>,
 ) {
     let _ = session.send(SessionPacket::Control(hello)).await;
     loop {
@@ -130,6 +153,7 @@ async fn client_loop(
                 match incoming {
                     Ok(Some(SessionPacket::Control(ControlMessage::Welcome { .. }))) => {
                         tracing::info!("中继已确认推流");
+                        let _ = welcome.send(true);
                     }
                     Ok(Some(SessionPacket::Control(ControlMessage::Error { message }))) => {
                         tracing::error!("中继错误: {message}");

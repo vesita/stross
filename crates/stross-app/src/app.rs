@@ -241,8 +241,8 @@ impl StrossApp {
     /// 开始推流。
     ///
     /// * `cfg`：采集配置（视频源 / 画质 / 音频）
-    /// * `relay_url`：`Some` 推到指定中继（连接阶段得到的 ws 地址）；
-    ///   `None` 推到常驻本机中继
+    /// * `relay_url`：`Some` 推到指定中继（ws:///srt:///quic://，按 scheme 选传输）；
+    ///   `None` 推到常驻本机中继，地址按流媒体类型自动选传输
     ///
     /// 已接入数据面（本机受控中继）时，若 `cfg.stream_id` 还不是内核会话
     /// （旧 UI 直接推流的兜底），自动创建本机会话并由内核签发 id（D4）；
@@ -274,14 +274,15 @@ impl StrossApp {
                 .map_err(|e| format!("创建会话失败: {e}"))?;
             cfg.stream_id = session.id;
         }
-        // 未指定中继时，推到已连接（常驻）的本机中继
+        // 未指定中继时，推到已连接（常驻）的本机中继；
+        // 推流地址按媒体类型自动选传输（视频→SRT>QUIC>WS，纯音频→QUIC>WS）
         let relay_url = match relay_url {
             Some(u) => Some(u),
             None => {
                 let guard = self.relay.lock().unwrap();
                 guard
                     .as_ref()
-                    .map(|r| format!("ws://127.0.0.1:{}/ws/push", r.port))
+                    .map(|r| r.auto_push_url(cfg.video.is_some()))
             }
         };
         let engine = SenderEngine::start(cfg.clone(), backend, relay_url.clone(), DEFAULT_PORT)

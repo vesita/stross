@@ -19,6 +19,7 @@ use clap::Args;
 use stross_core::session_channel::{ChannelKind, SessionDataManager};
 use stross_core::watch;
 use stross_core::SessionPacket;
+use stross_proto::frame::TRACK_VIDEO;
 use stross_media::playback::{
     AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackSink, VideoOut,
 };
@@ -48,6 +49,10 @@ pub struct ReceiveArgs {
     /// 音频输出方式
     #[arg(long, value_enum, default_value_t = AudioOutArg::Discard)]
     pub audio_out: AudioOutArg,
+    /// 逐帧延迟统计：记录每帧「到达时刻 − pts」，结束输出分位数摘要 + latency.csv
+    /// （相对首帧的附加延迟：含传输缓冲/重传等待，跨传输 A/B 用）
+    #[arg(long)]
+    pub latency: bool,
 }
 
 pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
@@ -94,6 +99,13 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
     let mut mgr = SessionDataManager::default();
     let start = Instant::now();
     let mut received = 0u64;
+    // 延迟统计样本：(pts_ms, 到达时刻相对接收起点 ms)
+    // relay 观看端接入时会先补发最近关键帧（历史帧 pts 小、到达最早，
+    // 与真实转播帧同批到达），该帧作为离群参考点会污染直方图尾部；
+    // 因此丢弃首条视频样本，其余按 pts 单调过滤（无损传输本应有序）。
+    let mut latency_samples: Vec<(u32, f64)> = Vec::new();
+    let mut max_pts: Option<u32> = None;
+    let mut video_seen = 0u32;
     loop {
         let remaining = Duration::from_secs(args.secs)
             .saturating_sub(start.elapsed());
@@ -104,6 +116,17 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
             Ok(Ok(Some(pkt))) => match pkt {
                 SessionPacket::Media(frame) => {
                     received += 1;
+                    // 延迟统计只取视频轨（音频帧更密，混入会污染 pts 节奏）；
+                    // 首条视频样本（relay 补发的历史关键帧）与 pts 回退帧不进样本
+                    if args.latency && frame.header.track == TRACK_VIDEO {
+                        let pts = frame.header.pts_ms;
+                        video_seen += 1;
+                        if video_seen > 1 && max_pts.map(|m| pts >= m).unwrap_or(true) {
+                            max_pts = Some(pts);
+                            let arrival_ms = start.elapsed().as_secs_f64() * 1000.0;
+                            latency_samples.push((pts, arrival_ms));
+                        }
+                    }
                     mgr.channel(&args.stream, ChannelKind::Lossless)
                         .push(frame, Instant::now());
                     let channel = mgr.channel(&args.stream, ChannelKind::Lossless);
@@ -149,5 +172,40 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
             args.stream, size.0, size.1
         ),
     )?;
+
+    // 延迟统计：跨端无法对齐时钟（pts 是发送端相对起点），因此以
+    // (arrival − pts) 的**中位数**为基线，报告各帧相对基线的偏移分布：
+    //   * p50 ≈ 0：传输层稳态无附加延迟
+    //   * p99−p50 / max−p50：抖动与尾延迟（缓冲/重传等待的真实信号）
+    // 样本已滤除 pts 回退的补发关键帧，中位数基线进一步消除离群影响。
+    if args.latency && !latency_samples.is_empty() {
+        let mut csv = String::from("pts_ms,arrival_ms\n");
+        for (pts, arr) in &latency_samples {
+            csv.push_str(&format!("{pts},{arr:.1}\n"));
+        }
+        std::fs::write(format!("{}/latency.csv", args.out), csv)?;
+        let mut ds: Vec<f64> = latency_samples
+            .iter()
+            .map(|(pts, arr)| arr - *pts as f64)
+            .collect();
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = ds[ds.len() / 2];
+        let pct = |p: f64| -> f64 {
+            let i = ((ds.len() as f64) * p).floor() as usize;
+            ds[i.min(ds.len() - 1)]
+        };
+        let off = |p: f64| pct(p) - median;
+        tracing::info!(
+            "延迟统计（相对中位数偏移 ms，n={}）: p50={:.1} p90={:.1} p95={:.1} p99={:.1} max={:.1} min={:.1}",
+            ds.len(),
+            off(0.50),
+            off(0.90),
+            off(0.95),
+            off(0.99),
+            ds.last().copied().unwrap_or(0.0) - median,
+            ds.first().copied().unwrap_or(0.0) - median,
+        );
+        tracing::info!("延迟样本已写 {}/latency.csv", args.out);
+    }
     Ok(())
 }

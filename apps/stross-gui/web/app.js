@@ -6,6 +6,13 @@
 // 修改本文件后必须重新生成 app.js 并提交两者。
 //
 // 交互模型：先连接中继（本机或局域网），再选择「推流（发）」或「观看（收）」。
+//
+// 图标：统一使用内联 SVG 雪碧图（index.html 中的 <symbol> + icon() 辅助），
+// 不使用 emoji。交互约定：
+//   · 连接成功后启动状态轮询，断开即停止（不全局无条件轮询）
+//   · 耗时操作（连接/推流/接收）按钮内嵌 spinner 加载态
+//   · 扫描/串流列表请求带 in-flight guard 与 TTL 缓存，防止快速切换重复请求
+//   · 断开连接为两段式确认（防误触），错误提示可关闭
 const $ = (id) => document.getElementById(id);
 const $input = (id) => $(id);
 const $select = (id) => $(id);
@@ -16,6 +23,74 @@ function call(cmd, args) {
     if (!invoke)
         return Promise.reject(new Error('当前页面未运行在 Stross 桌面应用中'));
     return invoke(cmd, args);
+}
+/** 内联 SVG 图标（引用 index.html 雪碧图中的 <symbol>）。 */
+function icon(name, cls = '') {
+    return `<svg class="ic${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
+}
+/** 空状态占位（图标 + 文案，可选错误配色）。 */
+function emptyState(iconName, text, isError = false) {
+    const box = document.createElement('div');
+    box.className = 'empty';
+    const ic = document.createElement('span');
+    ic.innerHTML = icon(iconName);
+    const p = document.createElement('p');
+    if (isError)
+        p.className = 'err-text';
+    p.textContent = text;
+    box.appendChild(ic);
+    box.appendChild(p);
+    return box;
+}
+/** 让列表项可点击且可键盘操作（Enter/Space 触发）。 */
+function makeClickable(el, fn) {
+    el.tabIndex = 0;
+    el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            fn();
+        }
+    });
+    el.onclick = fn;
+}
+/** 按钮加载态：内嵌 spinner 并禁用；loading=false 恢复原内容。 */
+function setBtnLoading(btn, loading) {
+    if (loading) {
+        if (btn.dataset.loading === '1')
+            return;
+        btn.dataset.loading = '1';
+        btn.dataset.label = btn.innerHTML;
+        btn.innerHTML = '<span class="spinner"></span>' + btn.textContent;
+        btn.disabled = true;
+    }
+    else {
+        if (btn.dataset.loading !== '1')
+            return;
+        delete btn.dataset.loading;
+        btn.innerHTML = btn.dataset.label || '';
+        delete btn.dataset.label;
+        btn.disabled = false;
+    }
+}
+/** 显示视图/面板并播放淡入动画（重进时重启动画）。 */
+function showView(el) {
+    el.classList.remove('hidden');
+    el.classList.remove('view-enter');
+    void el.offsetWidth; // 强制 reflow，重启动画
+    el.classList.add('view-enter');
+}
+/** 给错误框挂上「关闭」按钮并滚动到可见处。 */
+function attachErrClose(box) {
+    if (box.querySelector('.err-close'))
+        return;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'err-close';
+    close.title = '关闭';
+    close.innerHTML = icon('x');
+    close.onclick = () => box.classList.add('hidden');
+    box.appendChild(close);
+    box.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 const QUALITIES = {
     LOW: { width: 640, height: 360, fps: 24, bitrateKbps: 800 },
@@ -38,6 +113,17 @@ const remoteStreams = new Map();
 let currentTab = 'send';
 let IS_ANDROID = false;
 let MY_IPS = [];
+// —— 交互状态 ——
+let connecting = false; // 连接请求 in-flight（防重复点击）
+let statusTimer = null; // 状态轮询句柄（连接后启动，断开停止）
+let scanInFlight = false; // 连接页「扫描局域网」in-flight
+let discoverInFlight = false; // 观看页「扫描局域网串流」in-flight
+let discoverCacheAt = 0; // 观看页发现结果缓存时间（TTL 防重复扫描）
+const DISCOVER_TTL_MS = 5000;
+let streamsCache = null; // 已连接中继串流列表缓存
+const STREAMS_TTL_MS = 3000;
+let disconnectArmed = false; // 两段式断开：第一段等待确认
+let disconnectTimer = null;
 // ---------------------------------------------------------------- 初始化
 async function init() {
     if (!invoke) {
@@ -60,7 +146,7 @@ async function init() {
             $('mic-hint').textContent = '需要麦克风权限；拒绝则仅推流屏幕';
         }
         else if (info.ffmpeg) {
-            fb.textContent = 'ffmpeg ✓';
+            fb.textContent = 'ffmpeg';
             fb.classList.add('ok');
         }
         else {
@@ -123,12 +209,12 @@ function renderRecent() {
         const li = document.createElement('li');
         li.textContent = u;
         li.title = '点击连接';
-        li.onclick = () => {
+        makeClickable(li, () => {
             $input('relay-addr').value = u;
             document.querySelector('input[name="conn"][value="remote"]').checked = true;
             $('remote-row').classList.remove('hidden');
             void connect();
-        };
+        });
         ul.appendChild(li);
     });
 }
@@ -137,6 +223,7 @@ function showFatal(msg) {
     const box = $('error-box');
     box.textContent = msg;
     box.classList.remove('hidden');
+    attachErrClose(box);
 }
 function hideError() {
     $('error-box').classList.add('hidden');
@@ -145,6 +232,7 @@ function showConnectError(msg) {
     const box = $('connect-error');
     box.textContent = msg;
     box.classList.remove('hidden');
+    attachErrClose(box);
 }
 function hideConnectError() {
     $('connect-error').classList.add('hidden');
@@ -160,11 +248,13 @@ function normAddr(addr) {
 }
 async function connect() {
     hideConnectError();
-    const mode = document.querySelector('input[name="conn"]:checked').value;
+    if (connecting)
+        return;
+    connecting = true;
     const btn = $btn('connect-btn');
-    btn.disabled = true;
-    btn.textContent = '连接中…';
+    setBtnLoading(btn, true);
     try {
+        const mode = document.querySelector('input[name="conn"]:checked').value;
         if (mode === 'local') {
             const info = (await call('start_relay'));
             connection = {
@@ -199,6 +289,7 @@ async function connect() {
             void refreshTransportPorts(connection);
         }
         enterApp();
+        startStatusPolling();
     }
     catch (e) {
         const msg = e.message;
@@ -208,8 +299,8 @@ async function connect() {
         showConnectError(hint);
     }
     finally {
-        btn.disabled = false;
-        btn.textContent = '连接';
+        connecting = false;
+        setBtnLoading(btn, false);
     }
 }
 /** 拉取中继 `/api/info`，填充 SRT/QUIC 拨号地址（失败静默，退回 WS）。 */
@@ -277,18 +368,32 @@ function pickRelayUrl(stream) {
     }
     return r.wsBase;
 }
-/** 流的轨道类型标签（如「视频+音频」）。 */
-function typeLabel(s) {
-    const t = [];
+/** 流类型小标签（视频/音频 chip）。 */
+function trackChips(s) {
+    const wrap = document.createElement('span');
+    wrap.className = 'chips';
     if (s.video)
-        t.push('视频');
+        wrap.appendChild(chipEl('video', '视频'));
     if (s.audio)
-        t.push('音频');
-    return t.length ? '  ·  ' + t.join('+') : '';
+        wrap.appendChild(chipEl('audio', '音频'));
+    return wrap;
+}
+function chipEl(kind, label) {
+    const c = document.createElement('span');
+    c.className = 'chip ' + kind;
+    c.innerHTML = icon(kind === 'audio' ? 'music' : 'video') + '<span>' + label + '</span>';
+    return c;
+}
+/** 观看人数（眼睛图标 + 数字）。 */
+function watcherCount(n) {
+    const w = document.createElement('span');
+    w.className = 'watchers';
+    w.innerHTML = icon('eye') + '<span>' + n + ' 人观看</span>';
+    return w;
 }
 function enterApp() {
     $('connect-view').classList.add('hidden');
-    $('app-view').classList.remove('hidden');
+    showView($('app-view'));
     $('conn-badge').textContent = '已连接';
     $('conn-badge').classList.add('ok');
     $('disconnect-btn').classList.remove('hidden');
@@ -299,7 +404,7 @@ function enterApp() {
         renderUrls(connection.relayUrls);
     }
     setTab('send');
-    void loadRemoteStreams();
+    void loadRemoteStreams(true);
     void pollStatus();
 }
 function disconnect() {
@@ -309,21 +414,72 @@ function disconnect() {
     connection = null;
     targetRelay = null;
     remoteStreams.clear();
+    streamsCache = null;
+    discoverCacheAt = 0;
+    stopStatusPolling();
     $('app-view').classList.add('hidden');
     $('connect-view').classList.remove('hidden');
     $('conn-badge').textContent = '未连接';
     $('conn-badge').classList.remove('ok');
-    $('disconnect-btn').classList.add('hidden');
+    const dbtn = $btn('disconnect-btn');
+    dbtn.classList.add('hidden');
+    dbtn.classList.remove('danger');
+    const dlabel = dbtn.querySelector('span');
+    if (dlabel)
+        dlabel.textContent = '断开';
+    disconnectArmed = false;
     void stopReceive();
     setRunning(false);
+}
+/** 两段式断开确认：第一次点击进入「确认断开？」（3 秒后自动恢复），再点执行。 */
+function armDisconnect() {
+    const btn = $btn('disconnect-btn');
+    const label = btn.querySelector('span');
+    if (!disconnectArmed) {
+        disconnectArmed = true;
+        btn.classList.add('danger');
+        if (label)
+            label.textContent = '确认断开？';
+        disconnectTimer = window.setTimeout(() => {
+            disconnectArmed = false;
+            btn.classList.remove('danger');
+            if (label)
+                label.textContent = '断开';
+        }, 3000);
+        return;
+    }
+    if (disconnectTimer !== null) {
+        window.clearTimeout(disconnectTimer);
+        disconnectTimer = null;
+    }
+    disconnectArmed = false;
+    btn.classList.remove('danger');
+    if (label)
+        label.textContent = '断开';
+    disconnect();
+}
+/** 状态轮询生命周期：连接后启动、断开即停。 */
+function startStatusPolling() {
+    if (statusTimer !== null)
+        return;
+    statusTimer = window.setInterval(() => void pollStatus(), 2000);
+}
+function stopStatusPolling() {
+    if (statusTimer !== null) {
+        window.clearInterval(statusTimer);
+        statusTimer = null;
+    }
 }
 // ---------------------------------------------------------------- 模式切换
 function setTab(tab) {
     currentTab = tab;
     $('tab-send-btn').classList.toggle('active', tab === 'send');
     $('tab-watch-btn').classList.toggle('active', tab === 'watch');
-    $('tab-send').classList.toggle('hidden', tab !== 'send');
-    $('tab-watch').classList.toggle('hidden', tab !== 'watch');
+    const send = $('tab-send');
+    const watch = $('tab-watch');
+    send.classList.toggle('hidden', tab !== 'send');
+    watch.classList.toggle('hidden', tab !== 'watch');
+    showView(tab === 'send' ? send : watch);
     if (tab === 'watch') {
         void loadRemoteStreams();
         void scanRemoteStreams();
@@ -363,11 +519,11 @@ function renderIps(ips) {
         const li = document.createElement('li');
         li.textContent = ip;
         li.title = '点击填入中继地址';
-        li.onclick = () => {
+        makeClickable(li, () => {
             document.querySelector('input[name="conn"][value="remote"]').checked = true;
             $('remote-row').classList.remove('hidden');
             $input('relay-addr').value = `http://${ip}:8777`;
-        };
+        });
         ul.appendChild(li);
     });
     if (!ips.length)
@@ -383,35 +539,56 @@ const ROLE_LABELS = {
 function roleLabel(r) {
     return ROLE_LABELS[r] || r;
 }
+/** 角色小标签 chip。 */
+function roleChip(role) {
+    const c = document.createElement('span');
+    c.className = 'chip role';
+    c.textContent = roleLabel(role);
+    return c;
+}
 /** 扫描局域网内其它设备（mDNS）；打开应用时自动执行一次，也可手动重扫。 */
 async function scanRelays() {
+    if (scanInFlight)
+        return; // 防并发重复扫描
+    scanInFlight = true;
     const box = $('scan-results');
     box.classList.remove('hidden');
-    box.innerHTML = '<p class="hint">扫描中（2 秒）…</p>';
+    box.innerHTML = '<p class="hint">扫描中…</p>';
     try {
         const relays = (await call('scan_relays'));
-        // 剔除本机（本机中继走「🖥️ 本机」选项）
+        // 剔除本机（本机中继走「本机」选项）
         const others = relays.filter((r) => !r.ip || MY_IPS.indexOf(r.ip) === -1);
+        box.innerHTML = '';
         if (!others.length) {
-            box.innerHTML = '<p class="hint">未发现局域网内其它设备（mDNS）。可手动输入地址。</p>';
+            box.appendChild(emptyState('radio', '未发现局域网内其它设备（mDNS）。可手动输入地址。'));
             return;
         }
-        box.innerHTML = '';
         others.forEach((r) => {
             const url = r.urls[0];
             const card = document.createElement('button');
             card.type = 'button';
             card.className = 'scan-card';
-            const nameLine = document.createElement('div');
+            const ic = document.createElement('span');
+            ic.className = 'card-ic';
+            ic.innerHTML = icon('radio');
+            card.appendChild(ic);
+            const body = document.createElement('span');
+            body.className = 'card-body';
+            const nameLine = document.createElement('span');
             nameLine.className = 'scan-name';
             nameLine.textContent = r.name || 'Stross 设备';
-            const metaLine = document.createElement('div');
+            const metaLine = document.createElement('span');
             metaLine.className = 'scan-meta';
-            metaLine.textContent =
-                (r.ip ? r.ip + ':' + r.port : url) +
-                    (r.roles && r.roles.length ? '  ·  ' + r.roles.map(roleLabel).join(' / ') : '');
-            card.appendChild(nameLine);
-            card.appendChild(metaLine);
+            metaLine.appendChild(document.createTextNode(r.ip ? r.ip + ':' + r.port : url));
+            if (r.roles && r.roles.length) {
+                const chips = document.createElement('span');
+                chips.className = 'chips';
+                r.roles.forEach((role) => chips.appendChild(roleChip(role)));
+                metaLine.appendChild(chips);
+            }
+            body.appendChild(nameLine);
+            body.appendChild(metaLine);
+            card.appendChild(body);
             card.title = '点击连接 ' + url;
             card.onclick = () => {
                 $input('relay-addr').value = url;
@@ -423,7 +600,11 @@ async function scanRelays() {
         });
     }
     catch (e) {
-        box.innerHTML = `<p class="hint err-text">扫描失败：${e.message}</p>`;
+        box.innerHTML = '';
+        box.appendChild(emptyState('radio', '扫描失败：' + e.message, true));
+    }
+    finally {
+        scanInFlight = false;
     }
 }
 // ---------------------------------------------------------------- 推流配置
@@ -484,7 +665,8 @@ async function startStream() {
         return;
     }
     savePrefs();
-    $btn('start-btn').disabled = true;
+    const btn = $btn('start-btn');
+    setBtnLoading(btn, true);
     try {
         if (IS_ANDROID) {
             starting = true;
@@ -497,7 +679,8 @@ async function startStream() {
         renderUrls(res.watchUrls);
         // D4：内核签发流 id —— 预填接收面板，本机可立即原生接收
         $input('recv-stream-input').value = res.streamId || '';
-        void loadRemoteStreams();
+        void loadRemoteStreams(true); // 强制刷新，立即出现新流
+        setBtnLoading(btn, false);
         if (IS_ANDROID) {
             void pollMobileStatus(); // 立即查一次真实采集状态
         }
@@ -506,6 +689,7 @@ async function startStream() {
         }
     }
     catch (e) {
+        setBtnLoading(btn, false);
         showFatal(String(e));
         starting = false;
         setRunning(false);
@@ -520,6 +704,7 @@ async function stopStream() {
     }
     starting = false;
     setRunning(false);
+    void loadRemoteStreams(true); // 停止后刷新列表
 }
 /** Android：轮询采集真实状态（Kotlin 控制帧 t=9 回报 → capture_status）。 */
 async function pollMobileStatus() {
@@ -557,6 +742,8 @@ async function pollMobileStatus() {
     }
 }
 async function pollStatus() {
+    if (!connection)
+        return;
     if (IS_ANDROID) {
         // Android 每 2 秒轮询真实采集状态
         if (running || starting)
@@ -567,12 +754,18 @@ async function pollStatus() {
         const s = (await call('stream_status'));
         setRunning(s.running);
         $('stream-meta').textContent = s.running
-            ? `「${s.title}」(${s.streamId}) · 中继端口 ${s.relayPort} · 开始于 ${new Date(s.startedAt * 1000).toLocaleTimeString()}`
+            ? `「${s.title}」(${s.streamId}) · 已推流 ${fmtElapsed((Date.now() / 1000) - s.startedAt)} · 中继端口 ${s.relayPort} · 局域网设备可在「观看（收）」页接收`
             : '';
     }
     catch (_) {
         /* ignore */
     }
+}
+/** 秒数 → "X 分 Y 秒"（推流时长展示）。 */
+function fmtElapsed(totalSecs) {
+    const s = Math.max(0, Math.floor(totalSecs));
+    const m = Math.floor(s / 60);
+    return m > 0 ? `${m} 分 ${s % 60} 秒` : `${s} 秒`;
 }
 /** phase: 'idle' | 'starting' | 'live' */
 function setRunning(r, phase = r ? 'live' : 'idle') {
@@ -588,9 +781,9 @@ function setRunning(r, phase = r ? 'live' : 'idle') {
     }
     else if (phase === 'live') {
         dot.className = 'dot live';
-        text.textContent = IS_ANDROID ? '采集中 ✓ 推流中' : '推流中';
+        text.textContent = '推流中';
         // 明确告知去向（D1：无浏览器观看端，接收走「观看（收）」页原生播放）
-        $('stream-meta').textContent = '推流中 ✅ 局域网设备可在「📥 观看（收）」页选择本机流接收';
+        $('stream-meta').textContent = '推流中 · 局域网设备可在「观看（收）」页选择本机流接收';
     }
     else {
         dot.className = 'dot idle';
@@ -605,14 +798,14 @@ function renderUrls(urls) {
         const li = document.createElement('li');
         const tag = document.createElement('span');
         tag.className = 'tag';
-        tag.textContent = '▶';
+        tag.innerHTML = icon('play');
         li.appendChild(tag);
         li.appendChild(document.createTextNode(u));
         li.title = '点击复制';
-        li.onclick = () => {
+        makeClickable(li, () => {
             navigator.clipboard?.writeText(u).then(() => {
                 li.style.borderColor = 'var(--ok)';
-                li.textContent = '✅ 已复制';
+                li.innerHTML = '<span class="tag ok">' + icon('check') + '</span>已复制';
                 setTimeout(() => {
                     li.style.borderColor = '';
                     li.innerHTML = '';
@@ -620,7 +813,7 @@ function renderUrls(urls) {
                     li.appendChild(document.createTextNode(u));
                 }, 1500);
             });
-        };
+        });
         ul.appendChild(li);
     });
 }
@@ -635,55 +828,113 @@ function listen(event, cb) {
 let receiving = false;
 let recvFrameCount = 0;
 let recvUnlisten = null;
+/** 接收等待浮层：接收中且尚未收到首帧时显示。 */
+function updateRecvOverlay() {
+    $('recv-overlay').classList.toggle('hidden', !receiving || recvFrameCount > 0);
+}
+/** 串流卡片（图标 + 名称 + 元信息：流 id/中继名 + 轨道 chip + 观看人数）。 */
+function streamCard(o) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'scan-card';
+    const ic = document.createElement('span');
+    ic.className = 'card-ic';
+    ic.innerHTML = icon(o.stream.video ? 'video' : o.stream.audio ? 'music' : 'radio');
+    const body = document.createElement('span');
+    body.className = 'card-body';
+    const name = document.createElement('span');
+    name.className = 'scan-name';
+    name.textContent = o.title;
+    const meta = document.createElement('span');
+    meta.className = 'scan-meta';
+    meta.appendChild(document.createTextNode(o.sub));
+    meta.appendChild(trackChips(o.stream));
+    if (o.stream.watchers)
+        meta.appendChild(watcherCount(o.stream.watchers));
+    body.appendChild(name);
+    body.appendChild(meta);
+    card.appendChild(ic);
+    card.appendChild(body);
+    card.title = '点击接收 ' + o.stream.streamId;
+    card.onclick = () => o.onPick(card);
+    return card;
+}
+/** 清空所有串流卡片的选中态。 */
+function clearCardSelection() {
+    document.querySelectorAll('.recv-streams .scan-card').forEach((c) => c.classList.remove('selected'));
+}
 /** 拉取当前中继的在线串流列表（GET /api/streams），渲染可选卡片。 */
-async function loadRemoteStreams() {
+async function loadRemoteStreams(force = false) {
     const box = $('recv-streams');
     if (!connection) {
         box.innerHTML = '';
         return;
     }
+    // TTL 缓存：3 秒内不重复请求；force（推流后/手动）绕过缓存
+    if (!force && streamsCache && Date.now() - streamsCache.at < STREAMS_TTL_MS) {
+        box.innerHTML = '';
+        for (const s of streamsCache.list) {
+            remoteStreams.set(s.streamId, s);
+            box.appendChild(streamCard({
+                title: s.title || s.streamId,
+                sub: s.streamId,
+                stream: s,
+                onPick: (card) => {
+                    clearCardSelection();
+                    card.classList.add('selected');
+                    targetRelay = null; // 回已连接中继
+                    remoteStreams.set(s.streamId, s);
+                    $input('recv-stream-input').value = s.streamId;
+                    void startReceive();
+                },
+            }));
+        }
+        return;
+    }
     try {
         const resp = await fetch(connection.url + '/api/streams', { cache: 'no-store' });
         if (!resp.ok) {
-            box.innerHTML = '<p class="hint">中继未提供串流列表（HTTP ' + resp.status + '）</p>';
+            box.innerHTML = '';
+            box.appendChild(emptyState('video', '中继未提供串流列表（HTTP ' + resp.status + '）', true));
             return;
         }
         const data = (await resp.json());
         const list = Array.isArray(data) ? data : (data.streams || []);
+        streamsCache = { at: Date.now(), list };
+        box.innerHTML = '';
         if (!list.length) {
-            box.innerHTML = '<p class="hint">该中继暂无在线串流。可先在「📤 推流」页开始推流。</p>';
+            box.appendChild(emptyState('video', '该中继暂无在线串流。可先在「推流」页开始推流。'));
             return;
         }
-        box.innerHTML = '';
         for (const s of list) {
             remoteStreams.set(s.streamId, s);
-            const card = document.createElement('button');
-            card.type = 'button';
-            card.className = 'scan-card';
-            const name = document.createElement('div');
-            name.className = 'scan-name';
-            name.textContent = s.title || s.streamId;
-            const meta = document.createElement('div');
-            meta.className = 'scan-meta';
-            meta.textContent = s.streamId + typeLabel(s) + (s.watchers ? '  ·  ' + s.watchers + ' 人观看' : '');
-            card.appendChild(name);
-            card.appendChild(meta);
-            card.title = '点击接收 ' + s.streamId;
-            card.onclick = () => {
-                targetRelay = null; // 回已连接中继
-                remoteStreams.set(s.streamId, s);
-                $input('recv-stream-input').value = s.streamId;
-                void startReceive();
-            };
-            box.appendChild(card);
+            box.appendChild(streamCard({
+                title: s.title || s.streamId,
+                sub: s.streamId,
+                stream: s,
+                onPick: (card) => {
+                    clearCardSelection();
+                    card.classList.add('selected');
+                    targetRelay = null; // 回已连接中继
+                    remoteStreams.set(s.streamId, s);
+                    $input('recv-stream-input').value = s.streamId;
+                    void startReceive();
+                },
+            }));
         }
     }
     catch (e) {
-        box.innerHTML = '<p class="hint">拉取串流列表失败：' + e.message + '</p>';
+        box.innerHTML = '';
+        box.appendChild(emptyState('video', '拉取串流列表失败：' + e.message, true));
     }
 }
 /** 接收页自动发现：扫描局域网中继（mDNS），聚合各中继的在线串流（跨设备观看）。 */
-async function scanRemoteStreams() {
+async function scanRemoteStreams(force = false) {
+    if (discoverInFlight)
+        return; // 防并发
+    if (!force && discoverCacheAt && Date.now() - discoverCacheAt < DISCOVER_TTL_MS)
+        return;
+    discoverInFlight = true;
     const box = $('discover-streams');
     box.innerHTML = '<p class="hint">扫描局域网串流…</p>';
     let relays;
@@ -691,78 +942,82 @@ async function scanRemoteStreams() {
         relays = (await call('scan_relays'));
     }
     catch (e) {
-        box.innerHTML = `<p class="hint err-text">扫描失败：${e.message}</p>`;
+        box.innerHTML = '';
+        box.appendChild(emptyState('radio', '扫描失败：' + e.message, true));
+        discoverInFlight = false;
         return;
     }
-    const others = relays.filter((r) => !r.ip || MY_IPS.indexOf(r.ip) === -1);
-    if (!others.length) {
-        box.innerHTML = '<p class="hint">未发现局域网其它设备（mDNS）。可手动输入地址连接。</p>';
-        return;
-    }
-    const found = [];
-    for (const r of others) {
-        const base = (r.urls[0] || '').replace(/\/+$/, '');
-        if (!base)
-            continue;
-        // 传输端口：/api/info（旧版本中继无此端点 → 该中继走 WS）
-        let info = null;
-        try {
-            const iresp = await fetch(base + '/api/info', { cache: 'no-store' });
-            if (iresp.ok)
-                info = (await iresp.json());
+    try {
+        const others = relays.filter((r) => !r.ip || MY_IPS.indexOf(r.ip) === -1);
+        if (!others.length) {
+            box.innerHTML = '';
+            box.appendChild(emptyState('radio', '未发现局域网其它设备（mDNS）。可手动输入地址连接。'));
+            return;
         }
-        catch (_) { /* 忽略 */ }
-        try {
-            const sresp = await fetch(base + '/api/streams', { cache: 'no-store' });
-            if (!sresp.ok)
+        const found = [];
+        for (const r of others) {
+            const base = (r.urls[0] || '').replace(/\/+$/, '');
+            if (!base)
                 continue;
-            const data = (await sresp.json());
-            const list = Array.isArray(data) ? data : (data.streams || []);
-            const host = base.replace(/^https?:\/\//, '');
-            for (const st of list) {
-                found.push({
-                    relayName: r.name || r.ip || base,
-                    relayBase: base,
-                    stream: st,
-                    srtUrl: info && info.srtPort ? `srt://${host}:${info.srtPort}` : null,
-                    quicUrl: info && info.quicPort ? `quic://${host}:${info.quicPort}` : null,
-                });
+            // 传输端口：/api/info（旧版本中继无此端点 → 该中继走 WS）
+            let info = null;
+            try {
+                const iresp = await fetch(base + '/api/info', { cache: 'no-store' });
+                if (iresp.ok)
+                    info = (await iresp.json());
             }
+            catch (_) { /* 忽略 */ }
+            try {
+                const sresp = await fetch(base + '/api/streams', { cache: 'no-store' });
+                if (!sresp.ok)
+                    continue;
+                const data = (await sresp.json());
+                const list = Array.isArray(data) ? data : (data.streams || []);
+                const host = base.replace(/^https?:\/\//, '');
+                for (const st of list) {
+                    found.push({
+                        relayName: r.name || r.ip || base,
+                        relayBase: base,
+                        stream: st,
+                        srtUrl: info && info.srtPort ? `srt://${host}:${info.srtPort}` : null,
+                        quicUrl: info && info.quicPort ? `quic://${host}:${info.quicPort}` : null,
+                    });
+                }
+            }
+            catch (_) { /* 该中继不可达，跳过 */ }
         }
-        catch (_) { /* 该中继不可达，跳过 */ }
+        box.innerHTML = '';
+        if (!found.length) {
+            box.appendChild(emptyState('radio', '局域网内暂无在线串流（可手动输入流 id）。'));
+            return;
+        }
+        for (const it of found) {
+            box.appendChild(streamCard({
+                title: it.stream.title || it.stream.streamId,
+                sub: it.relayName,
+                stream: it.stream,
+                onPick: (card) => {
+                    clearCardSelection();
+                    card.classList.add('selected');
+                    // 目标切到该中继：地址 + 流信息（传输自动选择按流类型决策）
+                    targetRelay = { wsBase: it.relayBase.replace(/^http/, 'ws'), srtUrl: it.srtUrl, quicUrl: it.quicUrl };
+                    remoteStreams.set(it.stream.streamId, it.stream);
+                    $input('recv-stream-input').value = it.stream.streamId;
+                    void startReceive();
+                },
+            }));
+        }
     }
-    if (!found.length) {
-        box.innerHTML = '<p class="hint">局域网内暂无在线串流（可手动输入流 id）。</p>';
-        return;
-    }
-    box.innerHTML = '';
-    for (const it of found) {
-        const card = document.createElement('button');
-        card.type = 'button';
-        card.className = 'scan-card';
-        const name = document.createElement('div');
-        name.className = 'scan-name';
-        name.textContent = it.stream.title || it.stream.streamId;
-        const meta = document.createElement('div');
-        meta.className = 'scan-meta';
-        meta.textContent = it.relayName + typeLabel(it.stream) + (it.stream.watchers ? '  ·  ' + it.stream.watchers + ' 人观看' : '');
-        card.appendChild(name);
-        card.appendChild(meta);
-        card.title = '点击接收 ' + it.stream.streamId + '（' + it.relayBase + '）';
-        card.onclick = () => {
-            // 目标切到该中继：地址 + 流信息（传输自动选择按流类型决策）
-            targetRelay = { wsBase: it.relayBase.replace(/^http/, 'ws'), srtUrl: it.srtUrl, quicUrl: it.quicUrl };
-            remoteStreams.set(it.stream.streamId, it.stream);
-            $input('recv-stream-input').value = it.stream.streamId;
-            void startReceive();
-        };
-        box.appendChild(card);
+    finally {
+        discoverInFlight = false;
+        discoverCacheAt = Date.now();
     }
 }
 function showRecvError(msg) {
     const box = $('recv-error');
     box.textContent = msg;
     box.classList.remove('hidden');
+    attachErrClose(box);
 }
 function hideRecvError() {
     $('recv-error').classList.add('hidden');
@@ -779,7 +1034,8 @@ async function startReceive() {
         showRecvError('请输入流 id，或从上方选择一串流');
         return;
     }
-    $btn('recv-start-btn').disabled = true;
+    const btn = $btn('recv-start-btn');
+    setBtnLoading(btn, true);
     try {
         const audio = $select('recv-audio-select').value; // 'device' | 'discard'（与 AudioOut serde 一致）
         const stream = remoteStreams.get(streamId) || null; // 流类型（video/audio）供传输自动选择
@@ -798,14 +1054,19 @@ async function startReceive() {
         $('recv-status').textContent = '接收中…';
         $('recv-dot').className = 'dot starting';
         $btn('recv-stop-btn').disabled = false;
+        setBtnLoading(btn, false);
+        btn.disabled = true; // 接收中不可重复开始
+        updateRecvOverlay(); // 等待首帧 → 显示浮层
         // 订阅解码帧事件 → canvas
         recvUnlisten = await listen('receive-frame', (p) => {
             drawReceiveFrame(p.width, p.height, p.data);
             recvFrameCount += 1;
+            updateRecvOverlay();
         });
         void pollReceiveStatus();
     }
     catch (e) {
+        setBtnLoading(btn, false);
         showRecvError('接收失败：' + e.message);
         setReceiving(false);
     }
@@ -847,9 +1108,10 @@ function setReceiving(r) {
     $btn('recv-start-btn').disabled = r;
     $btn('recv-stop-btn').disabled = !r;
     $('recv-dot').className = 'dot ' + (r ? 'live' : 'idle');
-    $('recv-status').textContent = r ? '接收中 ✓' : '未接收';
+    $('recv-status').textContent = r ? '接收中' : '未接收';
     if (!r)
         $('recv-meta').textContent = '';
+    updateRecvOverlay();
 }
 /** 轮询接收统计（帧数 / 解码 / 音频块）。 */
 async function pollReceiveStatus() {
@@ -878,13 +1140,13 @@ document.querySelectorAll('input[name="video"]').forEach((r) => r.addEventListen
 }));
 $btn('connect-btn').onclick = () => void connect();
 $btn('scan-btn').onclick = () => void scanRelays();
-$btn('disconnect-btn').onclick = disconnect;
+$btn('disconnect-btn').onclick = armDisconnect;
 $btn('tab-send-btn').onclick = () => setTab('send');
 $btn('tab-watch-btn').onclick = () => setTab('watch');
-$btn('discover-btn').onclick = () => void scanRemoteStreams();
+$btn('discover-btn').onclick = () => void scanRemoteStreams(true);
 $btn('start-btn').onclick = () => void startStream();
 $btn('stop-btn').onclick = () => void stopStream();
 $btn('recv-start-btn').onclick = () => void startReceive();
 $btn('recv-stop-btn').onclick = () => void stopReceive();
 void init();
-setInterval(() => void pollStatus(), 2000);
+// 状态轮询由 connect() 成功后启动、disconnect() 停止（不再全局无条件轮询）

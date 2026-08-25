@@ -7,16 +7,148 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <!-- 内联 SVG 图标雪碧图：统一 stroke 风格线性图标（替代 emoji），
+       通过 <svg class="ic"><use href="#i-xxx"/></svg> 引用。 -->
+  <svg class="svg-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-logo" viewBox="0 0 24 24">
+      <path d="M2 16.1A5 5 0 0 1 5.9 20" />
+      <path d="M2 12.05A9 9 0 0 1 9.95 20" />
+      <path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" />
+      <line x1="2" y1="20" x2="2.01" y2="20" />
+    </symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24">
+      <rect x="2" y="3" width="20" height="14" rx="2" />
+      <line x1="8" y1="21" x2="16" y2="21" />
+      <line x1="12" y1="17" x2="12" y2="21" />
+    </symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24">
+      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+      <circle cx="12" cy="13" r="4" />
+    </symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24">
+      <path d="M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2" />
+      <path d="M6.453 15h11.094" />
+      <path d="M8.5 2h7" />
+    </symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="2" y1="12" x2="22" y2="12" />
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+    </symbol>
+    <symbol id="i-search" viewBox="0 0 24 24">
+      <circle cx="11" cy="11" r="8" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="17 8 12 3 7 8" />
+      <line x1="12" y1="3" x2="12" y2="15" />
+    </symbol>
+    <symbol id="i-download" viewBox="0 0 24 24">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24">
+      <rect x="5" y="2" width="14" height="20" rx="2" />
+      <line x1="12" y1="18" x2="12.01" y2="18" />
+    </symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24">
+      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" y1="19" x2="12" y2="23" />
+      <line x1="8" y1="23" x2="16" y2="23" />
+    </symbol>
+    <symbol id="i-speaker" viewBox="0 0 24 24">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07" />
+    </symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      <line x1="23" y1="9" x2="17" y2="15" />
+      <line x1="17" y1="9" x2="23" y2="15" />
+    </symbol>
+    <symbol id="i-play" viewBox="0 0 24 24">
+      <polygon points="5 3 19 12 5 21 5 3" />
+    </symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24">
+      <rect x="3.5" y="3.5" width="17" height="17" rx="3" />
+    </symbol>
+    <symbol id="i-check" viewBox="0 0 24 24">
+      <polyline points="20 6 9 17 4 12" />
+    </symbol>
+    <symbol id="i-x" viewBox="0 0 24 24">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24">
+      <polyline points="23 4 23 10 17 10" />
+      <polyline points="1 20 1 14 7 14" />
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+    </symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+    </symbol>
+    <symbol id="i-link" viewBox="0 0 24 24">
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    </symbol>
+    <symbol id="i-rocket" viewBox="0 0 24 24">
+      <line x1="22" y1="2" x2="11" y2="13" />
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+    </symbol>
+    <symbol id="i-wifi" viewBox="0 0 24 24">
+      <path d="M5 12.55a11 11 0 0 1 14.08 0" />
+      <path d="M1.42 9a16 16 0 0 1 21.16 0" />
+      <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+      <line x1="12" y1="20" x2="12.01" y2="20" />
+    </symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </symbol>
+    <symbol id="i-video" viewBox="0 0 24 24">
+      <polygon points="23 7 16 12 23 17 23 7" />
+      <rect x="1" y="5" width="15" height="14" rx="2" />
+    </symbol>
+    <symbol id="i-music" viewBox="0 0 24 24">
+      <path d="M9 18V5l12-2v13" />
+      <circle cx="6" cy="18" r="3" />
+      <circle cx="18" cy="16" r="3" />
+    </symbol>
+    <symbol id="i-server" viewBox="0 0 24 24">
+      <rect x="2" y="2" width="20" height="8" rx="2" />
+      <rect x="2" y="14" width="20" height="8" rx="2" />
+      <line x1="6" y1="6" x2="6.01" y2="6" />
+      <line x1="6" y1="18" x2="6.01" y2="18" />
+    </symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24">
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </symbol>
+    <symbol id="i-radio" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="2" />
+      <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14" />
+    </symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24">
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    </symbol>
+  </svg>
+
   <header>
     <div class="brand">
-      <span class="logo">📡</span>
+      <span class="logo-mark">
+        <svg class="ic"><use href="#i-logo" /></svg>
+      </span>
       <div>
         <h1>Stross</h1>
         <span class="subtitle">局域网串流器</span>
       </div>
     </div>
     <div class="header-right">
-      <button id="disconnect-btn" class="ghost-btn hidden" type="button">✕ 断开</button>
+      <button id="disconnect-btn" class="ghost-btn hidden" type="button">
+        <svg class="ic"><use href="#i-x" /></svg><span>断开</span>
+      </button>
       <span id="conn-badge" class="badge">未连接</span>
       <span id="ffmpeg-badge" class="badge">检查 ffmpeg…</span>
       <span id="ver-badge" class="badge muted">v-</span>
@@ -31,16 +163,22 @@
 
       <div class="row">
         <label class="seg" data-conn="local">
-          <input type="radio" name="conn" value="local" checked /> 🖥️ 本机（自动启动中继）
+          <input type="radio" name="conn" value="local" checked />
+          <svg class="ic"><use href="#i-monitor" /></svg>
+          <span>本机（自动启动中继）</span>
         </label>
         <label class="seg" data-conn="remote">
-          <input type="radio" name="conn" value="remote" /> 🌐 局域网中继
+          <input type="radio" name="conn" value="remote" />
+          <svg class="ic"><use href="#i-globe" /></svg>
+          <span>局域网中继</span>
         </label>
       </div>
 
       <div class="row hidden" id="remote-row">
         <input id="relay-addr" type="text" placeholder="http://192.168.1.100:8777" />
-        <button id="scan-btn" type="button">🔍 重新扫描</button>
+        <button id="scan-btn" type="button">
+          <svg class="ic"><use href="#i-search" /></svg><span>重新扫描</span>
+        </button>
       </div>
 
       <div id="scan-results" class="scan-results hidden"></div>
@@ -64,8 +202,12 @@
     <!-- ==================== 主界面（连接后） ==================== -->
     <section id="app-view" class="hidden">
       <nav class="tabs">
-        <button id="tab-send-btn" class="tab active" type="button">📤 推流（发）</button>
-        <button id="tab-watch-btn" class="tab" type="button">📥 观看（收）</button>
+        <button id="tab-send-btn" class="tab active" type="button">
+          <svg class="ic"><use href="#i-upload" /></svg><span>推流（发）</span>
+        </button>
+        <button id="tab-watch-btn" class="tab" type="button">
+          <svg class="ic"><use href="#i-download" /></svg><span>观看（收）</span>
+        </button>
         <span class="tab-conn" id="tab-conn-label">未连接</span>
       </nav>
 
@@ -78,17 +220,24 @@
             <legend>视频</legend>
             <div class="row" id="video-seg-row">
               <label class="seg" data-video="screen">
-                <input type="radio" name="video" value="screen" checked /> 🖥️ 屏幕
+                <input type="radio" name="video" value="screen" checked />
+                <svg class="ic"><use href="#i-monitor" /></svg>
+                <span>屏幕</span>
               </label>
               <label class="seg" data-video="camera">
-                <input type="radio" name="video" value="camera" /> 📷 摄像头
+                <input type="radio" name="video" value="camera" />
+                <svg class="ic"><use href="#i-camera" /></svg>
+                <span>摄像头</span>
               </label>
               <label class="seg" data-video="synthetic">
-                <input type="radio" name="video" value="synthetic" /> 🧪 测试画面
+                <input type="radio" name="video" value="synthetic" />
+                <svg class="ic"><use href="#i-flask" /></svg>
+                <span>测试画面</span>
               </label>
             </div>
             <div class="row hidden" id="android-video-note">
-              <span>📱 屏幕（MediaProjection，首次会请求系统授权）</span>
+              <svg class="ic"><use href="#i-phone" /></svg>
+              <span>屏幕（MediaProjection，首次会请求系统授权）</span>
             </div>
             <div class="row hidden" id="camera-row">
               <select id="camera-select"></select>
@@ -108,12 +257,20 @@
           <fieldset>
             <legend>音频</legend>
             <div class="row">
-              <label class="check"><input type="checkbox" id="mic-enable" checked /> 🎤 麦克风</label>
+              <label class="check">
+                <input type="checkbox" id="mic-enable" checked />
+                <svg class="ic"><use href="#i-mic" /></svg>
+                <span>麦克风</span>
+              </label>
               <select id="mic-select" class="grow"></select>
               <span class="hint" id="mic-hint"></span>
             </div>
             <div class="row" id="sys-row">
-              <label class="check"><input type="checkbox" id="sys-enable" /> 🔊 系统声音</label>
+              <label class="check">
+                <input type="checkbox" id="sys-enable" />
+                <svg class="ic"><use href="#i-speaker" /></svg>
+                <span>系统声音</span>
+              </label>
               <select id="sys-select" class="grow"></select>
               <span class="hint" id="sys-hint"></span>
             </div>
@@ -126,8 +283,12 @@
           </div>
 
           <div class="actions">
-            <button id="start-btn" class="primary" type="button">▶ 开始推流</button>
-            <button id="stop-btn" type="button" disabled>⏹ 停止</button>
+            <button id="start-btn" class="primary" type="button">
+              <svg class="ic"><use href="#i-play" /></svg><span>开始推流</span>
+            </button>
+            <button id="stop-btn" type="button" disabled>
+              <svg class="ic"><use href="#i-stop" /></svg><span>停止</span>
+            </button>
           </div>
         </section>
 
@@ -154,8 +315,13 @@
           <p class="hint">已连接中继：<span id="watch-relay-url" class="mono"></span></p>
           <p class="hint">自动发现局域网内其它中继的在线串流（跨设备观看），或选择已连接中继的串流，或直接输入流 id。</p>
           <div class="row">
-            <span class="hint">📡 局域网串流（自动发现）：</span>
-            <button id="discover-btn" type="button">🔄 重扫</button>
+            <span class="hint icon-hint">
+              <svg class="ic"><use href="#i-radio" /></svg>
+              <span>局域网串流（自动发现）：</span>
+            </span>
+            <button id="discover-btn" type="button">
+              <svg class="ic"><use href="#i-refresh" /></svg><span>重扫</span>
+            </button>
           </div>
           <div id="discover-streams" class="recv-streams"></div>
           <p class="hint">选择要接收的串流（接收端有选择权，F2.1），或直接输入流 id。</p>
@@ -163,19 +329,29 @@
           <div class="row">
             <input id="recv-stream-input" type="text" placeholder="流 id（如 sess-1 或 demo-1234）" class="grow" />
             <select id="recv-transport-select" title="观看传输（UDP 需要中继支持 /api/info）">
-              <option value="auto" selected>⚡ 自动（优先 UDP）</option>
-              <option value="ws">🔌 WebSocket</option>
-              <option value="srt">🚀 SRT</option>
-              <option value="quic">🚀 QUIC</option>
+              <option value="auto" selected>自动（优先 UDP）</option>
+              <option value="ws">WebSocket</option>
+              <option value="srt">SRT</option>
+              <option value="quic">QUIC</option>
             </select>
             <select id="recv-audio-select" title="音频输出方式">
-              <option value="device" selected>🔊 设备播放</option>
-              <option value="discard">🔇 静音</option>
+              <option value="device" selected>设备播放</option>
+              <option value="discard">静音</option>
             </select>
-            <button id="recv-start-btn" class="primary" type="button">▶ 开始接收</button>
-            <button id="recv-stop-btn" type="button" disabled>⏹ 停止</button>
+            <button id="recv-start-btn" class="primary" type="button">
+              <svg class="ic"><use href="#i-play" /></svg><span>开始接收</span>
+            </button>
+            <button id="recv-stop-btn" type="button" disabled>
+              <svg class="ic"><use href="#i-stop" /></svg><span>停止</span>
+            </button>
           </div>
-          <canvas id="recv-canvas" width="640" height="360"></canvas>
+          <div class="canvas-wrap">
+            <canvas id="recv-canvas" width="640" height="360"></canvas>
+            <div class="canvas-overlay hidden" id="recv-overlay">
+              <span class="spinner"></span>
+              <span>等待流数据…</span>
+            </div>
+          </div>
           <div class="status-line">
             <span class="dot idle" id="recv-dot"></span>
             <span id="recv-status">未接收</span>

@@ -143,6 +143,9 @@ pub(crate) struct SessionInner {
     pub(crate) video_tx: Mutex<Option<std::sync::mpsc::SyncSender<Frame>>>,
     pub(crate) audio_tx: Mutex<Option<std::sync::mpsc::SyncSender<Frame>>>,
     pub(crate) video_rx_out: Mutex<Option<tokio::sync::mpsc::Receiver<RenderedFrame>>>,
+    /// 视频失步标记（与 writer 线程共享）：丢帧后置位，writer 等关键帧重建，
+    /// 避免把花屏帧喂给解码器（与 [`PlaybackStats::dropped_push`] 联动）。
+    pub(crate) video_resync: Option<Arc<AtomicBool>>,
     pub(crate) threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
@@ -154,6 +157,7 @@ impl PlaybackSession {
             return Err(PlaybackError::Closed);
         }
         use stross_proto::frame::{TRACK_AUDIO, TRACK_VIDEO};
+        let is_video = frame.header.track == TRACK_VIDEO;
         // 先绑定锁守卫再取引用，避免临时守卫被提前释放（E0716）
         let video_tx = self.inner.video_tx.lock().unwrap();
         let audio_tx = self.inner.audio_tx.lock().unwrap();
@@ -167,6 +171,13 @@ impl PlaybackSession {
                 Ok(()) => Ok(()),
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
                     self.inner.stats.lock().unwrap().dropped_push += 1;
+                    // 视频丢帧会撕裂解码链 → 置失步，writer 等关键帧重建
+                    // （H.264 花屏帧不喂解码器，最多一个 GOP 后干净恢复）
+                    if is_video
+                        && let Some(r) = self.inner.video_resync.as_ref()
+                    {
+                        r.store(true, Ordering::Relaxed);
+                    }
                     Ok(())
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err(PlaybackError::Closed),

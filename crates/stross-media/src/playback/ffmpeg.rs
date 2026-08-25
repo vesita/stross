@@ -70,15 +70,19 @@ impl PlaybackSink for FfmpegPlaybackSink {
         let mut video_tx = None;
         let mut audio_tx = None;
         let mut video_rx_out = None;
+        let mut video_resync = None;
 
         if cfg.video.is_some() {
             let (tx, rx) = std::sync::mpsc::sync_channel::<Frame>(64);
             let (out_tx, out_rx) = mpsc::channel::<RenderedFrame>(32);
+            // 失步标记提升为共享引用：push 侧丢帧也能置位，让 writer
+            // 等关键帧重建（避免把花屏帧喂给解码器）
+            let resync = Arc::new(AtomicBool::new(false));
             let shared = Arc::new(VideoShared {
                 size: Mutex::new(None),
                 frame_size: Mutex::new(None),
                 pts: Mutex::new(VecDeque::new()),
-                resync: AtomicBool::new(false),
+                resync: resync.clone(),
                 out_tx,
                 stats: stats.clone(),
                 stopped: stopped.clone(),
@@ -90,6 +94,7 @@ impl PlaybackSink for FfmpegPlaybackSink {
                 .map_err(|e| PlaybackError::Spawn(e.to_string()))?;
             threads.push(h);
             video_tx = Some(tx);
+            video_resync = Some(resync);
         }
 
         if let Some(spec) = cfg.audio {
@@ -125,6 +130,7 @@ impl PlaybackSink for FfmpegPlaybackSink {
                 video_tx: Mutex::new(video_tx),
                 audio_tx: Mutex::new(audio_tx),
                 video_rx_out: Mutex::new(video_rx_out),
+                video_resync,
                 threads: Mutex::new(threads),
             }),
         })
@@ -139,8 +145,8 @@ struct VideoShared {
     frame_size: Mutex<Option<usize>>,
     /// 已写入子进程的 pts 队列（读线程每产出一帧弹出一个）。
     pts: Mutex<VecDeque<u32>>,
-    /// 失步标记：子进程异常退出后置位，写线程等关键帧重建。
-    resync: AtomicBool,
+    /// 失步标记：子进程异常退出或 push 侧丢帧后置位，写线程等关键帧重建。
+    resync: Arc<AtomicBool>,
     /// 解码画面输出通道。
     out_tx: mpsc::Sender<RenderedFrame>,
     stats: Arc<Mutex<PlaybackStats>>,
@@ -484,8 +490,10 @@ fn spawn_decode(args: &[&str]) -> std::io::Result<(Child, ChildStdin, ChildStdou
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use crate::pipeline::{AudioSourceConfig, Quality, StreamConfig, StreamSession, VideoSource};
     use crate::playback::VideoOut;
+    use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, TRACK_VIDEO};
     use std::time::{Duration, Instant};
 
     /// 用采集管线生成一段协议帧（合成源，时长 cfg.duration_secs）。
@@ -628,5 +636,90 @@ mod tests {
         let s = session.stats();
         assert!(s.audio_blocks_in >= 5, "应收到音频块: {s:?}");
         assert!(s.audio_blocks_out >= 5, "应解码出音频块: {s:?}");
+    }
+
+    /// 视频丢帧 → resync 置位 → writer 等关键帧重建（B 批花屏修复）。
+    ///
+    /// 两段验证：
+    /// 1. 拿 video_tx 把队列塞满，随后 push 必走 Full 分支 → 丢帧计数 +
+    ///    resync 置位（不把撕裂的 GOP 喂给解码器）；
+    /// 2. resync 置位后 writer 丢弃非关键帧、在关键帧处重建（video_resyncs 增长）。
+    #[tokio::test]
+    async fn dropped_video_frame_triggers_resync() {
+        if !ffmpeg_available() {
+            eprintln!("跳过：未找到 ffmpeg");
+            return;
+        }
+        let session = FfmpegPlaybackSink
+            .open(PlaybackConfig {
+                video: Some(VideoOut { display: None }),
+                audio: None,
+            })
+            .unwrap();
+        let resync = session.inner.video_resync.clone().expect("视频会话有 resync");
+        let video_tx = session
+            .inner
+            .video_tx
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("视频发送端存在");
+        let tiny = || {
+            Frame::new(
+                TRACK_VIDEO,
+                CODEC_H264,
+                0,
+                0,
+                Bytes::from_static(b"x"),
+            )
+        };
+
+        // 1) 塞满队列（容量 64）→ push 必 Full → 丢帧 + resync 置位
+        let mut filled = 0;
+        while video_tx.try_send(tiny()).is_ok() {
+            filled += 1;
+        }
+        assert!(filled >= 64, "应能塞满 64 容量队列，实际 {filled}");
+        let s_before = session.stats();
+        let _ = session.push(tiny()); // 队列满 → 走 Full 分支
+        let s = session.stats();
+        assert!(
+            s.dropped_push > s_before.dropped_push,
+            "塞满后 push 应丢帧: {s:?}"
+        );
+        assert!(
+            resync.load(Ordering::Relaxed),
+            "视频丢帧后应置位 resync（等关键帧重建，不喂花屏帧）"
+        );
+
+        // 2) writer 消费完积压后：resync 期间非关键帧被丢弃，
+        //    关键帧到达触发重建（video_resyncs 增长）
+        let s_before2 = session.stats();
+        // 先清掉 resync 观察点：置 false，模拟 writer 已消费完队列
+        resync.store(false, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            // 喂关键帧：writer 应重建解码器（resync 消费路径）
+            let kf = Frame::new(
+                TRACK_VIDEO,
+                CODEC_H264,
+                FLAG_KEYFRAME,
+                0,
+                Bytes::from_static(b"x"),
+            );
+            if session.push(kf).is_err() {
+                break;
+            }
+            if session.stats().video_resyncs > s_before2.video_resyncs {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let s2 = session.stats();
+        assert!(
+            s2.video_resyncs > s_before2.video_resyncs,
+            "关键帧应触发解码器重建（花屏修复路径）: {s:?}"
+        );
+        session.stop();
     }
 }

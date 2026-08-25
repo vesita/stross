@@ -1,6 +1,7 @@
 //! 接收播放引擎（1e）：从局域网中继**接收并原生解码**。
 //!
-//! 链路：`/ws/watch?stream=`（WS 全序不丢）→ [`SessionDataManager`] 无损通道
+//! 链路：`watch`（WS / SRT / QUIC，按 relay URL scheme 选传输，见
+//! [`stross_core::watch::connect_watch`]）→ [`SessionDataManager`] 无损通道
 //! （1b）→ [`FfmpegPlaybackSink`] 解码（1c，D6）→ 解码帧通道交给上层
 //! （GUI 绘制 / 录制）。与发送侧对称，是"接收端有选择权"（F2.1）的实现基础。
 //!
@@ -9,10 +10,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use futures_util::StreamExt;
 use stross_core::session_channel::{ChannelKind, SessionDataManager};
+use stross_core::watch;
+use stross_core::SessionPacket;
 // 桌面解码播放路径（ffmpeg 子进程）；Android 走 `start_raw` 编码帧转发，
 // 由 Kotlin MediaCodec 解码（见 stross-gui `mobile::spawn_android_playback`）。
 #[cfg(not(target_os = "android"))]
@@ -22,9 +24,7 @@ use stross_media::playback::{
 };
 use stross_media::playback::RenderedFrame;
 use stross_proto::frame::Frame;
-use stross_proto::message::ControlMessage;
 use tokio::sync::mpsc;
-use tokio_tungstenite::connect_async;
 
 /// 接收统计（可观测、可测试）。
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
@@ -134,6 +134,9 @@ impl Receiver {
 }
 
 /// 接收主循环：watch 收帧 → 无损通道 → 播放；统计同步到共享状态。
+///
+/// 消息驱动（每帧到达立即产出送播放，无固定轮询——50ms tick 曾是
+/// 端到端延迟的固定上限来源）。
 #[cfg(not(target_os = "android"))]
 async fn receive_loop(
     inner: Arc<ReceiverInner>,
@@ -142,11 +145,10 @@ async fn receive_loop(
     session: PlaybackSession,
     frame_tx: mpsc::Sender<RenderedFrame>,
 ) {
-    let url = format!("{relay_url}/ws/watch?stream={stream_id}");
-    let (mut ws, _) = match connect_async(&url).await {
-        Ok(v) => v,
+    let data = match watch::connect_watch(&relay_url, &stream_id).await {
+        Ok(d) => d,
         Err(e) => {
-            inner.stats.lock().unwrap().error = Some(format!("连接中继失败: {e}"));
+            inner.stats.lock().unwrap().error = Some(e);
             return;
         }
     };
@@ -169,31 +171,23 @@ async fn receive_loop(
         if inner.stopped.load(Ordering::Relaxed) {
             break;
         }
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-            msg = ws.next() => match msg {
-                Some(Ok(m)) => {
-                    if m.is_text() {
-                        let text = m.into_text().unwrap_or_default();
-                        if let Ok(ControlMessage::Ready { .. }) = ControlMessage::from_text(&text) {
-                            tracing::info!("接收就绪: {stream_id}");
-                        }
-                    } else if m.is_binary() {
-                        let data = m.into_data();
-                        if let Ok(frame) = Frame::from_bytes(&data) {
-                            inner.stats.lock().unwrap().received += 1;
-                            mgr.channel(&stream_id, ChannelKind::Lossless)
-                                .push(frame, Instant::now());
-                        }
+        match data.recv().await {
+            Ok(Some(SessionPacket::Media(frame))) => {
+                inner.stats.lock().unwrap().received += 1;
+                mgr.channel(&stream_id, ChannelKind::Lossless)
+                    .push(frame, Instant::now());
+                // 消息驱动：立即产出送播放
+                let channel = mgr.channel(&stream_id, ChannelKind::Lossless);
+                for f in channel.poll(Instant::now()) {
+                    if session.push(f).is_err() {
+                        break;
                     }
                 }
-                Some(Err(_)) | None => break,
-            },
-        }
-        // 通道 → 播放（lossless 直通，按序产出）
-        let channel = mgr.channel(&stream_id, ChannelKind::Lossless);
-        for f in channel.poll(Instant::now()) {
-            if session.push(f).is_err() {
+            }
+            Ok(Some(SessionPacket::Control(_))) => {}
+            Ok(None) => break,
+            Err(e) => {
+                tracing::warn!("观看连接异常: {e}");
                 break;
             }
         }
@@ -211,17 +205,18 @@ async fn receive_loop(
 }
 
 /// 编码帧转发主循环：watch 收帧 → 无损通道 → 直接转发（不解码）。
+///
+/// 消息驱动（同 [`receive_loop`]）。
 async fn receive_raw_loop(
     inner: Arc<ReceiverInner>,
     relay_url: String,
     stream_id: String,
     frame_tx: mpsc::Sender<Frame>,
 ) {
-    let url = format!("{relay_url}/ws/watch?stream={stream_id}");
-    let (mut ws, _) = match connect_async(&url).await {
-        Ok(v) => v,
+    let data = match watch::connect_watch(&relay_url, &stream_id).await {
+        Ok(d) => d,
         Err(e) => {
-            inner.stats.lock().unwrap().error = Some(format!("连接中继失败: {e}"));
+            inner.stats.lock().unwrap().error = Some(e);
             return;
         }
     };
@@ -230,32 +225,24 @@ async fn receive_raw_loop(
         if inner.stopped.load(Ordering::Relaxed) {
             break;
         }
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-            msg = ws.next() => match msg {
-                Some(Ok(m)) => {
-                    if m.is_text() {
-                        let text = m.into_text().unwrap_or_default();
-                        if let Ok(ControlMessage::Ready { .. }) = ControlMessage::from_text(&text) {
-                            tracing::info!("接收就绪（编码帧转发）: {stream_id}");
-                        }
-                    } else if m.is_binary() {
-                        let data = m.into_data();
-                        if let Ok(frame) = Frame::from_bytes(&data) {
-                            inner.stats.lock().unwrap().received += 1;
-                            mgr.channel(&stream_id, ChannelKind::Lossless)
-                                .push(frame, Instant::now());
-                        }
+        match data.recv().await {
+            Ok(Some(SessionPacket::Media(frame))) => {
+                inner.stats.lock().unwrap().received += 1;
+                mgr.channel(&stream_id, ChannelKind::Lossless)
+                    .push(frame, Instant::now());
+                // 通道 → 转发（lossless 直通，按序产出；消费者慢则丢帧，不反压）
+                let channel = mgr.channel(&stream_id, ChannelKind::Lossless);
+                for f in channel.poll(Instant::now()) {
+                    if frame_tx.try_send(f).is_err() {
+                        inner.stats.lock().unwrap().dropped += 1;
                     }
                 }
-                Some(Err(_)) | None => break,
-            },
-        }
-        // 通道 → 转发（lossless 直通，按序产出；消费者慢则丢帧，不反压）
-        let channel = mgr.channel(&stream_id, ChannelKind::Lossless);
-        for f in channel.poll(Instant::now()) {
-            if frame_tx.try_send(f).is_err() {
-                inner.stats.lock().unwrap().dropped += 1;
+            }
+            Ok(Some(SessionPacket::Control(_))) => {}
+            Ok(None) => break,
+            Err(e) => {
+                tracing::warn!("观看连接异常: {e}");
+                break;
             }
         }
         inner.stats.lock().unwrap().running = true;

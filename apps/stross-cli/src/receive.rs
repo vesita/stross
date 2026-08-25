@@ -1,10 +1,12 @@
 //! `stross receive`：接收并原生解码播放（D6 桌面 PlaybackSink）。
 //!
-//! 链路：`/ws/watch?stream=`（WS 全序不丢）→ [`SessionDataManager`] 无损通道
+//! 链路：`watch`（WS / SRT / QUIC，按 `--relay` scheme 选传输，见
+//! [`stross_core::watch::connect_watch`]）→ [`SessionDataManager`] 无损通道
 //! （1b）→ [`FfmpegPlaybackSink`] 解码（1c）→ 可选 RGBA 帧落盘 / 扬声器输出。
 //!
 //! ```text
 //! stross receive --relay ws://127.0.0.1:18777 --stream demo --out /tmp/out --secs 4
+//! stross receive --relay srt://127.0.0.1:18778 --stream demo --out /tmp/out --secs 4
 //! # 产物: /tmp/out/frame_%04d.rgba + meta.txt
 //! # 验证: ffmpeg -framerate 30 -f image2 -c:v rawvideo -pix_fmt rgba -s 1280x720 \
 //! #        -i /tmp/out/frame_%04d.rgba -c:v libx264 /tmp/out/out.mp4
@@ -14,14 +16,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Args;
-use futures_util::StreamExt;
 use stross_core::session_channel::{ChannelKind, SessionDataManager};
+use stross_core::watch;
+use stross_core::SessionPacket;
 use stross_media::playback::{
     AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackSink, VideoOut,
 };
-use stross_proto::frame::Frame;
-use stross_proto::message::ControlMessage;
-use tokio_tungstenite::connect_async;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum AudioOutArg {
@@ -52,9 +52,11 @@ pub struct ReceiveArgs {
 
 pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.out)?;
-    let url = format!("{}/ws/watch?stream={}", args.relay, args.stream);
-    tracing::info!("连接中继 {url}");
-    let (mut ws, _) = connect_async(&url).await.context("连接中继失败")?;
+    tracing::info!("连接中继 {}（流 {}）", args.relay, args.stream);
+    let data = watch::connect_watch(&args.relay, &args.stream)
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("连接中继失败")?;
 
     // 播放会话：视频 → RGBA 通道；音频 → 设备或丢弃
     let sink = FfmpegPlaybackSink;
@@ -88,43 +90,35 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
         (n, size)
     });
 
-    // 无损通道（WS 全序不丢）：收帧 → 通道缓存 → 轮询产出 → 播放
+    // 无损通道（全序不丢）：收帧 → 通道缓存 → 即时产出 → 播放（消息驱动）
     let mut mgr = SessionDataManager::default();
-    let deadline = Instant::now() + Duration::from_secs(args.secs);
+    let start = Instant::now();
     let mut received = 0u64;
-    while Instant::now() < deadline {
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-            msg = ws.next() => match msg {
-                Some(Ok(m)) => {
-                    if m.is_text() {
-                        let text = m.into_text()?;
-                        let ctrl = ControlMessage::from_text(&text)?;
-                        match ctrl {
-                            ControlMessage::Ready { stream_id: _ } => {
-                                tracing::info!("中继就绪，开始接收 {}", args.stream);
-                            }
-                            other => tracing::debug!("控制消息: {other:?}"),
-                        }
-                    } else if m.is_binary() {
-                        let data = m.into_data();
-                        if let Ok(frame) = Frame::from_bytes(&data) {
-                            received += 1;
-                            mgr.channel(&args.stream, ChannelKind::Lossless)
-                                .push(frame, Instant::now());
-                        }
+    loop {
+        let remaining = Duration::from_secs(args.secs)
+            .saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, data.recv()).await {
+            Ok(Ok(Some(pkt))) => match pkt {
+                SessionPacket::Media(frame) => {
+                    received += 1;
+                    mgr.channel(&args.stream, ChannelKind::Lossless)
+                        .push(frame, Instant::now());
+                    let channel = mgr.channel(&args.stream, ChannelKind::Lossless);
+                    for f in channel.poll(Instant::now()) {
+                        let _ = session.push(f);
                     }
                 }
-                Some(Err(e)) => {
-                    tracing::warn!("WS 错误: {e}");
-                    break;
-                }
-                None => break,
+                SessionPacket::Control(_) => {}
             },
-        }
-        let channel = mgr.channel(&args.stream, ChannelKind::Lossless);
-        for f in channel.poll(Instant::now()) {
-            let _ = session.push(f);
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => {
+                tracing::warn!("观看连接异常: {e}");
+                break;
+            }
+            Err(_) => break, // 接收时长到
         }
     }
     // 收尾：冲净通道 + 停止播放（后台线程收尾后画面通道关闭）

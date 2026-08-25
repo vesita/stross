@@ -183,6 +183,9 @@ pub enum ControlMessage {
     },
     /// 推流端结束。
     Bye,
+    /// 观看端请求观看一个流（SRT/QUIC watch 的首条控制消息；
+    /// WS 观看由 URL 查询参数声明，无需此消息）。
+    Watch { stream_id: String },
     /// 中继端确认。
     Welcome { stream_id: String },
     /// 观看端就绪，可以开始收帧。
@@ -330,6 +333,16 @@ mod tests {
             ControlMessage::from_text(&text).unwrap(),
             ControlMessage::Bye
         );
+    }
+
+    #[test]
+    fn watch_roundtrip() {
+        let msg = ControlMessage::Watch {
+            stream_id: "abc".into(),
+        };
+        let text = msg.to_text();
+        assert!(text.contains("\"type\":\"watch\""), "text: {text}");
+        assert_eq!(ControlMessage::from_text(&text).unwrap(), msg);
     }
 
     #[test]

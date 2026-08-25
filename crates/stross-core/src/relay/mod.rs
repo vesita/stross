@@ -291,14 +291,14 @@ impl RelayServer {
         let actual_port = listener.local_addr()?.port();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-        // SRT 推流监听：原生推流端可经 srt://<host>:<srt_port> 推流，
-        // 数据面与 WS 推流完全一致（handle_push；传输抽象第三次验证）
+        // SRT 推流/观看监听：原生端可经 srt://<host>:<srt_port> 推流或观看，
+        // 数据面与 WS 完全一致（handle_connect 按首条消息分流 Hello/Watch）
         let mut srt_listener = SrtTransport::new()
             .bind("0.0.0.0:0")
             .await
             .map_err(|e| anyhow::anyhow!("SRT 监听失败: {e}"))?;
         let srt_port = srt_listener.local_addr().port();
-        tracing::info!("SRT 推流监听: 0.0.0.0:{srt_port}");
+        tracing::info!("SRT 推流/观看监听: 0.0.0.0:{srt_port}");
         let srt_state = state.clone();
         let mut srt_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {
@@ -307,7 +307,7 @@ impl RelayServer {
                     res = srt_listener.accept() => match res {
                         Ok(session) => {
                             let state = srt_state.clone();
-                            tokio::spawn(async move { handle_push(session, state).await });
+                            tokio::spawn(async move { handle_connect(session, state).await });
                         }
                         Err(e) => {
                             tracing::warn!("SRT accept 失败: {e}");
@@ -320,14 +320,14 @@ impl RelayServer {
             tracing::debug!("SRT 监听已停止");
         });
 
-        // QUIC 推流监听：一条连接 control/media 双 stream 多路复用
-        // （Lossless；自签名证书 + 客户端接受任意证书，局域网可信模型）
+        // QUIC 推流/观看监听：一条连接 control/media 双 stream 多路复用，
+        // 原生端可推流（Hello）或观看（Watch）（Lossless；自签名 + 局域网可信模型）
         let mut quic_listener = QuicTransport::new()
             .bind("0.0.0.0:0".parse().expect("静态地址"))
             .await
             .map_err(|e| anyhow::anyhow!("QUIC 监听失败: {e}"))?;
         let quic_port = quic_listener.local_addr().port();
-        tracing::info!("QUIC 推流监听: 0.0.0.0:{quic_port}");
+        tracing::info!("QUIC 推流/观看监听: 0.0.0.0:{quic_port}");
         let quic_state = state.clone();
         let mut quic_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {
@@ -336,7 +336,7 @@ impl RelayServer {
                     res = quic_listener.accept() => match res {
                         Ok(session) => {
                             let state = quic_state.clone();
-                            tokio::spawn(async move { handle_push(session, state).await });
+                            tokio::spawn(async move { handle_connect(session, state).await });
                         }
                         Err(e) => {
                             tracing::warn!("QUIC accept 失败: {e}");
@@ -458,18 +458,65 @@ pub(super) async fn handle_watch(
 
 /// 推流端：Hello → 建流 → 转发帧；Bye / 断开 → 删流。
 pub(super) async fn handle_push(session: Box<dyn DataSession>, state: RelayState) {
+    handle_push_loop(session, state, None).await;
+}
+
+/// 统一接入点（SRT/QUIC 监听用）：首条控制消息决定角色——
+/// `Hello` = 推流（进入 [`handle_push_loop`]），`Watch` = 观看（[`handle_watch`]）。
+pub(super) async fn handle_connect(session: Box<dyn DataSession>, state: RelayState) {
+    let first = match session.recv().await {
+        Ok(Some(pkt)) => pkt,
+        Ok(None) => {
+            tracing::warn!("首条消息前连接断开");
+            let _ = session.close().await;
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("首条消息接收失败: {e}");
+            let _ = session.close().await;
+            return;
+        }
+    };
+    match first {
+        SessionPacket::Control(ControlMessage::Hello { .. }) => {
+            handle_push_loop(session, state, Some(first)).await;
+        }
+        SessionPacket::Control(ControlMessage::Watch { stream_id }) => {
+            handle_watch(session, stream_id, state).await;
+        }
+        other => {
+            tracing::warn!("首条消息既不是 Hello 也不是 Watch: {other:?}");
+            let _ = session
+                .send(SessionPacket::Control(ControlMessage::Error {
+                    message: "首条消息必须是 Hello（推流）或 Watch（观看）".into(),
+                }))
+                .await;
+            let _ = session.close().await;
+        }
+    }
+}
+
+/// 推流循环主体；`pending` 为接入点已消费的首包（Hello），WS 路径为 `None`。
+async fn handle_push_loop(
+    session: Box<dyn DataSession>,
+    state: RelayState,
+    mut pending: Option<SessionPacket>,
+) {
     let mut stream_id: Option<String> = None;
     loop {
-        let pkt = match session.recv().await {
-            Ok(Some(pkt)) => pkt,
-            Ok(None) => {
-                tracing::warn!("推流端连接已断开（无更多消息）");
-                break;
-            }
-            Err(e) => {
-                tracing::warn!("推流端连接异常: {e}");
-                break;
-            }
+        let pkt = match pending.take() {
+            Some(pkt) => pkt,
+            None => match session.recv().await {
+                Ok(Some(pkt)) => pkt,
+                Ok(None) => {
+                    tracing::warn!("推流端连接已断开（无更多消息）");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("推流端连接异常: {e}");
+                    break;
+                }
+            },
         };
         match pkt {
             SessionPacket::Control(ControlMessage::Hello {

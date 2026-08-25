@@ -7,11 +7,17 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use stross_app::{Platform, StrossApp};
+use stross_app::{Platform, Receiver, StrossApp};
+use stross_core::relay::RelayServer;
+use stross_core::transport::srt::SrtTransport;
+use stross_core::transport::{PeerAddr, SessionPacket, SessionParams, Transport};
 use stross_media::capture::FfmpegBackend;
 use stross_media::pipeline::ffmpeg_available;
-use stross_media::pipeline::{Quality, StreamConfig, VideoSource};
+use stross_media::pipeline::{Quality, StreamConfig, StreamSession, VideoSource};
 use stross_media::playback::AudioOut;
+use stross_proto::frame::Frame;
+use stross_proto::message::{ControlMessage, ReliabilityProfile};
+use tokio::sync::mpsc;
 
 fn cfg(stream_id: &str, secs: u32) -> StreamConfig {
     StreamConfig {
@@ -79,4 +85,92 @@ async fn receive_decodes_live_stream() {
         .unwrap_or(0);
     assert!(drawn > 0, "解码帧通道应有帧流出");
     app.stop_stream().await.ok();
+}
+
+/// 接收走 SRT 观看端（阶段 0b）：真实 ffmpeg 合成源经 SRT 推流 → 中继 →
+/// `Receiver`（SRT watch 参数化路径）解码，验证 UDP 观看端端到端可用。
+#[tokio::test]
+async fn receive_over_srt_decodes_live_stream() {
+    if !ffmpeg_available() {
+        eprintln!("跳过：未找到 ffmpeg");
+        return;
+    }
+    let relay = RelayServer::start(0).await.expect("启动中继");
+    let srt_url = format!("srt://127.0.0.1:{}", relay.srt_port.expect("SRT 监听"));
+
+    // SRT 推流：真实 ffmpeg 合成源（testsrc2 LOW，3 秒）
+    let (tx, mut rx) = mpsc::channel::<Frame>(256);
+    let cap = StreamSession::spawn(&cfg("recv-srt", 3), tx).expect("启动采集");
+    let transport = SrtTransport::new();
+    let peer = PeerAddr {
+        transport: stross_proto::message::TransportId::Srt,
+        addr: srt_url.clone(),
+    };
+    let params = SessionParams {
+        session_id: "recv-srt".into(),
+        profile: ReliabilityProfile::Adaptive,
+    };
+    let push = transport.connect(&peer, &params).await.expect("SRT 连接中继");
+    push.send(SessionPacket::Control(ControlMessage::Hello {
+        stream_id: "recv-srt".into(),
+        title: "SRT 接收测试".into(),
+        video: None,
+        audio: None,
+    }))
+    .await
+    .unwrap();
+    // 等 Welcome，确保流已建立（避免观看端先到报「流不存在」）
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), push.recv()).await {
+            Ok(Ok(Some(SessionPacket::Control(ControlMessage::Welcome { .. })))) => break,
+            Ok(Ok(Some(_))) => continue,
+            Ok(Ok(None)) => panic!("推流连接提前关闭"),
+            Ok(Err(e)) => panic!("推流 recv 错误: {e}"),
+            Err(_) => panic!("等 Welcome 超时"),
+        }
+    }
+    let push_task = tokio::spawn(async move {
+        while let Some(f) = rx.recv().await {
+            if push.send(SessionPacket::Media(f)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // 观看端：SRT watch → 解码
+    let recv = Receiver::start(srt_url, "recv-srt".into(), AudioOut::Discard)
+        .await
+        .expect("SRT 接收启动");
+    let mut frames = recv.take_frames().expect("应有帧通道");
+    let frame_task = tokio::spawn(async move {
+        let mut n = 0u32;
+        while let Some(f) = frames.recv().await {
+            assert_eq!(f.rgba.len() as u32, f.width * f.height * 4, "RGBA 帧尺寸");
+            n += 1;
+        }
+        n
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        let s = recv.stats();
+        if s.decoded_video > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    recv.stop();
+
+    let s = recv.stats();
+    assert!(s.received > 0, "应收到协议帧: {s:?}");
+    assert!(s.decoded_video > 0, "应解码出视频帧: {s:?}");
+    let drawn = tokio::time::timeout(Duration::from_secs(3), frame_task)
+        .await
+        .map(|r| r.unwrap_or(0))
+        .unwrap_or(0);
+    assert!(drawn > 0, "解码帧通道应有帧流出");
+
+    drop(cap);
+    push_task.abort();
+    relay.stop().await;
 }

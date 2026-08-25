@@ -118,7 +118,6 @@ mod tests {
     use super::*;
     use crate::relay::RelayState;
     use std::collections::HashMap;
-    use stross_proto::message::CodecId;
 
     #[cfg(feature = "discovery")]
     fn discovered(ip: &str, port: u16, txt: Vec<(String, String)>) -> crate::discovery::Discovered {
@@ -184,6 +183,7 @@ mod tests {
     #[cfg(feature = "discovery")]
     #[test]
     fn peer_from_discovered_parses_txt() {
+        use stross_proto::message::CodecId;
         let info = DiscoveryInfo {
             v: DiscoveryInfo::VERSION,
             name: "客厅电脑".into(),

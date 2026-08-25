@@ -138,7 +138,7 @@ async fn receive_over_srt_decodes_live_stream() {
     });
 
     // 观看端：SRT watch → 解码
-    let recv = Receiver::start(srt_url, "recv-srt".into(), AudioOut::Discard)
+    let recv = Receiver::start(srt_url, "recv-srt".into(), AudioOut::Discard, None)
         .await
         .expect("SRT 接收启动");
     let mut frames = recv.take_frames().expect("应有帧通道");

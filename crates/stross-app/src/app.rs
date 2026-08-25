@@ -23,7 +23,7 @@ use stross_media::playback::AudioOut;
 use stross_media::playback::RenderedFrame;
 use tokio::sync::mpsc;
 
-use crate::receiver::{ReceiveStats, Receiver};
+use crate::receiver::{LocalProxy, ReceiveStats, Receiver};
 use stross_proto::frame::Frame;
 use stross_proto::message::{CodecId, DiscoveryInfo, MediaKind, RoleId, TransportId};
 
@@ -398,7 +398,7 @@ impl StrossApp {
                 r.stop(); // 先停旧的
             }
         }
-        let r = Receiver::start(relay_url, stream_id, audio_out).await?;
+        let r = Receiver::start(relay_url, stream_id, audio_out, self.local_proxy()).await?;
         *self.receiver.lock().unwrap() = Some(r.clone());
         Ok(r)
     }
@@ -418,7 +418,7 @@ impl StrossApp {
                 r.stop(); // 先停旧的
             }
         }
-        let r = Receiver::start_raw(relay_url, stream_id).await?;
+        let r = Receiver::start_raw(relay_url, stream_id, self.local_proxy()).await?;
         *self.receiver.lock().unwrap() = Some(r.clone());
         Ok(r)
     }
@@ -428,6 +428,14 @@ impl StrossApp {
         if let Some(r) = self.receiver.lock().unwrap().take() {
             r.stop();
         }
+    }
+
+    /// 本机中继的代理能力（观看直连失败时级联兜底）；本机中继未启动时为 `None`。
+    fn local_proxy(&self) -> Option<LocalProxy> {
+        self.relay.lock().unwrap().as_ref().map(|h| LocalProxy {
+            state: h.state(),
+            ws_base: format!("ws://127.0.0.1:{}", h.port),
+        })
     }
 
     /// 取出当前接收会话的解码帧通道（每会话一次）。

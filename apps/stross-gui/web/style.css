@@ -423,11 +423,45 @@ button.danger:hover:not(:disabled) {
   transition: border-color 0.15s, transform 0.15s, background 0.15s;
 }
 .url-list li:hover { border-color: var(--accent); background: var(--surface-3); transform: translateX(2px); }
-.url-list li:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91, 140, 255, 0.18); }
+.url-list li:focus-visible,
+.url-list li:has(:focus-visible) {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(91, 140, 255, 0.18);
+}
 .url-list li .tag { display: inline-flex; color: var(--accent); }
 .url-list li .tag.ok { color: var(--ok); }
 .url-list li .tag .ic { width: 14px; height: 14px; }
 .url-list li .hint { font-family: var(--font-sans); }
+
+/* 最近连接：可点击主体 + 单条删除按钮 */
+.url-list li .recent-main {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+.url-list li .recent-del {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-3);
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.url-list li:hover .recent-del,
+.url-list li .recent-del:focus-visible,
+.url-list li .recent-del:active { opacity: 1; }
+.url-list li .recent-del:hover {
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--err);
+  transform: none;
+  filter: none;
+}
+.url-list li .recent-del .ic { width: 14px; height: 14px; }
 
 /* ---------------- 连接视图 ---------------- */
 
@@ -436,6 +470,7 @@ button.danger:hover:not(:disabled) {
   max-width: 760px;
   margin: 0 auto;
   width: 100%;
+  container-type: inline-size; /* 扫描结果多列网格的查询锚点 */
 }
 
 /* 主界面（推流/观看）跨满两列网格，卡片按单列流式排布 */
@@ -594,7 +629,40 @@ button.danger:hover:not(:disabled) {
   max-width: 46%;
 }
 
-.tab-pane { display: flex; flex-direction: column; gap: 16px; }
+.tab-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  /* 容器查询锚点：内部 pane-grid / 流列表按实际容器宽度自适应折叠 */
+  container-type: inline-size;
+}
+
+/* 面板布局：宽容器两栏（配置+状态 / 控制+画面），窄容器自动折叠单栏 */
+.pane-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+@container (min-width: 780px) {
+  .pane-grid { grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); }
+}
+
+/* 流列表 / 扫描结果：宽容器多列网格，窄容器单列 */
+.recv-streams { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+@container (min-width: 560px) {
+  .recv-streams {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 8px;
+  }
+  .scan-results {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 8px;
+  }
+}
+.recv-streams .empty, .scan-results .empty { grid-column: 1 / -1; }
 
 /* 视图 / 面板切换过渡 */
 .view-enter { animation: fadeUp 0.26s ease; }
@@ -632,8 +700,6 @@ button.danger:hover:not(:disabled) {
   -webkit-backdrop-filter: blur(2px);
 }
 
-.recv-streams { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
-
 .mono { font-family: var(--font-mono); }
 
 /* ---------------- 移动端适配 ---------------- */
@@ -663,6 +729,12 @@ button.danger:hover:not(:disabled) {
   .actions button { flex: 1; }
 
   .url-list li { padding: 12px 14px; font-size: 14px; }
+  .url-list li .recent-del {
+    width: 40px;
+    height: 40px;
+    margin: -8px -6px -8px 0;
+    opacity: 1;
+  }
   .header-right { gap: 6px; }
 }
 

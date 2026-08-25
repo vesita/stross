@@ -194,7 +194,13 @@ function saveRecent(url) {
     list.unshift(url);
     localStorage.setItem(LS_RECENT, JSON.stringify(list.slice(0, 5)));
 }
-/** 渲染"最近连接"列表，点击即填入并自动连接。 */
+/** 删除一条最近连接历史（不触发连接），空列表时隐藏区块。 */
+function removeRecent(url) {
+    const list = getRecent().filter((u) => u !== url);
+    localStorage.setItem(LS_RECENT, JSON.stringify(list));
+    renderRecent();
+}
+/** 渲染"最近连接"列表：点击连接，右侧 ✕ 删除单条记录。 */
 function renderRecent() {
     const list = getRecent();
     const block = $('recent-block');
@@ -207,14 +213,28 @@ function renderRecent() {
     ul.innerHTML = '';
     list.forEach((u) => {
         const li = document.createElement('li');
-        li.textContent = u;
-        li.title = '点击连接';
-        makeClickable(li, () => {
+        const main = document.createElement('span');
+        main.className = 'recent-main';
+        main.textContent = u;
+        main.title = '点击连接';
+        makeClickable(main, () => {
             $input('relay-addr').value = u;
             document.querySelector('input[name="conn"][value="remote"]').checked = true;
             $('remote-row').classList.remove('hidden');
             void connect();
         });
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'recent-del';
+        del.title = '删除该记录';
+        del.setAttribute('aria-label', '删除 ' + u);
+        del.innerHTML = icon('x');
+        del.onclick = (e) => {
+            e.stopPropagation(); // 不触发连接
+            removeRecent(u);
+        };
+        li.appendChild(main);
+        li.appendChild(del);
         ul.appendChild(li);
     });
 }

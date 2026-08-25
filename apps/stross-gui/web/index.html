@@ -213,8 +213,9 @@
 
       <!-- 推流 -->
       <div id="tab-send" class="tab-pane">
-        <section class="card">
-          <h2>串流源</h2>
+        <div class="pane-grid">
+          <section class="card">
+            <h2>串流源</h2>
 
           <fieldset>
             <legend>视频</legend>
@@ -290,75 +291,82 @@
               <svg class="ic"><use href="#i-stop" /></svg><span>停止</span>
             </button>
           </div>
-        </section>
+          </section>
 
-        <section class="card">
-          <h2>状态</h2>
-          <div id="status" class="status">
-            <div class="status-line"><span class="dot idle" id="status-dot"></span><span id="status-text">未推流</span></div>
-            <div id="stream-meta" class="meta"></div>
-            <div id="error-box" class="error hidden"></div>
-          </div>
+          <section class="card">
+            <h2>状态</h2>
+            <div id="status" class="status">
+              <div class="status-line"><span class="dot idle" id="status-dot"></span><span id="status-text">未推流</span></div>
+              <div id="stream-meta" class="meta"></div>
+              <div id="error-box" class="error hidden"></div>
+            </div>
 
-          <h2>中继入口</h2>
-          <p class="hint">本机中继入口地址（数据面 ws://ip:port/ws/*，REST /api/*）：</p>
-          <ul id="url-list" class="url-list">
-            <li class="hint">连接中继后显示入口地址</li>
-          </ul>
-        </section>
+            <h2>中继入口</h2>
+            <p class="hint">本机中继入口地址（数据面 ws://ip:port/ws/*，REST /api/*）：</p>
+            <ul id="url-list" class="url-list">
+              <li class="hint">连接中继后显示入口地址</li>
+            </ul>
+          </section>
+        </div>
       </div>
 
       <!-- 观看（原生接收，D6/D1） -->
       <div id="tab-watch" class="tab-pane hidden">
-        <section class="card">
-          <h2>接收（原生播放）</h2>
-          <p class="hint">已连接中继：<span id="watch-relay-url" class="mono"></span></p>
-          <p class="hint">自动发现局域网内其它中继的在线串流（跨设备观看），或选择已连接中继的串流，或直接输入流 id。</p>
-          <div class="row">
-            <span class="hint icon-hint">
-              <svg class="ic"><use href="#i-radio" /></svg>
-              <span>局域网串流（自动发现）：</span>
-            </span>
-            <button id="discover-btn" type="button">
-              <svg class="ic"><use href="#i-refresh" /></svg><span>重扫</span>
-            </button>
-          </div>
-          <div id="discover-streams" class="recv-streams"></div>
-          <p class="hint">选择要接收的串流（接收端有选择权，F2.1），或直接输入流 id。</p>
-          <div id="recv-streams" class="recv-streams"></div>
-          <div class="row">
-            <input id="recv-stream-input" type="text" placeholder="流 id（如 sess-1 或 demo-1234）" class="grow" />
-            <select id="recv-transport-select" title="观看传输（UDP 需要中继支持 /api/info）">
-              <option value="auto" selected>自动（优先 UDP）</option>
-              <option value="ws">WebSocket</option>
-              <option value="srt">SRT</option>
-              <option value="quic">QUIC</option>
-            </select>
-            <select id="recv-audio-select" title="音频输出方式">
-              <option value="device" selected>设备播放</option>
-              <option value="discard">静音</option>
-            </select>
-            <button id="recv-start-btn" class="primary" type="button">
-              <svg class="ic"><use href="#i-play" /></svg><span>开始接收</span>
-            </button>
-            <button id="recv-stop-btn" type="button" disabled>
-              <svg class="ic"><use href="#i-stop" /></svg><span>停止</span>
-            </button>
-          </div>
-          <div class="canvas-wrap">
-            <canvas id="recv-canvas" width="640" height="360"></canvas>
-            <div class="canvas-overlay hidden" id="recv-overlay">
-              <span class="spinner"></span>
-              <span>等待流数据…</span>
+        <div class="pane-grid pane-grid-watch">
+          <section class="card">
+            <h2>接收（原生播放）</h2>
+            <p class="hint">已连接中继：<span id="watch-relay-url" class="mono"></span></p>
+            <p class="hint">自动发现局域网内其它中继的在线串流（跨设备观看），或选择已连接中继的串流，或直接输入流 id。</p>
+            <div class="row">
+              <span class="hint icon-hint">
+                <svg class="ic"><use href="#i-radio" /></svg>
+                <span>局域网串流（自动发现）：</span>
+              </span>
+              <button id="discover-btn" type="button">
+                <svg class="ic"><use href="#i-refresh" /></svg><span>重扫</span>
+              </button>
             </div>
-          </div>
-          <div class="status-line">
-            <span class="dot idle" id="recv-dot"></span>
-            <span id="recv-status">未接收</span>
-          </div>
-          <div id="recv-meta" class="meta"></div>
-          <div id="recv-error" class="error hidden"></div>
-        </section>
+            <div id="discover-streams" class="recv-streams"></div>
+            <p class="hint">选择要接收的串流（接收端有选择权，F2.1），或直接输入流 id。</p>
+            <div id="recv-streams" class="recv-streams"></div>
+            <div class="row">
+              <input id="recv-stream-input" type="text" placeholder="流 id（如 sess-1 或 demo-1234）" class="grow" />
+              <select id="recv-transport-select" title="观看传输（UDP 需要中继支持 /api/info）">
+                <option value="auto" selected>自动（优先 UDP）</option>
+                <option value="ws">WebSocket</option>
+                <option value="srt">SRT</option>
+                <option value="quic">QUIC</option>
+              </select>
+              <select id="recv-audio-select" title="音频输出方式">
+                <option value="device" selected>设备播放</option>
+                <option value="discard">静音</option>
+              </select>
+              <button id="recv-start-btn" class="primary" type="button">
+                <svg class="ic"><use href="#i-play" /></svg><span>开始接收</span>
+              </button>
+              <button id="recv-stop-btn" type="button" disabled>
+                <svg class="ic"><use href="#i-stop" /></svg><span>停止</span>
+              </button>
+            </div>
+            <div id="recv-error" class="error hidden"></div>
+          </section>
+
+          <section class="card">
+            <h2>画面</h2>
+            <div class="canvas-wrap">
+              <canvas id="recv-canvas" width="640" height="360"></canvas>
+              <div class="canvas-overlay hidden" id="recv-overlay">
+                <span class="spinner"></span>
+                <span>等待流数据…</span>
+              </div>
+            </div>
+            <div class="status-line">
+              <span class="dot idle" id="recv-dot"></span>
+              <span id="recv-status">未接收</span>
+            </div>
+            <div id="recv-meta" class="meta"></div>
+          </section>
+        </div>
       </div>
     </section>
   </main>

@@ -7,9 +7,10 @@
 //! 设计文档 `docs/requirements.md` §7：中继 = 受内核驱动的数据面后端（主从关系）。
 
 use async_trait::async_trait;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use stross_core::relay::{RelayEvent, RelayHandle, RelayState};
+use stross_core::relay::{RelayEvent, RelayHandle, RelayState, ShareTokenValidator};
 
 /// 数据面后端：内核通过它预授权 / 撤销流接入，并订阅流生命周期事件。
 #[async_trait]
@@ -20,6 +21,8 @@ pub trait DataPlaneBackend: Send + Sync + 'static {
     async fn revoke_stream(&self, session_id: &str) -> Result<(), String>;
     /// 数据面事件订阅（StreamStarted / StreamEnded / WatchersChanged）。
     fn events(&self) -> broadcast::Receiver<RelayEvent>;
+    /// 注入接入凭证校验器（B 阶段跨设备推流；默认不注入 = 行为与现状一致）。
+    fn set_share_token_validator(&self, _validator: Arc<dyn ShareTokenValidator>) {}
 }
 
 /// 内嵌中继适配器：把中继共享状态包装为数据面后端（本机同进程闭环）。
@@ -53,5 +56,9 @@ impl DataPlaneBackend for RelayDataPlane {
 
     fn events(&self) -> broadcast::Receiver<RelayEvent> {
         self.state.subscribe_events()
+    }
+
+    fn set_share_token_validator(&self, validator: Arc<dyn ShareTokenValidator>) {
+        self.state.set_token_validator(Some(validator));
     }
 }

@@ -26,6 +26,11 @@ use crate::app::StrossApp;
 /// 控制面默认端口（回环）。
 pub const DEFAULT_CTRL_PORT: u16 = 18778;
 
+/// 接入凭证默认有效期（秒，5 分钟）。
+const fn default_token_ttl() -> u64 {
+    300
+}
+
 /// 控制请求（CLI → 实例）。
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "camelCase")]
@@ -43,6 +48,15 @@ pub enum CtrlRequest {
     StartStream {
         config: StreamConfig,
         relay_url: Option<String>,
+    },
+    /// 为已建会话签发一次性接入凭证（B 阶段：跨设备推流）。
+    /// 返回 [`stross_proto::message::ShareToken`] 字符串 + PIN，调用方编码为
+    /// 二维码 / 短码交给推流端；凭证经推流端 Hello 出示即接入本机受控中继。
+    ShareToken {
+        session_id: String,
+        /// 有效期（秒）。
+        #[serde(default = "default_token_ttl")]
+        ttl_secs: u64,
     },
     /// 停止推流。
     StopStream,
@@ -182,6 +196,27 @@ async fn handle_request(app: &StrossApp, text: &str) -> CtrlResponse {
                     "relayPort": r.relay_port,
                     "watchUrls": r.watch_urls,
                     "streamId": r.stream_id,
+                })),
+                Err(e) => CtrlResponse::err(e),
+            }
+        }
+        CtrlRequest::ShareToken {
+            session_id,
+            ttl_secs,
+        } => {
+            // D3 场景：接收端默认接受手机麦克风反向共享
+            let media = vec![stross_proto::message::MediaKind::Mic];
+            match app.kernel().create_share_token(
+                &session_id,
+                media,
+                std::time::Duration::from_secs(ttl_secs),
+            ) {
+                Ok(token) => CtrlResponse::ok(json!({
+                    "token": token.to_token_string(),
+                    "streamId": token.stream_id,
+                    "pin": token.pin,
+                    "expiresAt": token.expires_at,
+                    "media": token.media.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>(),
                 })),
                 Err(e) => CtrlResponse::err(e),
             }

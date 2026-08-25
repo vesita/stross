@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -240,16 +240,21 @@ async fn ws_watch(
     ws: WebSocketUpgrade,
     Query(q): Query<WatchQuery>,
     State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
 ) -> Response {
     ws.on_upgrade(move |socket| {
-        let session = WsTransport::new().from_upgraded(socket);
+        let session = WsTransport::new().from_upgraded(socket, Some(peer));
         handle_watch(session, q.stream, state)
     })
 }
 
-async fn ws_push(ws: WebSocketUpgrade, State(state): State<RelayState>) -> Response {
+async fn ws_push(
+    ws: WebSocketUpgrade,
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+) -> Response {
     ws.on_upgrade(move |socket| {
-        let session = WsTransport::new().from_upgraded(socket);
+        let session = WsTransport::new().from_upgraded(socket, Some(peer));
         handle_push(session, state)
     })
 }

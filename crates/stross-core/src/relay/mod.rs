@@ -39,7 +39,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
 use stross_proto::frame::{Frame, TRACK_VIDEO};
-use stross_proto::message::{ControlMessage, StreamInfo};
+use stross_proto::message::{ControlMessage, ShareToken, StreamInfo};
 
 use crate::transport::quic::QuicTransport;
 use crate::transport::srt::SrtTransport;
@@ -51,8 +51,9 @@ pub const DEFAULT_PORT: u16 = 8777;
 /// 中继数据面事件（内核订阅，用于控制面追踪流生命周期）。
 ///
 /// 对应需求 F2.2「先会话后传输」与 D4「会话 id 内核签发」：受控模式下
-/// 只有内核预授权（[`RelayState::authorize_stream`]）的 stream_id 才能推流；
-/// 流的起止 / 观看人数变化通过本事件上报内核。
+/// 只有内核预授权（[`RelayState::authorize_stream`]）或出示有效接入凭证
+/// （[`ShareToken`]，经 [`RelayState::set_token_validator`] 注入校验器）的
+/// stream_id 才能推流；流的起止 / 观看人数变化通过本事件上报内核。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum RelayEvent {
@@ -62,6 +63,18 @@ pub enum RelayEvent {
     StreamEnded { stream_id: String },
     /// 观看者数量变化（订阅 / 断开时上报）。
     WatchersChanged { stream_id: String, watchers: u32 },
+}
+
+/// 接入凭证校验器（跨设备推流用）。
+///
+/// 受控中继在预授权之外接受"凭证匹配"：推流端 Hello 携带 [`ShareToken`]，
+/// 中继调用本校验器（由内核注入，读取内核签发表）确认凭证有效且
+/// `token.stream_id == Hello.stream_id`。默认（未注入）为 `None` = 不接受
+/// 凭证接入，行为与现状一致。
+pub trait ShareTokenValidator: Send + Sync {
+    /// 校验凭证是否有效（存在 / 未过期 / 与签发时一致）。调用方保证
+    /// `token.stream_id` 已与 Hello 的 stream_id 比对过。
+    fn validate(&self, token: &ShareToken) -> bool;
 }
 
 /// 单条流的内部状态。
@@ -99,6 +112,8 @@ pub struct RelayState {
     proxies: Arc<Mutex<HashMap<String, ProxyEntry>>>,
     /// 受控模式允许接入的 stream id（内核预注册；非受控模式忽略）。
     allowed: Arc<Mutex<HashSet<String>>>,
+    /// 接入凭证校验器（跨设备推流；`None` = 不接受凭证接入）。
+    token_validator: Arc<Mutex<Option<Arc<dyn ShareTokenValidator>>>>,
     /// 是否受控：仅允许 [`Self::allowed`] 中的 stream id 推流。
     controlled: bool,
     /// 本机 HTTP/WS 监听端口（`/api/info` 上报用）。
@@ -126,6 +141,7 @@ impl Default for RelayState {
             peers: Arc::new(Mutex::new(HashMap::new())),
             proxies: Arc::new(Mutex::new(HashMap::new())),
             allowed: Arc::new(Mutex::new(HashSet::new())),
+            token_validator: Arc::new(Mutex::new(None)),
             controlled: false,
             port: 0,
             srt_port: None,
@@ -238,8 +254,42 @@ impl RelayState {
         self.controlled
     }
 
+    /// 注入接入凭证校验器（内核调用；`None` 关闭凭证接入，行为与现状一致）。
+    pub fn set_token_validator(&self, validator: Option<Arc<dyn ShareTokenValidator>>) {
+        *self.token_validator.lock().unwrap() = validator;
+    }
+
     fn is_authorized(&self, id: &str) -> bool {
         self.allowed.lock().unwrap().contains(id)
+    }
+
+    /// 凭证接入判定（跨设备推流）：只做凭证校验，**不含预授权**——
+    /// 预授权仅对本机（回环来源）放行，见 [`RelayState::is_allowed`]。
+    fn token_allows(&self, id: &str, share_token: Option<&str>) -> bool {
+        let Some(token_str) = share_token else {
+            return false;
+        };
+        // 凭证解析失败 / 缺失校验器 → 拒绝
+        let validator = self.token_validator.lock().unwrap().clone();
+        let Some(validator) = validator else {
+            return false;
+        };
+        let Some(token) = ShareToken::from_token_string(token_str) else {
+            tracing::warn!("推流被拒绝: 流 {id} 的接入凭证格式非法");
+            return false;
+        };
+        if token.stream_id != id {
+            tracing::warn!("推流被拒绝: 流 {id} 的接入凭证 streamId 不匹配");
+            return false;
+        }
+        validator.validate(&token)
+    }
+
+    /// 受控模式接入判定（来源感知门控）：
+    /// * 回环来源（本机进程）→ 内核预授权放行（本机流程不变）；
+    /// * 非回环 / 未知来源（跨设备）→ 必须出示有效接入凭证。
+    fn is_allowed(&self, id: &str, share_token: Option<&str>, local: bool) -> bool {
+        (local && self.is_authorized(id)) || self.token_allows(id, share_token)
     }
 
     /// 广播一条数据面事件（无订阅者时忽略）。
@@ -528,11 +578,15 @@ impl RelayServer {
         });
 
         let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = shutdown_rx.changed().await;
-                })
-                .await;
+            // ConnectInfo：WS 升级处提取对端地址（来源感知门控用）
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.changed().await;
+            })
+            .await;
         });
         // 周期浏览局域网内其它中继，维护设备发现缓存（feature `discovery`）
         #[cfg(feature = "discovery")]
@@ -712,17 +766,29 @@ async fn handle_push_loop(
                 title,
                 video,
                 audio,
+                share_token,
             }) => {
-                // 受控模式：未预授权的 stream id 拒绝接入（需求 F2.2「先会话后传输」）
-                if state.is_controlled() && !state.is_authorized(&id) {
-                    tracing::warn!("推流被拒绝: 流 {id} 未授权（请先创建会话）");
-                    let _ = session
-                        .send(SessionPacket::Control(ControlMessage::Error {
-                            message: format!("流 {id} 未授权，请先创建会话"),
-                        }))
-                        .await;
-                    let _ = session.close().await;
-                    return;
+                // 受控模式接入门控（需求 F2.2 + B 阶段凭证式跨设备推流）：
+                // 回环来源（本机流程）走内核预授权；非回环 / 未知来源
+                // （跨设备，如手机 → 电脑）必须出示有效接入凭证。
+                if state.is_controlled() {
+                    let local = session
+                        .peer_addr()
+                        .map(|a| a.ip().is_loopback())
+                        .unwrap_or(false);
+                    if !state.is_allowed(&id, share_token.as_deref(), local) {
+                        tracing::warn!(
+                            "推流被拒绝: 流 {id} 来源 {} 未授权（本机需先建会话，跨设备需出示接入凭证）",
+                            if local { "回环" } else { "非回环" }
+                        );
+                        let _ = session
+                            .send(SessionPacket::Control(ControlMessage::Error {
+                                message: format!("流 {id} 未授权，请先创建会话或出示有效接入凭证"),
+                            }))
+                            .await;
+                        let _ = session.close().await;
+                        return;
+                    }
                 }
                 // 同名流冲突时拒绝新推流端
                 if state.get(&id).is_some() {
@@ -845,6 +911,7 @@ mod tests {
             title: "级联测试流".into(),
             video: None,
             audio: None,
+            share_token: None,
         }))
         .await
         .unwrap();

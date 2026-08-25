@@ -120,11 +120,16 @@ async fn client_loop(
     welcome: watch::Sender<bool>,
 ) {
     let _ = session.send(SessionPacket::Control(hello)).await;
+    // 会话内单调递增帧序号（B5）：有损路径（SRT）的接收端抖动缓冲按 seq
+    // 排序/判空洞；无损路径（WS/QUIC）接收端直通，seq 无副作用。
+    let mut next_seq: u32 = 0;
     loop {
         tokio::select! {
             frame = rx.recv() => {
                 match frame {
-                    Some(f) => {
+                    Some(mut f) => {
+                        f.header.seq = next_seq;
+                        next_seq = next_seq.wrapping_add(1);
                         if session.send(SessionPacket::Media(f)).await.is_err() {
                             tracing::warn!("推流连接断开");
                             let _ = connected.send(false);

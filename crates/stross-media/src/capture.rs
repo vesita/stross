@@ -51,6 +51,21 @@ pub trait CaptureBackend: Send + Sync {
     fn stop(&self);
     /// 当前采集状态。
     fn status(&self) -> CaptureStatus;
+    /// 会话起点墙上时刻（Unix 毫秒；延迟校准用，`receive --calibrate` 消费）。
+    /// 默认 `None`（未知 / 未启动）。
+    fn wall_start_unix_ms(&self) -> Option<u64> {
+        None
+    }
+    /// 首帧墙时刻（Unix 毫秒；`None` = 尚未输出首帧）。延迟校准精确用：
+    /// 调用方轮询到 `Some` 再写 `--report-start`（排除 ffmpeg 预热）。
+    /// 默认 `None`。
+    fn first_frame_wall_unix_ms(&self) -> Option<u64> {
+        None
+    }
+    /// 首帧 pts（毫秒；与首帧墙时刻成对，校准 pts0 修正用）。默认 `None`。
+    fn first_frame_pts_ms(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// 桌面端采集后端：ffmpeg 子进程（见 [`crate::pipeline::StreamSession`]）。
@@ -114,6 +129,45 @@ impl CaptureBackend for FfmpegBackend {
 
     fn status(&self) -> CaptureStatus {
         self.status.lock().unwrap().clone()
+    }
+
+    fn wall_start_unix_ms(&self) -> Option<u64> {
+        let session = self.session.lock().unwrap();
+        let s = session.as_ref()?;
+        // 优先首帧墙时刻（pts=0 对应此时刻，排除 ffmpeg 预热）；未出帧时回退
+        // 会话起点（spawn 时刻，含预热上界）
+        let wall = s
+            .first_frame
+            .lock()
+            .unwrap()
+            .map(|(w, _)| w)
+            .unwrap_or(s.started_wall);
+        Some(
+            wall.duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        )
+    }
+
+    /// 首帧墙时刻（Unix 毫秒；`None` = ffmpeg 尚未输出首帧）。
+    /// 延迟校准精确用：调用方应轮询到 `Some` 再写 `--report-start`。
+    fn first_frame_wall_unix_ms(&self) -> Option<u64> {
+        let session = self.session.lock().unwrap();
+        let guard = session.as_ref()?.first_frame.lock().unwrap();
+        let (wall, _) = guard.as_ref()?;
+        Some(
+            wall.duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        )
+    }
+
+    /// 首帧 pts（毫秒；与 [`Self::first_frame_wall_unix_ms`] 成对，延迟校准
+    /// 的 pts0 修正用）。
+    fn first_frame_pts_ms(&self) -> Option<u32> {
+        let session = self.session.lock().unwrap();
+        let guard = session.as_ref()?.first_frame.lock().unwrap();
+        Some(guard.as_ref()?.1)
     }
 }
 

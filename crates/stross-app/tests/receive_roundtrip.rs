@@ -29,6 +29,7 @@ fn cfg(stream_id: &str, secs: u32) -> StreamConfig {
         quality: Quality::LOW,
         audio: None,
         duration_secs: Some(secs),
+        share_token: None,
     }
 }
 
@@ -119,6 +120,7 @@ async fn receive_over_srt_decodes_live_stream() {
         title: "SRT 接收测试".into(),
         video: None,
         audio: None,
+        share_token: None,
     }))
     .await
     .unwrap();
@@ -133,7 +135,12 @@ async fn receive_over_srt_decodes_live_stream() {
         }
     }
     let push_task = tokio::spawn(async move {
-        while let Some(f) = rx.recv().await {
+        // 会话内递增 seq（与真实推流端 RelayClient 一致，B5：有损路径的
+        // 接收端抖动缓冲按 seq 排序；裸推流必须自行填充）
+        let mut next_seq = 0u32;
+        while let Some(mut f) = rx.recv().await {
+            f.header.seq = next_seq;
+            next_seq = next_seq.wrapping_add(1);
             if push.send(SessionPacket::Media(f)).await.is_err() {
                 break;
             }

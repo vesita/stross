@@ -53,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
         quality: Quality::MEDIUM,
         audio: None,
         duration_secs: Some(secs as u32),
+        share_token: None,
     };
     if with_audio {
         cfg.audio = Some(AudioSourceConfig {

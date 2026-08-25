@@ -566,6 +566,7 @@ mod tests {
             quality: Quality::LOW,
             audio: None,
             duration_secs: Some(1),
+            share_token: None,
         };
         let frames = capture_frames(cfg).await;
         assert!(!frames.is_empty(), "采集管线应产出帧");
@@ -622,6 +623,7 @@ mod tests {
                 ..Default::default()
             }),
             duration_secs: Some(1),
+            share_token: None,
         };
         let frames = capture_frames(cfg).await;
         assert!(!frames.is_empty(), "采集管线应产出音频帧");

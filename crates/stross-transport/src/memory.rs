@@ -172,6 +172,7 @@ mod tests {
                 title: "t".into(),
                 video: None,
                 audio: None,
+                share_token: None,
             }))
             .await
             .unwrap();

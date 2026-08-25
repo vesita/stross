@@ -88,6 +88,7 @@ mod tests {
             title: "watch 测试流".into(),
             video: None,
             audio: None,
+            share_token: None,
         }))
         .await
         .unwrap();

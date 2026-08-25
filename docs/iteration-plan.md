@@ -84,16 +84,27 @@ GStreamer 流水线。
 需要电脑控制面开放 LAN 绑定，违背 D7 v1"控制面仅回环"的门控，留待
 "远程控制（手机控制电脑）"阶段再评估。
 
-### B1 凭证生命周期（stross-proto 扩展）
+### B1 凭证生命周期（stross-proto 扩展）✅
 
-- [ ] `ShareToken` 结构：`stream_id`、`addrs`（各传输地址）、`pin`、
-      `expires_at`、`media`（本次共享的媒体类型，如 mic）
-      ——平台无关 JSON，可入二维码/短码；
-- [ ] 内核侧：建会话时签发 ShareToken（复用现有 create-session 授权路径，
-      加 token 生成与时效校验）；
-- [ ] 接入侧：手机推流前出示 token（复用 WS/ctrl 或推流首消息扩展字段），
-      中继校验 stream_id 已授权 + PIN + 未过期；
-- [ ] 单测：token 编解码、过期拒绝、错误 PIN 拒绝、未知 stream_id 拒绝。
+- [x] `ShareToken` 结构（v/stream_id/pin/expires_at/media）——平台无关 JSON，
+      可入二维码/短码；`to_token_string`/`from_token_string`/`is_expired` +
+      单测（roundtrip/容错/过期边界）
+- [x] `ControlMessage::Hello` 增加可选 `share_token` 字段（向后兼容：旧推流端
+      不传、wire 不变）；单测含旧客户端解析
+- [x] 内核签发与校验：`Kernel::create_share_token(session_id, media, ttl)` /
+      `verify_share_token`（签发表 + 过期惰性清理 + 逐字比对防篡改/重放；
+      PIN 为伪随机 6 位，不引入 rand 依赖）；单测覆盖签发/校验/篡改/过期/
+      同会话重签覆盖
+- [x] 中继接入校验（来源感知门控）：`DataSession::peer_addr()`（ws/srt/quic
+      实现；QUIC 直接从 connection 派生）→ 受控中继**回环来源走内核预授权
+      （本机流程不变），非回环/未知来源必须出示有效凭证**——预授权不再能
+      被远程冒用；`ShareTokenValidator` 钩子由内核 attach 数据面时注入
+- [x] 控制面与命令面：`ctrl share-token <session-id> [--ttl N]` 签发并打印
+      token；`push --share-token <token>` 出示凭证推流（Hello 携带）
+- [x] 测试：kernel 单测 + 集成测试（凭证放行/篡改拒绝/过期拒绝/非回环
+      即使已预授权也须凭证）+ **双 PC 端到端脚本**
+      `scripts/share-token-test.sh`（PC-A serve+签发 → PC-B 凭凭证经局域网
+      IP 推流 → PC-A 播放；含两个反例）
 
 ### B2 手机端反向外设推流（Android）
 
@@ -113,29 +124,44 @@ GStreamer 流水线。
       Linux PipeWire 虚拟源——"录音设备播放手机声音"的完整版；
 - 验收：电脑扬声器听到手机麦克风声音（D3 验收 3）。
 
-### B4 反向音频低延迟路径（≤100–200ms 预算）
+### B4 反向音频低延迟路径（≤100–200ms 预算）✅ 测量设施，待 SRT 调参
 
 > 参考：scrcpy 低延迟音频（小缓冲 + 直接写）、QuicMic QUIC 音频、jittr 自适应抖动。
 
-- [ ] 延迟预算拆解（端到端 = 采集缓冲 + 编码 + 传输 + 抖动缓冲 + 解码 +
-      输出缓冲），先实测现状（receive --latency 已有），再逐项压；
-- [ ] 编码：AAC 低延迟参数（-profile aac_low、短帧/低延迟切片）或
-      **Opus**（CodecId 已预留 Opus 枚举；20ms 帧 + 低复杂度更适合
-      ≤200ms 预算；ffmpeg libopus 即可，无新依赖）；
-- [ ] 抖动缓冲（B5）与传输（QUIC/SRT）按预算目标调参；
-- 验收：端到端 ≤ 200ms（局域网、QUIC 路径）——**一期硬指标，须脚本化
-      可测**：push/receive 双侧打 pts，receive 侧统计首帧到播放延迟。
+- [x] **延迟测量设施固化**：`push --report-start`（首帧墙时刻 + pts0 修正，
+      排除 ffmpeg 预热）+ `receive --calibrate`（同钟绝对端到端延迟
+      min/p50/p95/p99）+ `receive --no-write`（长跑零 IO，避免落盘污染）
+- [x] **双 PC 实测**（`scripts/latency-stability-test.sh [SECS] [trans...]`，
+      45s 长跑 + 多传输对比）：
+      - **QUIC：端到端 min=0.9ms / p99=4.1ms**（本机局域网，≪200ms 达标）；
+        相对抖动 p99=1.3ms；帧 94.7% / 音频块 95.5%（缺量=接入窗口，非掉帧）；
+        RSS 30.5→32.2MB 有界
+      - **SRT：min=240.9ms / p99=245.0ms**——系统性延迟（分布极窄，非抖动），
+        rsrt `SrtOptions.latency`（SRTO_RCVLATENCY 默认 120ms × 两级链路 ≈240ms）；
+        **待调参**（如 40ms）后再测；局域网低延迟优先 QUIC
+- [ ] 编码低延迟参数（AAC/Opus）：QUIC 路径已 ≤5ms，非瓶颈；仅当 SRT
+      调参后仍不达标再评估
+- 验收：QUIC 路径端到端 ≤ 200ms 已实测达标（脚本可回归断言）
 
-### B5 接收端抖动缓冲（SessionDataManager 流式通道）
+### B5 接收端抖动缓冲（SessionDataManager 流式通道）✅
 
-> 需求 §4.4 设计已定：定长环形缓冲、按 seq/pts 索引排序、乱序落槽、
-> 超时未齐跳过并等关键帧重对齐、内存有界。参考 jittr 算法对照实现。
+> 基础（定长环形 / 乱序落槽 / 空洞超时跳过 / 视频关键帧重对齐 / 音频跳洞 /
+> 内存有界断言）已随需求 §4.4 骨架存在；本轮补齐自适应与链路接入。
 
-- [ ] `StreamChannel`：纯逻辑、可单测（硬约束 §5：不依赖平台代码）；
-- [ ] 环形缓冲容量固定（如 64–256 槽），越界策略 = 丢弃最旧；
-- [ ] 音频抖动缓冲 ≤100ms 自适应（低延迟场景收紧）；
-- [ ] 单测：乱序插入、超时跳过、满缓冲行为、内存上界断言；
-- 验收：乱序/丢包注入下播放不卡顿超过阈值；缓冲容量恒定（§6.2 内存有界）。
+- [x] **自适应等待窗口**（jitter.rs）：到达间隔 EWMA 抖动估计 → 空洞等待窗口
+      动态取 `[min_wait, max_wait]`——抖动小收紧（低延迟）、抖动大放宽（防
+      卡顿）；单测：低抖动收紧 / 高抖动放宽 / 窗口内空洞等待后补发
+- [x] **音频轨收紧**（session_channel.rs）：音频 `max_wait=100ms` +
+      `min_wait=10ms` + 自适应（≤100ms 预算，需求 §4.4）；视频 200ms 保持
+- [x] **接收链路接入**（receiver.rs）：`channel_kind_for` 按传输分流——
+      SRT（Adaptive，可能乱序/超时丢）→ `Lossy` 进抖动缓冲；WS/QUIC（全序
+      不丢）→ `Lossless` 直通零延迟；`receive_loop` 与 `receive_raw_loop`
+      都接入
+- [x] **推流端 seq 分配**（sender.rs，隐藏前置）：`RelayClient` 发送点统一
+      分配会话内递增 seq（此前恒 0，有损路径 jitter 无法工作）；SRT 裸推流
+      测试同步补 seq 填充
+- [x] 回归：全量测试 + clippy 干净；`dual-device-test.sh`（SRT 推流路径）与
+      `share-token-test.sh` 全绿
 
 ### B6 会话控制完善（F2.3/F5.3）
 

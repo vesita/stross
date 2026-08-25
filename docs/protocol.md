@@ -45,13 +45,15 @@ flags 位：
 
 ## 控制消息（JSON 文本帧）
 
-`{"type": ...}` 区分类型，字段 `camelCase`。
+`{"type": ...}` 区分类型（变体名小写）。**注意**：控制消息是 internally-tagged
+enum，字段名保持 **snake_case**（如 `stream_id`、`share_token`）；REST API
+（`/api/*`）字段为 **camelCase**（如 `streamId`）。
 
 ### 推流端 → 中继
 
 ```jsonc
 { "type": "hello",
-  "streamId": "stross-abc", "title": "我的串流",
+  "stream_id": "stross-abc", "title": "我的串流",
   "video": { "codec": "h264", "width": 1280, "height": 720, "fps": 30 },
   "audio": { "codec": "aac", "sampleRate": 48000, "channels": 2 } }
 ```
@@ -63,14 +65,14 @@ flags 位：
 ### 中继 → 推流端
 
 ```json
-{ "type": "welcome", "streamId": "stross-abc" }
+{ "type": "welcome", "stream_id": "stross-abc" }
 { "type": "error", "message": "流 xxx 已存在" }
 ```
 
 ### 中继 → 接收端
 
 ```json
-{ "type": "ready", "streamId": "stross-abc" }
+{ "type": "ready", "stream_id": "stross-abc" }
 { "type": "error", "message": "流 xxx 不存在" }
 ```
 
@@ -141,7 +143,7 @@ import asyncio, json, websockets
 async def main():
     async with websockets.connect("ws://192.168.1.5:8777/ws/push") as ws:
         await ws.send(json.dumps({
-            "type": "hello", "streamId": "demo", "title": "demo",
+            "type": "hello", "stream_id": "demo", "title": "demo",
             "video": {"codec": "h264", "width": 640, "height": 360, "fps": 24},
         }))
         # 逐帧发送：24 字节头 + H.264 Annex-B 数据

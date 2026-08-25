@@ -63,6 +63,7 @@ fn hello() -> String {
             sample_rate: Some(48000),
             channels: Some(2),
         }),
+        share_token: None,
     }
     .to_text()
 }

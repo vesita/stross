@@ -11,7 +11,7 @@
 //! 生命周期与会话一致（`channel()` 于会话建立、`remove()` 于会话拆除）。
 
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use stross_proto::frame::{Frame, TRACK_VIDEO};
 
@@ -45,8 +45,13 @@ impl StreamChannel {
                 require_keyframe_resync: true,
                 ..JitterConfig::default()
             }),
+            // 音频轨收紧：低延迟预算（端到端 ≤200ms 的一部分）≤100ms，
+            // 自适应在抖动小时贴近 min_wait（需求 §4.4 自适应策略）
             audio: JitterBuffer::new(JitterConfig {
                 require_keyframe_resync: false,
+                max_wait: Duration::from_millis(100),
+                min_wait: Duration::from_millis(10),
+                adaptive: true,
                 ..JitterConfig::default()
             }),
         }

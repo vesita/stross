@@ -180,6 +180,9 @@ pub enum ControlMessage {
         video: Option<TrackInfo>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audio: Option<TrackInfo>,
+        /// 一次性接入凭证（跨设备推流用，见 [`ShareToken`]；本机推流 / 旧端为 `None`）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        share_token: Option<String>,
     },
     /// 推流端结束。
     Bye,
@@ -294,6 +297,54 @@ impl DiscoveryInfo {
     }
 }
 
+/// 一次性接入凭证（跨设备推流，见 docs/iteration-plan.md B0/B1）。
+///
+/// 场景：**接收端**（如电脑）主动建会话并签发凭证，**推流端**（如手机）出示
+/// 凭证直接向接收端的受控中继推流——受控中继在预授权（[`Kernel` 数据面]）
+/// 之外接受"凭证匹配"作为接入凭据，实现跨设备推流而**不开放任何远程控制面**
+/// （D7：控制面仍仅回环）。
+///
+/// 安全模型：凭证是**一次性密码本**——`pin` 为签发时生成的随机串，服务端
+/// 存储签发时的完整凭证，推流端出示必须逐字匹配且未过期。凭证经二维码 / 短码
+/// 展示（参考 QuicMic 的接入模式 + F2.5 会话级 PIN 语义）；不进日志、不进
+/// mDNS TXT、不进进程参数。
+///
+/// [`Kernel`]: https://docs.rs/stross-app/latest/stross_app/kernel/struct.Kernel.html
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareToken {
+    /// 描述版本（自描述演进；当前 [`ShareToken::VERSION`]）。
+    pub v: u8,
+    /// 接收端内核签发的会话 id（D4：与 stream_id 合一）；推流 Hello 必须携带同一 id。
+    pub stream_id: String,
+    /// 签发时生成的随机 PIN（一次性；服务端存储为准，防重放/篡改）。
+    pub pin: String,
+    /// 过期时间（Unix 秒）；过期后中继拒绝接入。
+    pub expires_at: u64,
+    /// 本次共享的媒体类型（如 `mic`；供接收端 UI 展示 / 校验）。
+    pub media: Vec<MediaKind>,
+}
+
+impl ShareToken {
+    /// 当前凭证版本。
+    pub const VERSION: u8 = 1;
+
+    /// 编码为字符串（JSON；二维码 / 短码友好，与 DiscoveryInfo 单 key JSON 同风格）。
+    pub fn to_token_string(&self) -> String {
+        serde_json::to_string(self).expect("ShareToken 序列化不应失败")
+    }
+
+    /// 从字符串解码；缺失 / 非法返回 `None`（调用方拒绝接入）。
+    pub fn from_token_string(s: &str) -> Option<Self> {
+        serde_json::from_str(s).ok()
+    }
+
+    /// 是否已过期（`now_secs` 为当前 Unix 秒）。
+    pub fn is_expired(&self, now_secs: u64) -> bool {
+        self.expires_at <= now_secs
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,11 +370,56 @@ mod tests {
                 sample_rate: Some(48000),
                 channels: Some(2),
             }),
+            share_token: None,
         };
         let text = msg.to_text();
         let back = ControlMessage::from_text(&text).unwrap();
         assert_eq!(msg, back);
         assert!(text.contains("\"type\":\"hello\""));
+        // 无 token 时不应序列化 shareToken 字段（向后兼容：旧推流端 wire 不变）
+        assert!(!text.contains("shareToken"), "text: {text}");
+    }
+
+    #[test]
+    fn hello_with_share_token_roundtrip() {
+        let token = ShareToken {
+            v: ShareToken::VERSION,
+            stream_id: "sess-1".into(),
+            pin: "483920".into(),
+            expires_at: 1_800_000_000,
+            media: vec![MediaKind::Mic],
+        };
+        let msg = ControlMessage::Hello {
+            stream_id: "sess-1".into(),
+            title: "手机麦克风".into(),
+            video: None,
+            audio: Some(TrackInfo {
+                codec: CodecId::Aac,
+                width: None,
+                height: None,
+                fps: None,
+                sample_rate: Some(48000),
+                channels: Some(1),
+            }),
+            share_token: Some(token.to_token_string()),
+        };
+        let text = msg.to_text();
+        // 注：internally-tagged enum（tag="type"）的字段名保持 snake_case
+        // （与既有 stream_id 一致）；share_token 是嵌入的 ShareToken JSON 字符串，
+        // 其内部为 camelCase（streamId）
+        assert!(text.contains("\"share_token\""), "text: {text}");
+        assert!(
+            text.contains("\\\"streamId\\\":\\\"sess-1\\\""),
+            "text: {text}"
+        );
+        let back = ControlMessage::from_text(&text).unwrap();
+        assert_eq!(msg, back);
+        // 旧客户端（无 share_token 字段）发来的 Hello 也应能解析
+        let legacy = r#"{"type":"hello","stream_id":"s1","title":"t"}"#;
+        match ControlMessage::from_text(legacy).unwrap() {
+            ControlMessage::Hello { share_token, .. } => assert_eq!(share_token, None),
+            other => panic!("期望 Hello，得到 {other:?}"),
+        }
     }
 
     #[test]
@@ -471,5 +567,46 @@ mod tests {
             )]),
             None
         );
+    }
+
+    #[test]
+    fn share_token_roundtrip() {
+        let token = ShareToken {
+            v: ShareToken::VERSION,
+            stream_id: "sess-1".into(),
+            pin: "483920".into(),
+            expires_at: 1_800_000_000,
+            media: vec![MediaKind::Mic, MediaKind::SystemAudio],
+        };
+        let s = token.to_token_string();
+        assert!(s.contains("\"streamId\":\"sess-1\""), "wire: {s}");
+        assert_eq!(ShareToken::from_token_string(&s).unwrap(), token);
+    }
+
+    #[test]
+    fn share_token_tolerant() {
+        // 坏 JSON → None
+        assert_eq!(ShareToken::from_token_string("{oops"), None);
+        // 未知枚举值（media）→ 解码失败
+        assert!(
+            ShareToken::from_token_string(
+                r#"{"v":1,"streamId":"s","pin":"1","expiresAt":1,"media":["hacker"]}"#
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn share_token_expiry() {
+        let token = ShareToken {
+            v: ShareToken::VERSION,
+            stream_id: "sess-1".into(),
+            pin: "483920".into(),
+            expires_at: 100,
+            media: vec![MediaKind::Mic],
+        };
+        assert!(token.is_expired(100), "边界：等于 expires_at 即过期");
+        assert!(token.is_expired(101));
+        assert!(!token.is_expired(99));
     }
 }

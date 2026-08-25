@@ -57,6 +57,17 @@ pub struct LocalProxy {
     pub ws_base: String,
 }
 
+/// 按传输 scheme 选通道可靠性（B5）：
+/// * `srt://`（Adaptive：ARQ 超时即丢、TSBPD 乱序窗口）→ 有损 → 抖动缓冲；
+/// * `ws://` / `quic://`（全序不丢）→ 无损直通（零额外延迟）。
+fn channel_kind_for(relay_url: &str) -> ChannelKind {
+    if relay_url.starts_with("srt://") {
+        ChannelKind::Lossy
+    } else {
+        ChannelKind::Lossless
+    }
+}
+
 /// 观看连接：先直连 `relay_url`；失败且提供 `local_proxy` 时，
 /// 经本机中继级联代理（`POST /api/proxy` 的进程内等价），再 watch 本地代理流。
 async fn connect_with_proxy(
@@ -221,6 +232,9 @@ async fn receive_loop(
     });
 
     let mut mgr = SessionDataManager::default();
+    // 通道按传输可靠性分流（B5）：SRT（Adaptive，ARQ 超时即丢、可能乱序）→
+    // 有损路径进抖动缓冲；WS/QUIC（全序不丢）→ 直通。
+    let channel_kind = channel_kind_for(&relay_url);
     loop {
         if inner.stopped.load(Ordering::Relaxed) {
             break;
@@ -230,7 +244,7 @@ async fn receive_loop(
                 inner.stats.lock().unwrap().received += 1;
                 // 单次借用通道：push + poll 共用一个 &mut，避免每帧重复
                 // 的 String 分配 + HashMap 查找（热路径）
-                let channel = mgr.channel(&stream_id, ChannelKind::Lossless);
+                let channel = mgr.channel(&stream_id, channel_kind);
                 channel.push(frame, Instant::now());
                 // 消息驱动：立即产出送播放
                 for f in channel.poll(Instant::now()) {
@@ -277,6 +291,8 @@ async fn receive_raw_loop(
         }
     };
     let mut mgr = SessionDataManager::default();
+    // 同 [`receive_loop`]：按传输可靠性分流（SRT 有损 → 抖动缓冲）
+    let channel_kind = channel_kind_for(&relay_url);
     loop {
         if inner.stopped.load(Ordering::Relaxed) {
             break;
@@ -285,7 +301,7 @@ async fn receive_raw_loop(
             Ok(Some(SessionPacket::Media(frame))) => {
                 inner.stats.lock().unwrap().received += 1;
                 // 单次借用通道（热路径，避免每帧重复 String 分配 + 查找）
-                let channel = mgr.channel(&stream_id, ChannelKind::Lossless);
+                let channel = mgr.channel(&stream_id, channel_kind);
                 channel.push(frame, Instant::now());
                 // 通道 → 转发（lossless 直通，按序产出；消费者慢则丢帧，不反压）
                 for f in channel.poll(Instant::now()) {
@@ -334,6 +350,7 @@ mod tests {
             title: "降级测试流".into(),
             video: None,
             audio: None,
+            share_token: None,
         }))
         .await
         .unwrap();

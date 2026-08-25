@@ -39,10 +39,18 @@ impl WsTransport {
     }
 
     /// 服务端：把一个已升级的 axum WebSocket 包装成数据会话。
-    pub fn from_upgraded(&self, socket: axum::extract::ws::WebSocket) -> Box<dyn DataSession> {
+    ///
+    /// `peer` 为对端地址（HTTP 升级处经 `ConnectInfo` 提取）；来源感知门控
+    /// （回环 = 本机预授权，非回环 = 凭证接入）依赖它，未知来源按非回环对待。
+    pub fn from_upgraded(
+        &self,
+        socket: axum::extract::ws::WebSocket,
+        peer: Option<std::net::SocketAddr>,
+    ) -> Box<dyn DataSession> {
         Box::new(WsDataSession {
             io: Box::new(AxumWs::new(socket)),
             stats: self.stats.clone(),
+            peer,
         })
     }
 }
@@ -72,6 +80,7 @@ impl Transport for WsTransport {
         Ok(Box::new(WsDataSession {
             io: Box::new(TungsteniteWs::new(socket)),
             stats: self.stats.clone(),
+            peer: peer.addr.parse().ok(),
         }))
     }
 
@@ -223,10 +232,16 @@ impl WsIo for TungsteniteWs {
 struct WsDataSession {
     io: Box<dyn WsIo>,
     stats: SharedStats,
+    /// 对端地址（来源感知门控；服务端来自 HTTP 升级处，客户端来自拨号地址）。
+    peer: Option<std::net::SocketAddr>,
 }
 
 #[async_trait]
 impl DataSession for WsDataSession {
+    fn peer_addr(&self) -> Option<std::net::SocketAddr> {
+        self.peer
+    }
+
     async fn send(&self, pkt: SessionPacket) -> Result<(), TransportError> {
         let (msg, size) = match pkt {
             SessionPacket::Control(c) => {

@@ -159,6 +159,11 @@ pub trait DataSession: Send + Sync + 'static {
     async fn recv(&self) -> Result<Option<SessionPacket>, TransportError>;
     /// 关闭会话。
     async fn close(&self) -> Result<(), TransportError>;
+    /// 对端地址（来源感知门控用：回环 = 本机流程走内核预授权；
+    /// 非回环 / 未知 = 跨设备接入，必须出示接入凭证）。
+    fn peer_addr(&self) -> Option<std::net::SocketAddr> {
+        None
+    }
 }
 
 /// 共享统计计数器（Transport 与其派生的会话共享；字节计数为原子，无锁）。

@@ -100,7 +100,11 @@ impl Transport for SrtTransport {
             .await
             .map_err(|e| TransportError::Connect(format!("SRT 连接失败: {e}")))?;
         tracing::info!("SRT 已连接: {addr}");
-        Ok(Box::new(SrtDataSession::new(sock, self.stats.clone())))
+        Ok(Box::new(SrtDataSession::new(
+            sock,
+            self.stats.clone(),
+            addr.parse().ok(),
+        )))
     }
 
     async fn accept(
@@ -137,7 +141,11 @@ impl SrtListenerHandle {
             .await
             .map_err(|e| TransportError::Io(format!("SRT accept 失败: {e}")))?;
         tracing::info!("SRT 入站连接: {peer}");
-        Ok(Box::new(SrtDataSession::new(sock, self.stats.clone())))
+        Ok(Box::new(SrtDataSession::new(
+            sock,
+            self.stats.clone(),
+            Some(peer.into()),
+        )))
     }
 }
 
@@ -146,6 +154,8 @@ pub struct SrtDataSession {
     sock: Mutex<Option<rsrt::SrtSocket>>,
     stats: SharedStats,
     rx: Mutex<RxState>,
+    /// 对端地址（来源感知门控；回环 = 本机，非回环 = 凭证接入）。
+    peer: Option<std::net::SocketAddr>,
 }
 
 /// 接收侧重组状态（TSBPD 有序 → 只按 `frag_idx` 累积）。
@@ -162,17 +172,25 @@ struct PendingFrame {
 }
 
 impl SrtDataSession {
-    pub fn new(sock: rsrt::SrtSocket, stats: SharedStats) -> Self {
+    pub fn new(
+        sock: rsrt::SrtSocket,
+        stats: SharedStats,
+        peer: Option<std::net::SocketAddr>,
+    ) -> Self {
         Self {
             sock: Mutex::new(Some(sock)),
             stats,
             rx: Mutex::new(RxState::default()),
+            peer,
         }
     }
 }
 
 #[async_trait]
 impl DataSession for SrtDataSession {
+    fn peer_addr(&self) -> Option<std::net::SocketAddr> {
+        self.peer
+    }
     async fn send(&self, pkt: SessionPacket) -> Result<(), TransportError> {
         let guard = self.sock.lock().await;
         let sock = guard.as_ref().ok_or(TransportError::Closed)?;
@@ -369,6 +387,7 @@ mod tests {
                 title: "t".into(),
                 video: None,
                 audio: None,
+                share_token: None,
             }))
             .await
             .unwrap();

@@ -336,6 +336,7 @@ mod tests {
             quality: Quality::LOW,
             audio: None,
             duration_secs: Some(2),
+            share_token: None,
         };
         let args = video_command(&cfg).unwrap();
         let joined = args.join(" ");
@@ -355,6 +356,7 @@ mod tests {
             quality: Quality::LOW,
             audio: Some(AudioSourceConfig::default()),
             duration_secs: None,
+            share_token: None,
         };
         let args = audio_command(&cfg).unwrap();
         let joined = args.join(" ");
@@ -375,6 +377,7 @@ mod tests {
                 ..Default::default()
             }),
             duration_secs: Some(1),
+            share_token: None,
         };
         let args = audio_command(&cfg).unwrap();
         let joined = args.join(" ");

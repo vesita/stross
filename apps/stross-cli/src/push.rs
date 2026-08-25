@@ -45,6 +45,14 @@ pub struct PushArgs {
     /// 流 id（默认 demo-<pid>）
     #[arg(long)]
     pub stream_id: Option<String>,
+    /// 一次性接入凭证（跨设备推流：出示对方设备签发的 ShareToken，直接推入
+    /// 对方受控中继；格式为 ShareToken JSON 字符串，可用 `ctrl share-token` 生成）
+    #[arg(long)]
+    pub share_token: Option<String>,
+    /// 把会话起点墙上时刻（Unix 毫秒）写入该文件（延迟校准用；接收端
+    /// `receive --calibrate` 读同一文件，双 PC 同机同钟时得到绝对端到端延迟）
+    #[arg(long)]
+    pub report_start: Option<String>,
     /// 画质
     #[arg(long, value_enum, default_value_t = QualityArg::Medium)]
     pub quality: QualityArg,
@@ -63,6 +71,7 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
         quality: args.quality.quality(),
         audio: None,
         duration_secs: Some(args.secs as u32),
+        share_token: args.share_token.clone(),
     };
     if args.audio {
         cfg.audio = Some(AudioSourceConfig::synthetic_test());
@@ -101,6 +110,27 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
         None => {
             let url = args.relay.as_deref().unwrap_or("<自动>");
             tracing::info!("📡 推流中（{} 秒）: {stream_id} → {url}", args.secs);
+        }
+    }
+    // 延迟校准：等 ffmpeg 输出首帧（排除预热）后记录首帧墙时刻
+    if let Some(path) = &args.report_start {
+        let mut start_ms = None;
+        for _ in 0..100 {
+            if let Some(ms) = engine.first_frame_wall_unix_ms() {
+                start_ms = Some(ms);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let start_ms = start_ms.or_else(|| engine.wall_start_unix_ms());
+        if let Some(start_ms) = start_ms {
+            let pts0 = engine.first_frame_pts_ms().unwrap_or(0);
+            std::fs::write(
+                path,
+                format!(r#"{{"sessionStartUnixMs":{start_ms},"firstPtsMs":{pts0}}}"#),
+            )
+            .map_err(|e| anyhow::anyhow!("写校准文件失败 {path}: {e}"))?;
+            tracing::info!("会话起点已写 {path}: sessionStartUnixMs={start_ms} firstPtsMs={pts0}");
         }
     }
     tokio::time::sleep(Duration::from_secs(args.secs)).await;

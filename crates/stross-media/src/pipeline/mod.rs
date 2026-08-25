@@ -22,7 +22,8 @@ mod args;
 pub use args::{audio_command, ffmpeg_available, ffmpeg_bin, video_command};
 
 use std::process::Stdio;
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -171,6 +172,9 @@ pub struct StreamConfig {
     /// 限制推流时长（秒）；`None` = 无限。测试/演示用。
     #[serde(default)]
     pub duration_secs: Option<u32>,
+    /// 一次性接入凭证（跨设备推流到对方受控中继用；本机推流为 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_token: Option<String>,
 }
 
 impl StreamConfig {
@@ -181,6 +185,7 @@ impl StreamConfig {
             title: self.title.clone(),
             video: self.video_track_info(),
             audio: self.audio_track_info(),
+            share_token: self.share_token.clone(),
         }
     }
 
@@ -221,6 +226,12 @@ pub struct StreamSession {
     video: Option<Child>,
     audio: Option<Child>,
     started: Instant,
+    /// 会话起点墙上时刻（与 [`Self::started`] 同一时刻）；延迟校准用
+    /// （`receive --calibrate` 读推流端 `--report-start` 的同一文件）。
+    pub started_wall: SystemTime,
+    /// 首个视频帧产出时的墙上时刻 + 其 pts（比 `started_wall` 精确：排除
+    /// ffmpeg 预热，`(wall, pts0)` 即首帧的编码时刻；校准延迟时优先用它）。
+    pub first_frame: Arc<std::sync::Mutex<Option<(SystemTime, u32)>>>,
     /// 持有发送端，保证推流通道在会话存续期间一直打开
     /// （读循环只持 clone；若此处不持有，读循环一结束推流就会被判定为结束）。
     #[allow(dead_code)] // 只持有不读取，用于维持通道存活
@@ -234,6 +245,8 @@ impl StreamSession {
             bail!("未找到 ffmpeg。请安装 ffmpeg，或设置 STROSS_FFMPEG 指向可执行文件。");
         }
         let started = Instant::now();
+        let started_wall = SystemTime::now();
+        let first_frame = Arc::new(std::sync::Mutex::new(None));
         let mut video = None;
         let mut audio = None;
 
@@ -242,7 +255,8 @@ impl StreamSession {
             let mut child = spawn_ffmpeg(&args)?;
             let stdout = child.stdout.take().context("视频进程没有 stdout")?;
             let tx2 = tx.clone();
-            tokio::spawn(read_video_loop(stdout, tx2, started));
+            let ff = first_frame.clone();
+            tokio::spawn(read_video_loop(stdout, tx2, started, ff));
             video = Some(child);
         }
 
@@ -263,6 +277,8 @@ impl StreamSession {
             video,
             audio,
             started,
+            started_wall,
+            first_frame,
             tx,
         })
     }
@@ -291,10 +307,14 @@ fn spawn_ffmpeg(args: &[String]) -> Result<Child> {
 }
 
 /// 视频读循环：切 NAL → 组访问单元 → 发帧。
+///
+/// `first_frame`：首个访问单元产出时记录 (墙上时刻, pts)（延迟校准用；
+/// 只记录一次，消除首帧管道延迟偏差）。
 async fn read_video_loop(
     mut stdout: tokio::process::ChildStdout,
     tx: mpsc::Sender<Frame>,
     started: Instant,
+    first_frame: Arc<std::sync::Mutex<Option<(SystemTime, u32)>>>,
 ) {
     let mut splitter = AnnexBSplitter::new();
     let mut au = AccessUnitBuilder::new();
@@ -310,7 +330,15 @@ async fn read_video_loop(
             Ok(n) => {
                 for nal in splitter.feed(&buf[..n]) {
                     if let Some(unit) = au.push(nal) {
+                        // 首帧墙时刻（块作用域持锁：guard 在块末立即释放，
+                        // 避免 std MutexGuard 跨 await 导致 future 非 Send）
                         let pts = started.elapsed().as_millis() as u32;
+                        {
+                            let mut ff = first_frame.lock().unwrap();
+                            if ff.is_none() {
+                                *ff = Some((SystemTime::now(), pts));
+                            }
+                        }
                         let flags = if unit.keyframe { FLAG_KEYFRAME } else { 0 };
                         let payload = unit.to_annex_b();
                         sent += 1;

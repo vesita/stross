@@ -35,6 +35,7 @@ async fn push_to_external_relay() {
         quality: Quality::LOW,
         audio: None,
         duration_secs: Some(2),
+        share_token: None,
     };
     let url = format!("ws://127.0.0.1:{}/ws/push", relay.port);
     let engine = SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), Some(url), 0)
@@ -86,6 +87,7 @@ async fn synthetic_video_flows_end_to_end() {
         quality: Quality::LOW,
         audio: None,
         duration_secs: Some(3),
+        share_token: None,
     };
 
     let engine = SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), None, 0)

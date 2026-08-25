@@ -20,8 +20,13 @@ use stross_proto::frame::Frame;
 pub struct JitterConfig {
     /// 环形槽数（内存上界 = 槽数 × 单帧大小）。
     pub capacity: usize,
-    /// 空洞等待窗口：超过该时长未补上的空洞视为丢帧。
+    /// 空洞等待窗口上界：超过该时长未补上的空洞视为丢帧。
     pub max_wait: Duration,
+    /// 空洞等待窗口下界（自适应时使用：抖动小 → 贴近此值，低延迟）。
+    pub min_wait: Duration,
+    /// 自适应等待窗口：按实测到达间隔抖动动态收紧/放宽（音频轨用此收紧
+    /// 到 ≤ [`Self::max_wait`]，需求 §4.4「自适应策略」）。
+    pub adaptive: bool,
     /// 视频轨丢帧后需等待关键帧重对齐（音频轨为 `false`）。
     pub require_keyframe_resync: bool,
 }
@@ -31,6 +36,8 @@ impl Default for JitterConfig {
         Self {
             capacity: 512,
             max_wait: Duration::from_millis(200),
+            min_wait: Duration::from_millis(10),
+            adaptive: true,
             require_keyframe_resync: true,
         }
     }
@@ -66,8 +73,24 @@ pub struct JitterBuffer {
     last_progress: Option<Instant>,
     /// 重对齐等待：视频轨丢帧后置位，丢弃非关键帧直到关键帧到来。
     awaiting_keyframe: bool,
+    /// 到达间隔 EWMA（自适应基准）。
+    avg_interval: Option<Duration>,
+    /// 抖动估计（到达间隔偏差 EWMA）。
+    jitter_est: Duration,
+    /// 最近一次 push 时间（间隔计算）。
+    last_arrival: Option<Instant>,
     /// 统计。
     pub stats: JitterStats,
+}
+
+/// EWMA 更新（α = 1/8 的整数近似；`cur` 为旧值，`sample` 为新样本）。
+fn ewma(cur: Duration, sample: Duration) -> Duration {
+    let diff = sample.abs_diff(cur);
+    if sample >= cur {
+        cur + diff / 8
+    } else {
+        cur - diff / 8
+    }
 }
 
 /// `seq` 序比较（u32 回绕安全）：`a < b` 当且仅当 `a` 落后于 `b` 不超过半个序号空间。
@@ -82,14 +105,42 @@ impl JitterBuffer {
             next_seq: None,
             last_progress: None,
             awaiting_keyframe: false,
+            avg_interval: None,
+            jitter_est: Duration::ZERO,
+            last_arrival: None,
             stats: JitterStats::default(),
             cfg,
         }
     }
 
+    /// 当前生效的空洞等待窗口：自适应时按实测抖动在 `[min_wait, max_wait]`
+    /// 内动态取值（抖动小 → 贴近 `min_wait`，低延迟；抖动大 → 放宽防卡顿）。
+    pub(crate) fn effective_wait(&self) -> Duration {
+        if !self.cfg.adaptive {
+            return self.cfg.max_wait;
+        }
+        let base = self.jitter_est * 4; // 4× 实测抖动，覆盖多数乱序窗口
+        base.clamp(self.cfg.min_wait, self.cfg.max_wait)
+    }
+
     /// 喂入一帧（时间由调用方注入，便于测试与多轨对齐）。
     pub fn push(&mut self, frame: Frame, now: Instant) {
         self.stats.received += 1;
+        // 自适应：更新到达间隔与抖动估计（EWMA）
+        if let Some(last) = self.last_arrival {
+            let interval = now.duration_since(last);
+            self.avg_interval = Some(match self.avg_interval {
+                Some(avg) => ewma(avg, interval),
+                None => interval,
+            });
+            let dev = match self.avg_interval {
+                Some(avg) if interval >= avg => interval - avg,
+                Some(avg) => avg - interval,
+                None => Duration::ZERO,
+            };
+            self.jitter_est = ewma(self.jitter_est, dev);
+        }
+        self.last_arrival = Some(now);
         let seq = frame.header.seq;
 
         // 关键帧 = 重对齐点：清空旧槽、重置游标
@@ -165,10 +216,10 @@ impl JitterBuffer {
                 out.push(slot.frame);
                 continue;
             }
-            // 空洞：等待窗口内不跳，超时才跳
+            // 空洞：等待窗口内不跳，超时才跳（自适应窗口见 [`Self::effective_wait`]）
             let overdue = self
                 .last_progress
-                .is_some_and(|t| now.duration_since(t) > self.cfg.max_wait);
+                .is_some_and(|t| now.duration_since(t) > self.effective_wait());
             if !overdue {
                 break;
             }
@@ -313,5 +364,78 @@ mod tests {
         }
         assert_eq!(jb.slots.len(), 8, "环形槽数恒定");
         assert!(jb.slots.iter().flatten().count() <= 8, "槽内帧数 ≤ 容量");
+    }
+
+    #[test]
+    fn adaptive_wait_tracks_low_jitter() {
+        // 稳定节拍（30fps ≈ 33ms）→ 抖动估计小 → 等待窗口贴近 min_wait
+        let mut jb = JitterBuffer::new(JitterConfig {
+            adaptive: true,
+            max_wait: Duration::from_millis(200),
+            min_wait: Duration::from_millis(10),
+            ..Default::default()
+        });
+        let mut t = t0();
+        for i in 0..20 {
+            jb.push(frame(i, i == 0), t);
+            t += Duration::from_millis(33);
+        }
+        assert!(
+            jb.effective_wait() <= Duration::from_millis(60),
+            "低抖动下等待窗口应收紧，实际 {:?}",
+            jb.effective_wait()
+        );
+    }
+
+    #[test]
+    fn adaptive_wait_expands_under_high_jitter() {
+        // 抖动注入（间隔 5ms / 61ms 交替，均值 33ms）→ 抖动估计大 → 窗口放宽
+        let mut jb = JitterBuffer::new(JitterConfig {
+            adaptive: true,
+            max_wait: Duration::from_millis(200),
+            min_wait: Duration::from_millis(10),
+            ..Default::default()
+        });
+        let mut t = t0();
+        for i in 0..20 {
+            jb.push(frame(i, i == 0), t);
+            t += if i % 2 == 0 {
+                Duration::from_millis(5)
+            } else {
+                Duration::from_millis(61)
+            };
+        }
+        assert!(
+            jb.effective_wait() >= Duration::from_millis(80),
+            "高抖动下等待窗口应放宽，实际 {:?}",
+            jb.effective_wait()
+        );
+    }
+
+    #[test]
+    fn adaptive_window_gap_waited_then_emitted() {
+        // 自适应窗口内的空洞应等待（不跳过），窗口外超时才跳
+        let mut jb = JitterBuffer::new(JitterConfig {
+            adaptive: true,
+            max_wait: Duration::from_millis(200),
+            min_wait: Duration::from_millis(10),
+            ..Default::default()
+        });
+        let now = t0();
+        // 首帧 + 后续稳定节拍建立抖动估计（低抖动 → 窗口 ~10-60ms）
+        jb.push(frame(0, true), now);
+        let mut t = now + Duration::from_millis(33);
+        for i in 1..6 {
+            jb.push(frame(i, false), t);
+            t += Duration::from_millis(33);
+        }
+        let wait = jb.effective_wait();
+        // 空洞（seq6 缺失）在窗口内不跳
+        assert!(jb.poll(now + wait / 2).len() <= 6, "窗口内不跳洞");
+        // 补上 seq6 → 连续输出
+        jb.push(frame(6, false), t);
+        let out = jb.poll(t);
+        let seqs: Vec<u32> = out.iter().map(|f| f.header.seq).collect();
+        assert_eq!(seqs, vec![6], "补上后应输出 seq6");
     }
 }

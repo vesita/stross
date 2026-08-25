@@ -31,6 +31,18 @@ fn hello(stream_id: &str) -> ControlMessage {
             channels: None,
         }),
         audio: None,
+        share_token: None,
+    }
+}
+
+/// 带接入凭证的 Hello（跨设备推流）。
+fn hello_with_token(stream_id: &str, token: &str) -> ControlMessage {
+    ControlMessage::Hello {
+        stream_id: stream_id.into(),
+        title: "跨设备推流".into(),
+        video: None,
+        audio: None,
+        share_token: Some(token.to_string()),
     }
 }
 
@@ -202,6 +214,190 @@ async fn uncontrolled_relay_keeps_open_push() {
         ControlMessage::Welcome {
             stream_id: "any-id".into()
         }
+    );
+    push.close(None).await.unwrap();
+    relay.stop().await;
+}
+
+/// 凭证式跨设备推流（B 阶段，docs/iteration-plan.md B0/B1）：
+/// 受控中继未预授权该 id（内核不接数据面），推流端仅出示内核签发的
+/// [`ShareToken`] 即可接入；无凭证 / 篡改凭证被拒绝。
+#[tokio::test]
+async fn share_token_grants_cross_device_push() {
+    use stross_core::relay::RelayHandle;
+    use stross_proto::message::MediaKind;
+
+    let relay: RelayHandle = RelayServer::start_controlled(0).await.unwrap();
+    let port = relay.port;
+    let kernel = Kernel::new();
+    // 不 attach_data_plane：会话创建**不会**预授权给中继，只有凭证能放行
+    let session = kernel
+        .create_session("local", &["local".into()], &SessionPrefs::default())
+        .await
+        .unwrap();
+    assert!(relay.is_controlled(), "受控模式");
+    // 注入内核的凭证校验器（attach_data_plane 之外直接注入，模拟"凭证接入"路径）
+    relay
+        .state()
+        .set_token_validator(Some(kernel.token_validator()));
+    let token = kernel
+        .create_share_token(&session.id, vec![MediaKind::Mic], Duration::from_secs(300))
+        .unwrap();
+    let token_str = token.to_token_string();
+
+    // 1) 未授权 id + 无凭证 → 拒绝（F2.2 语义保持）
+    let (mut plain, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/push"))
+        .await
+        .unwrap();
+    plain
+        .send(Message::Text(hello(&session.id).to_text().into()))
+        .await
+        .unwrap();
+    let err = plain.next().await.unwrap().unwrap();
+    assert!(
+        matches!(
+            ControlMessage::from_text(&err.into_text().unwrap()).unwrap(),
+            ControlMessage::Error { .. }
+        ),
+        "未授权且无凭证应拒绝"
+    );
+    plain.close(None).await.unwrap();
+
+    // 2) 出示有效凭证 → 接受（Welcome），流可建立
+    let (mut push, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/push"))
+        .await
+        .unwrap();
+    push.send(Message::Text(
+        hello_with_token(&session.id, &token_str).to_text().into(),
+    ))
+    .await
+    .unwrap();
+    let welcome = push.next().await.unwrap().unwrap();
+    assert_eq!(
+        ControlMessage::from_text(&welcome.into_text().unwrap()).unwrap(),
+        ControlMessage::Welcome {
+            stream_id: session.id.clone()
+        },
+        "有效凭证应放行推流"
+    );
+    push.send(Message::Binary(video_frame().into()))
+        .await
+        .unwrap();
+
+    // 3) 篡改凭证（PIN 改掉）→ 拒绝（服务端以签发时存储为准，逐字比对）
+    let mut forged = token.clone();
+    forged.pin = "000000".into();
+    let (mut bad, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/push"))
+        .await
+        .unwrap();
+    bad.send(Message::Text(
+        hello_with_token(&session.id, &forged.to_token_string())
+            .to_text()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let err = bad.next().await.unwrap().unwrap();
+    assert!(
+        matches!(
+            ControlMessage::from_text(&err.into_text().unwrap()).unwrap(),
+            ControlMessage::Error { .. }
+        ),
+        "篡改凭证应拒绝"
+    );
+    bad.close(None).await.unwrap();
+
+    // 4) 凭证过期 → 拒绝
+    let expired = kernel
+        .create_share_token(&session.id, vec![MediaKind::Mic], Duration::ZERO)
+        .unwrap();
+    let (mut stale, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/push"))
+        .await
+        .unwrap();
+    stale
+        .send(Message::Text(
+            hello_with_token(&session.id, &expired.to_token_string())
+                .to_text()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let err = stale.next().await.unwrap().unwrap();
+    assert!(
+        matches!(
+            ControlMessage::from_text(&err.into_text().unwrap()).unwrap(),
+            ControlMessage::Error { .. }
+        ),
+        "过期凭证应拒绝"
+    );
+    stale.close(None).await.unwrap();
+
+    push.close(None).await.unwrap();
+    relay.stop().await;
+}
+
+/// 来源感知门控（B 阶段完善）：**跨设备（非回环）来源即使 id 已被内核预授权，
+/// 不出示凭证也拒绝**——预授权只服务本机（回环）流程；远程推流必须凭证。
+#[tokio::test]
+async fn remote_source_requires_token_even_when_authorized() {
+    use stross_core::net::local_ips;
+    use stross_core::relay::RelayHandle;
+    use stross_proto::message::MediaKind;
+
+    let relay: RelayHandle = RelayServer::start_controlled(0).await.unwrap();
+    let port = relay.port;
+    let kernel = Kernel::new();
+    // 正常接线：create_session 会把 id 预授权给受控中继
+    kernel.attach_data_plane(Arc::new(RelayDataPlane::new(&relay)));
+    let session = kernel
+        .create_session("local", &["local".into()], &SessionPrefs::default())
+        .await
+        .unwrap();
+    let lan_ip = local_ips()
+        .into_iter()
+        .next()
+        .expect("测试环境应有局域网 IP（非回环来源模拟）");
+    assert!(!lan_ip.is_loopback(), "需要非回环 IP 模拟跨设备来源");
+
+    // 1) 非回环来源 + 已预授权 + 无凭证 → 拒绝（门控核心语义）
+    let (mut remote, _) = tokio_tungstenite::connect_async(format!("ws://{lan_ip}:{port}/ws/push"))
+        .await
+        .expect("经局域网 IP 连接（模拟另一台设备）");
+    remote
+        .send(Message::Text(hello(&session.id).to_text().into()))
+        .await
+        .unwrap();
+    let err = remote.next().await.unwrap().unwrap();
+    assert!(
+        matches!(
+            ControlMessage::from_text(&err.into_text().unwrap()).unwrap(),
+            ControlMessage::Error { .. }
+        ),
+        "跨设备来源无凭证应拒绝（即使 id 已预授权）"
+    );
+    remote.close(None).await.unwrap();
+
+    // 2) 同一来源出示凭证 → 放行
+    let token = kernel
+        .create_share_token(&session.id, vec![MediaKind::Mic], Duration::from_secs(300))
+        .unwrap();
+    let (mut push, _) = tokio_tungstenite::connect_async(format!("ws://{lan_ip}:{port}/ws/push"))
+        .await
+        .unwrap();
+    push.send(Message::Text(
+        hello_with_token(&session.id, &token.to_token_string())
+            .to_text()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let welcome = push.next().await.unwrap().unwrap();
+    assert_eq!(
+        ControlMessage::from_text(&welcome.into_text().unwrap()).unwrap(),
+        ControlMessage::Welcome {
+            stream_id: session.id.clone()
+        },
+        "跨设备来源出示凭证应放行"
     );
     push.close(None).await.unwrap();
     relay.stop().await;

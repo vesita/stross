@@ -83,6 +83,21 @@ impl SenderEngine {
         self.backend.status()
     }
 
+    /// 会话起点墙上时刻（Unix 毫秒；延迟校准用 `--report-start`）。
+    pub fn wall_start_unix_ms(&self) -> Option<u64> {
+        self.backend.wall_start_unix_ms()
+    }
+
+    /// 首帧墙时刻（Unix 毫秒；`None` = ffmpeg 尚未输出首帧）。
+    pub fn first_frame_wall_unix_ms(&self) -> Option<u64> {
+        self.backend.first_frame_wall_unix_ms()
+    }
+
+    /// 首帧 pts（毫秒；与首帧墙时刻成对，校准 pts0 修正用）。
+    pub fn first_frame_pts_ms(&self) -> Option<u32> {
+        self.backend.first_frame_pts_ms()
+    }
+
     /// 停止推流：结束采集 → 优雅 Bye → 关闭内嵌中继。
     pub async fn stop(mut self) {
         self.backend.stop();

@@ -52,6 +52,15 @@ pub enum CtrlCommand {
     },
     /// 拆会话（同时拆流）
     Teardown { session_id: String },
+    /// 为会话签发一次性接入凭证（跨设备推流用）：把返回的 token 交给推流端
+    /// （如手机 `stross push --share-token <token> --relay ws://本机IP:端口/ws/push`），
+    /// 推流端凭此直接接入本机受控中继，无需远程控制面
+    ShareToken {
+        session_id: String,
+        /// 有效期（秒，默认 300）
+        #[arg(long, default_value_t = 300)]
+        ttl: u64,
+    },
     /// 开始推流（合成源，无设备环境可跑）
     StartStream {
         #[arg(long, default_value_t = 15)]
@@ -107,6 +116,21 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
             let _ = request(&args.connect, req).await?;
             tracing::info!("已拆除会话: {session_id}");
         }
+        CtrlCommand::ShareToken { session_id, ttl } => {
+            let req = CtrlRequest::ShareToken {
+                session_id: session_id.clone(),
+                ttl_secs: ttl,
+            };
+            let payload = request(&args.connect, req).await?;
+            let token = payload["token"].as_str().unwrap_or("?");
+            tracing::info!(
+                "已签发接入凭证: streamId={} pin={} expiresAt={}",
+                payload["streamId"].as_str().unwrap_or("?"),
+                payload["pin"].as_str().unwrap_or("?"),
+                payload["expiresAt"],
+            );
+            tracing::info!("推流端出示凭证（--share-token）: {token}");
+        }
         CtrlCommand::StartStream {
             secs,
             audio,
@@ -123,6 +147,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 quality: quality.quality(),
                 audio: None,
                 duration_secs: Some(secs as u32),
+                share_token: None,
             };
             if audio {
                 config.audio = Some(AudioSourceConfig::synthetic_test());

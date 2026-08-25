@@ -223,6 +223,10 @@ impl QuicDataSession {
 
 #[async_trait]
 impl DataSession for QuicDataSession {
+    fn peer_addr(&self) -> Option<std::net::SocketAddr> {
+        Some(self.conn.remote_address())
+    }
+
     async fn send(&self, pkt: SessionPacket) -> Result<(), TransportError> {
         match pkt {
             SessionPacket::Control(c) => {
@@ -468,6 +472,7 @@ mod tests {
                 title: "t".into(),
                 video: None,
                 audio: None,
+                share_token: None,
             }))
             .await
             .unwrap();

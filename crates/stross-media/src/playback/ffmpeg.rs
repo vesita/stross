@@ -249,8 +249,19 @@ fn video_reader_gen(mut stdout: ChildStdout, shared: Arc<VideoShared>) {
                     continue;
                 };
                 let need = w as usize * h as usize * 4;
+                // 预分配到位：避免首帧时 acc 从初始容量反复 grow
+                // （1080p 一帧 8.3MB，一次性 reserve 免去多次翻倍拷贝）
+                if acc.capacity() < need {
+                    acc.reserve(need - acc.len());
+                }
                 while acc.len() >= need {
-                    let rgba: Vec<u8> = acc.drain(..need).collect();
+                    // 恰好整帧：整个缓冲直接交给上层（零拷贝），
+                    // 并用预分配的新缓冲接续累积；有残留才 drain 切帧
+                    let rgba = if acc.len() == need {
+                        std::mem::replace(&mut acc, Vec::with_capacity(need))
+                    } else {
+                        acc.drain(..need).collect()
+                    };
                     let pts_ms = shared.pts.lock().unwrap().pop_front().unwrap_or(0);
                     let rendered = RenderedFrame {
                         pts_ms,

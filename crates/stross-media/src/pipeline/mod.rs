@@ -178,6 +178,35 @@ pub struct StreamConfig {
 }
 
 impl StreamConfig {
+    /// CLI 合成源推流配置（测试 / 演示：testsrc2 画面 + 可选 440Hz 测试音）。
+    ///
+    /// `push` / `ctrl start-stream` / `demo_push` 共用，避免各处手拼字段
+    /// （重复实现，曾出现 `--audio` 无声等不一致）。
+    pub fn cli_synthetic(
+        stream_id: String,
+        title: String,
+        quality: Quality,
+        secs: u32,
+        audio: bool,
+        share_token: Option<String>,
+    ) -> Self {
+        let mut cfg = Self {
+            stream_id,
+            title,
+            video: Some(VideoSource::Synthetic {
+                pattern: "testsrc2".into(),
+            }),
+            quality,
+            audio: None,
+            duration_secs: Some(secs),
+            share_token,
+        };
+        if audio {
+            cfg.audio = Some(AudioSourceConfig::synthetic_test());
+        }
+        cfg
+    }
+
     /// 生成推流端注册用的 `Hello` 控制消息。
     pub fn hello(&self) -> stross_proto::message::ControlMessage {
         stross_proto::message::ControlMessage::Hello {

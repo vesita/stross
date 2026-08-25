@@ -69,6 +69,10 @@ pub struct JitterBuffer {
     slots: Vec<Option<Slot>>,
     /// 连续输出游标：下一个应输出的 `seq`。
     next_seq: Option<u32>,
+    /// 已到达帧的最高 `seq`（跳洞推进上界：游标不得越过它，否则会
+    /// 超前跳过后续已到达的帧——SRT 跨轨共享 seq 时占位空洞密集，
+    /// 过度跳洞会把 next_seq 推到所有已到达帧之前，导致帧全部被吞）。
+    highest_seq: Option<u32>,
     /// 游标最近一次推进的时间（空洞超时判定基准）。
     last_progress: Option<Instant>,
     /// 重对齐等待：视频轨丢帧后置位，丢弃非关键帧直到关键帧到来。
@@ -103,6 +107,7 @@ impl JitterBuffer {
         Self {
             slots: (0..cfg.capacity.max(1)).map(|_| None).collect(),
             next_seq: None,
+            highest_seq: None,
             last_progress: None,
             awaiting_keyframe: false,
             avg_interval: None,
@@ -153,6 +158,7 @@ impl JitterBuffer {
             }
             self.slots.iter_mut().for_each(|s| *s = None);
             self.next_seq = Some(seq);
+            self.highest_seq = Some(seq); // 槽已清空，游标上界随之重置
             self.awaiting_keyframe = false;
             self.last_progress = Some(now);
             self.place(seq, Slot { frame });
@@ -179,6 +185,10 @@ impl JitterBuffer {
                 }
             }
         }
+        self.highest_seq = Some(
+            self.highest_seq
+                .map_or(seq, |h| if seq_lt(h, seq) { seq } else { h }),
+        );
         self.place(seq, Slot { frame });
     }
 
@@ -203,6 +213,11 @@ impl JitterBuffer {
             return Vec::new();
         }
         let mut out = Vec::new();
+        // 跳洞上限（= 槽位数）：一次 poll 内最多推进这么多空洞就退出本轮，
+        // 防止「空洞持续 + overdue 恒真」时 `next_seq` 无限递增（u32 环绕）
+        // 造成的 CPU 死循环（poll 内 `now`/`last_progress` 不变，overdue 不退场）。
+        let max_holes = self.cfg.capacity as u32;
+        let mut holes_skipped = 0u32;
         while let Some(next) = self.next_seq {
             let idx = next as usize % self.cfg.capacity;
             let ready = self.slots[idx]
@@ -223,14 +238,28 @@ impl JitterBuffer {
             if !overdue {
                 break;
             }
+            // 游标已越过所有已到达帧：没有更远的目标，退出本轮等新帧
+            if let Some(h) = self.highest_seq
+                && seq_lt(h, next)
+            {
+                break;
+            }
+            if holes_skipped >= max_holes {
+                break;
+            }
+            holes_skipped += 1;
             self.next_seq = Some(next.wrapping_add(1));
             self.stats.dropped_out_of_window += 1;
             if self.cfg.require_keyframe_resync {
-                // 视频轨：进入重对齐等待，本轮不再输出（等关键帧）
+                // 视频轨：空洞=丢帧 → 重对齐等待（等关键帧重建，防花屏）。
+                // 轨内连续 seq（StreamChannel 已归一化）下占位空洞不存在，
+                // 此处只有真丢帧/断流才会触发。
                 self.awaiting_keyframe = true;
                 break;
             }
-            // 音频轨：跳洞后继续
+            // 音频轨：跳洞后继续推进（受 `highest_seq` 上界约束，游标不
+            // 越过已到达帧，故不会超前吞帧；一次 poll 可追平最新帧，且
+            // 不会因 `overdue` 恒真而无限递增 `next_seq`）。
         }
         out
     }

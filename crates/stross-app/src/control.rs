@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stross_media::pipeline::StreamConfig;
 
+use crate::SessionPrefs;
 use crate::app::StrossApp;
 
 /// 控制面默认端口（回环）。
@@ -168,14 +169,15 @@ async fn handle_request(app: &StrossApp, text: &str) -> CtrlResponse {
         Err(e) => return CtrlResponse::err(format!("非法请求: {e}")),
     };
     match req {
-        CtrlRequest::CreateSession { title: _, sinks } => {
-            // 源节点固定为本机（register_local_node 注册的 "local"）
-            match app
-                .kernel()
-                .create_session("local", &sinks, &Default::default())
-                .await
-            {
-                Ok(s) => CtrlResponse::ok(json!({ "sessionId": s.id })),
+        CtrlRequest::CreateSession { title, sinks } => {
+            // 源节点固定为本机（register_local_node 注册的 "local"）；
+            // title 随会话存储（UI 展示），不再是死字段
+            let prefs = SessionPrefs {
+                title,
+                ..Default::default()
+            };
+            match app.kernel().create_session("local", &sinks, &prefs).await {
+                Ok(s) => CtrlResponse::ok(json!({ "sessionId": s.id, "title": s.title })),
                 Err(e) => CtrlResponse::err(e),
             }
         }

@@ -9,7 +9,7 @@
 //!   `stross-media`（桌面 ffmpeg）与 UI 层（Android 原生）实现里
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::receiver::{LocalProxy, ReceiveStats, Receiver};
 use stross_proto::frame::Frame;
-use stross_proto::message::{CodecId, DiscoveryInfo, MediaKind, RoleId, TransportId};
+use stross_proto::message::{DiscoveryInfo, MediaKind, RoleId, TransportId};
 
 use crate::engine::SenderEngine;
 use crate::kernel::{Kernel, NodeInfo, NodeRole, RelayDataPlane};
@@ -161,24 +161,15 @@ impl StrossApp {
         // 避免只广播第一个 IP 导致其它网卡网段扫描不到本机
         {
             let instance = format!("sender-{port}");
-            let info = DiscoveryInfo {
-                v: DiscoveryInfo::VERSION,
-                name: "Stross 本机中继".into(),
-                roles: vec![RoleId::Relay, RoleId::Sender, RoleId::Viewer],
-                media: vec![
+            let info = DiscoveryInfo::relay_default(
+                "Stross 本机中继",
+                vec![
                     MediaKind::Screen,
                     MediaKind::Camera,
                     MediaKind::Mic,
                     MediaKind::SystemAudio,
                 ],
-                transports: vec![
-                    TransportId::Ws,
-                    TransportId::WebRtc,
-                    TransportId::Srt,
-                    TransportId::Quic,
-                ],
-                codecs: vec![CodecId::H264, CodecId::Aac],
-            };
+            );
             match Discovery::start(&instance, &local_ips(), port, &info) {
                 Ok(d) => {
                     *self.discovery.lock().unwrap() = Some(d);
@@ -271,7 +262,14 @@ impl StrossApp {
             );
             let session = self
                 .kernel
-                .create_session("local", &["local".into()], &crate::SessionPrefs::default())
+                .create_session(
+                    "local",
+                    &["local".into()],
+                    &crate::SessionPrefs {
+                        title: cfg.title.clone(),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .map_err(|e| format!("创建会话失败: {e}"))?;
             cfg.stream_id = session.id;
@@ -293,10 +291,7 @@ impl StrossApp {
             .relay_port()
             .or_else(|| self.relay.lock().unwrap().as_ref().map(|r| r.port))
             .unwrap_or(DEFAULT_PORT);
-        let started_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let started_at = stross_proto::time::unix_secs();
         *self.engine.lock().unwrap() = Some(RunningStream {
             engine,
             relay_port,

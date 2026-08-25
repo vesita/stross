@@ -26,6 +26,16 @@ pub enum ChannelKind {
     Lossy,
 }
 
+/// 按 relay URL scheme 的传输可靠性契约分流（SRT = Adaptive → 有损路径进
+/// 抖动缓冲；WS/QUIC = Lossless → 直通零延迟）。推流端 `RelayClient` /
+/// 观看端 `connect_watch` 的同一 scheme 判断见 [`crate::transport::transport_for_url`]。
+pub fn channel_kind_for_url(relay_url: &str) -> ChannelKind {
+    match crate::transport::transport_for_url(relay_url).profile() {
+        stross_proto::message::ReliabilityProfile::Adaptive => ChannelKind::Lossy,
+        _ => ChannelKind::Lossless,
+    }
+}
+
 /// 流式通道：按 `ChannelKind` 分流到直通队列或双轨抖动缓冲。
 pub struct StreamChannel {
     kind: ChannelKind,
@@ -33,6 +43,12 @@ pub struct StreamChannel {
     lossless_queue: VecDeque<Frame>,
     video: JitterBuffer,
     audio: JitterBuffer,
+    /// 轨内序号：把传输层**跨轨共享**的全局 seq（SRT：视频帧间夹音频 seq）
+    /// 归一化为每轨独立的连续序号再喂抖动缓冲——抖动缓冲假设「空洞=丢帧」
+    /// （轨内连续 seq 语义，如 WebRTC）；直接喂全局 seq 会把音频占位空洞
+    /// 误判为丢帧（等待窗口耗尽 → 重对齐吞帧 / 跳洞游标落后被关键帧清空）。
+    video_seq: u32,
+    audio_seq: u32,
 }
 
 impl StreamChannel {
@@ -43,6 +59,7 @@ impl StreamChannel {
             lossless_queue: VecDeque::new(),
             video: JitterBuffer::new(JitterConfig {
                 require_keyframe_resync: true,
+                // 轨内连续 seq：空洞即真丢帧，保持「空洞即重对齐」防花屏
                 ..JitterConfig::default()
             }),
             // 音频轨收紧：低延迟预算（端到端 ≤200ms 的一部分）≤100ms，
@@ -54,6 +71,8 @@ impl StreamChannel {
                 adaptive: true,
                 ..JitterConfig::default()
             }),
+            video_seq: 0,
+            audio_seq: 0,
         }
     }
 
@@ -61,10 +80,28 @@ impl StreamChannel {
     pub fn push(&mut self, frame: Frame, now: Instant) {
         match self.kind {
             ChannelKind::Lossless => self.lossless_queue.push_back(frame),
-            ChannelKind::Lossy => match frame.header.track {
-                TRACK_VIDEO => self.video.push(frame, now),
-                _ => self.audio.push(frame, now),
-            },
+            ChannelKind::Lossy => {
+                let mut frame = frame;
+                // 轨内序号归一化（见 [`Self::video_seq`] 注释）；输出帧沿用
+                // 轨内序号，消费方（解码/延迟统计）依赖 pts 而非全局 seq。
+                let seq = match frame.header.track {
+                    TRACK_VIDEO => {
+                        let s = self.video_seq;
+                        self.video_seq = self.video_seq.wrapping_add(1);
+                        s
+                    }
+                    _ => {
+                        let s = self.audio_seq;
+                        self.audio_seq = self.audio_seq.wrapping_add(1);
+                        s
+                    }
+                };
+                frame.header.seq = seq;
+                match frame.header.track {
+                    TRACK_VIDEO => self.video.push(frame, now),
+                    _ => self.audio.push(frame, now),
+                }
+            }
         }
     }
 

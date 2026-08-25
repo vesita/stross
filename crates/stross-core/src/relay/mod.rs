@@ -30,7 +30,6 @@ pub use peers::PeerInfo;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::serve::{Listener, ListenerExt};
 use serde::Serialize;
@@ -330,10 +329,7 @@ impl RelayState {
                 title: stream_id.to_string(),
                 video: None,
                 audio: None,
-                started_at: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
+                started_at: stross_proto::time::unix_secs(),
                 watchers: 0,
             });
             // 先注册本地流（观看端立即可见），再启动上游拉取任务
@@ -510,7 +506,7 @@ impl RelayServer {
 
         // SRT 推流/观看监听：原生端可经 srt://<host>:<srt_port> 推流或观看，
         // 数据面与 WS 完全一致（handle_connect 按首条消息分流 Hello/Watch）
-        let mut srt_listener = SrtTransport::new()
+        let srt_listener = SrtTransport::new()
             .bind("0.0.0.0:0")
             .await
             .map_err(|e| anyhow::anyhow!("SRT 监听失败: {e}"))?;
@@ -519,7 +515,7 @@ impl RelayServer {
 
         // QUIC 推流/观看监听：一条连接 control/media 双 stream 多路复用，
         // 原生端可推流（Hello）或观看（Watch）（Lossless；自签名 + 局域网可信模型）
-        let mut quic_listener = QuicTransport::new()
+        let quic_listener = QuicTransport::new()
             .bind("0.0.0.0:0".parse().expect("静态地址"))
             .await
             .map_err(|e| anyhow::anyhow!("QUIC 监听失败: {e}"))?;
@@ -535,47 +531,13 @@ impl RelayServer {
         };
         let app = http::router(state.clone());
 
-        let srt_state = state.clone();
-        let mut srt_shutdown = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    res = srt_listener.accept() => match res {
-                        Ok(session) => {
-                            let state = srt_state.clone();
-                            tokio::spawn(async move { handle_connect(session, state).await });
-                        }
-                        Err(e) => {
-                            tracing::warn!("SRT accept 失败: {e}");
-                            break;
-                        }
-                    },
-                    _ = srt_shutdown.changed() => break,
-                }
-            }
-            tracing::debug!("SRT 监听已停止");
-        });
-
-        let quic_state = state.clone();
-        let mut quic_shutdown = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    res = quic_listener.accept() => match res {
-                        Ok(session) => {
-                            let state = quic_state.clone();
-                            tokio::spawn(async move { handle_connect(session, state).await });
-                        }
-                        Err(e) => {
-                            tracing::warn!("QUIC accept 失败: {e}");
-                            break;
-                        }
-                    },
-                    _ = quic_shutdown.changed() => break,
-                }
-            }
-            tracing::debug!("QUIC 监听已停止");
-        });
+        spawn_accept_loop(srt_listener, state.clone(), shutdown_tx.subscribe(), "SRT");
+        spawn_accept_loop(
+            quic_listener,
+            state.clone(),
+            shutdown_tx.subscribe(),
+            "QUIC",
+        );
 
         let task = tokio::spawn(async move {
             // ConnectInfo：WS 升级处提取对端地址（来源感知门控用）
@@ -703,6 +665,60 @@ pub(super) async fn handle_push(session: Box<dyn DataSession>, state: RelayState
     handle_push_loop(session, state, None).await;
 }
 
+/// 入站监听器抽象：`accept` 一个已建立的数据会话（SRT / QUIC 监听句柄各自实现）。
+#[async_trait::async_trait]
+trait AcceptLoop: Send {
+    async fn accept_session(
+        &mut self,
+    ) -> Result<Box<dyn DataSession>, crate::transport::TransportError>;
+}
+
+#[async_trait::async_trait]
+impl AcceptLoop for crate::transport::srt::SrtListenerHandle {
+    async fn accept_session(
+        &mut self,
+    ) -> Result<Box<dyn DataSession>, crate::transport::TransportError> {
+        self.accept().await
+    }
+}
+
+#[async_trait::async_trait]
+impl AcceptLoop for crate::transport::quic::QuicListenerHandle {
+    async fn accept_session(
+        &mut self,
+    ) -> Result<Box<dyn DataSession>, crate::transport::TransportError> {
+        self.accept().await
+    }
+}
+
+/// 通用入站 accept 循环：接收入站连接交给 [`handle_connect`]；
+/// 监听错误或停机信号退出。SRT / QUIC 两个 UDP 监听共用（消除复制）。
+fn spawn_accept_loop<L: AcceptLoop + 'static>(
+    mut listener: L,
+    state: RelayState,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    label: &'static str,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                res = listener.accept_session() => match res {
+                    Ok(session) => {
+                        let state = state.clone();
+                        tokio::spawn(async move { handle_connect(session, state).await });
+                    }
+                    Err(e) => {
+                        tracing::warn!("{label} accept 失败: {e}");
+                        break;
+                    }
+                },
+                _ = shutdown.changed() => break,
+            }
+        }
+        tracing::debug!("{label} 监听已停止");
+    })
+}
+
 /// 统一接入点（SRT/QUIC 监听用）：首条控制消息决定角色——
 /// `Hello` = 推流（进入 [`handle_push_loop`]），`Watch` = 观看（[`handle_watch`]）。
 pub(super) async fn handle_connect(session: Box<dyn DataSession>, state: RelayState) {
@@ -808,10 +824,7 @@ async fn handle_push_loop(
                     title,
                     video,
                     audio,
-                    started_at: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0),
+                    started_at: stross_proto::time::unix_secs(),
                     watchers: 0,
                 };
                 state.insert(StreamEntry {

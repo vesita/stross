@@ -21,6 +21,8 @@ pub struct Negotiated {
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub id: String,
+    /// 会话标题（接收端建会话时填写，如「手机麦克风」；UI 展示用）。
+    pub title: String,
     pub source: String,
     pub sinks: Vec<String>,
     pub path: RoutePath,
@@ -40,6 +42,8 @@ pub struct SessionPrefs {
     /// 会话访问码（PIN，可选）：设置后控制操作（route / teardown）需先
     /// [`crate::kernel::Kernel::authorize`]（设计文档 §7 会话级访问码）。
     pub access_code: Option<String>,
+    /// 会话标题（原 CreateSession.title 死字段；随会话存储供 UI 展示）。
+    pub title: String,
 }
 
 impl Session {
@@ -60,7 +64,68 @@ impl Session {
 /// 会话管理：会话拓扑与协商结果。
 #[derive(Default)]
 pub(super) struct SessionManager {
-    pub(super) sessions: Mutex<HashMap<String, Session>>,
+    sessions: Mutex<HashMap<String, Session>>,
+}
+
+impl SessionManager {
+    /// 会话是否存在。
+    pub(super) fn contains(&self, id: &str) -> bool {
+        self.sessions.lock().unwrap().contains_key(id)
+    }
+
+    /// 会话快照（不存在 → `None`）。
+    pub(super) fn get(&self, id: &str) -> Option<Session> {
+        self.sessions.lock().unwrap().get(id).cloned()
+    }
+
+    /// 登记会话。
+    pub(super) fn insert(&self, session: Session) {
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session.id.clone(), session);
+    }
+
+    /// 移除会话（返回被移除项；不存在 → `None`）。
+    pub(super) fn remove(&self, id: &str) -> Option<Session> {
+        self.sessions.lock().unwrap().remove(id)
+    }
+
+    /// 全量快照（按 id 排序）。
+    pub(super) fn snapshot(&self) -> Vec<Session> {
+        let guard = self.sessions.lock().unwrap();
+        let mut v: Vec<_> = guard.values().cloned().collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
+    }
+
+    /// 控制操作前的鉴权门禁：会话必须存在且已授权（F2.5 / 设计文档 §7）。
+    pub(super) fn require_authorized(&self, id: &str) -> Result<(), String> {
+        let guard = self.sessions.lock().unwrap();
+        let s = guard.get(id).ok_or_else(|| format!("会话 {id} 不存在"))?;
+        s.require_authorized()
+    }
+
+    /// 改道：校验鉴权后更新传输路径（F2.3 会话内动态改道）。
+    pub(super) fn route(&self, id: &str, path: RoutePath) -> Result<(), String> {
+        let mut guard = self.sessions.lock().unwrap();
+        let s = guard
+            .get_mut(id)
+            .ok_or_else(|| format!("会话 {id} 不存在"))?;
+        s.require_authorized()?;
+        s.path = path;
+        Ok(())
+    }
+
+    /// 标记已鉴权（访问码校验成功后调用）。
+    pub(super) fn mark_authorized(&self, id: &str) -> Result<(), String> {
+        let mut guard = self.sessions.lock().unwrap();
+        let s = guard
+            .get_mut(id)
+            .ok_or_else(|| format!("会话 {id} 不存在"))?;
+        s.mark_authorized();
+        Ok(())
+    }
 }
 
 /// 路由：传输方向选择策略。

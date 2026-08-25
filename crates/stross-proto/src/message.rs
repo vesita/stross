@@ -282,6 +282,28 @@ impl DiscoveryInfo {
     /// 当前描述版本。
     pub const VERSION: u8 = 1;
 
+    /// 中继 / 本机锚点广播的默认能力描述（roles = Relay/Sender/Viewer、
+    /// transports = ws/webrtc/srt/quic、codecs = h264/aac 固定；
+    /// `media` 按设备实际可共享项传入）。
+    ///
+    /// 统一 4 处广播点（app 锚点 / stross-relay / cli relay / GUI relay-only）
+    /// 的构造，避免重复实现与字段漂移。
+    pub fn relay_default(name: impl Into<String>, media: Vec<MediaKind>) -> Self {
+        Self {
+            v: Self::VERSION,
+            name: name.into(),
+            roles: vec![RoleId::Relay, RoleId::Sender, RoleId::Viewer],
+            media,
+            transports: vec![
+                TransportId::Ws,
+                TransportId::WebRtc,
+                TransportId::Srt,
+                TransportId::Quic,
+            ],
+            codecs: vec![CodecId::H264, CodecId::Aac],
+        }
+    }
+
     /// 编码为 mDNS TXT 条目（单 key）。
     pub fn to_txt(&self) -> Vec<(String, String)> {
         vec![(

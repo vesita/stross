@@ -16,7 +16,7 @@ use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use stross_app::CtrlRequest;
-use stross_media::pipeline::{AudioSourceConfig, StreamConfig, VideoSource};
+use stross_media::pipeline::StreamConfig;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -138,20 +138,14 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
             quality,
             relay,
         } => {
-            let mut config = StreamConfig {
-                stream_id: stream_id.unwrap_or_else(|| format!("demo-{}", std::process::id())),
-                title: "CLI 推流".into(),
-                video: Some(VideoSource::Synthetic {
-                    pattern: "testsrc2".into(),
-                }),
-                quality: quality.quality(),
-                audio: None,
-                duration_secs: Some(secs as u32),
-                share_token: None,
-            };
-            if audio {
-                config.audio = Some(AudioSourceConfig::synthetic_test());
-            }
+            let config = StreamConfig::cli_synthetic(
+                stream_id.unwrap_or_else(|| format!("demo-{}", std::process::id())),
+                "CLI 推流".into(),
+                quality.quality(),
+                secs as u32,
+                audio,
+                None,
+            );
             let req = CtrlRequest::StartStream {
                 config,
                 relay_url: relay,

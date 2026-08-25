@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use stross_app::SenderEngine;
 use stross_media::capture::FfmpegBackend;
-use stross_media::pipeline::{AudioSourceConfig, Quality, StreamConfig, VideoSource};
+use stross_media::pipeline::{Quality, StreamConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -44,26 +44,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let mut cfg = StreamConfig {
-        stream_id: stream_id.clone(),
-        title: "演示串流（测试画面）".into(),
-        video: Some(VideoSource::Synthetic {
-            pattern: "testsrc2".into(),
-        }),
-        quality: Quality::MEDIUM,
-        audio: None,
-        duration_secs: Some(secs as u32),
-        share_token: None,
-    };
-    if with_audio {
-        cfg.audio = Some(AudioSourceConfig {
-            mic: None,
-            system_audio: None,
-            // lavfi sine（无设备环境可跑，验证解码+播放链路；真实麦克风走手机推流）
-            synthetic: Some(440),
-            ..Default::default()
-        });
-    }
+    let mut cfg = StreamConfig::cli_synthetic(
+        stream_id.clone(),
+        "演示串流（测试画面）".into(),
+        Quality::MEDIUM,
+        secs as u32,
+        with_audio,
+        None,
+    );
 
     let engine = match SenderEngine::start(
         cfg.clone(),

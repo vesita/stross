@@ -11,9 +11,6 @@
 
 use stross_proto::message::ControlMessage;
 
-use crate::transport::quic::QuicTransport;
-use crate::transport::srt::SrtTransport;
-use crate::transport::ws::WsTransport;
 use crate::transport::{DataSession, PeerAddr, SessionPacket, SessionParams, Transport};
 
 /// 连接中继并请求观看 `stream_id`；返回已就绪（收到 `Ready`）的数据会话。
@@ -24,14 +21,15 @@ pub async fn connect_watch(
     relay_url: &str,
     stream_id: &str,
 ) -> Result<Box<dyn DataSession>, String> {
-    let (transport, addr): (Box<dyn Transport>, String) = if relay_url.starts_with("srt://") {
-        (Box::new(SrtTransport::new()), relay_url.to_string())
-    } else if relay_url.starts_with("quic://") {
-        (Box::new(QuicTransport::new()), relay_url.to_string())
+    let (transport, addr): (Box<dyn Transport>, String) = if relay_url.starts_with("ws://") {
+        (
+            crate::transport::transport_for_url(relay_url),
+            format!("{relay_url}/ws/watch?stream={stream_id}"),
+        )
     } else {
         (
-            Box::new(WsTransport::new()),
-            format!("{relay_url}/ws/watch?stream={stream_id}"),
+            crate::transport::transport_for_url(relay_url),
+            relay_url.to_string(),
         )
     };
     let peer = PeerAddr {
@@ -131,25 +129,37 @@ mod tests {
         }
     }
 
+    /// 参数化辅助：用 `transport` 建推流会话（stream_id 在 url 中），推 Hello+关键帧，
+    /// 再用 `relay_url` watch 收关键帧。三种传输共用同一测试体（去重）。
+    async fn watch_receives_pushed_stream(
+        transport: Box<dyn Transport>,
+        peer: PeerAddr,
+        relay_url: &str,
+        stream_id: &str,
+    ) {
+        let params = SessionParams {
+            session_id: stream_id.into(),
+            profile: transport.profile(),
+        };
+        let push = transport.connect(&peer, &params).await.unwrap();
+        push_frame(stream_id, push.as_ref()).await;
+        let _watch = watch_and_get_keyframe(relay_url, stream_id).await;
+    }
+
     #[tokio::test]
     async fn srt_watch_receives_ws_pushed_stream() {
         let handle = RelayServer::start(0).await.unwrap();
         let srt_port = handle.srt_port.expect("relay 应启用 SRT 监听");
-
-        let transport = crate::transport::srt::SrtTransport::new();
-        let peer = PeerAddr {
-            transport: stross_proto::message::TransportId::Srt,
-            addr: format!("srt://127.0.0.1:{srt_port}"),
-        };
-        let params = SessionParams {
-            session_id: "srt-watch".into(),
-            profile: stross_proto::message::ReliabilityProfile::Adaptive,
-        };
-        let push = transport.connect(&peer, &params).await.unwrap();
-        push_frame("srt-watch", push.as_ref()).await;
-
-        let _watch =
-            watch_and_get_keyframe(&format!("srt://127.0.0.1:{srt_port}"), "srt-watch").await;
+        watch_receives_pushed_stream(
+            Box::new(crate::transport::srt::SrtTransport::new()),
+            PeerAddr {
+                transport: stross_proto::message::TransportId::Srt,
+                addr: format!("srt://127.0.0.1:{srt_port}"),
+            },
+            &format!("srt://127.0.0.1:{srt_port}"),
+            "srt-watch",
+        )
+        .await;
         handle.stop().await;
     }
 
@@ -157,21 +167,16 @@ mod tests {
     async fn quic_watch_receives_ws_pushed_stream() {
         let handle = RelayServer::start(0).await.unwrap();
         let quic_port = handle.quic_port.expect("relay 应启用 QUIC 监听");
-
-        let transport = crate::transport::quic::QuicTransport::new();
-        let peer = PeerAddr {
-            transport: stross_proto::message::TransportId::Quic,
-            addr: format!("quic://127.0.0.1:{quic_port}"),
-        };
-        let params = SessionParams {
-            session_id: "quic-watch".into(),
-            profile: stross_proto::message::ReliabilityProfile::Lossless,
-        };
-        let push = transport.connect(&peer, &params).await.unwrap();
-        push_frame("quic-watch", push.as_ref()).await;
-
-        let _watch =
-            watch_and_get_keyframe(&format!("quic://127.0.0.1:{quic_port}"), "quic-watch").await;
+        watch_receives_pushed_stream(
+            Box::new(crate::transport::quic::QuicTransport::new()),
+            PeerAddr {
+                transport: stross_proto::message::TransportId::Quic,
+                addr: format!("quic://127.0.0.1:{quic_port}"),
+            },
+            &format!("quic://127.0.0.1:{quic_port}"),
+            "quic-watch",
+        )
+        .await;
         handle.stop().await;
     }
 
@@ -179,20 +184,16 @@ mod tests {
     async fn ws_watch_keeps_working() {
         let handle = RelayServer::start(0).await.unwrap();
         let relay_ws = format!("ws://127.0.0.1:{}", handle.port);
-
-        let transport = crate::transport::ws::WsTransport::new();
-        let peer = PeerAddr {
-            transport: stross_proto::message::TransportId::Ws,
-            addr: format!("{relay_ws}/ws/push"),
-        };
-        let params = SessionParams {
-            session_id: "ws-watch".into(),
-            profile: stross_proto::message::ReliabilityProfile::Lossless,
-        };
-        let push = transport.connect(&peer, &params).await.unwrap();
-        push_frame("ws-watch", push.as_ref()).await;
-
-        let _watch = watch_and_get_keyframe(&relay_ws, "ws-watch").await;
+        watch_receives_pushed_stream(
+            Box::new(crate::transport::ws::WsTransport::new()),
+            PeerAddr {
+                transport: stross_proto::message::TransportId::Ws,
+                addr: format!("{relay_ws}/ws/push"),
+            },
+            &relay_ws,
+            "ws-watch",
+        )
+        .await;
         handle.stop().await;
     }
 }

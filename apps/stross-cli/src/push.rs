@@ -8,7 +8,7 @@ use std::time::Duration;
 use clap::Args;
 use stross_app::SenderEngine;
 use stross_media::capture::FfmpegBackend;
-use stross_media::pipeline::{AudioSourceConfig, Quality, StreamConfig, VideoSource};
+use stross_media::pipeline::{Quality, StreamConfig};
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum QualityArg {
@@ -62,20 +62,14 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
     let stream_id = args
         .stream_id
         .unwrap_or_else(|| format!("demo-{}", std::process::id()));
-    let mut cfg = StreamConfig {
-        stream_id: stream_id.clone(),
-        title: "CLI 推流".into(),
-        video: Some(VideoSource::Synthetic {
-            pattern: "testsrc2".into(),
-        }),
-        quality: args.quality.quality(),
-        audio: None,
-        duration_secs: Some(args.secs as u32),
-        share_token: args.share_token.clone(),
-    };
-    if args.audio {
-        cfg.audio = Some(AudioSourceConfig::synthetic_test());
-    }
+    let mut cfg = StreamConfig::cli_synthetic(
+        stream_id.clone(),
+        "CLI 推流".into(),
+        args.quality.quality(),
+        args.secs as u32,
+        args.audio,
+        args.share_token.clone(),
+    );
 
     let engine = match SenderEngine::start(
         cfg.clone(),

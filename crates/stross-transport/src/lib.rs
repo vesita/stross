@@ -95,6 +95,18 @@ pub struct SessionParams {
     pub profile: ReliabilityProfile,
 }
 
+/// 按 relay URL scheme 选传输实现（推流 `RelayClient` / 观看 `connect_watch`
+/// 共用，避免各调用点重复 if-else；可靠性契约由 [`Transport::profile`] 给出）。
+pub fn transport_for_url(url: &str) -> Box<dyn Transport> {
+    if url.starts_with("srt://") {
+        Box::new(srt::SrtTransport::new())
+    } else if url.starts_with("quic://") {
+        Box::new(quic::QuicTransport::new())
+    } else {
+        Box::new(ws::WsTransport::new())
+    }
+}
+
 /// 对端地址。
 #[derive(Debug, Clone)]
 pub struct PeerAddr {

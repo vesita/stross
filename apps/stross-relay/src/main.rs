@@ -13,7 +13,7 @@
 use clap::Parser;
 use stross_core::net::local_ips;
 use stross_core::relay::{DEFAULT_PORT, RelayServer};
-use stross_proto::message::{CodecId, DiscoveryInfo, RoleId, TransportId};
+use stross_proto::message::DiscoveryInfo;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -57,19 +57,7 @@ async fn main() -> anyhow::Result<()> {
             &format!("relay-{}", handle.port),
             &local_ips(),
             handle.port,
-            &DiscoveryInfo {
-                v: DiscoveryInfo::VERSION,
-                name: "Stross 中继".into(),
-                roles: vec![RoleId::Relay, RoleId::Sender, RoleId::Viewer],
-                media: vec![],
-                transports: vec![
-                    TransportId::Ws,
-                    TransportId::WebRtc,
-                    TransportId::Srt,
-                    TransportId::Quic,
-                ],
-                codecs: vec![CodecId::H264, CodecId::Aac],
-            },
+            &DiscoveryInfo::relay_default("Stross 中继", vec![]),
         )?;
         tracing::info!("mDNS 广播中…");
         tokio::signal::ctrl_c().await?;

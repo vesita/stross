@@ -17,7 +17,7 @@ use stross_app::{CaptureStatusView, Platform, StrossApp};
 use stross_media::capture::FfmpegBackend;
 use stross_media::pipeline::StreamConfig;
 #[cfg(not(mobile))]
-use stross_proto::message::{CodecId, DiscoveryInfo, RoleId, TransportId};
+use stross_proto::message::DiscoveryInfo;
 use tauri::{Emitter, Manager, State};
 
 #[cfg(mobile)]
@@ -103,6 +103,7 @@ async fn create_session(
         profile: stross_proto::message::ReliabilityProfile::Lossy,
         preferred_transport: None,
         access_code,
+        title: String::new(),
     };
     state.kernel().create_session(&src, &sinks, &prefs).await
 }
@@ -353,19 +354,7 @@ pub fn run_relay_only(args: &[String]) {
                 &format!("sender-relay-{}", handle.port),
                 &local_ips(),
                 handle.port,
-                &DiscoveryInfo {
-                    v: DiscoveryInfo::VERSION,
-                    name: "Stross 中继".into(),
-                    roles: vec![RoleId::Relay, RoleId::Sender, RoleId::Viewer],
-                    media: vec![],
-                    transports: vec![
-                        TransportId::Ws,
-                        TransportId::WebRtc,
-                        TransportId::Srt,
-                        TransportId::Quic,
-                    ],
-                    codecs: vec![CodecId::H264, CodecId::Aac],
-                },
+                &DiscoveryInfo::relay_default("Stross 中继", vec![]),
             ) {
                 Ok(d) => {
                     tracing::info!("mDNS 广播中…");

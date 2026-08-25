@@ -207,7 +207,7 @@ impl Kernel {
 
     /// 会话是否存在（id 已由内核签发且未拆除）。
     pub fn has_session(&self, id: &str) -> bool {
-        self.sessions.sessions.lock().unwrap().contains_key(id)
+        self.sessions.contains(id)
     }
 
     // -----------------------------------------------------------------------
@@ -277,6 +277,7 @@ impl Kernel {
         }
         let session = Session {
             id,
+            title: prefs.title.clone(),
             source: src.to_string(),
             sinks: sinks.to_vec(),
             path: Router::default_path(sinks),
@@ -284,11 +285,7 @@ impl Kernel {
             requires_pin,
             authorized: !requires_pin, // 无访问码的会话控制面直接放行（现状行为）
         };
-        self.sessions
-            .sessions
-            .lock()
-            .unwrap()
-            .insert(session.id.clone(), session.clone());
+        self.sessions.insert(session.clone());
         let _ = self.events.send(KernelEvent::SessionStarted {
             session: session.clone(),
         });
@@ -299,13 +296,7 @@ impl Kernel {
     ///
     /// 会话启用访问码（PIN）且未通过 [`Kernel::authorize`] 时拒绝（设计文档 §7）。
     pub fn route(&self, id: &str, path: RoutePath) -> Result<(), String> {
-        let mut guard = self.sessions.sessions.lock().unwrap();
-        let session = guard
-            .get_mut(id)
-            .ok_or_else(|| format!("会话 {id} 不存在"))?;
-        session.require_authorized()?;
-        session.path = path.clone();
-        drop(guard);
+        self.sessions.route(id, path.clone())?;
         let _ = self.events.send(KernelEvent::SessionRouted {
             session_id: id.to_string(),
             path,
@@ -317,28 +308,20 @@ impl Kernel {
     ///
     /// 未设置访问码的会话直接成功（无操作）。
     pub fn authorize(&self, id: &str, access_code: Option<&str>) -> Result<(), String> {
-        let mut guard = self.sessions.sessions.lock().unwrap();
-        let session = guard
-            .get_mut(id)
-            .ok_or_else(|| format!("会话 {id} 不存在"))?;
         self.auth
             .authorize(id, access_code)
             .map_err(|e| e.to_string())?;
-        session.mark_authorized();
-        Ok(())
+        self.sessions.mark_authorized(id)
     }
 
     /// 查询单个会话。
     pub fn session(&self, id: &str) -> Option<Session> {
-        self.sessions.sessions.lock().unwrap().get(id).cloned()
+        self.sessions.get(id)
     }
 
     /// 会话列表快照（按 id 排序）。
     pub fn sessions(&self) -> Vec<Session> {
-        let guard = self.sessions.sessions.lock().unwrap();
-        let mut v: Vec<_> = guard.values().cloned().collect();
-        v.sort_by(|a, b| a.id.cmp(&b.id));
-        v
+        self.sessions.snapshot()
     }
 
     /// 最简能力协商（阶段 1）：
@@ -384,14 +367,8 @@ impl Kernel {
 
     /// 拆除会话（同样受访问码鉴权约束）；已接入数据面时撤销流预授权。
     pub async fn teardown(&self, id: &str) -> Result<(), String> {
-        {
-            let mut guard = self.sessions.sessions.lock().unwrap();
-            let session = guard
-                .get_mut(id)
-                .ok_or_else(|| format!("会话 {id} 不存在"))?;
-            session.require_authorized()?;
-            guard.remove(id);
-        }
+        self.sessions.require_authorized(id)?;
+        self.sessions.remove(id);
         self.auth.set_code(id, None); // 清理访问码
         let dp = self.data_plane.lock().unwrap().clone();
         if let Some(dp) = dp {
@@ -426,12 +403,9 @@ impl stross_core::relay::ShareTokenValidator for KernelTokenValidator {
     }
 }
 
-/// 当前 Unix 秒。
+/// 当前 Unix 秒（公共实现见 [`stross_proto::time`]）。
 fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    stross_proto::time::unix_secs()
 }
 
 /// 一次性凭证 PIN（6 位数字）。
@@ -585,6 +559,7 @@ mod tests {
             profile: ReliabilityProfile::Lossy,
             preferred_transport: Some(TransportId::WebRtc),
             access_code: None,
+            title: String::new(),
         };
         let s2 = k.create_session("a", &["b".into()], &prefs).await.unwrap();
         assert_eq!(s2.negotiated.transport, TransportId::Ws);
@@ -599,6 +574,7 @@ mod tests {
             profile: ReliabilityProfile::Lossy,
             preferred_transport: None,
             access_code: Some("1234".into()),
+            title: String::new(),
         };
         let s = k.create_session("a", &["b".into()], &prefs).await.unwrap();
         assert!(s.requires_pin);

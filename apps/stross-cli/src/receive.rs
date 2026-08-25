@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use clap::Args;
 use stross_core::SessionPacket;
-use stross_core::session_channel::{ChannelKind, SessionDataManager};
+use stross_core::session_channel::{SessionDataManager, channel_kind_for_url};
 use stross_core::watch;
 use stross_media::playback::{
     AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackSink, VideoOut,
@@ -121,31 +121,23 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
     let mut latency_samples: Vec<(u32, f64)> = Vec::new();
     let mut max_pts: Option<u32> = None;
     let mut video_seen = 0u32;
-    // 绝对端到端延迟：会话起点墙上毫秒（`--calibrate` 读推流端报告）
-    let session_start_ms: Option<u64> = match &args.calibrate {
+    // 绝对端到端延迟：`--calibrate` 读推流端 --report-start 写的 JSON
+    // （同一文件一次读取：会话起点墙上毫秒 + 首帧 pts0 修正）
+    let (session_start_ms, first_pts): (Option<u64>, f64) = match &args.calibrate {
         Some(path) => {
             let raw = std::fs::read_to_string(path)
                 .map_err(|e| anyhow::anyhow!("读校准文件失败 {path}: {e}"))?;
             let v: serde_json::Value = serde_json::from_str(&raw)
                 .map_err(|e| anyhow::anyhow!("校准文件 JSON 非法: {e}"))?;
-            v["sessionStartUnixMs"].as_u64().or_else(|| {
+            let s = v["sessionStartUnixMs"].as_u64().or_else(|| {
                 v.get("sessionStartUnixMs")
                     .and_then(|x| x.as_i64())
                     .map(|x| x as u64)
-            })
+            });
+            let p = v["firstPtsMs"].as_u64().unwrap_or(0) as f64;
+            (s, p)
         }
-        None => None,
-    };
-    // pts0 修正：首帧 pts（校准起点 = 首帧解析时刻，对应 pts0 而非 0）
-    let first_pts: f64 = match &args.calibrate {
-        Some(path) => {
-            let raw = std::fs::read_to_string(path).unwrap_or_default();
-            serde_json::from_str::<serde_json::Value>(&raw)
-                .ok()
-                .and_then(|v| v["firstPtsMs"].as_u64())
-                .unwrap_or(0) as f64
-        }
-        None => 0.0,
+        None => (None, 0.0),
     };
     let mut abs_latency: Vec<f64> = Vec::new();
     loop {
@@ -181,7 +173,7 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
                         }
                     }
                     // 单次借用通道：push + poll 共用一个 &mut（热路径）
-                    let channel = mgr.channel(&args.stream, ChannelKind::Lossless);
+                    let channel = mgr.channel(&args.stream, channel_kind_for_url(&args.relay));
                     channel.push(frame, Instant::now());
                     for f in channel.poll(Instant::now()) {
                         let _ = session.push(f);
@@ -198,7 +190,7 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
         }
     }
     // 收尾：冲净通道 + 停止播放（后台线程收尾后画面通道关闭）
-    let channel = mgr.channel(&args.stream, ChannelKind::Lossless);
+    let channel = mgr.channel(&args.stream, channel_kind_for_url(&args.relay));
     for f in channel.poll(Instant::now()) {
         let _ = session.push(f);
     }
@@ -231,6 +223,12 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
     //   * p50 ≈ 0：传输层稳态无附加延迟
     //   * p99−p50 / max−p50：抖动与尾延迟（缓冲/重传等待的真实信号）
     // 样本已滤除 pts 回退的补发关键帧，中位数基线进一步消除离群影响。
+    /// 有序样本的分位数（`p` ∈ [0, 1]；调用方保证 `sorted` 非空且升序）。
+    fn pct(sorted: &[f64], p: f64) -> f64 {
+        let i = ((sorted.len() as f64) * p).floor() as usize;
+        sorted[i.min(sorted.len() - 1)]
+    }
+
     if args.latency && !latency_samples.is_empty() {
         let mut csv = String::from("pts_ms,arrival_ms\n");
         for (pts, arr) in &latency_samples {
@@ -243,11 +241,7 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
             .collect();
         ds.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median = ds[ds.len() / 2];
-        let pct = |p: f64| -> f64 {
-            let i = ((ds.len() as f64) * p).floor() as usize;
-            ds[i.min(ds.len() - 1)]
-        };
-        let off = |p: f64| pct(p) - median;
+        let off = |p: f64| pct(&ds, p) - median;
         tracing::info!(
             "延迟统计（相对中位数偏移 ms，n={}）: p50={:.1} p90={:.1} p95={:.1} p99={:.1} max={:.1} min={:.1}",
             ds.len(),
@@ -266,18 +260,14 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
     if !abs_latency.is_empty() {
         let mut ds = abs_latency.clone();
         ds.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let pct = |p: f64| -> f64 {
-            let i = ((ds.len() as f64) * p).floor() as usize;
-            ds[i.min(ds.len() - 1)]
-        };
         tracing::info!(
             "绝对端到端延迟 ms（校准，n={}）: min={:.1} p50={:.1} p90={:.1} p95={:.1} p99={:.1} max={:.1}",
             ds.len(),
             ds.first().copied().unwrap_or(0.0),
-            pct(0.50),
-            pct(0.90),
-            pct(0.95),
-            pct(0.99),
+            pct(&ds, 0.50),
+            pct(&ds, 0.90),
+            pct(&ds, 0.95),
+            pct(&ds, 0.99),
             ds.last().copied().unwrap_or(0.0),
         );
     }

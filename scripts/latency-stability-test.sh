@@ -21,7 +21,8 @@ OUT="${OUT:-/tmp/stross-latency}"
 PORT=18777
 CTRL=18778
 SECS="${1:-60}"
-TRANS="${2:-srt quic}"
+shift 1 || true
+TRANS="${*:-srt quic}"   # 变参：300 srt quic ws 与 300 "srt quic ws" 等价
 MIN_FRAMES_PCT=90        # 接收帧数 ≥ 90% 期望
 MIN_AUDIO_PCT=90         # 音频块 ≥ 90% 期望
 MAX_TAIL_JITTER=250       # abs p99 − min ≤ 250ms（传输/缓冲尾延迟上界）
@@ -90,7 +91,7 @@ run_round() {
   RSS1=$(ps -o rss= -p "$A_PID" 2>/dev/null | tr -d ' ')
   kill "$A_PID" 2>/dev/null; wait "$A_PID" 2>/dev/null; A_PID=""
   kill "$B_PID" 2>/dev/null; wait "$B_PID" 2>/dev/null; B_PID=""
-  rm -rf "$OUT/$trans" "$OUT"/start.json 2>/dev/null""
+  rm -rf "$OUT/$trans" "$OUT"/start.json 2>/dev/null
 
   echo "  接收: ${FRAMES}/${EXPECT_FRAMES} 帧 | 音频块 ${AUDIO}/${EXPECT_AUDIO}"
   [ -n "$ABS_MIN" ] && echo "  绝对端到端延迟 ms: min=${ABS_MIN} p99=${ABS_P99:-?}（含 ffmpeg 预热上界）"

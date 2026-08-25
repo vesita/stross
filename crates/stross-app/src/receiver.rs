@@ -10,11 +10,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use stross_core::SessionPacket;
 use stross_core::relay::RelayState;
-use stross_core::session_channel::{ChannelKind, SessionDataManager};
+use stross_core::session_channel::{SessionDataManager, channel_kind_for_url};
 use stross_core::watch;
 // 桌面解码播放路径（ffmpeg 子进程）；Android 走 `start_raw` 编码帧转发，
 // 由 Kotlin MediaCodec 解码（见 stross-gui `mobile::spawn_android_playback`）。
@@ -57,15 +57,62 @@ pub struct LocalProxy {
     pub ws_base: String,
 }
 
-/// 按传输 scheme 选通道可靠性（B5）：
-/// * `srt://`（Adaptive：ARQ 超时即丢、TSBPD 乱序窗口）→ 有损 → 抖动缓冲；
-/// * `ws://` / `quic://`（全序不丢）→ 无损直通（零额外延迟）。
-fn channel_kind_for(relay_url: &str) -> ChannelKind {
-    if relay_url.starts_with("srt://") {
-        ChannelKind::Lossy
-    } else {
-        ChannelKind::Lossless
+/// watch 主循环公共核心：连接（含级联兜底）→ 每帧经抖动/直通通道 →
+/// `consume` 消费；`sync` 每 100ms 与收尾时同步统计。
+/// [`receive_loop`]（解码播放）与 [`receive_raw_loop`]（编码帧转发）共用，
+/// 消除两处 ~40 行重复的循环/通道/统计骨架。
+async fn watch_consume_loop<C, S>(
+    inner: Arc<ReceiverInner>,
+    relay_url: String,
+    stream_id: String,
+    local_proxy: Option<LocalProxy>,
+    mut consume: C,
+    mut sync: S,
+) where
+    C: FnMut(Frame) + Send + 'static,
+    S: FnMut() + Send + 'static,
+{
+    let data = match connect_with_proxy(&relay_url, &stream_id, local_proxy.as_ref()).await {
+        Ok(d) => d,
+        Err(e) => {
+            inner.stats.lock().unwrap().error = Some(e);
+            return;
+        }
+    };
+    let mut mgr = SessionDataManager::default();
+    // 通道按传输可靠性分流（B5）：SRT（Adaptive，ARQ 超时即丢/可能乱序）→
+    // 有损路径进抖动缓冲；WS/QUIC（全序不丢）→ 直通。
+    let channel_kind = channel_kind_for_url(&relay_url);
+    // 统计低频同步（热路径只做帧转发；查询/锁每 100ms 一次）
+    let mut last_sync = Instant::now();
+    loop {
+        if inner.stopped.load(Ordering::Relaxed) {
+            break;
+        }
+        match data.recv().await {
+            Ok(Some(SessionPacket::Media(frame))) => {
+                inner.stats.lock().unwrap().received += 1;
+                // 单次借用通道：push + poll 共用一个 &mut（热路径）
+                let channel = mgr.channel(&stream_id, channel_kind);
+                channel.push(frame, Instant::now());
+                // 消息驱动：立即产出
+                for f in channel.poll(Instant::now()) {
+                    consume(f);
+                }
+            }
+            Ok(Some(SessionPacket::Control(_))) => {}
+            Ok(None) => break,
+            Err(e) => {
+                tracing::warn!("观看连接异常: {e}");
+                break;
+            }
+        }
+        if last_sync.elapsed() >= Duration::from_millis(100) {
+            sync();
+            last_sync = Instant::now();
+        }
     }
+    sync(); // 最终同步
 }
 
 /// 观看连接：先直连 `relay_url`；失败且提供 `local_proxy` 时，
@@ -210,13 +257,6 @@ async fn receive_loop(
     frame_tx: mpsc::Sender<RenderedFrame>,
     local_proxy: Option<LocalProxy>,
 ) {
-    let data = match connect_with_proxy(&relay_url, &stream_id, local_proxy.as_ref()).await {
-        Ok(d) => d,
-        Err(e) => {
-            inner.stats.lock().unwrap().error = Some(e);
-            return;
-        }
-    };
     // 解码帧 → 上层通道（消费者慢则丢帧计数，不反压阻塞解码）
     let mut frames_rx = session.take_video_frames().unwrap_or_else(|| {
         // 未配置视频轨（不应发生）：退化为丢弃通道
@@ -231,43 +271,28 @@ async fn receive_loop(
         }
     });
 
-    let mut mgr = SessionDataManager::default();
-    // 通道按传输可靠性分流（B5）：SRT（Adaptive，ARQ 超时即丢、可能乱序）→
-    // 有损路径进抖动缓冲；WS/QUIC（全序不丢）→ 直通。
-    let channel_kind = channel_kind_for(&relay_url);
-    loop {
-        if inner.stopped.load(Ordering::Relaxed) {
-            break;
-        }
-        match data.recv().await {
-            Ok(Some(SessionPacket::Media(frame))) => {
-                inner.stats.lock().unwrap().received += 1;
-                // 单次借用通道：push + poll 共用一个 &mut，避免每帧重复
-                // 的 String 分配 + HashMap 查找（热路径）
-                let channel = mgr.channel(&stream_id, channel_kind);
-                channel.push(frame, Instant::now());
-                // 消息驱动：立即产出送播放
-                for f in channel.poll(Instant::now()) {
-                    if session.push(f).is_err() {
-                        break;
-                    }
-                }
-            }
-            Ok(Some(SessionPacket::Control(_))) => {}
-            Ok(None) => break,
-            Err(e) => {
-                tracing::warn!("观看连接异常: {e}");
-                break;
-            }
-        }
-        // 同步解码统计
-        let s = session.stats();
-        let mut st = inner.stats.lock().unwrap();
-        st.decoded_video = s.video_frames_out;
-        st.audio_blocks = s.audio_blocks_out;
-        st.dropped = s.dropped_push;
-        st.running = true;
-    }
+    // 公共主循环：帧消费 = 解码播放；周期同步 = 解码统计
+    let sink = session.clone();
+    let session_stats = session.clone();
+    let inner2 = inner.clone();
+    watch_consume_loop(
+        inner.clone(),
+        relay_url,
+        stream_id,
+        local_proxy,
+        move |frame| {
+            let _ = sink.push(frame);
+        },
+        move || {
+            let s = session_stats.stats();
+            let mut st = inner2.stats.lock().unwrap();
+            st.decoded_video = s.video_frames_out;
+            st.audio_blocks = s.audio_blocks_out;
+            st.dropped = s.dropped_push;
+            st.running = true;
+        },
+    )
+    .await;
     session.stop();
     fwd.abort();
     inner.stats.lock().unwrap().running = false;
@@ -283,42 +308,24 @@ async fn receive_raw_loop(
     frame_tx: mpsc::Sender<Frame>,
     local_proxy: Option<LocalProxy>,
 ) {
-    let data = match connect_with_proxy(&relay_url, &stream_id, local_proxy.as_ref()).await {
-        Ok(d) => d,
-        Err(e) => {
-            inner.stats.lock().unwrap().error = Some(e);
-            return;
-        }
-    };
-    let mut mgr = SessionDataManager::default();
-    // 同 [`receive_loop`]：按传输可靠性分流（SRT 有损 → 抖动缓冲）
-    let channel_kind = channel_kind_for(&relay_url);
-    loop {
-        if inner.stopped.load(Ordering::Relaxed) {
-            break;
-        }
-        match data.recv().await {
-            Ok(Some(SessionPacket::Media(frame))) => {
-                inner.stats.lock().unwrap().received += 1;
-                // 单次借用通道（热路径，避免每帧重复 String 分配 + 查找）
-                let channel = mgr.channel(&stream_id, channel_kind);
-                channel.push(frame, Instant::now());
-                // 通道 → 转发（lossless 直通，按序产出；消费者慢则丢帧，不反压）
-                for f in channel.poll(Instant::now()) {
-                    if frame_tx.try_send(f).is_err() {
-                        inner.stats.lock().unwrap().dropped += 1;
-                    }
-                }
+    // 公共主循环：帧消费 = 编码帧转发；周期同步 = running 标记
+    let inner2 = inner.clone();
+    let inner3 = inner.clone();
+    watch_consume_loop(
+        inner.clone(),
+        relay_url,
+        stream_id,
+        local_proxy,
+        move |f| {
+            if frame_tx.try_send(f).is_err() {
+                inner2.stats.lock().unwrap().dropped += 1;
             }
-            Ok(Some(SessionPacket::Control(_))) => {}
-            Ok(None) => break,
-            Err(e) => {
-                tracing::warn!("观看连接异常: {e}");
-                break;
-            }
-        }
-        inner.stats.lock().unwrap().running = true;
-    }
+        },
+        move || {
+            inner3.stats.lock().unwrap().running = true;
+        },
+    )
+    .await;
     inner.stats.lock().unwrap().running = false;
 }
 

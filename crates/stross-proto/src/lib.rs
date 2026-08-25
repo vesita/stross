@@ -9,5 +9,25 @@
 pub mod frame;
 pub mod message;
 
+/// 通用时间工具（Unix 秒/毫秒；多处会话起点/过期时间计算共用，避免各层
+/// 重复 `SystemTime::duration_since(UNIX_EPOCH)` 转换）。
+pub mod time {
+    /// 当前 Unix 秒。
+    pub fn unix_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// 当前 Unix 毫秒。
+    pub fn unix_millis() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+}
+
 pub use frame::*;
 pub use message::*;

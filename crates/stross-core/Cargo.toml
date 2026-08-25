@@ -12,6 +12,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+async-trait.workspace = true
 tracing.workspace = true
 axum.workspace = true
 hostname.workspace = true
@@ -24,10 +25,10 @@ default = []
 discovery = ["dep:mdns-sd", "stross-transport/discovery"]
 
 [dev-dependencies]
-futures-util = "0.3"
-tokio-tungstenite = "0.27"
-tungstenite = "0.27"
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+tungstenite.workspace = true
 # WebRTC 集成测试客户端（webrtc_watch.rs 直接使用 str0m 对端）
-str0m = { version = "0.23", default-features = false, features = ["rust-crypto"] }
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+str0m.workspace = true
+reqwest.workspace = true
 tracing-subscriber.workspace = true

@@ -19,10 +19,7 @@ use tokio::task::JoinHandle;
 use stross_proto::frame::Frame;
 use stross_proto::message::ControlMessage;
 
-use crate::transport::quic::QuicTransport;
-use crate::transport::srt::SrtTransport;
-use crate::transport::ws::WsTransport;
-use crate::transport::{DataSession, PeerAddr, SessionPacket, SessionParams, Transport};
+use crate::transport::{DataSession, PeerAddr, SessionPacket, SessionParams};
 
 /// 推流客户端。
 pub struct RelayClient {
@@ -45,13 +42,7 @@ impl RelayClient {
             ControlMessage::Hello { stream_id, .. } => stream_id.clone(),
             _ => String::new(),
         };
-        let transport: Box<dyn Transport> = if url.starts_with("srt://") {
-            Box::new(SrtTransport::new())
-        } else if url.starts_with("quic://") {
-            Box::new(QuicTransport::new())
-        } else {
-            Box::new(WsTransport::new())
-        };
+        let transport = crate::transport::transport_for_url(url);
         let peer = PeerAddr {
             transport: transport.id(),
             addr: url.to_string(),

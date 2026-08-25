@@ -219,11 +219,7 @@ fn video_writer_loop(rx: std::sync::mpsc::Receiver<Frame>, shared: Arc<VideoShar
         shared.stats.lock().unwrap().video_frames_in += 1;
     }
     // 收尾：杀子进程、关 stdin、join 读线程
-    kill_child(child.take());
-    drop(stdin.take());
-    if let Some(r) = reader.take() {
-        let _ = r.join();
-    }
+    teardown_gen(&mut child, &mut stdin, &mut reader);
 }
 
 /// 视频读线程（一个子进程代际）：持续读 stdout，按帧大小切出 RGBA 帧。
@@ -338,11 +334,7 @@ fn audio_writer_loop(
         let Some(si) = stdin.as_mut() else { continue };
         if si.write_all(&frame.payload).is_err() {
             // 子进程已退出 → 杀旧进程、等下一帧重建
-            kill_child(child.take());
-            drop(stdin.take());
-            if let Some(r) = reader.take() {
-                let _ = r.join();
-            }
+            teardown_gen(&mut child, &mut stdin, &mut reader);
             continue;
         }
         stats.lock().unwrap().audio_blocks_in += 1;
@@ -409,6 +401,20 @@ fn kill_child(child: Option<Child>) {
     if let Some(mut c) = child {
         let _ = c.kill();
         let _ = c.wait();
+    }
+}
+
+/// 收尾一个解码子进程代际：杀子进程、关 stdin、join 读线程。
+/// 视频/音频主循环与失步重建共用（避免 4 处复制同样的收尾序列）。
+fn teardown_gen(
+    child: &mut Option<Child>,
+    stdin: &mut Option<std::process::ChildStdin>,
+    reader: &mut Option<std::thread::JoinHandle<()>>,
+) {
+    kill_child(child.take());
+    drop(stdin.take());
+    if let Some(r) = reader.take() {
+        let _ = r.join();
     }
 }
 

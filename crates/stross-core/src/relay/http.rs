@@ -41,6 +41,8 @@ pub(super) fn router(state: RelayState) -> Router {
         .route("/api/info", get(api_info))
         .route("/api/streams", get(api_streams))
         .route("/api/peers", get(api_peers))
+        .route("/api/proxy", post(api_proxy_start))
+        .route("/api/proxies", get(api_proxies))
         .route("/api/webrtc/start", post(api_webrtc_start))
         .route("/api/webrtc/answer", post(api_webrtc_answer))
         .route("/ws/push", get(ws_push))
@@ -76,6 +78,51 @@ async fn api_streams(State(state): State<RelayState>) -> Json<Vec<StreamInfo>> {
 /// 局域网内其它设备（观看端页面「局域网设备」区拉取）。
 async fn api_peers(State(state): State<RelayState>) -> Json<Vec<PeerInfo>> {
     Json(state.peers())
+}
+
+// ---------------------------------------------------------------------------
+// 级联代理（转发链/树）：POST /api/proxy 把上游中继的流拉到本地广播
+// ---------------------------------------------------------------------------
+
+/// 请求建立代理流。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyReq {
+    /// 上游中继基址（`ws://host:port`；`srt://` / `quic://` 亦可）。
+    upstream: String,
+    /// 上游流 id。
+    stream_id: String,
+    /// 上游流信息（可选；前端自动发现时已持有，透传避免再向上游查询）。
+    #[serde(default)]
+    info: Option<StreamInfo>,
+}
+
+/// 建立代理流：本地 `/api/streams` 立即出现该流，普通 watch 即可订阅。
+/// 409 = 本地已有同名流（推流或代理）。
+async fn api_proxy_start(
+    State(state): State<RelayState>,
+    Json(req): Json<ProxyReq>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    match state.start_proxy(&req.upstream, &req.stream_id, req.info) {
+        Ok(id) => Ok(Json(serde_json::json!({
+            "streamId": id,
+            "proxied": true,
+        }))),
+        Err(e) => Err(api_err(StatusCode::CONFLICT, e)),
+    }
+}
+
+/// 列出本中继当前代理的流（id → 上游）。
+async fn api_proxies(State(state): State<RelayState>) -> Json<Vec<serde_json::Value>> {
+    Json(
+        state
+            .proxies()
+            .into_iter()
+            .map(|(stream_id, upstream)| {
+                serde_json::json!({ "streamId": stream_id, "upstream": upstream })
+            })
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------

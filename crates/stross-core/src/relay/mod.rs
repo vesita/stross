@@ -1,10 +1,13 @@
 //! 中继服务器：接收推流，向观看者广播。
 //!
-//! 借鉴 [MediaMTX](https://github.com/bluenviron/mediamtx) 的"推流端 → 中继 → 观看端"模型：
+//! 借鉴 [MediaMTX](https://github.com/bluenviron/mediamtx) 的"推流端 → 中继 → 观看端"模型，
+//! 并支持**级联代理**（转发链/树）：中继可将上游中继的流拉到本地广播，
+//! 观看端只需连接最近的中继（见 [`RelayState::start_proxy`]，对齐 MoQ 的中继链语义）。
 //!
 //! * `GET /ws/push`：推流端 WebSocket（先发 `Hello`，再发二进制媒体帧）
 //! * `GET /ws/watch?stream=<id>`：观看端 WebSocket（收到 `Ready` 后收帧）
-//! * `GET /api/streams`：流列表（观看端页面拉取）
+//! * `GET /api/streams`：流列表（含本地推流与代理流）
+//! * `POST /api/proxy`：请求代理上游中继的流（级联）
 //! * `GET /`：内嵌的观看端页面
 //!
 //! 数据面转发（[`handle_push`] / [`handle_watch`]）只依赖
@@ -70,6 +73,14 @@ struct StreamEntry {
     last_keyframe: Option<Frame>,
 }
 
+/// 一条代理流（级联转发）的运行状态。
+struct ProxyEntry {
+    /// 上游中继基址（`ws://host:port`；`srt://` / `quic://` 亦透传 [`crate::watch::connect_watch`]）。
+    upstream: String,
+    /// 上游拉取任务句柄（拆除时 abort）。
+    task: JoinHandle<()>,
+}
+
 /// 流表分片（`Arc` 便于 `RelayState` 克隆共享；每片一把 `Mutex`）。
 type StreamShards = Arc<Vec<Arc<Mutex<HashMap<String, StreamEntry>>>>>;
 
@@ -83,6 +94,9 @@ pub struct RelayState {
     webrtc_peers: Arc<Mutex<HashMap<String, crate::transport::webrtc::WebRtcPeer>>>,
     /// 局域网内其它中继（设备发现缓存；`/api/peers` 返回）。
     peers: Arc<Mutex<HashMap<String, PeerInfo>>>,
+    /// 代理流任务表（级联转发；id → 上游 + 拉取任务）。
+    /// 代理流同时注册在 [`Self::streams`]，本地观看端走普通转发路径。
+    proxies: Arc<Mutex<HashMap<String, ProxyEntry>>>,
     /// 受控模式允许接入的 stream id（内核预注册；非受控模式忽略）。
     allowed: Arc<Mutex<HashSet<String>>>,
     /// 是否受控：仅允许 [`Self::allowed`] 中的 stream id 推流。
@@ -110,6 +124,7 @@ impl Default for RelayState {
             ),
             webrtc_peers: Arc::new(Mutex::new(HashMap::new())),
             peers: Arc::new(Mutex::new(HashMap::new())),
+            proxies: Arc::new(Mutex::new(HashMap::new())),
             allowed: Arc::new(Mutex::new(HashSet::new())),
             controlled: false,
             port: 0,
@@ -236,6 +251,103 @@ impl RelayState {
     pub fn subscribe_events(&self) -> broadcast::Receiver<RelayEvent> {
         self.events.subscribe()
     }
+
+    /// 在本中继上建立**代理流**（级联转发）：从 `upstream` 中继拉取 `stream_id`，
+    /// 作为本地虚拟流广播，实现「观看端 → 本中继 → 上游中继 → 推流端」的转发链/树。
+    ///
+    /// 代理流对本地观看端完全透明：出现在 `/api/streams`，可被普通 watch 订阅，
+    /// 关键帧对齐 / 多观看者广播复用现有路径。上游断开或连接失败时自动清理。
+    ///
+    /// `info` 可选：调用方已知上游流信息（title/video/audio）时透传，
+    /// 避免再向上游查询；缺省用占位信息（解码不受影响——SPS/PPS 随关键帧）。
+    pub fn start_proxy(
+        &self,
+        upstream: &str,
+        stream_id: &str,
+        info: Option<StreamInfo>,
+    ) -> Result<String, String> {
+        {
+            let mut guards = self.proxies.lock().unwrap();
+            if guards.contains_key(stream_id) {
+                return Err(format!("本地已有代理流 {stream_id}"));
+            }
+            if self.get(stream_id).is_some() {
+                return Err(format!("本地已有流 {stream_id}（推流或代理）"));
+            }
+            let (tx, _rx) = broadcast::channel(128);
+            let info = info.unwrap_or_else(|| StreamInfo {
+                stream_id: stream_id.to_string(),
+                title: stream_id.to_string(),
+                video: None,
+                audio: None,
+                started_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                watchers: 0,
+            });
+            // 先注册本地流（观看端立即可见），再启动上游拉取任务
+            self.insert(StreamEntry {
+                info: info.clone(),
+                tx,
+                last_keyframe: None,
+            });
+            let task = tokio::spawn(proxy_uplink(
+                self.clone(),
+                upstream.to_string(),
+                stream_id.to_string(),
+            ));
+            guards.insert(
+                stream_id.to_string(),
+                ProxyEntry {
+                    upstream: upstream.to_string(),
+                    task,
+                },
+            );
+            self.emit(RelayEvent::StreamStarted {
+                stream_id: stream_id.to_string(),
+                info,
+            });
+        }
+        Ok(stream_id.to_string())
+    }
+
+    /// 拆除代理流（上游断开 / 手动调用）：删流 + 上报事件 + 移除任务记录。
+    pub fn remove_proxy(&self, id: &str) {
+        let removed = self.proxies.lock().unwrap().remove(id).is_some();
+        if removed && self.remove(id) {
+            self.emit(RelayEvent::StreamEnded {
+                stream_id: id.to_string(),
+            });
+        }
+    }
+
+    /// 列出代理流（id → 上游地址），供 `/api/proxies`。
+    pub fn proxies(&self) -> Vec<(String, String)> {
+        let mut v: Vec<_> = self
+            .proxies
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, e)| (id.clone(), e.upstream.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// 拆除全部代理任务（中继停止时调用）。
+    pub fn abort_proxies(&self) {
+        let tasks: Vec<_> = self
+            .proxies
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, e)| e.task)
+            .collect();
+        for t in tasks {
+            t.abort();
+        }
+    }
 }
 
 /// 中继句柄。
@@ -313,9 +425,10 @@ impl RelayHandle {
         self.state.clone()
     }
 
-    /// 停止中继服务。
+    /// 停止中继服务（同时拆除全部代理任务）。
     pub async fn stop(self) {
         let _ = self.shutdown.send(true);
+        self.state.abort_proxies();
         let _ = self.task.await;
     }
 }
@@ -459,9 +572,15 @@ pub(super) async fn handle_watch(
     };
     let info = entry.info.clone();
     let mut rx = entry.tx.subscribe();
+    let last_kf = entry.last_keyframe.clone();
+    let watchers = entry.tx.receiver_count() as u32;
+    // 尽早释放 entry（含 broadcast::Sender 的 clone）：流被删后原始 sender drop，
+    // 广播 channel 关闭 → rx.recv() 返回 Closed → 本循环退出并关会话；
+    // 否则 sender clone 让 channel 永活，观看会话（含级联代理）悬挂不清理。
+    drop(entry);
     state.emit(RelayEvent::WatchersChanged {
         stream_id: stream_id.clone(),
-        watchers: entry.tx.receiver_count() as u32,
+        watchers,
     });
     let _ = session
         .send(SessionPacket::Control(ControlMessage::Ready {
@@ -471,13 +590,13 @@ pub(super) async fn handle_watch(
 
     let mut video_started = false;
     // 新观看者先收到最近一个关键帧（含 SPS/PPS），立刻可解码
-    if let Some(kf) = entry.last_keyframe.clone() {
+    if let Some(kf) = last_kf {
         if session.send(SessionPacket::Media(kf)).await.is_err() {
             // 会话已死：补发观看数变化，避免计数泄漏
             drop(rx);
             state.emit(RelayEvent::WatchersChanged {
                 stream_id: stream_id.clone(),
-                watchers: entry.tx.receiver_count() as u32,
+                watchers: 0,
             });
             return;
         }
@@ -512,11 +631,15 @@ pub(super) async fn handle_watch(
     }
     // 干净关闭会话（WS 发 Close 帧；WebRTC 触发 run loop 退出）
     let _ = session.close().await;
-    // 订阅端已断开，广播新的观看者数量
+    // 订阅端已断开，广播新的观看者数量（流仍存在时取剩余 receiver 数）
     drop(rx);
+    let watchers = state
+        .get(&stream_id)
+        .map(|e| e.tx.receiver_count() as u32)
+        .unwrap_or(0);
     state.emit(RelayEvent::WatchersChanged {
         stream_id: stream_id.clone(),
-        watchers: entry.tx.receiver_count() as u32,
+        watchers,
     });
     tracing::debug!("观看端断开: {stream_id} ({})", info.title);
 }
@@ -664,4 +787,199 @@ async fn handle_push_loop(
         }
     }
     let _ = session.close().await;
+}
+
+/// 代理拉取任务：以观看者身份连接上游中继，把收到的帧转发到本地代理流；
+/// 上游断开 / 连接失败时清理本地代理流（[`RelayState::remove_proxy`]）。
+async fn proxy_uplink(state: RelayState, upstream: String, stream_id: String) {
+    let session = match crate::watch::connect_watch(&upstream, &stream_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("代理上游连接失败 {upstream} {stream_id}: {e}");
+            state.remove_proxy(&stream_id);
+            return;
+        }
+    };
+    tracing::info!("代理已连接上游: {upstream} → {stream_id}");
+    loop {
+        match session.recv().await {
+            Ok(Some(SessionPacket::Media(frame))) => state.forward(&stream_id, frame),
+            Ok(Some(SessionPacket::Control(_))) => continue,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::warn!("代理上游接收异常: {e}");
+                break;
+            }
+        }
+    }
+    tracing::info!("代理上游断开，清理本地流: {stream_id}");
+    state.remove_proxy(&stream_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_VIDEO};
+    use stross_proto::message::{ControlMessage, ReliabilityProfile};
+
+    use crate::transport::ws::WsTransport;
+    use crate::transport::{PeerAddr, SessionParams, Transport};
+    use crate::watch::connect_watch;
+    use tokio::time::Duration;
+
+    /// 在 `base`（ws://host:port）中继上建流并发送一个关键帧（等 Welcome 确认流已注册）。
+    /// 返回推流会话：调用方必须持有它直到断言结束（drop 会断开并删流）。
+    async fn push_keyframe(base: &str, stream_id: &str) -> Box<dyn DataSession> {
+        let transport = WsTransport::new();
+        let peer = PeerAddr {
+            transport: stross_proto::message::TransportId::Ws,
+            addr: format!("{base}/ws/push"),
+        };
+        let params = SessionParams {
+            session_id: stream_id.into(),
+            profile: ReliabilityProfile::Lossless,
+        };
+        let push = transport.connect(&peer, &params).await.unwrap();
+        push.send(SessionPacket::Control(ControlMessage::Hello {
+            stream_id: stream_id.into(),
+            title: "级联测试流".into(),
+            video: None,
+            audio: None,
+        }))
+        .await
+        .unwrap();
+        // 等 Welcome，确保流已建立（避免观看/代理先到报「流不存在」）
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), push.recv()).await {
+                Ok(Ok(Some(SessionPacket::Control(ControlMessage::Welcome { .. })))) => break,
+                Ok(Ok(Some(_))) => continue,
+                Ok(Ok(None)) => panic!("推流连接提前关闭"),
+                Ok(Err(e)) => panic!("推流 recv 错误: {e}"),
+                Err(_) => panic!("等 Welcome 超时"),
+            }
+        }
+        push.send(SessionPacket::Media(Frame::new(
+            TRACK_VIDEO,
+            CODEC_H264,
+            FLAG_KEYFRAME,
+            0,
+            vec![0x65, 0x88, 0x00, 0x01],
+        )))
+        .await
+        .unwrap();
+        push
+    }
+
+    /// 从 `base` 中继观看 `stream_id`，直到收到关键帧（带超时）。
+    async fn watch_until_keyframe(base: &str, stream_id: &str) {
+        let session = connect_watch(base, stream_id).await.expect("watch 连接应成功");
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), session.recv()).await {
+                Ok(Ok(Some(SessionPacket::Media(f)))) if f.header.is_keyframe() => break,
+                Ok(Ok(Some(_))) => continue,
+                Ok(Ok(None)) => panic!("观看连接提前关闭"),
+                Ok(Err(e)) => panic!("观看 recv 错误: {e}"),
+                Err(_) => panic!("收关键帧超时"),
+            }
+        }
+    }
+
+    /// 级联拓扑：R1 推流 → R2 代理 R1 的流 → 观看端连 R2 收到关键帧。
+    #[tokio::test]
+    async fn relay_proxies_remote_stream() {
+        let r1 = RelayServer::start(0).await.unwrap();
+        let r2 = RelayServer::start(0).await.unwrap();
+        let base1 = format!("ws://127.0.0.1:{}", r1.port);
+        let base2 = format!("ws://127.0.0.1:{}", r2.port);
+
+        let _push1 = push_keyframe(&base1, "cascade-1").await;
+
+        // R2 代理 R1 的流（调用方未知上游 info，走占位）
+        let id = r2.state().start_proxy(&base1, "cascade-1", None).unwrap();
+        assert_eq!(id, "cascade-1");
+        // 代理流立即出现在 R2 的流列表
+        assert!(r2.streams().iter().any(|s| s.stream_id == "cascade-1"));
+
+        // 观看端连 R2 收到关键帧（经 R2 → R1 级联转发）
+        watch_until_keyframe(&base2, "cascade-1").await;
+
+        // 代理流信息（/api/streams 展示用）
+        let info = r2
+            .streams()
+            .into_iter()
+            .find(|s| s.stream_id == "cascade-1")
+            .expect("代理流应存在于 R2 流表");
+        assert_eq!(info.title, "cascade-1");
+
+        r1.stop().await;
+        r2.stop().await;
+    }
+
+    /// 代理不存在的流：任务失败后本地占位流被清理。
+    #[tokio::test]
+    async fn proxy_of_missing_stream_cleans_up() {
+        let r1 = RelayServer::start(0).await.unwrap();
+        let r2 = RelayServer::start(0).await.unwrap();
+        let base1 = format!("ws://127.0.0.1:{}", r1.port);
+
+        r2.state()
+            .start_proxy(&base1, "no-such-stream", None)
+            .unwrap();
+        // 等拉取任务失败并清理（connect_watch 会收到「流不存在」错误）
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            r2.streams().iter().all(|s| s.stream_id != "no-such-stream"),
+            "代理不存在的流应自动清理"
+        );
+
+        r1.stop().await;
+        r2.stop().await;
+    }
+
+    /// 同名冲突：本地已有推流时拒绝代理。
+    #[tokio::test]
+    async fn proxy_conflicts_with_local_stream() {
+        let r2 = RelayServer::start(0).await.unwrap();
+        let base1 = format!("ws://127.0.0.1:{}", r2.port);
+
+        let _push2 = push_keyframe(&base1, "local-1").await;
+        let err = r2.state().start_proxy("ws://127.0.0.1:1", "local-1", None);
+        assert!(err.is_err(), "本地已有同名流时应拒绝代理");
+
+        r2.stop().await;
+    }
+
+    /// 上游推流结束后，代理任务退出、本地代理流被清理（覆盖 sender clone 悬挂 bug）。
+    #[tokio::test]
+    async fn proxy_cleans_up_when_upstream_stream_ends() {
+        let r1 = RelayServer::start(0).await.unwrap();
+        let r2 = RelayServer::start(0).await.unwrap();
+        let base1 = format!("ws://127.0.0.1:{}", r1.port);
+        let base2 = format!("ws://127.0.0.1:{}", r2.port);
+
+        let push = push_keyframe(&base1, "short-1").await;
+        r2.state().start_proxy(&base1, "short-1", None).unwrap();
+        // 确认级联转发已通（观看端经 R2 收到关键帧）
+        watch_until_keyframe(&base2, "short-1").await;
+
+        drop(push); // 推流端断开 → R1 删流 → 上游观看会话关闭 → 代理自清理
+        // 轮询等待清理（跨进程事件传播需要时间）
+        for _ in 0..20 {
+            if r2.streams().iter().all(|s| s.stream_id != "short-1") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            r2.streams().iter().all(|s| s.stream_id != "short-1"),
+            "上游流结束后代理应自动清理"
+        );
+        assert!(
+            r2.state().proxies().is_empty(),
+            "代理任务表应清空"
+        );
+
+        r1.stop().await;
+        r2.stop().await;
+    }
 }

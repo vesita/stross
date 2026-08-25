@@ -54,7 +54,7 @@ impl Default for WebRtcTransport {
 impl WebRtcTransport {
     pub fn new() -> Self {
         Self {
-            stats: Arc::new(Mutex::new(TransportStats::default())),
+            stats: Arc::new(TransportStats::default()),
         }
     }
 
@@ -163,7 +163,7 @@ impl Transport for WebRtcTransport {
     }
 
     fn stats(&self) -> TransportStats {
-        self.stats.blocking_lock().clone()
+        self.stats.as_ref().clone()
     }
 }
 
@@ -228,7 +228,7 @@ impl WebRtcPeer {
             .ok_or(TransportError::Protocol("peer 已被使用".into()))?;
 
         let (inbound_tx, inbound_rx) = mpsc::channel::<SessionPacket>(64);
-        let stats: SharedStats = Arc::new(Mutex::new(TransportStats::default()));
+        let stats: SharedStats = Arc::new(TransportStats::default());
         let udp = self.udp.clone();
         let control_id = self.control_id;
         let media_id = self.media_id;
@@ -338,7 +338,7 @@ impl PeerLoop {
                             }
                         };
                         if let Some(n) = sent {
-                            self.stats.lock().await.add_sent(n);
+                            self.stats.add_sent(n);
                         }
                     }
                     Ok(PeerCommand::Close) => {
@@ -385,7 +385,7 @@ impl PeerLoop {
                         if let Err(e) = self.udp.send_to(&t.contents[..], t.destination).await {
                             tracing::warn!("webrtc udp send_to: {e}");
                         }
-                        self.stats.lock().await.add_sent(n);
+                        self.stats.add_sent(n);
                     }
                     Ok(Output::Timeout(t)) => {
                         next_timeout = Some(t);
@@ -425,7 +425,7 @@ impl PeerLoop {
                                 None
                             };
                             if let Some(pkt) = pkt {
-                                self.stats.lock().await.add_recv(d.data.len());
+                                self.stats.add_recv(d.data.len());
                                 let _ = self.inbound_tx.send(pkt).await;
                             }
                         }

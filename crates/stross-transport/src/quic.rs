@@ -51,7 +51,7 @@ impl Default for QuicTransport {
 impl QuicTransport {
     pub fn new() -> Self {
         Self {
-            stats: Arc::new(Mutex::new(TransportStats::default())),
+            stats: Arc::new(TransportStats::default()),
         }
     }
 
@@ -137,7 +137,7 @@ impl Transport for QuicTransport {
     }
 
     fn stats(&self) -> TransportStats {
-        self.stats.blocking_lock().clone()
+        self.stats.as_ref().clone()
     }
 }
 
@@ -229,13 +229,13 @@ impl DataSession for QuicDataSession {
                 let text = c.to_text();
                 let mut tx = self.control_tx.lock().await;
                 write_msg(&mut tx, text.as_bytes()).await?;
-                self.stats.lock().await.add_sent(LEN_BYTES + text.len());
+                self.stats.add_sent(LEN_BYTES + text.len());
             }
             SessionPacket::Media(frame) => {
                 let full = frame.to_bytes();
                 let mut tx = self.media_tx.lock().await;
                 write_msg(&mut tx, &full).await?;
-                self.stats.lock().await.add_sent(LEN_BYTES + full.len());
+                self.stats.add_sent(LEN_BYTES + full.len());
             }
         }
         Ok(())
@@ -248,7 +248,7 @@ impl DataSession for QuicDataSession {
             biased;
             r = self.recv_control() => {
                 let Some(bytes) = r? else { return Ok(None) };
-                self.stats.lock().await.add_recv(LEN_BYTES + bytes.len());
+                self.stats.add_recv(LEN_BYTES + bytes.len());
                 let text = std::str::from_utf8(&bytes)
                     .map_err(|e| TransportError::Protocol(e.to_string()))?;
                 let msg = ControlMessage::from_text(text)
@@ -257,7 +257,7 @@ impl DataSession for QuicDataSession {
             }
             r = self.recv_media() => {
                 let Some(bytes) = r? else { return Ok(None) };
-                self.stats.lock().await.add_recv(LEN_BYTES + bytes.len());
+                self.stats.add_recv(LEN_BYTES + bytes.len());
                 let frame = Frame::from_bytes(&bytes)
                     .map_err(|e| TransportError::Protocol(e.to_string()))?;
                 Ok(Some(SessionPacket::Media(frame)))

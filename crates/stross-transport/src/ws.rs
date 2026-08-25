@@ -34,7 +34,7 @@ impl Default for WsTransport {
 impl WsTransport {
     pub fn new() -> Self {
         Self {
-            stats: Arc::new(Mutex::new(TransportStats::default())),
+            stats: Arc::new(TransportStats::default()),
         }
     }
 
@@ -65,6 +65,10 @@ impl Transport for WsTransport {
         let (socket, _resp) = tokio_tungstenite::connect_async(&peer.addr)
             .await
             .map_err(|e| TransportError::Connect(e.to_string()))?;
+        // TCP_NODELAY：媒体每帧一个 WS 消息，Nagle 会叠加延迟
+        if let tokio_tungstenite::MaybeTlsStream::Plain(tcp) = socket.get_ref() {
+            let _ = tcp.set_nodelay(true);
+        }
         Ok(Box::new(WsDataSession {
             io: Box::new(TungsteniteWs::new(socket)),
             stats: self.stats.clone(),
@@ -81,7 +85,7 @@ impl Transport for WsTransport {
     }
 
     fn stats(&self) -> TransportStats {
-        self.stats.blocking_lock().clone()
+        self.stats.as_ref().clone()
     }
 }
 
@@ -237,7 +241,7 @@ impl DataSession for WsDataSession {
             }
         };
         self.io.send_msg(msg).await?;
-        self.stats.lock().await.add_sent(size);
+        self.stats.add_sent(size);
         Ok(())
     }
 
@@ -251,14 +255,14 @@ impl DataSession for WsDataSession {
                 let pkt = stross_proto::message::ControlMessage::from_text(&s)
                     .map(SessionPacket::Control)
                     .map_err(|e| TransportError::Protocol(e.to_string()))?;
-                self.stats.lock().await.add_recv(n);
+                self.stats.add_recv(n);
                 Ok(Some(pkt))
             }
             WsMsg::Binary(b) => {
                 let n = b.len();
                 let frame = stross_proto::frame::Frame::from_bytes(&b)
                     .map_err(|e| TransportError::Protocol(e.to_string()))?;
-                self.stats.lock().await.add_recv(n);
+                self.stats.add_recv(n);
                 Ok(Some(SessionPacket::Media(frame)))
             }
         }

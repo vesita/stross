@@ -58,7 +58,7 @@ impl Default for SrtTransport {
 impl SrtTransport {
     pub fn new() -> Self {
         Self {
-            stats: Arc::new(Mutex::new(TransportStats::default())),
+            stats: Arc::new(TransportStats::default()),
         }
     }
 
@@ -113,7 +113,7 @@ impl Transport for SrtTransport {
     }
 
     fn stats(&self) -> TransportStats {
-        self.stats.blocking_lock().clone()
+        self.stats.as_ref().clone()
     }
 }
 
@@ -192,7 +192,7 @@ impl DataSession for SrtDataSession {
                 sock.send(&msg)
                     .await
                     .map_err(|e| TransportError::Io(format!("SRT 发送失败: {e}")))?;
-                self.stats.lock().await.add_sent(n);
+                self.stats.add_sent(n);
             }
             SessionPacket::Media(frame) => {
                 let payload = &frame.payload;
@@ -205,7 +205,7 @@ impl DataSession for SrtDataSession {
                     sock.send(&msg)
                         .await
                         .map_err(|e| TransportError::Io(format!("SRT 发送失败: {e}")))?;
-                    self.stats.lock().await.add_sent(n);
+                    self.stats.add_sent(n);
                 } else {
                     // 分片：每片 = 1B 类型 + 帧头（frag_* 标记）+ 片载荷
                     let frag_cnt = (payload.len().div_ceil(FRAGMENT_LEN)) as u8;
@@ -222,7 +222,7 @@ impl DataSession for SrtDataSession {
                         sock.send(&msg)
                             .await
                             .map_err(|e| TransportError::Io(format!("SRT 发送失败: {e}")))?;
-                        self.stats.lock().await.add_sent(n);
+                        self.stats.add_sent(n);
                     }
                 }
             }
@@ -241,7 +241,7 @@ impl DataSession for SrtDataSession {
             else {
                 return Ok(None); // 对端干净关闭（SRT SHUTDOWN）
             };
-            self.stats.lock().await.add_recv(bytes.len());
+            self.stats.add_recv(bytes.len());
             if let Some(pkt) = decode_message(&bytes, &mut *self.rx.lock().await) {
                 return Ok(Some(pkt));
             }

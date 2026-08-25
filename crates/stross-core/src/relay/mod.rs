@@ -29,6 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::serve::{Listener, ListenerExt};
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
@@ -283,7 +284,10 @@ impl RelayServer {
         };
         let app = http::router(state.clone());
 
-        let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+        // TCP_NODELAY：媒体每帧一个 WS 消息，Nagle 会叠加延迟（LAN 也受影响）
+        let listener = TcpListener::bind(("0.0.0.0", port)).await?.tap_io(|s| {
+            let _ = s.set_nodelay(true);
+        });
         let actual_port = listener.local_addr()?.port();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
@@ -495,7 +499,9 @@ pub(super) async fn handle_push(session: Box<dyn DataSession>, state: RelayState
                     let _ = session.close().await;
                     return;
                 }
-                let (tx, _rx) = broadcast::channel(1024);
+                // 广播容量 128 ≈ 4 秒 @30fps：限制慢观看端的内存积压
+                // （超出的观看端收到 Lagged，等下一个关键帧重对齐）
+                let (tx, _rx) = broadcast::channel(128);
                 let info = StreamInfo {
                     stream_id: id.clone(),
                     title,

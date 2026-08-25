@@ -34,7 +34,7 @@ impl MemoryHub {
 pub struct MemoryTransport {
     hub: Arc<MemoryHub>,
     addr: String,
-    stats: Arc<AsyncMutex<TransportStats>>,
+    stats: Arc<TransportStats>,
 }
 
 impl MemoryTransport {
@@ -42,7 +42,7 @@ impl MemoryTransport {
         Self {
             hub,
             addr: addr.into(),
-            stats: Arc::new(AsyncMutex::new(TransportStats::default())),
+            stats: Arc::new(TransportStats::default()),
         }
     }
 }
@@ -104,7 +104,7 @@ impl Transport for MemoryTransport {
     }
 
     fn stats(&self) -> TransportStats {
-        self.stats.blocking_lock().clone()
+        self.stats.as_ref().clone()
     }
 }
 

@@ -21,30 +21,70 @@ pub mod webrtc;
 pub mod ws;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use stross_proto::frame::Frame;
 use stross_proto::message::{ControlMessage, ReliabilityProfile, TransportId};
 use thiserror::Error;
-use tokio::sync::Mutex;
 
 /// 传输统计数据（供内核事件 / 观看端 stats UI 使用）。
-#[derive(Debug, Clone, Default, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+///
+/// 字节计数为原子（`fetch_add`），媒体热路径（每帧）只做无锁累加；
+/// rtt/loss/jitter 为低频可选项，普通字段即可。
+#[derive(Debug, Default)]
 pub struct TransportStats {
     pub rtt_ms: Option<u32>,
     pub loss_pct: Option<f32>,
     pub jitter_ms: Option<f32>,
-    pub bytes_sent: u64,
-    pub bytes_recv: u64,
+    bytes_sent: AtomicU64,
+    bytes_recv: AtomicU64,
 }
 
 impl TransportStats {
-    fn add_sent(&mut self, n: usize) {
-        self.bytes_sent = self.bytes_sent.saturating_add(n as u64);
+    /// 已发送字节数（原子读）。
+    pub fn bytes_sent(&self) -> u64 {
+        self.bytes_sent.load(Ordering::Relaxed)
     }
-    fn add_recv(&mut self, n: usize) {
-        self.bytes_recv = self.bytes_recv.saturating_add(n as u64);
+
+    /// 已接收字节数（原子读）。
+    pub fn bytes_recv(&self) -> u64 {
+        self.bytes_recv.load(Ordering::Relaxed)
+    }
+
+    /// 累加已发送字节（热路径：无锁）。
+    pub(crate) fn add_sent(&self, n: usize) {
+        self.bytes_sent.fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    /// 累加已接收字节（热路径：无锁）。
+    pub(crate) fn add_recv(&self, n: usize) {
+        self.bytes_recv.fetch_add(n as u64, Ordering::Relaxed);
+    }
+}
+
+impl Clone for TransportStats {
+    fn clone(&self) -> Self {
+        Self {
+            rtt_ms: self.rtt_ms,
+            loss_pct: self.loss_pct,
+            jitter_ms: self.jitter_ms,
+            bytes_sent: AtomicU64::new(self.bytes_sent()),
+            bytes_recv: AtomicU64::new(self.bytes_recv()),
+        }
+    }
+}
+
+impl serde::Serialize for TransportStats {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("TransportStats", 5)?;
+        st.serialize_field("rttMs", &self.rtt_ms)?;
+        st.serialize_field("lossPct", &self.loss_pct)?;
+        st.serialize_field("jitterMs", &self.jitter_ms)?;
+        st.serialize_field("bytesSent", &self.bytes_sent())?;
+        st.serialize_field("bytesRecv", &self.bytes_recv())?;
+        st.end()
     }
 }
 
@@ -121,5 +161,5 @@ pub trait DataSession: Send + Sync + 'static {
     async fn close(&self) -> Result<(), TransportError>;
 }
 
-/// 共享统计计数器（Transport 与其派生的会话共享）。
-pub(crate) type SharedStats = Arc<Mutex<TransportStats>>;
+/// 共享统计计数器（Transport 与其派生的会话共享；字节计数为原子，无锁）。
+pub(crate) type SharedStats = Arc<TransportStats>;

@@ -70,10 +70,15 @@ struct StreamEntry {
     last_keyframe: Option<Frame>,
 }
 
+/// 流表分片（`Arc` 便于 `RelayState` 克隆共享；每片一把 `Mutex`）。
+type StreamShards = Arc<Vec<Arc<Mutex<HashMap<String, StreamEntry>>>>>;
+
 /// 中继共享状态。
 #[derive(Clone)]
 pub struct RelayState {
-    streams: Arc<Mutex<HashMap<String, StreamEntry>>>,
+    /// 流表分片锁：按 stream_id hash 分片，不同流的转发互不阻塞
+    /// （单流内仍原子：last_keyframe 更新 + 广播；多流并发时是真正热路径）。
+    streams: StreamShards,
     /// 待完成信令的 WebRTC peer（`/api/webrtc/start` 与 `/answer` 之间）。
     webrtc_peers: Arc<Mutex<HashMap<String, crate::transport::webrtc::WebRtcPeer>>>,
     /// 局域网内其它中继（设备发现缓存；`/api/peers` 返回）。
@@ -92,10 +97,17 @@ pub struct RelayState {
     events: broadcast::Sender<RelayEvent>,
 }
 
+/// 流表分片数（幂为 2，取模快；16 片对家庭/小团队并发足够）。
+const STREAM_SHARDS: usize = 16;
+
 impl Default for RelayState {
     fn default() -> Self {
         Self {
-            streams: Arc::new(Mutex::new(HashMap::new())),
+            streams: Arc::new(
+                (0..STREAM_SHARDS)
+                    .map(|_| Arc::new(Mutex::new(HashMap::new())))
+                    .collect(),
+            ),
             webrtc_peers: Arc::new(Mutex::new(HashMap::new())),
             peers: Arc::new(Mutex::new(HashMap::new())),
             allowed: Arc::new(Mutex::new(HashSet::new())),
@@ -109,27 +121,41 @@ impl Default for RelayState {
 }
 
 impl RelayState {
-    /// 流列表（快照）。
+    /// stream_id → 分片索引（FNV-1a 变体，够用且无随机 seed 依赖）。
+    fn shard_for(id: &str) -> usize {
+        let mut h = 0x811c_9dc5u64;
+        for b in id.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        (h as usize) & (STREAM_SHARDS - 1)
+    }
+
+    /// 流列表（快照；跨分片合并）。
     pub fn streams(&self) -> Vec<StreamInfo> {
-        let guard = self.streams.lock().unwrap();
-        let mut v: Vec<_> = guard
-            .values()
-            .map(|e| {
+        let mut v: Vec<StreamInfo> = Vec::new();
+        for shard in self.streams.iter() {
+            let guard = shard.lock().unwrap();
+            v.extend(guard.values().map(|e| {
                 let mut info = e.info.clone();
                 info.watchers = e.tx.receiver_count() as u32;
                 info
-            })
-            .collect();
+            }));
+        }
         v.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
         v
     }
 
     fn get(&self, id: &str) -> Option<StreamEntry> {
-        self.streams.lock().unwrap().get(id).cloned()
+        self.streams[Self::shard_for(id)]
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
     }
 
     fn insert(&self, entry: StreamEntry) {
-        self.streams
+        self.streams[Self::shard_for(&entry.info.stream_id)]
             .lock()
             .unwrap()
             .insert(entry.info.stream_id.clone(), entry);
@@ -137,10 +163,10 @@ impl RelayState {
 
     /// 转发一帧：关键帧时更新缓存，然后广播。
     ///
-    /// 热路径：单次加锁完成「缓存更新 + 广播」，避免逐帧整体 clone `StreamEntry`
-    /// （旧实现每次 `get` 都会复制 `StreamInfo` 字符串与关键帧 Bytes）。
+    /// 热路径：单次加锁（本流分片）完成「缓存更新 + 广播」，
+    /// 避免逐帧整体 clone `StreamEntry`；不同流走不同分片锁，互不阻塞。
     fn forward(&self, id: &str, frame: Frame) {
-        let mut guard = self.streams.lock().unwrap();
+        let mut guard = self.streams[Self::shard_for(id)].lock().unwrap();
         if let Some(entry) = guard.get_mut(id) {
             if frame.header.track == TRACK_VIDEO && frame.header.is_keyframe() {
                 entry.last_keyframe = Some(frame.clone());
@@ -150,7 +176,11 @@ impl RelayState {
     }
 
     fn remove(&self, id: &str) -> bool {
-        self.streams.lock().unwrap().remove(id).is_some()
+        self.streams[Self::shard_for(id)]
+            .lock()
+            .unwrap()
+            .remove(id)
+            .is_some()
     }
 
     /// 局域网设备列表（按名称排序）。

@@ -196,11 +196,13 @@ impl DataSession for SrtDataSession {
             }
             SessionPacket::Media(frame) => {
                 let payload = &frame.payload;
+                // rsrt::send 内部会再 to_vec 一次；这里复用一块 buffer
+                // 避免每帧/每片重复分配
+                let mut msg = Vec::with_capacity(1 + HEADER_LEN + FRAGMENT_LEN);
                 if payload.len() <= FRAGMENT_LEN {
-                    let full = frame.to_bytes();
-                    let mut msg = Vec::with_capacity(1 + full.len());
                     msg.push(PktType::Media as u8);
-                    msg.extend_from_slice(&full);
+                    msg.extend_from_slice(&frame.header.encode());
+                    msg.extend_from_slice(payload);
                     let n = msg.len();
                     sock.send(&msg)
                         .await
@@ -208,13 +210,14 @@ impl DataSession for SrtDataSession {
                     self.stats.add_sent(n);
                 } else {
                     // 分片：每片 = 1B 类型 + 帧头（frag_* 标记）+ 片载荷
+                    // （1080p 关键帧可达数百片）
                     let frag_cnt = (payload.len().div_ceil(FRAGMENT_LEN)) as u8;
                     for (i, chunk) in payload.chunks(FRAGMENT_LEN).enumerate() {
                         let mut header = frame.header;
                         header.frag_idx = i as u8;
                         header.frag_cnt = frag_cnt;
                         header.len = chunk.len() as u32;
-                        let mut msg = Vec::with_capacity(1 + HEADER_LEN + chunk.len());
+                        msg.clear();
                         msg.push(PktType::Media as u8);
                         msg.extend_from_slice(&header.encode());
                         msg.extend_from_slice(chunk);

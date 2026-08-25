@@ -102,3 +102,4 @@ APK 输出：`apps/stross-gui/src-tauri/gen/android/app/build/outputs/apk/`
 | 局域网打不开 | 检查防火墙放行端口（默认 8777）；确认在同一网段 |
 | 延迟较大 | 降低画质档位或减小 `Quality::gop`（默认 2 秒关键帧间隔） |
 | Android 构建报 NDK/SDK 错 | 安装 NDK（`sdkmanager "ndk;25.2.9519653"`），设置 `ANDROID_HOME` |
+| 桌面应用在 NVIDIA + Wayland 下启动报 `Gdk-Message: Error 71 (协议错误) dispatching to Wayland display` | webkit2gtk 的 DMA-BUF 渲染器与合成器协商失败；应用已自动关闭该渲染器（`WEBKIT_DISABLE_DMABUF_RENDERER=1`，仅 NVIDIA+Wayland 生效）。仍异常可手动 `export WEBKIT_DISABLE_DMABUF_RENDERER=1`；**不要**用 `GDK_BACKEND=x11` 绕过（NVIDIA 下会报 GBM buffer 创建失败） |

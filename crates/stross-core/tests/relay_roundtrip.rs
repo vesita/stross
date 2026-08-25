@@ -164,7 +164,25 @@ async fn healthz_served() {
     assert_eq!(health, "ok");
     // D1：无浏览器观看端，根路径与静态资产已移除（404 空 body）
     let index = reqwest_lite(&format!("http://127.0.0.1:{port}/")).await;
-    assert!(index.is_empty(), "根路径应 404 空 body（观看端已移除），实际: {index}");
+    assert!(
+        index.is_empty(),
+        "根路径应 404 空 body（观看端已移除），实际: {index}"
+    );
+    handle.stop().await;
+}
+
+/// `/api/info` 上报各传输端口（前端据此构造 srt:// / quic:// 拨号地址）。
+#[tokio::test]
+async fn api_info_reports_transport_ports() {
+    let handle = RelayServer::start(0).await.unwrap();
+    let port = handle.port;
+    let body = reqwest_lite(&format!("http://127.0.0.1:{port}/api/info")).await;
+    let info: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(info["port"], serde_json::json!(port));
+    let srt = info["srtPort"].as_u64().expect("srtPort 应为数字");
+    let quic = info["quicPort"].as_u64().expect("quicPort 应为数字");
+    assert_eq!(srt as u16, handle.srt_port.expect("SRT 端口"));
+    assert_eq!(quic as u16, handle.quic_port.expect("QUIC 端口"));
     handle.stop().await;
 }
 

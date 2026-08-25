@@ -167,7 +167,10 @@ async function connect() {
                 url: `http://127.0.0.1:${info.port}`,
                 wsUrl: `ws://127.0.0.1:${info.port}/ws/push`,
                 relayUrls: info.urls,
+                srtUrl: null,
+                quicUrl: null,
             };
+            void refreshTransportPorts(connection);
         }
         else {
             const addr = normAddr($input('relay-addr').value);
@@ -182,7 +185,14 @@ async function connect() {
             if (!resp.ok)
                 throw new Error('中继返回 HTTP ' + resp.status);
             await resp.json();
-            connection = { url: addr, wsUrl: addr.replace(/^http/, 'ws') + '/ws/push', relayUrls: [addr + '/'] };
+            connection = {
+                url: addr,
+                wsUrl: addr.replace(/^http/, 'ws') + '/ws/push',
+                relayUrls: [addr + '/'],
+                srtUrl: null,
+                quicUrl: null,
+            };
+            void refreshTransportPorts(connection);
         }
         enterApp();
     }
@@ -197,6 +207,38 @@ async function connect() {
         btn.disabled = false;
         btn.textContent = '连接';
     }
+}
+/** 拉取中继 `/api/info`，填充 SRT/QUIC 拨号地址（失败静默，退回 WS）。 */
+async function refreshTransportPorts(conn) {
+    try {
+        const resp = await fetch(conn.url + '/api/info', { cache: 'no-store' });
+        if (!resp.ok)
+            return;
+        const info = (await resp.json());
+        const host = conn.url.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+        if (info.srtPort)
+            conn.srtUrl = `srt://${host}:${info.srtPort}`;
+        if (info.quicPort)
+            conn.quicUrl = `quic://${host}:${info.quicPort}`;
+    }
+    catch (_) {
+        // 中继可能不支持 /api/info（旧版本）：保持 null，观看端走 WS
+    }
+}
+/** 按「接收传输」下拉选择构造 relay 拨号地址；UDP 端口不可用时回退 WS。 */
+function pickRelayUrl() {
+    const sel = $select('recv-transport-select').value;
+    const ws = connection.wsUrl.replace('/ws/push', '');
+    if (sel === 'srt' && connection.srtUrl)
+        return connection.srtUrl;
+    if (sel === 'quic' && connection.quicUrl)
+        return connection.quicUrl;
+    if (sel === 'auto' && connection.srtUrl)
+        return connection.srtUrl;
+    if (sel !== 'auto' && sel !== 'ws') {
+        showRecvError(`该中继未提供 ${sel.toUpperCase()} 端口（/api/info 不可用），已回退 WebSocket`);
+    }
+    return ws;
 }
 function enterApp() {
     $('connect-view').classList.add('hidden');
@@ -591,8 +633,9 @@ async function startReceive() {
     $btn('recv-start-btn').disabled = true;
     try {
         const audio = $select('recv-audio-select').value; // 'device' | 'discard'（与 AudioOut serde 一致）
+        const relay = pickRelayUrl(); // 按传输选择：ws / srt / quic（UDP 不可用回退）
         await call('start_receive', {
-            relay: connection.wsUrl.replace('/ws/push', ''),
+            relay,
             stream: streamId,
             audio,
         });

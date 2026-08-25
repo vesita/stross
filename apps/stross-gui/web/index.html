@@ -156,6 +156,12 @@
           <div id="recv-streams" class="recv-streams"></div>
           <div class="row">
             <input id="recv-stream-input" type="text" placeholder="流 id（如 sess-1 或 demo-1234）" class="grow" />
+            <select id="recv-transport-select" title="观看传输（UDP 需要中继支持 /api/info）">
+              <option value="auto" selected>⚡ 自动（优先 UDP）</option>
+              <option value="ws">🔌 WebSocket</option>
+              <option value="srt">🚀 SRT</option>
+              <option value="quic">🚀 QUIC</option>
+            </select>
             <select id="recv-audio-select" title="音频输出方式">
               <option value="device" selected>🔊 设备播放</option>
               <option value="discard">🔇 静音</option>

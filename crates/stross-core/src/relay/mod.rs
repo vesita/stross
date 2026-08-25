@@ -82,6 +82,12 @@ pub struct RelayState {
     allowed: Arc<Mutex<HashSet<String>>>,
     /// 是否受控：仅允许 [`Self::allowed`] 中的 stream id 推流。
     controlled: bool,
+    /// 本机 HTTP/WS 监听端口（`/api/info` 上报用）。
+    port: u16,
+    /// SRT 推流/观看监听端口（随机分配；`/api/info` 上报用，供前端选 UDP 路径）。
+    srt_port: Option<u16>,
+    /// QUIC 推流/观看监听端口（随机分配；`/api/info` 上报用）。
+    quic_port: Option<u16>,
     /// 数据面事件广播（无人订阅时 send 返回 Err，忽略即可）。
     events: broadcast::Sender<RelayEvent>,
 }
@@ -94,6 +100,9 @@ impl Default for RelayState {
             peers: Arc::new(Mutex::new(HashMap::new())),
             allowed: Arc::new(Mutex::new(HashSet::new())),
             controlled: false,
+            port: 0,
+            srt_port: None,
+            quic_port: None,
             events: broadcast::channel(64).0,
         }
     }
@@ -278,12 +287,6 @@ impl RelayServer {
     }
 
     async fn start_inner(port: u16, controlled: bool) -> anyhow::Result<RelayHandle> {
-        let state = RelayState {
-            controlled,
-            ..RelayState::default()
-        };
-        let app = http::router(state.clone());
-
         // TCP_NODELAY：媒体每帧一个 WS 消息，Nagle 会叠加延迟（LAN 也受影响）
         let listener = TcpListener::bind(("0.0.0.0", port)).await?.tap_io(|s| {
             let _ = s.set_nodelay(true);
@@ -299,6 +302,25 @@ impl RelayServer {
             .map_err(|e| anyhow::anyhow!("SRT 监听失败: {e}"))?;
         let srt_port = srt_listener.local_addr().port();
         tracing::info!("SRT 推流/观看监听: 0.0.0.0:{srt_port}");
+
+        // QUIC 推流/观看监听：一条连接 control/media 双 stream 多路复用，
+        // 原生端可推流（Hello）或观看（Watch）（Lossless；自签名 + 局域网可信模型）
+        let mut quic_listener = QuicTransport::new()
+            .bind("0.0.0.0:0".parse().expect("静态地址"))
+            .await
+            .map_err(|e| anyhow::anyhow!("QUIC 监听失败: {e}"))?;
+        let quic_port = quic_listener.local_addr().port();
+        tracing::info!("QUIC 推流/观看监听: 0.0.0.0:{quic_port}");
+
+        let state = RelayState {
+            controlled,
+            port: actual_port,
+            srt_port: Some(srt_port),
+            quic_port: Some(quic_port),
+            ..RelayState::default()
+        };
+        let app = http::router(state.clone());
+
         let srt_state = state.clone();
         let mut srt_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {
@@ -320,14 +342,6 @@ impl RelayServer {
             tracing::debug!("SRT 监听已停止");
         });
 
-        // QUIC 推流/观看监听：一条连接 control/media 双 stream 多路复用，
-        // 原生端可推流（Hello）或观看（Watch）（Lossless；自签名 + 局域网可信模型）
-        let mut quic_listener = QuicTransport::new()
-            .bind("0.0.0.0:0".parse().expect("静态地址"))
-            .await
-            .map_err(|e| anyhow::anyhow!("QUIC 监听失败: {e}"))?;
-        let quic_port = quic_listener.local_addr().port();
-        tracing::info!("QUIC 推流/观看监听: 0.0.0.0:{quic_port}");
         let quic_state = state.clone();
         let mut quic_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {

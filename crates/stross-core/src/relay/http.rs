@@ -38,6 +38,7 @@ async fn cors_layer(
 pub(super) fn router(state: RelayState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/api/info", get(api_info))
         .route("/api/streams", get(api_streams))
         .route("/api/peers", get(api_peers))
         .route("/api/webrtc/start", post(api_webrtc_start))
@@ -46,6 +47,26 @@ pub(super) fn router(state: RelayState) -> Router {
         .route("/ws/watch", get(ws_watch))
         .layer(axum::middleware::from_fn(cors_layer))
         .with_state(state)
+}
+
+/// 中继入口信息（各传输端口；前端据此构造 srt:// / quic:// 拨号地址）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayInfoResp {
+    /// HTTP/WS 端口。
+    port: u16,
+    /// SRT 推流/观看端口（随机分配）。
+    srt_port: Option<u16>,
+    /// QUIC 推流/观看端口（随机分配）。
+    quic_port: Option<u16>,
+}
+
+async fn api_info(State(state): State<RelayState>) -> Json<RelayInfoResp> {
+    Json(RelayInfoResp {
+        port: state.port,
+        srt_port: state.srt_port,
+        quic_port: state.quic_port,
+    })
 }
 
 async fn api_streams(State(state): State<RelayState>) -> Json<Vec<StreamInfo>> {

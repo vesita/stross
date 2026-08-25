@@ -260,7 +260,7 @@ impl DataSession for WsDataSession {
             }
             WsMsg::Binary(b) => {
                 let n = b.len();
-                let frame = stross_proto::frame::Frame::from_bytes(&b)
+                let frame = stross_proto::frame::Frame::from_bytes_owned(b)
                     .map_err(|e| TransportError::Protocol(e.to_string()))?;
                 self.stats.add_recv(n);
                 Ok(Some(SessionPacket::Media(frame)))

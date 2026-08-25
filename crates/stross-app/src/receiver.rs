@@ -174,10 +174,11 @@ async fn receive_loop(
         match data.recv().await {
             Ok(Some(SessionPacket::Media(frame))) => {
                 inner.stats.lock().unwrap().received += 1;
-                mgr.channel(&stream_id, ChannelKind::Lossless)
-                    .push(frame, Instant::now());
-                // 消息驱动：立即产出送播放
+                // 单次借用通道：push + poll 共用一个 &mut，避免每帧重复
+                // 的 String 分配 + HashMap 查找（热路径）
                 let channel = mgr.channel(&stream_id, ChannelKind::Lossless);
+                channel.push(frame, Instant::now());
+                // 消息驱动：立即产出送播放
                 for f in channel.poll(Instant::now()) {
                     if session.push(f).is_err() {
                         break;
@@ -228,10 +229,10 @@ async fn receive_raw_loop(
         match data.recv().await {
             Ok(Some(SessionPacket::Media(frame))) => {
                 inner.stats.lock().unwrap().received += 1;
-                mgr.channel(&stream_id, ChannelKind::Lossless)
-                    .push(frame, Instant::now());
-                // 通道 → 转发（lossless 直通，按序产出；消费者慢则丢帧，不反压）
+                // 单次借用通道（热路径，避免每帧重复 String 分配 + 查找）
                 let channel = mgr.channel(&stream_id, ChannelKind::Lossless);
+                channel.push(frame, Instant::now());
+                // 通道 → 转发（lossless 直通，按序产出；消费者慢则丢帧，不反压）
                 for f in channel.poll(Instant::now()) {
                     if frame_tx.try_send(f).is_err() {
                         inner.stats.lock().unwrap().dropped += 1;

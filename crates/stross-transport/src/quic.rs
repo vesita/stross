@@ -258,7 +258,7 @@ impl DataSession for QuicDataSession {
             r = self.recv_media() => {
                 let Some(bytes) = r? else { return Ok(None) };
                 self.stats.add_recv(LEN_BYTES + bytes.len());
-                let frame = Frame::from_bytes(&bytes)
+                let frame = Frame::from_bytes_owned(bytes)
                     .map_err(|e| TransportError::Protocol(e.to_string()))?;
                 Ok(Some(SessionPacket::Media(frame)))
             }

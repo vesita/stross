@@ -410,22 +410,25 @@ impl PeerLoop {
                             }
                         }
                         Event::ChannelData(d) => {
-                            let pkt = if d.id == self.control_id {
-                                String::from_utf8(d.data.to_vec())
+                            let n = d.data.len();
+                            // 先处理 media（move 走 d.data，避免借用冲突），再处理 control
+                            let pkt = if d.id == self.media_id {
+                                // Vec<u8> → Bytes（0 拷贝转移）→ 零拷贝切片载荷
+                                stross_proto::frame::Frame::from_bytes_owned(d.data.into())
+                                    .ok()
+                                    .map(SessionPacket::Media)
+                            } else if d.id == self.control_id {
+                                String::from_utf8(d.data)
                                     .ok()
                                     .and_then(|s| {
                                         stross_proto::message::ControlMessage::from_text(&s).ok()
                                     })
                                     .map(SessionPacket::Control)
-                            } else if d.id == self.media_id {
-                                stross_proto::frame::Frame::from_bytes(&d.data)
-                                    .ok()
-                                    .map(SessionPacket::Media)
                             } else {
                                 None
                             };
                             if let Some(pkt) = pkt {
-                                self.stats.add_recv(d.data.len());
+                                self.stats.add_recv(n);
                                 let _ = self.inbound_tx.send(pkt).await;
                             }
                         }

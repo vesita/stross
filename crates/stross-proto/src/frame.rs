@@ -199,6 +199,9 @@ impl Frame {
     }
 
     /// 从线上消息解码；若头声明的长度超出输入则返回 `None`。
+    ///
+    /// 拷贝语义：输入是借用切片，载荷会 `copy_from_slice` 复制一份。
+    /// 热路径（WS/QUIC 接收）请用 [`Frame::from_bytes_owned`] 避免每帧全量拷贝。
     pub fn from_bytes(buf: &[u8]) -> Result<Self, FrameError> {
         let header = FrameHeader::decode(buf)?;
         let total = HEADER_LEN + header.len as usize;
@@ -208,6 +211,22 @@ impl Frame {
         Ok(Frame {
             header,
             payload: Bytes::copy_from_slice(&buf[HEADER_LEN..total]),
+        })
+    }
+
+    /// 从线上消息解码（**零拷贝**）：`buf` 是传输层已读入的完整消息，
+    /// 载荷用 [`Bytes::slice`] 共享底层内存，不复制。
+    ///
+    /// 仅校验帧头与长度；`buf` 尾部多余字节被忽略（不进入载荷）。
+    pub fn from_bytes_owned(buf: Bytes) -> Result<Self, FrameError> {
+        let header = FrameHeader::decode(&buf)?;
+        let total = HEADER_LEN + header.len as usize;
+        if buf.len() < total {
+            return Err(FrameError::TooShort(buf.len()));
+        }
+        Ok(Frame {
+            header,
+            payload: buf.slice(HEADER_LEN..total),
         })
     }
 }

@@ -127,9 +127,9 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
                             latency_samples.push((pts, arrival_ms));
                         }
                     }
-                    mgr.channel(&args.stream, ChannelKind::Lossless)
-                        .push(frame, Instant::now());
+                    // 单次借用通道：push + poll 共用一个 &mut（热路径）
                     let channel = mgr.channel(&args.stream, ChannelKind::Lossless);
+                    channel.push(frame, Instant::now());
                     for f in channel.poll(Instant::now()) {
                         let _ = session.push(f);
                     }

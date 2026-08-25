@@ -242,7 +242,7 @@ impl DataSession for SrtDataSession {
                 return Ok(None); // 对端干净关闭（SRT SHUTDOWN）
             };
             self.stats.add_recv(bytes.len());
-            if let Some(pkt) = decode_message(&bytes, &mut *self.rx.lock().await) {
+            if let Some(pkt) = decode_message(bytes, &mut *self.rx.lock().await) {
                 return Ok(Some(pkt));
             }
             // `None` = 分片累积中（或一条损坏消息）：继续收下一片/下一条
@@ -259,7 +259,10 @@ impl DataSession for SrtDataSession {
 }
 
 /// 解码一个 SRT 消息；媒体分片在此重组。
-fn decode_message(bytes: &[u8], rx: &mut RxState) -> Option<SessionPacket> {
+///
+/// 零拷贝：消息是传输层读入的 `Bytes`，未分片帧载荷直接切片共享；
+/// 分片帧的片载荷也切片累积，仅最终拼接为连续缓冲区时复制一次。
+fn decode_message(bytes: Bytes, rx: &mut RxState) -> Option<SessionPacket> {
     let ty = *bytes.first()?;
     match ty {
         // 与 PktType::Control / PktType::Media 对应（#[repr(u8)]）
@@ -271,7 +274,7 @@ fn decode_message(bytes: &[u8], rx: &mut RxState) -> Option<SessionPacket> {
         }
         0x01 => {
             let header = FrameHeader::decode(&bytes[1..]).ok()?;
-            let payload = Bytes::copy_from_slice(&bytes[1 + HEADER_LEN..]);
+            let payload = bytes.slice(1 + HEADER_LEN..);
             if header.frag_cnt == 0 {
                 Some(SessionPacket::Media(Frame { header, payload }))
             } else {

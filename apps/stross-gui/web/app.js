@@ -31,6 +31,10 @@ let starting = false; // Android 采集启动中（等待真实状态回报）
 let startingSince = 0; // 启动开始时间戳（超时兜底用）
 const START_TIMEOUT_MS = 60000; // 采集启动超时
 let connection = null;
+/** 自动发现卡片选中的接收目标中继（null = 使用已连接中继）。 */
+let targetRelay = null;
+/** 流 id → 流信息缓存（传输自动选择按 video/audio 类型决策）。 */
+const remoteStreams = new Map();
 let currentTab = 'send';
 let IS_ANDROID = false;
 let MY_IPS = [];
@@ -225,20 +229,62 @@ async function refreshTransportPorts(conn) {
         // 中继可能不支持 /api/info（旧版本）：保持 null，观看端走 WS
     }
 }
-/** 按「接收传输」下拉选择构造 relay 拨号地址；UDP 端口不可用时回退 WS。 */
-function pickRelayUrl() {
+/** 当前接收目标中继（自动发现卡片选中时优先，否则已连接中继；均无则 null）。 */
+function currentRelay() {
+    if (targetRelay)
+        return targetRelay;
+    if (!connection)
+        return null;
+    return {
+        wsBase: connection.wsUrl.replace('/ws/push', ''),
+        srtUrl: connection.srtUrl,
+        quicUrl: connection.quicUrl,
+    };
+}
+/** 按流媒体类型自动选传输（auto 模式）：
+ *  含视频 → SRT（Adaptive：丢包不阻塞、关键帧自愈）> QUIC > WS
+ *  纯音频 → QUIC（无损：音频不可丢）> WS */
+function autoRelayUrl(stream) {
+    const r = currentRelay();
+    if (!r)
+        return '';
+    const hasVideo = !!(stream && stream.video);
+    if (hasVideo) {
+        if (r.srtUrl)
+            return r.srtUrl;
+        if (r.quicUrl)
+            return r.quicUrl;
+    }
+    else if (r.quicUrl) {
+        return r.quicUrl;
+    }
+    return r.wsBase;
+}
+/** 按「接收传输」下拉 + 流媒体类型构造 relay 拨号地址；UDP 端口不可用回退 WS。 */
+function pickRelayUrl(stream) {
     const sel = $select('recv-transport-select').value;
-    const ws = connection.wsUrl.replace('/ws/push', '');
-    if (sel === 'srt' && connection.srtUrl)
-        return connection.srtUrl;
-    if (sel === 'quic' && connection.quicUrl)
-        return connection.quicUrl;
-    if (sel === 'auto' && connection.srtUrl)
-        return connection.srtUrl;
-    if (sel !== 'auto' && sel !== 'ws') {
+    const r = currentRelay();
+    if (!r)
+        return '';
+    if (sel === 'srt' && r.srtUrl)
+        return r.srtUrl;
+    if (sel === 'quic' && r.quicUrl)
+        return r.quicUrl;
+    if (sel === 'auto')
+        return autoRelayUrl(stream);
+    if (sel === 'srt' || sel === 'quic') {
         showRecvError(`该中继未提供 ${sel.toUpperCase()} 端口（/api/info 不可用），已回退 WebSocket`);
     }
-    return ws;
+    return r.wsBase;
+}
+/** 流的轨道类型标签（如「视频+音频」）。 */
+function typeLabel(s) {
+    const t = [];
+    if (s.video)
+        t.push('视频');
+    if (s.audio)
+        t.push('音频');
+    return t.length ? '  ·  ' + t.join('+') : '';
 }
 function enterApp() {
     $('connect-view').classList.add('hidden');
@@ -261,6 +307,8 @@ function disconnect() {
         void stopStream();
     }
     connection = null;
+    targetRelay = null;
+    remoteStreams.clear();
     $('app-view').classList.add('hidden');
     $('connect-view').classList.remove('hidden');
     $('conn-badge').textContent = '未连接';
@@ -276,8 +324,10 @@ function setTab(tab) {
     $('tab-watch-btn').classList.toggle('active', tab === 'watch');
     $('tab-send').classList.toggle('hidden', tab !== 'send');
     $('tab-watch').classList.toggle('hidden', tab !== 'watch');
-    if (tab === 'watch')
+    if (tab === 'watch') {
         void loadRemoteStreams();
+        void scanRemoteStreams();
+    }
 }
 // ---------------------------------------------------------------- 设备
 async function loadDevices() {
@@ -587,6 +637,7 @@ async function loadRemoteStreams() {
         }
         box.innerHTML = '';
         for (const s of list) {
+            remoteStreams.set(s.streamId, s);
             const card = document.createElement('button');
             card.type = 'button';
             card.className = 'scan-card';
@@ -595,11 +646,13 @@ async function loadRemoteStreams() {
             name.textContent = s.title || s.streamId;
             const meta = document.createElement('div');
             meta.className = 'scan-meta';
-            meta.textContent = s.streamId + (s.watchers ? '  ·  ' + s.watchers + ' 人观看' : '');
+            meta.textContent = s.streamId + typeLabel(s) + (s.watchers ? '  ·  ' + s.watchers + ' 人观看' : '');
             card.appendChild(name);
             card.appendChild(meta);
             card.title = '点击接收 ' + s.streamId;
             card.onclick = () => {
+                targetRelay = null; // 回已连接中继
+                remoteStreams.set(s.streamId, s);
                 $input('recv-stream-input').value = s.streamId;
                 void startReceive();
             };
@@ -610,6 +663,83 @@ async function loadRemoteStreams() {
         box.innerHTML = '<p class="hint">拉取串流列表失败：' + e.message + '</p>';
     }
 }
+/** 接收页自动发现：扫描局域网中继（mDNS），聚合各中继的在线串流（跨设备观看）。 */
+async function scanRemoteStreams() {
+    const box = $('discover-streams');
+    box.innerHTML = '<p class="hint">扫描局域网串流…</p>';
+    let relays;
+    try {
+        relays = (await call('scan_relays'));
+    }
+    catch (e) {
+        box.innerHTML = `<p class="hint err-text">扫描失败：${e.message}</p>`;
+        return;
+    }
+    const others = relays.filter((r) => !r.ip || MY_IPS.indexOf(r.ip) === -1);
+    if (!others.length) {
+        box.innerHTML = '<p class="hint">未发现局域网其它设备（mDNS）。可手动输入地址连接。</p>';
+        return;
+    }
+    const found = [];
+    for (const r of others) {
+        const base = (r.urls[0] || '').replace(/\/+$/, '');
+        if (!base)
+            continue;
+        // 传输端口：/api/info（旧版本中继无此端点 → 该中继走 WS）
+        let info = null;
+        try {
+            const iresp = await fetch(base + '/api/info', { cache: 'no-store' });
+            if (iresp.ok)
+                info = (await iresp.json());
+        }
+        catch (_) { /* 忽略 */ }
+        try {
+            const sresp = await fetch(base + '/api/streams', { cache: 'no-store' });
+            if (!sresp.ok)
+                continue;
+            const data = (await sresp.json());
+            const list = Array.isArray(data) ? data : (data.streams || []);
+            const host = base.replace(/^https?:\/\//, '');
+            for (const st of list) {
+                found.push({
+                    relayName: r.name || r.ip || base,
+                    relayBase: base,
+                    stream: st,
+                    srtUrl: info && info.srtPort ? `srt://${host}:${info.srtPort}` : null,
+                    quicUrl: info && info.quicPort ? `quic://${host}:${info.quicPort}` : null,
+                });
+            }
+        }
+        catch (_) { /* 该中继不可达，跳过 */ }
+    }
+    if (!found.length) {
+        box.innerHTML = '<p class="hint">局域网内暂无在线串流（可手动输入流 id）。</p>';
+        return;
+    }
+    box.innerHTML = '';
+    for (const it of found) {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'scan-card';
+        const name = document.createElement('div');
+        name.className = 'scan-name';
+        name.textContent = it.stream.title || it.stream.streamId;
+        const meta = document.createElement('div');
+        meta.className = 'scan-meta';
+        meta.textContent = it.relayName + typeLabel(it.stream) + (it.stream.watchers ? '  ·  ' + it.stream.watchers + ' 人观看' : '');
+        card.appendChild(name);
+        card.appendChild(meta);
+        card.title = '点击接收 ' + it.stream.streamId + '（' + it.relayBase + '）';
+        card.onclick = () => {
+            // 目标切到该中继：地址 + 流信息（传输自动选择按流类型决策）
+            targetRelay = { wsBase: it.relayBase.replace(/^http/, 'ws'), srtUrl: it.srtUrl, quicUrl: it.quicUrl };
+            remoteStreams.set(it.stream.streamId, it.stream);
+            $input('recv-stream-input').value = it.stream.streamId;
+            void startReceive();
+        };
+        box.appendChild(card);
+    }
+}
 function showRecvError(msg) {
     const box = $('recv-error');
     box.textContent = msg;
@@ -618,11 +748,11 @@ function showRecvError(msg) {
 function hideRecvError() {
     $('recv-error').classList.add('hidden');
 }
-/** 开始原生接收：WS watch → 解码 → canvas 绘制。 */
+/** 开始原生接收：watch（WS/SRT/QUIC）→ 解码 → canvas 绘制。 */
 async function startReceive() {
     hideRecvError();
-    if (!connection) {
-        showRecvError('请先连接中继');
+    if (!connection && !targetRelay) {
+        showRecvError('请先连接中继，或从上方「局域网串流」自动发现选择');
         return;
     }
     const streamId = $input('recv-stream-input').value.trim();
@@ -633,7 +763,12 @@ async function startReceive() {
     $btn('recv-start-btn').disabled = true;
     try {
         const audio = $select('recv-audio-select').value; // 'device' | 'discard'（与 AudioOut serde 一致）
-        const relay = pickRelayUrl(); // 按传输选择：ws / srt / quic（UDP 不可用回退）
+        const stream = remoteStreams.get(streamId) || null; // 流类型（video/audio）供传输自动选择
+        const relay = pickRelayUrl(stream); // 按传输选择 + 流媒体类型：ws / srt / quic（UDP 不可用回退）
+        if (!relay) {
+            showRecvError('无可用接收目标（请先连接中继或从局域网串流选择）');
+            return;
+        }
         await call('start_receive', {
             relay,
             stream: streamId,
@@ -699,7 +834,7 @@ function setReceiving(r) {
 }
 /** 轮询接收统计（帧数 / 解码 / 音频块）。 */
 async function pollReceiveStatus() {
-    if (!receiving || !connection)
+    if (!receiving)
         return;
     try {
         const s = (await call('receive_status'));
@@ -727,6 +862,7 @@ $btn('scan-btn').onclick = () => void scanRelays();
 $btn('disconnect-btn').onclick = disconnect;
 $btn('tab-send-btn').onclick = () => setTab('send');
 $btn('tab-watch-btn').onclick = () => setTab('watch');
+$btn('discover-btn').onclick = () => void scanRemoteStreams();
 $btn('start-btn').onclick = () => void startStream();
 $btn('stop-btn').onclick = () => void stopStream();
 $btn('recv-start-btn').onclick = () => void startReceive();

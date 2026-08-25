@@ -152,6 +152,12 @@
         <section class="card">
           <h2>接收（原生播放）</h2>
           <p class="hint">已连接中继：<span id="watch-relay-url" class="mono"></span></p>
+          <p class="hint">自动发现局域网内其它中继的在线串流（跨设备观看），或选择已连接中继的串流，或直接输入流 id。</p>
+          <div class="row">
+            <span class="hint">📡 局域网串流（自动发现）：</span>
+            <button id="discover-btn" type="button">🔄 重扫</button>
+          </div>
+          <div id="discover-streams" class="recv-streams"></div>
           <p class="hint">选择要接收的串流（接收端有选择权，F2.1），或直接输入流 id。</p>
           <div id="recv-streams" class="recv-streams"></div>
           <div class="row">

@@ -110,7 +110,10 @@ async fn receive_over_srt_decodes_live_stream() {
         session_id: "recv-srt".into(),
         profile: ReliabilityProfile::Adaptive,
     };
-    let push = transport.connect(&peer, &params).await.expect("SRT 连接中继");
+    let push = transport
+        .connect(&peer, &params)
+        .await
+        .expect("SRT 连接中继");
     push.send(SessionPacket::Control(ControlMessage::Hello {
         stream_id: "recv-srt".into(),
         title: "SRT 接收测试".into(),

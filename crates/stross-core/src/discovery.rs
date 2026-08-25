@@ -31,9 +31,13 @@ pub struct Discovery {
 
 impl Discovery {
     /// 以 `instance` 名义广播服务（能力描述见 [`DiscoveryInfo`]）。
+    ///
+    /// `ips` 为要广播的本机局域网地址：**多网卡时全部传入**（一次注册
+    /// 即携带全部 A/AAAA 记录，各网卡网段都能扫描到本机）；空列表回退
+    /// 回环地址（至少保证本机可发现，行为与单 IP 时代一致）。
     pub fn start(
         instance: &str,
-        ip: IpAddr,
+        ips: &[IpAddr],
         port: u16,
         info: &DiscoveryInfo,
     ) -> anyhow::Result<Self> {
@@ -43,8 +47,17 @@ impl Discovery {
         // mdns-sd 0.21：TXT 属性走 IntoTxtProperties（HashMap<String, String>）；
         // 能力描述由 DiscoveryInfo 单 key JSON 编码（新增字段零维护）
         let props: std::collections::HashMap<String, String> = info.to_txt().into_iter().collect();
-        let mut info = ServiceInfo::new(SERVICE_TYPE, instance, &host, ip, port, props)
-            .map_err(|e| anyhow::anyhow!("ServiceInfo: {e}"))?;
+        // 多网卡广播：ServiceInfo::new 支持 AsIpAddrs（&[IpAddr]），
+        // 一次注册携带全部地址记录
+        let mut info = ServiceInfo::new(
+            SERVICE_TYPE,
+            instance,
+            &host,
+            broadcast_addrs(ips).as_slice(),
+            port,
+            props,
+        )
+        .map_err(|e| anyhow::anyhow!("ServiceInfo: {e}"))?;
         info = info.enable_addr_auto();
         daemon.register(info)?;
         Ok(Self {
@@ -103,5 +116,46 @@ impl Discovery {
 impl Drop for Discovery {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// 待广播的地址列表：多网卡全部保留；空列表回退回环地址。
+///
+/// 抽成纯函数便于单测（`ServiceInfo` 构造需要真实 mDNS socket，不在此测试）。
+fn broadcast_addrs(ips: &[IpAddr]) -> Vec<IpAddr> {
+    if ips.is_empty() {
+        vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]
+    } else {
+        ips.to_vec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broadcast_all_ips_when_multiple() {
+        // 多网卡：全部地址都应广播（已知问题②回归：此前只取第一个 IP）
+        let ips = vec![
+            IpAddr::V4("192.168.1.10".parse().unwrap()),
+            IpAddr::V4("10.0.0.5".parse().unwrap()),
+        ];
+        assert_eq!(broadcast_addrs(&ips), ips);
+    }
+
+    #[test]
+    fn broadcast_single_ip_passthrough() {
+        let ips = vec![IpAddr::V4("192.168.1.10".parse().unwrap())];
+        assert_eq!(broadcast_addrs(&ips), ips);
+    }
+
+    #[test]
+    fn broadcast_empty_falls_back_to_loopback() {
+        // 空列表（无局域网地址）→ 回退回环，行为与单 IP 时代一致
+        assert_eq!(
+            broadcast_addrs(&[]),
+            vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]
+        );
     }
 }

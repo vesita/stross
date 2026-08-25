@@ -478,6 +478,36 @@ button.danger:hover:not(:disabled) {
 
 .scan-results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 
+/* ---------------- 本机锚点卡片 ---------------- */
+
+.anchor-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid rgba(52, 211, 153, 0.3);
+  border-radius: var(--r-md);
+}
+.anchor-box.err {
+  border-color: rgba(248, 113, 113, 0.4);
+}
+.anchor-box .url-list { margin-top: 0; }
+.anchor-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-1);
+}
+.anchor-line .ic { width: 16px; height: 16px; color: var(--ok); }
+.anchor-box.err .anchor-line .ic { color: var(--err); }
+
+/* 网格页串流区跨满两栏（宽容器下） */
+.span-2 { grid-column: 1 / -1; }
+
 .scan-card {
   display: flex;
   align-items: flex-start;

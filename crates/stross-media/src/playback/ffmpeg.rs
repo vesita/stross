@@ -501,11 +501,11 @@ fn spawn_decode(args: &[&str]) -> std::io::Result<(Child, ChildStdin, ChildStdou
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use crate::pipeline::{AudioSourceConfig, Quality, StreamConfig, StreamSession, VideoSource};
     use crate::playback::VideoOut;
-    use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, TRACK_VIDEO};
+    use bytes::Bytes;
     use std::time::{Duration, Instant};
+    use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, TRACK_VIDEO};
 
     /// 用采集管线生成一段协议帧（合成源，时长 cfg.duration_secs）。
     async fn capture_frames(cfg: StreamConfig) -> Vec<Frame> {
@@ -667,7 +667,11 @@ mod tests {
                 audio: None,
             })
             .unwrap();
-        let resync = session.inner.video_resync.clone().expect("视频会话有 resync");
+        let resync = session
+            .inner
+            .video_resync
+            .clone()
+            .expect("视频会话有 resync");
         let video_tx = session
             .inner
             .video_tx
@@ -675,15 +679,7 @@ mod tests {
             .unwrap()
             .clone()
             .expect("视频发送端存在");
-        let tiny = || {
-            Frame::new(
-                TRACK_VIDEO,
-                CODEC_H264,
-                0,
-                0,
-                Bytes::from_static(b"x"),
-            )
-        };
+        let tiny = || Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, Bytes::from_static(b"x"));
 
         // 1) 塞满队列（容量 64）→ push 必 Full → 丢帧 + resync 置位
         let mut filled = 0;

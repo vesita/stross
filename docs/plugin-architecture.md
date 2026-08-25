@@ -2,7 +2,7 @@
 
 > 状态：**阶段 2 完成，四传输落地**（阶段 1：transport-webrtc（str0m，datachannel
 > 双通道）、relay WebRTC 信令端点、同一 handle_watch 驱动 ws/webrtc 集成测试通过、
-> 能力协商落地、观看端 WebRTC 路径带回退）
+> 能力协商落地、接收端 WebRTC 路径带回退）
 > · 阶段 2 已落地：拆 `stross-transport` crate、首个 Sink（录制 RecordingSink）、
 > 控制面鉴权（`AuthPolicy`/`PinAuthPolicy`）、`transport-srt`（rsrt 纯 Rust，
 > Adaptive）、`transport-quic`（quinn + rustls-ring，control/media 多路复用）——
@@ -27,7 +27,7 @@ Stross 现有五层架构（proto → core/media → app → sender）已经是�
   WebRTC / QUIC / SRT 后续按需接入；
 - **能力插件化**：Source（采集）与 Sink（渲染/注入/剪贴板）统一为能力注册表，
   为远期「Deskflow 类」键鼠注入、剪贴板共享留出同一条会话/路由/传输基座；
-- **UI 保持薄**：桌面 / Android / 观看端都是内核命令 + 事件的消费方。
+- **UI 保持薄**：桌面 / Android / 接收端都是内核命令 + 事件的消费方。
 
 这与 roadmap 的 P0（设备路由，类似投屏）、P2（流解耦 / 数据面控制面分离）、
 WebRTC 低延迟通道是同一个方向的统一抽象。
@@ -37,7 +37,7 @@ WebRTC 低延迟通道是同一个方向的统一抽象。
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ UI 层（薄消费方）                                                      │
-│   apps/stross-gui（Tauri 壳）/ 观看端页面 /（远期）stross-viewer    │
+│   apps/stross-gui（Tauri 壳）/（远期）独立接收 App（stross-viewer） │
 │   只调内核命令 + 订阅内核事件，不直接碰传输与采集                        │
 ├──────────────────────────────────────────────────────────────────────┤
 │ 内核（控制面）stross-kernel                                            │
@@ -135,7 +135,7 @@ impl Kernel {
 | 现状 | 目标 |
 |---|---|
 | `stross-core::relay`（Router 兼控制面+数据面） | 控制面逻辑上移到内核；数据面转发下沉为「Transport 之上的转发器」，关键帧对齐逻辑原样保留 |
-| `stross-app::StrossApp`（本地状态机） | 成为**本地应用门面**：组合 Kernel + 本地 Source + 本地内嵌中继；对 UI 的命令面（`app_info` / `list_devices` / `start_relay` / `scan_relays` / `start_stream` / `stop_stream` / `stream_status` / `capture_status` / `open_viewer`）保持兼容 |
+| `stross-app::StrossApp`（本地状态机） | 成为**本地应用门面**：组合 Kernel + 本地 Source + 本地内嵌中继；对 UI 的命令面（`app_info` / `list_devices` / `start_relay` / `scan_relays` / `start_stream` / `stop_stream` / `stream_status` / `capture_status` / `start_receive` / `stop_receive` / `receive_status`）保持兼容 |
 | `stross-media::capture::CaptureBackend` | 演进为 `Source` 能力：增加 `descriptor()`（media kind / codecs / 分辨率上限），`start/stop/status` 语义不变 |
 | `discovery.rs`（mDNS + TXT） | TXT 承载能力广播：`role=`、`transports=`、`codecs=`、控制端口 |
 | `stross-proto`（v1 帧 + 控制消息） | v2 帧头（seq/分片）+ 协商/路由控制消息（见 §5） |
@@ -195,18 +195,18 @@ impl DataSession {
 
 会话建立时：内核收集双方 `endpoints` ∩ 请求的 `profile` → 生成 `Offer` →
 对端 `Answer` 选一个 → `DataSession` 就绪。控制消息永远走无损通道（复用 WS），
-媒体按 profile 走协商出的传输。观看端按能力自动选传输（WebRTC 就绪前回退 WS）。
+媒体按 profile 走协商出的传输。接收端按能力自动选传输（WebRTC 就绪前回退 WS）。
 
 ### 4.4 候选实现与优先级
 
 | 传输 | profile | 状态 | 用途 |
 |---|---|---|---|
-| `transport-ws` | Lossless | ✅ 已落地（现状包一层） | 控制通道 + 媒体兜底 + 零安装观看端 |
-| `transport-webrtc` | Lossy | ✅ 阶段 1 已落地（str0m；control 可靠 / media 不可靠 datachannel） | 低延迟媒体通道，观看端 WebRTC 播放（带 WS 回退） |
+| `transport-ws` | Lossless | ✅ 已落地（现状包一层） | 控制通道 + 媒体兜底 |
+| `transport-webrtc` | Lossy | ✅ 阶段 1 已落地（str0m；control 可靠 / media 不可靠 datachannel） | 低延迟媒体通道，接收端 WebRTC（带 WS 回退） |
 | `transport-srt` | Adaptive | ✅ 阶段 2 已落地（rsrt 纯 Rust，TSBPD/ARQ/零 C 依赖） | 弱网/跨 NAT 推流（relay `srt_port`；分片/重组用 v2 头 `frag_*`） |
 | `transport-quic` | Lossless | ✅ 阶段 2 已落地（quinn 0.11 + rustls-ring；自签名证书） | 一条连接 control/media 双 stream 多路复用（relay `quic_port`），NAT 友好 |
 
-`TransportStats` 直接喂给观看端现有 stats UI（`st-rate` / `st-latency`），不需要新 UI。
+`TransportStats` 直接喂给接收端 stats UI（`st-rate` / `st-latency`），不需要新 UI。
 
 ## 5. 协议演进（stross-proto v2）
 
@@ -224,8 +224,8 @@ impl DataSession {
 - `frag_idx / frag_cnt`：分片位置/总数，`frag_cnt == 0` 表示未分片（WS 上的语义与 v1 完全一致）；
 - `reserved`：留作 flags 扩展（如未来 SVC 层标识）。
 
-**向后兼容策略**：观看端页面与服务端同源部署（`assets.rs` 编译期内嵌），升级即整体替换；
-v2 帧头在 WS 上取 `seq=0, frag_cnt=0` 时语义等价 v1，旧版本观看端只需在升级后刷新页面。
+**向后兼容策略**：接收端与服务端同源升级，整体替换；
+v2 帧头在 WS 上取 `seq=0, frag_cnt=0` 时语义等价 v1，旧版本接收端升级后即兼容。
 不做线上双版本帧头转换（成本高、收益低）。
 
 ### 5.2 控制消息扩展
@@ -265,18 +265,17 @@ pub enum ControlMessage {
 
 ### 5.4 前端 TypeScript（决策记录，2026-08 更新）
 
-两个前端（观看端 `stross-core/assets/viewer/`、推流端 `apps/stross-gui/web/`）
-已从手写 JS 迁移为 **TypeScript 真源**（`app.ts`）：
+浏览器观看端（`stross-core/assets/viewer/`）已随 D1 移除；剩余一个前端
+`apps/stross-gui/web/`（Tauri 壳），已从手写 JS 迁移为 **TypeScript 真源**
+（`app.ts`）：
 
-- **约束**：观看端资源由 Rust `include_str!` 编译期内嵌、推流端由 index.html 直接
-  加载——**cargo 构建必须零 node 依赖**；
-- **方案**：每个前端目录一个 `tsconfig.json`（strict，`noEmitOnError`），
-  `tsc` 发射的 `app.js` **提交进仓库**作为构建产物，`include_str!` / index.html 不变；
+- **约束**：推流端前端由 index.html 直接加载——**cargo 构建必须零 node 依赖**；
+- **方案**：前端目录一个 `tsconfig.json`（strict，`noEmitOnError`），
+  `tsc` 发射的 `app.js` **提交进仓库**作为构建产物，index.html 不变；
 - **开发流程**：改 `app.ts` 后运行 `npx tsc -p <目录>/tsconfig.json` 重新生成并提交两者
   （发射产物文件头注明来源）；类型检查 `npx tsc --noEmit -p <目录>/tsconfig.json`；
 - **约束边界**：emitted JS 必须保持纯 JS 语法（不得出现 `!` 等 TS 专属运行时语法——
   使用 JSDoc 类型断言 `/** @type {T} */ (expr)` 或显式 `as` 表达式规避）；
-- jmuxer.js 为 vendored 三方，不迁移。
 
 ### 5.5 阶段 2 决策记录（2026-08 更新）
 
@@ -319,14 +318,14 @@ pub trait Sink: Send + Sync {
 }
 ```
 
-阶段 1 的 Sink：观看端渲染（MSE / 原生播放器）、录制。
+阶段 1 的 Sink：接收端渲染（原生播放器，D6）、录制。
 **Deskflow 方向衔接**：键鼠注入、剪贴板共享 = 坐在 `Lossless` profile 会话上的 `InputSink` / `ClipboardSink`，
 复用同一套会话/路由/传输基座——架构上无新增概念，只有新能力插件。
 安全上输入注入默认不启用（见 §7）。
 
 ## 7. 安全
 
-- **会话级访问码（PIN）**：观看端可选的「访问码」（AirPlay 式），控制面强制校验，媒体数据面可选；
+- **会话级访问码（PIN）**：接收端可选的「访问码」（AirPlay 式），控制面强制校验，媒体数据面可选；
 - **控制面强制鉴权**：`Route` / `SessionEvent` / 未来的跨设备控制 API 必须过鉴权；
 - **能力最小化**：Sink 类能力（尤其输入注入）默认关闭，需用户在推流端显式开启；
 - 鉴权策略做成内核接口（`AuthPolicy` trait），阶段 1 内置 PIN 实现，
@@ -346,16 +345,17 @@ pub trait Sink: Send + Sync {
 | Tauri 命令面加 `route_session` / 内核事件（`KernelEvent` 订阅替代/补充 `stream_status` 轮询） | `apps/stross-gui/src-tauri/src/lib.rs` |
 | 测试：`transport-memory` 假实现 + Transport 层单测 | `stross-core/tests/` |
 
-**验收**：现有 150 个测试全绿；桌面端到端推流→观看行为与体验不变；帧头 v2 在 WS 上等价 v1。
+**验收**：现有 150 个测试全绿；桌面端到端推流→接收行为与体验不变；帧头 v2 在 WS 上等价 v1。
 
 ### 阶段 1 —— 第二个传输验证抽象（WebRTC）
 
-- `transport-webrtc`（str0m 或 webrtc-rs）：观看端 WebRTC 播放器与 MSE 并列/替换；
-- 能力协商落地：mDNS TXT 能力广播 + `Offer/Answer`；观看端按能力自动选传输；
+- `transport-webrtc`（str0m 或 webrtc-rs）：接收端 WebRTC 低延迟路径（原生播放器；
+  浏览器观看端已随 D1 移除，不再与 MSE 并列）；
+- 能力协商落地：mDNS TXT 能力广播 + `Offer/Answer`；接收端按能力自动选传输；
 - 同一套会话逻辑分别跑 ws 与 webrtc 的集成测试（**抽象价值的证明**）；
 - `InputSink` 原型（可选，验证 Lossless 会话上的非媒体能力）。
 
-**验收**：桌面推流 → 手机浏览器 WebRTC 播放延迟 <300ms；WS 路径回归无损；
+**验收**：桌面推流 → 手机原生 WebRTC 接收延迟 <300ms；WS 路径回归无损；
 A/B 两条传输共享同一内核测试套件。
 
 ### 阶段 2 —— 按需拆分与能力扩展（核心闭环已完成）
@@ -374,7 +374,7 @@ A/B 两条传输共享同一内核测试套件。
   `Adaptive` 契约；线格式 1B 类型前缀 + v2 帧头 `frag_*` 分片/重组（SRT 单
   消息 ≤ MSS−44）；relay 开独立 UDP 端口（`RelayHandle::srt_port`），
   `RelayClient` 按 `srt://` scheme 选传输；集成测试证明同一 `handle_push`
-  驱动 ws/srt（SRT 分片推流 → relay 重组 → WS 观看端逐字节一致）；
+  驱动 ws/srt（SRT 分片推流 → relay 重组 → WS 接收端逐字节一致）；
 - ✅ `transport-quic`：quinn 0.11 + rustls-ring（接受 ring 构建依赖）；
   control/media 双 stream 多路复用（stream 即类型）+ 长度前缀分帧 + 空消息
   就绪信号（QUIC 流 lazy）；自签名证书 + 客户端接受任意证书（局域网可信

@@ -55,10 +55,7 @@ async fn main() -> anyhow::Result<()> {
     if !args.no_advertise {
         let mut discovery = stross_core::discovery::Discovery::start(
             &format!("relay-{}", handle.port),
-            local_ips()
-                .first()
-                .copied()
-                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            &local_ips(),
             handle.port,
             &DiscoveryInfo {
                 v: DiscoveryInfo::VERSION,

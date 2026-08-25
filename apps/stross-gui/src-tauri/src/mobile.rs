@@ -75,8 +75,8 @@ pub fn init_playback() -> tauri::plugin::TauriPlugin<Wry> {
         .setup(|app, api| {
             #[cfg(target_os = "android")]
             {
-                let playback = api
-                    .register_android_plugin("dev.stross.sender", "PlaybackPlugin")?;
+                let playback =
+                    api.register_android_plugin("dev.stross.sender", "PlaybackPlugin")?;
                 app.manage(PlaybackPluginHandle(playback));
             }
             Ok(())
@@ -241,11 +241,7 @@ impl CaptureBackend for AndroidCapture {
 ///    转发为 Tauri 事件 `receive-frame`——与桌面接收路径同一前端事件。
 ///
 /// 调用方（`start_receive` 命令）在停止接收时自行结束 `rx`（会话 stop）。
-pub fn spawn_android_playback(
-    app: &AppHandle<Wry>,
-    rx: mpsc::Receiver<Frame>,
-    audio: AudioOut,
-) {
+pub fn spawn_android_playback(app: &AppHandle<Wry>, rx: mpsc::Receiver<Frame>, audio: AudioOut) {
     let handle = app.state::<PlaybackPluginHandle>().0.clone();
 
     // Kotlin → Rust：解码缩放后的 RGBA 帧（base64）→ 事件 → 前端 canvas
@@ -313,7 +309,8 @@ pub fn spawn_android_playback(
             let _ = handle.run_mobile_plugin::<serde_json::Value>(cmd, payload);
         }
         // 接收结束：通知 Kotlin 释放解码器 / AudioTrack
-        let _ = handle.run_mobile_plugin::<serde_json::Value>("stopPlayback", serde_json::json!({}));
+        let _ =
+            handle.run_mobile_plugin::<serde_json::Value>("stopPlayback", serde_json::json!({}));
         tracing::info!("Android 播放链路结束");
     });
 }

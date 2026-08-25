@@ -13,7 +13,7 @@
 │ crates/stross-core           │ crates/stross-media               │
 │ ② 核心局域网共享模块          │ ④ 系统适配模块                    │
 │ 中继 / 推流客户端 / mDNS      │ ffmpeg 管线 / 设备枚举            │
-│ / 观看端页面                  │ / NAL·ADTS 解析 / Source+Sink 能力 │
+│ / 发现引导                    │ / NAL·ADTS 解析 / Source+Sink 能力 │
 ├───────────────────────────────┴──────────────────────────────────┤
 │ crates/stross-transport ①½ 传输插件层：Transport/DataSession 抽象   │
 │   ws（无损）/ webrtc（有损）/ srt（自适应）/ quic（无损多路复用）    │
@@ -26,7 +26,7 @@
 |---|---|---|---|
 | ① 协议 | `stross-proto` | 线上契约：24 字节 v2 帧头（含 seq/分片）+ JSON 控制消息（含能力协商与路由） | 无内部依赖 |
 | ①½ 传输 | `stross-transport` | 可插拔传输层：`Transport`/`DataSession` 抽象 + ws/webrtc/srt/quic/memory 实现 + 本机 IP | proto |
-| ② 共享 | `stross-core` | 纯数据共享逻辑：中继、推流客户端、mDNS、观看端页面（re-export transport/net） | proto + transport |
+| ② 共享 | `stross-core` | 纯数据共享逻辑：中继、推流客户端、mDNS 发现引导（re-export transport/net） | proto + transport |
 | ④ 适配 | `stross-media` | 系统适配：ffmpeg 采集管线、设备枚举、H.264/AAC 切帧、`CaptureBackend`（Source）/ `Sink`（录制） | proto |
 | ③ 封装 | `stross-app` | 应用状态机 + 引擎组合 + 内核（设备图/会话/路由/鉴权），无 UI 依赖、可单测 | core + media |
 | ⑤ UI | `stross-gui` | Tauri 薄命令层 + Web 前端 + Android Kotlin 桥 | app |
@@ -36,34 +36,38 @@
 
 ### 交互模型
 
-桌面/Android 应用采用「**先连接，再收/发**」：
+桌面/Android 应用采用「**免先连设备网格**」（P0 已落地）：打开即自动锚定本机
+（受控中继 + mDNS 广播），进入网格页——本机锚点 / 局域网设备 / 全网串流聚合；
+点设备只看该设备串流，点流即看（直连锚点，失败自动经本机中继级联代理）；
+推流锚定本机，无需先连接任何设备：
 
 ```text
-连接阶段                    主界面
+设备网格                        推流 / 接收
 ┌──────────────┐   ┌────────────────────────────┐
-│ 本机中继       │──▶│ 📤 推流（发）：采集 → 推流到所连接的中继 │
-│ 或 局域网中继  │   │ 📥 观看（收）：内嵌播放器列出中继上的流 │
-│ (mDNS 扫描)   │   └────────────────────────────┘
+│ 本机锚点       │──▶│ 📤 共享（发）：采集 → 推流到锚点    │
+│ 局域网设备     │   │ 📥 接收（收）：原生播放器列出流      │
+│ 全网串流聚合   │   └────────────────────────────┘
 └──────────────┘
 ```
 
-- 「本机」连接：`start_relay` 启动一个常驻中继（观看与推流共用）。
-- 「局域网中继」连接：探测 `/api/streams` 可达性；mDNS 扫描返回候选。
-- 推流时把 `relay_url` 指向所连接的中继（桌面内嵌 / 外部中继统一走
-  `SenderEngine::start(relay_url)`）。
-- 观看页通过 iframe 加载中继托管的观看端页面，复用同一套 MSE 播放器。
+- 「锚定本机」：`start_relay` 启动常驻受控中继（接收与推流共用）+ mDNS 广播，
+  内核签发会话 id（D4），中继只接受内核授权会话（F2.2）。
+- 「局域网设备」：mDNS 扫描返回候选（能力引导 DiscoveryInfo 单 key JSON）。
+- 推流时把 `relay_url` 指向锚点（本机常驻 / 外部中继统一走
+  `SenderEngine::start(relay_url)`）；接收走原生播放（`PlaybackSink`，D6），
+  **无浏览器观看端**（D1：接收端全部原生）。
 
 ## 1. 总体数据流
 
 ```text
-推流端（桌面）                                         中继（Rust）                     观看端（浏览器）
+推流端（桌面）                                         中继（Rust）                     接收端（桌面原生）
 ┌─────────────────────────────┐              ┌──────────────────────┐         ┌─────────────────────────┐
-│ ffmpeg 视频进程              │              │ axum + tokio          │         │ WebSocket 客户端          │
-│ 屏幕/摄像头 → H.264 (Annex-B)│──stdout────▶│ /ws/push 收流          │         │ jmuxer(fMP4 封包)         │
-│ ffmpeg 音频进程              │              │ 关键帧缓存             │──广播──▶│ MediaSource (MSE)         │
-│ 麦克风/系统声 → AAC (ADTS)   │──stdout────▶│ /ws/watch?stream=ID    │         │ <video> 播放               │
+│ ffmpeg 视频进程              │              │ axum + tokio          │         │ WS watch 客户端          │
+│ 屏幕/摄像头 → H.264 (Annex-B)│──stdout────▶│ /ws/push 收流          │         │ 抖动缓冲(seq/pts 排序)   │
+│ ffmpeg 音频进程              │              │ 关键帧缓存             │──广播──▶│ ffmpeg 解码 → cpal 播放  │
+│ 麦克风/系统声 → AAC (ADTS)   │──stdout────▶│ /ws/watch?stream=ID    │         │ (PlaybackSink, D6)       │
 └─────────────┬───────────────┘              │ /api/streams 流列表    │         └─────────────────────────┘
-              │ Rust: NAL/ADTS 切帧          │ / 内嵌观看端页面        │
+              │ Rust: NAL/ADTS 切帧          │ 级联代理 /api/proxy    │
               │ 逐帧打时间戳 → Frame         └──────────────────────┘
               └── WebSocket push ──────────▶        ▲
                                                     │
@@ -74,6 +78,9 @@
 │ Kotlin 插件 → Rust mobile.rs  │
 └──────────────────────────────┘
 ```
+
+接收端不再依赖浏览器（D1）：桌面 `PlaybackSink` = ffmpeg 子进程解码 + cpal 输出
+（D6）；Android = MediaCodec + AudioTrack。观看端页面（jmuxer/MSE）已移除。
 
 ## 2. 协议（crates/stross-proto）
 
@@ -95,7 +102,7 @@
 
 ### 控制消息（JSON 文本帧）
 
-`Hello`（推流端声明）→ `Welcome`（中继确认）；观看端连上即收 `Ready`；
+`Hello`（推流端声明）→ `Welcome`（中继确认）；接收端连上即收 `Ready`；
 `Bye` 结束；`Error` 携带错误。
 
 ## 3. 系统适配模块（crates/stross-media）
@@ -124,7 +131,7 @@ pub trait CaptureBackend: Send + Sync {
 | 参数 | 原因 |
 |---|---|
 | `-tune zerolatency` | 低延迟编码（无 B 帧、无 lookahead） |
-| `-x264-params repeat_headers=1:slices=1` | 关键帧前重复 SPS/PPS（观看端随时接入）；单 slice（一帧一个 slice，便于切帧） |
+| `-x264-params repeat_headers=1:slices=1` | 关键帧前重复 SPS/PPS（接收端随时接入）；单 slice（一帧一个 slice，便于切帧） |
 | `-g <fps*2>` | 2 秒一个关键帧，兼顾延迟与接入速度 |
 | 音频 `-f adts` | ADTS 每帧自带采样率/声道配置 |
 
@@ -149,20 +156,32 @@ Rust 侧用 `AnnexBSplitter`（状态机切 NAL）→ `AccessUnitBuilder`
   （`stross-transport` 的 `Transport`/`DataSession`），ws 与 webrtc 共用同一套
   关键帧对齐逻辑（见 docs/plugin-architecture.md §4）。
 - 每条流一个 `broadcast::Sender<Bytes>`，容量 1024。
-- **关键帧对齐**：观看端任务只转发关键帧之后的视频帧；掉帧（Lagged）时
+- **关键帧对齐**：接收端任务只转发关键帧之后的视频帧；掉帧（Lagged）时
   重新等关键帧，避免从 GOP 中间开始导致花屏。
 - **最近关键帧缓存**：新观众连上先收到缓存的关键帧（含 SPS/PPS），
   立刻可解码，无需等下一个 GOP。
-- 推流端断开（Bye/断连）→ 删流，观看端收到流结束。
+- 推流端断开（Bye/断连）→ 删流，接收端收到流结束。
 
-## 5. 观看端（crates/stross-core/assets/viewer/）
+## 5. 接收端（原生播放，D1/D6）
 
-纯静态 HTML/JS/CSS，编译期内嵌进中继（`include_str!`），中继零外部文件。
+浏览器观看端已移除（D1：接收端全部原生，无内嵌 viewer / jmuxer / MSE）。
 
-- 拉取 `/api/streams` 渲染流列表（5 秒轮询）。
-- 点选流 → `ws://host/ws/watch?stream=ID` → jmuxer 把 H.264/AAC 原始流
-  封成 fMP4 喂给 MSE。
-- 断线 3 秒自动重连；界面显示码率/fps/缓冲时长。
+桌面接收链路（`Receiver` + `PlaybackSink`，见 crates/stross-app/src/receiver.rs、
+crates/stross-media/src/playback.rs）：
+
+1. 订阅 `ws://host/ws/watch?stream=ID`（或 SRT/QUIC watch）收媒体帧；
+2. 抖动缓冲（SessionDataManager 流式通道）：定长环形缓冲按 seq/pts 索引排序，
+   乱序帧落槽等待、按 pts 顺序消费、超时未齐跳过并等关键帧重对齐
+   （内存有界 = 固定容量，需求 §4.4）；
+3. 视频 → ffmpeg 子进程解码（H.264 → RGBA 原始帧，`RenderedFrame`）交给上层绘制；
+   音频 → ffmpeg 子进程解码（AAC → PCM）+ cpal 输出扬声器（D6：与采集侧同一
+   ffmpeg 二进制与子进程编排模式，零新增原生构建依赖）。
+
+Android 接收：编码帧直接交给 Kotlin（MediaCodec 解码 + AudioTrack 播放），
+实现同一 `PlaybackSink` trait（1f）。
+
+> 中继侧"新观众先收最近关键帧 + Lagged 重对齐"机制（§4）与接收端抖动缓冲互补，
+> 保证随时接入可解码。
 
 ## 6. 核心封装模块（crates/stross-app）
 
@@ -200,17 +219,17 @@ UI 层（桌面 / Android）只把 `invoke` 命令转发到这里，因此命令
   VirtualDisplay 直连 MediaCodec 输入面（零拷贝）→ H.264 输出。
 - 麦克风：`AudioRecord` → AAC MediaCodec → 手动加 ADTS 头。
 - 编码帧经 Tauri `Channel`（base64 JSON）回传 Rust `mobile.rs`（`AndroidCapture`
-  实现 `CaptureBackend`），转成协议帧送入推流客户端——与桌面端共用同一套中继/观看端。
+  实现 `CaptureBackend`），转成协议帧送入推流客户端——与桌面端共用同一套中继/接收端。
 
 ## 8. 关键设计决策
 
 | 决策 | 理由 |
 |---|---|
 | ffmpeg 做采集/编码，Rust 做编排 | 跨平台采集最省事且可靠；Rust 专注协议/并发/UI |
-| 原始 ES + 浏览器端封包（jmuxer） | 统一桌面/Android 两条推流路径，无需 Rust 端 MP4 muxer |
-| WebSocket 而非 WebRTC | 实现简单、穿透局域网无压力；代价是延迟 1–2s（GOP 级） |
-| 每帧一个 WS 消息 | 观看端按帧统计、按帧对齐，无需解析容器 |
-| 中继独立于推流端 | 多机推流到同一中继；观看端页面由中继托管 |
+| 原始 ES 传输 + 原生端解码 | 统一桌面/Android 两条推流路径；接收端原生解码（D1 移除浏览器/jmuxer） |
+| WebSocket 优先，SRT/QUIC 按场景 | 实现简单、穿透局域网无压力；低延迟场景走 UDP 传输（视频 SRT、纯音频 QUIC） |
+| 每帧一个 WS 消息 | 接收端按帧统计、按帧对齐，无需解析容器 |
+| 中继独立于推流端 | 多机推流到同一中继；受控中继接受内核授权会话（F2.2） |
 | 协议独立 crate | media 与 core 都要用 `Frame`，独立成 crate 让适配层不反向依赖共享层 |
 | 传输层独立 crate（阶段 2） | 传输实现（str0m/未来 quic/srt）的重依赖不进入 core/media/app 的依赖树；core re-export 保持路径兼容 |
 | `CaptureBackend` trait | 桌面 ffmpeg 与 Android 原生采集统一抽象，UI 命令面两边一致 |

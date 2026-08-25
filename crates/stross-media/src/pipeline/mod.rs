@@ -142,6 +142,20 @@ impl Default for AudioSourceConfig {
     }
 }
 
+impl AudioSourceConfig {
+    /// 合成测试音（440Hz sine）：无设备环境下验证音频链路。
+    ///
+    /// `--audio` 类 CLI 参数用它——此前直接用 [`AudioSourceConfig::default`]
+    /// 导致 synthetic/mic/system_audio 全为 `None`，ffmpeg 无音频输入，
+    /// 推流实际无声（音频链路从未被真实数据验证，D3 反向音频验收的前提）。
+    pub fn synthetic_test() -> Self {
+        Self {
+            synthetic: Some(440),
+            ..Self::default()
+        }
+    }
+}
+
 /// 一次推流的完整配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

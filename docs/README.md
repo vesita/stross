@@ -11,7 +11,7 @@ Stross 的设计与使用文档。建议阅读顺序：先 [requirements.md](req
 | [protocol.md](protocol.md) | 线上协议：24 字节 v2 帧头 + JSON 控制消息（能力协商 / 路由） |
 | [plugin-architecture.md](plugin-architecture.md) | 插件化架构：可插拔传输层、内核控制面（设备图/会话/路由/鉴权）、四传输落地记录 |
 | [platforms.md](platforms.md) | 平台构建与使用（Linux / Windows / Android），问题排查 |
-| [roadmap.md](roadmap.md) | 路线图：已落地项与推迟项（WASM 策略插件 / 跨设备控制 / Sink 扩展等） |
+| [roadmap.md](roadmap.md) | 路线图：P0 设备网格拓扑（免先连网格/级联代理，进行中）、P1 原生播放器、P2 流解耦（含跨设备推流）、P3 音视频同步、P4 跨网段路由 |
 
 ## 快速入口
 

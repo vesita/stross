@@ -156,8 +156,10 @@ impl StrossApp {
         // 把本机注册进内核设备图（含采集能力，供会话协商）
         self.register_local_node();
         // mDNS 广播本机中继，局域网内其它设备（如电脑端 Stross）可扫描发现。
-        // 能力描述统一走 DiscoveryInfo 单 key JSON（F1.2 / 1d）
-        if let Some(ip) = local_ips().into_iter().next() {
+        // 能力描述统一走 DiscoveryInfo 单 key JSON（F1.2 / 1d）。
+        // 多网卡：广播全部局域网 IP（Discovery::start 内部处理空列表回退回环），
+        // 避免只广播第一个 IP 导致其它网卡网段扫描不到本机
+        {
             let instance = format!("sender-{port}");
             let info = DiscoveryInfo {
                 v: DiscoveryInfo::VERSION,
@@ -177,7 +179,7 @@ impl StrossApp {
                 ],
                 codecs: vec![CodecId::H264, CodecId::Aac],
             };
-            match Discovery::start(&instance, ip, port, &info) {
+            match Discovery::start(&instance, &local_ips(), port, &info) {
                 Ok(d) => {
                     *self.discovery.lock().unwrap() = Some(d);
                 }
@@ -280,9 +282,7 @@ impl StrossApp {
             Some(u) => Some(u),
             None => {
                 let guard = self.relay.lock().unwrap();
-                guard
-                    .as_ref()
-                    .map(|r| r.auto_push_url(cfg.video.is_some()))
+                guard.as_ref().map(|r| r.auto_push_url(cfg.video.is_some()))
             }
         };
         let engine = SenderEngine::start(cfg.clone(), backend, relay_url.clone(), DEFAULT_PORT)

@@ -4,7 +4,10 @@
 // （app.js 是构建产物，提交进仓库——Tauri 直接加载，Rust 构建不依赖 node）。
 // 修改本文件后必须重新生成 app.js 并提交两者。
 //
-// 交互模型：先连接中继（本机或局域网），再选择「推流（发）」或「观看（收）」。
+// 交互模型（P0 免先连进入网格）：打开应用即自动锚定本机（启动受控中继 +
+// mDNS 广播）并扫描局域网设备/串流，直接进入「网格」页——点流卡片即看
+// （直连锚点，失败自动经本机级联代理），推流锚定本机；「连接」不再是先决
+// 条件，而是点流时的按需建立。
 //
 // 图标：统一使用内联 SVG 雪碧图（index.html 中的 <symbol> + icon() 辅助），
 // 不使用 emoji。交互约定：
@@ -112,10 +115,11 @@ const LS_RECENT = 'stross.recentRelays';
 
 interface CameraDevice { id: string; name: string; }
 interface DeviceList { cameras: CameraDevice[]; audioInputs: string[]; systemAudio: string[]; }
-interface Connection {
-  url: string;
-  wsUrl: string;
-  relayUrls: string[];
+/** 本机锚点（`start_relay` 启动的受控中继 + mDNS 广播；推流/级联兜底的数据面入口）。 */
+interface Anchor {
+  port: number;
+  /** http://ip:port 入口地址（供其它设备连接）。 */
+  urls: string[];
   /** SRT 拨号地址（/api/info 拉取到后填充；null = 不可用）。 */
   srtUrl: string | null;
   /** QUIC 拨号地址（/api/info 拉取到后填充；null = 不可用）。 */
@@ -184,26 +188,28 @@ let running = false;
 let starting = false; // Android 采集启动中（等待真实状态回报）
 let startingSince = 0; // 启动开始时间戳（超时兜底用）
 const START_TIMEOUT_MS = 60000; // 采集启动超时
-let connection: Connection | null = null;
-/** 自动发现卡片选中的接收目标中继（null = 使用已连接中继）。 */
+/** 本机锚点（免先连：init 自动 `start_relay`；推流/级联兜底的数据面入口）。 */
+let anchor: Anchor | null = null;
+/** 自动发现卡片选中的接收目标中继（null = 本机锚点）。 */
 let targetRelay: TargetRelay | null = null;
+/** 网格页选中的设备（relayBase 键；只看该设备的串流，null = 全部设备）。 */
+let selectedDevice: string | null = null;
+/** 手动添加的设备地址（http://host:port，免 mDNS；与最近历史共享持久化）。 */
+let manualRelays: string[] = [];
 /** 流 id → 流信息缓存（传输自动选择按 video/audio 类型决策）。 */
 const remoteStreams = new Map<string, RemoteStream>();
-let currentTab: 'send' | 'watch' = 'send';
+let currentTab: 'grid' | 'send' | 'watch' = 'grid';
 let IS_ANDROID = false;
 let MY_IPS: string[] = [];
 
 // —— 交互状态 ——
-let connecting = false; // 连接请求 in-flight（防重复点击）
-let statusTimer: number | null = null; // 状态轮询句柄（连接后启动，断开停止）
-let scanInFlight = false; // 连接页「扫描局域网」in-flight
-let discoverInFlight = false; // 观看页「扫描局域网串流」in-flight
-let discoverCacheAt = 0; // 观看页发现结果缓存时间（TTL 防重复扫描）
+let statusTimer: number | null = null; // 状态轮询句柄（应用打开期间常驻）
+let scanInFlight = false; // 「扫描局域网设备」in-flight
+let discoverInFlight = false; // 「扫描局域网串流」in-flight
+let discoverCacheAt = 0; // 发现结果缓存时间（TTL 防重复扫描）
 const DISCOVER_TTL_MS = 5000;
-let streamsCache: { at: number; list: RemoteStream[] } | null = null; // 已连接中继串流列表缓存
+let streamsCache: { at: number; list: RemoteStream[] } | null = null; // 本机锚点串流列表缓存
 const STREAMS_TTL_MS = 3000;
-let disconnectArmed = false; // 两段式断开：第一段等待确认
-let disconnectTimer: number | null = null;
 
 // ---------------------------------------------------------------- 初始化
 
@@ -236,32 +242,34 @@ async function init(): Promise<void> {
     renderIps(info.ips);
     restorePrefs();
     await loadDevices();
-    // 打开即自动扫描局域网设备，免去手动输入地址
+    // 免先连：自动锚定本机（受控中继 + mDNS 广播）→ 进入网格 → 自动扫描设备/串流
+    await ensureAnchor();
+    showApp();
+    startStatusPolling();
+    void loadRemoteStreams(true);
     void scanRelays();
+    void scanRemoteStreams();
   } catch (e) {
     showFatal(String(e));
   }
 }
 
-/** 恢复上次的连接地址/流名称偏好，并渲染最近连接历史。 */
+/** 恢复上次的地址/流名称偏好，并渲染手动添加历史。 */
 function restorePrefs(): void {
   const last = localStorage.getItem(LS_RELAY);
-  if (last) {
-    $input('relay-addr').value = last;
-    (document.querySelector('input[name="conn"][value="remote"]') as HTMLInputElement).checked = true;
-    $('remote-row').classList.remove('hidden');
-  }
+  if (last) $input('manual-addr').value = last;
   const title = localStorage.getItem(LS_TITLE);
   if (title) $input('title-input').value = title;
+  manualRelays = getRecent();
   renderRecent();
 }
 
 function savePrefs(): void {
-  localStorage.setItem(LS_RELAY, $input('relay-addr').value.trim());
+  localStorage.setItem(LS_RELAY, $input('manual-addr').value.trim());
   localStorage.setItem(LS_TITLE, $input('title-input').value.trim());
 }
 
-// ---------------- 最近连接历史 ----------------
+// ---------------- 手动添加历史 ----------------
 
 function getRecent(): string[] {
   try {
@@ -277,14 +285,15 @@ function saveRecent(url: string): void {
   localStorage.setItem(LS_RECENT, JSON.stringify(list.slice(0, 5)));
 }
 
-/** 删除一条最近连接历史（不触发连接），空列表时隐藏区块。 */
+/** 删除一条手动添加历史（不触发添加），空列表时隐藏区块。 */
 function removeRecent(url: string): void {
   const list = getRecent().filter((u) => u !== url);
   localStorage.setItem(LS_RECENT, JSON.stringify(list));
+  manualRelays = list;
   renderRecent();
 }
 
-/** 渲染"最近连接"列表：点击连接，右侧 ✕ 删除单条记录。 */
+/** 渲染"手动添加历史"：点击重新添加该设备，右侧 ✕ 删除单条记录。 */
 function renderRecent(): void {
   const list = getRecent();
   const block = $('recent-block');
@@ -300,12 +309,10 @@ function renderRecent(): void {
     const main = document.createElement('span');
     main.className = 'recent-main';
     main.textContent = u;
-    main.title = '点击连接';
+    main.title = '点击重新添加';
     makeClickable(main, () => {
-      $input('relay-addr').value = u;
-      (document.querySelector('input[name="conn"][value="remote"]') as HTMLInputElement).checked = true;
-      $('remote-row').classList.remove('hidden');
-      void connect();
+      $input('manual-addr').value = u;
+      void addManualRelay();
     });
     const del = document.createElement('button');
     del.type = 'button';
@@ -314,7 +321,7 @@ function renderRecent(): void {
     del.setAttribute('aria-label', '删除 ' + u);
     del.innerHTML = icon('x');
     del.onclick = (e) => {
-      e.stopPropagation(); // 不触发连接
+      e.stopPropagation(); // 不触发添加
       removeRecent(u);
     };
     li.appendChild(main);
@@ -334,17 +341,17 @@ function showFatal(msg: string): void {
 function hideError(): void {
   $('error-box').classList.add('hidden');
 }
-function showConnectError(msg: string): void {
-  const box = $('connect-error');
+function showGridError(msg: string): void {
+  const box = $('grid-error');
   box.textContent = msg;
   box.classList.remove('hidden');
   attachErrClose(box);
 }
-function hideConnectError(): void {
-  $('connect-error').classList.add('hidden');
+function hideGridError(): void {
+  $('grid-error').classList.add('hidden');
 }
 
-// ---------------------------------------------------------------- 连接
+// ---------------------------------------------------------------- 本机锚点
 
 function normAddr(addr: string): string | null {
   let a = addr.trim();
@@ -353,81 +360,105 @@ function normAddr(addr: string): string | null {
   return a.replace(/\/+$/, '');
 }
 
-async function connect(): Promise<void> {
-  hideConnectError();
-  if (connecting) return;
-  connecting = true;
-  const btn = $btn('connect-btn');
-  setBtnLoading(btn, true);
+/** 头部锚点徽标状态：锚定中 / 已锚定 / 失败。 */
+function setAnchorBadge(state: 'anchoring' | 'ok' | 'err'): void {
+  const badge = $('anchor-badge');
+  badge.className = 'badge' + (state === 'ok' ? ' ok' : state === 'err' ? ' err' : '');
+  badge.textContent = state === 'ok' ? '已锚定' : state === 'err' ? '锚定失败' : '锚定中…';
+}
+
+/** 免先连核心：自动锚定本机（`start_relay` 幂等，启动受控中继 + mDNS 广播）。 */
+async function ensureAnchor(): Promise<void> {
+  const box = $('anchor-box');
+  box.classList.remove('err');
+  box.innerHTML = '<span class="spinner"></span><span>锚定中…</span>';
+  setAnchorBadge('anchoring');
   try {
-    const mode = (document.querySelector('input[name="conn"]:checked') as HTMLInputElement).value;
-    if (mode === 'local') {
-      const info = (await call('start_relay')) as RelayInfo;
-      connection = {
-        url: `http://127.0.0.1:${info.port}`,
-        wsUrl: `ws://127.0.0.1:${info.port}/ws/push`,
-        relayUrls: info.urls,
-        srtUrl: null,
-        quicUrl: null,
-      };
-      void refreshTransportPorts(connection);
-    } else {
-      const addr = normAddr($input('relay-addr').value);
-      if (!addr) {
-        showConnectError('请输入中继地址，例如 http://192.168.1.100:8777');
-        return;
-      }
-      savePrefs();
-      saveRecent(addr);
-      // 探测中继是否可达
-      const resp = await fetch(addr + '/api/streams', { cache: 'no-store' });
-      if (!resp.ok) throw new Error('中继返回 HTTP ' + resp.status);
-      await resp.json();
-      connection = {
-        url: addr,
-        wsUrl: addr.replace(/^http/, 'ws') + '/ws/push',
-        relayUrls: [addr + '/'],
-        srtUrl: null,
-        quicUrl: null,
-      };
-      void refreshTransportPorts(connection);
-    }
-    enterApp();
-    startStatusPolling();
+    const info = (await call('start_relay')) as RelayInfo;
+    anchor = {
+      port: info.port,
+      urls: info.urls,
+      srtUrl: null,
+      quicUrl: null,
+    };
+    renderAnchor(info);
+    setAnchorBadge('ok');
+    void refreshAnchorPorts();
   } catch (e) {
-    const msg = (e as Error).message;
-    const hint = msg.includes('Failed to fetch') || msg.includes('NetworkError')
-      ? '无法访问该地址。请检查：地址是否正确、设备是否在同一局域网、中继是否启动、防火墙是否放行。'
-      : '连接失败：' + msg;
-    showConnectError(hint);
-  } finally {
-    connecting = false;
-    setBtnLoading(btn, false);
+    anchor = null;
+    setAnchorBadge('err');
+    box.classList.add('err');
+    box.innerHTML = '';
+    box.appendChild(emptyState('server', '本机锚定失败：' + (e as Error).message + '（推流不可用；仍可观看局域网串流）', true));
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.innerHTML = icon('refresh') + '<span>重试锚定</span>';
+    retry.onclick = () => void ensureAnchor();
+    box.appendChild(retry);
   }
 }
 
-/** 拉取中继 `/api/info`，填充 SRT/QUIC 拨号地址（失败静默，退回 WS）。 */
-async function refreshTransportPorts(conn: Connection): Promise<void> {
+/** 网格页「本机锚点」卡片：端口 + 可复制的入口地址。 */
+function renderAnchor(info: RelayInfo): void {
+  const box = $('anchor-box');
+  box.innerHTML = '';
+  const line = document.createElement('div');
+  line.className = 'anchor-line';
+  line.innerHTML = icon('server') + '<span>已锚定 · 中继端口 ' + info.port + ' · mDNS 广播中</span>';
+  box.appendChild(line);
+  const ul = document.createElement('ul');
+  ul.className = 'url-list';
+  info.urls.forEach((u) => ul.appendChild(urlListItem(u)));
+  box.appendChild(ul);
+}
+
+/** 拉取本机锚点 `/api/info`，填充 SRT/QUIC 拨号地址（失败静默，退回 WS）。 */
+async function refreshAnchorPorts(): Promise<void> {
+  if (!anchor) return;
   try {
-    const resp = await fetch(conn.url + '/api/info', { cache: 'no-store' });
+    const resp = await fetch(`http://127.0.0.1:${anchor.port}/api/info`, { cache: 'no-store' });
     if (!resp.ok) return;
     const info = (await resp.json()) as { srtPort?: number; quicPort?: number };
-    const host = conn.url.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-    if (info.srtPort) conn.srtUrl = `srt://${host}:${info.srtPort}`;
-    if (info.quicPort) conn.quicUrl = `quic://${host}:${info.quicPort}`;
+    if (info.srtPort) anchor.srtUrl = `srt://127.0.0.1:${info.srtPort}`;
+    if (info.quicPort) anchor.quicUrl = `quic://127.0.0.1:${info.quicPort}`;
   } catch (_) {
     // 中继可能不支持 /api/info（旧版本）：保持 null，观看端走 WS
   }
 }
 
-/** 当前接收目标中继（自动发现卡片选中时优先，否则已连接中继；均无则 null）。 */
+/** 手动添加设备地址（免 mDNS）：探测可达后进入设备/串流聚合。 */
+async function addManualRelay(): Promise<void> {
+  hideGridError();
+  const addr = normAddr($input('manual-addr').value);
+  if (!addr) {
+    showGridError('请输入设备地址，例如 http://192.168.1.100:8777');
+    return;
+  }
+  savePrefs();
+  saveRecent(addr);
+  // 探测中继是否可达（/api/streams 是受控/普通中继都提供的只读端点）
+  try {
+    const resp = await fetch(addr + '/api/streams', { cache: 'no-store' });
+    if (!resp.ok) throw new Error('中继返回 HTTP ' + resp.status);
+    await resp.json();
+  } catch (e) {
+    showGridError('无法访问 ' + addr + '：' + (e as Error).message);
+    return;
+  }
+  manualRelays = [addr, ...manualRelays.filter((u) => u !== addr)];
+  renderRecent();
+  void scanRelays(); // 设备列表出现该设备
+  void scanRemoteStreams(true); // 强制刷新串流聚合（含手动设备）
+}
+
+/** 当前接收目标中继（点选的局域网设备优先，否则本机锚点；均无则 null）。 */
 function currentRelay(): TargetRelay | null {
   if (targetRelay) return targetRelay;
-  if (!connection) return null;
+  if (!anchor) return null;
   return {
-    wsBase: connection.wsUrl.replace('/ws/push', ''),
-    srtUrl: connection.srtUrl,
-    quicUrl: connection.quicUrl,
+    wsBase: `ws://127.0.0.1:${anchor.port}`,
+    srtUrl: anchor.srtUrl,
+    quicUrl: anchor.quicUrl,
   };
 }
 
@@ -485,98 +516,46 @@ function watcherCount(n: number): HTMLElement {
   return w;
 }
 
-function enterApp(): void {
-  $('connect-view').classList.add('hidden');
+/** 进入主界面（免先连：init 锚定后直接调用，无连接门槛）。 */
+function showApp(): void {
+  $('app-view').classList.remove('hidden');
   showView($('app-view'));
-  $('conn-badge').textContent = '已连接';
-  $('conn-badge').classList.add('ok');
-  $('disconnect-btn').classList.remove('hidden');
-  $('tab-conn-label').textContent = '已连接：' + connection!.url;
-  $('watch-relay-url').textContent = connection!.url;
-  // 连接成功即可展示中继入口地址（供其它设备连接数据面）
-  if (connection!.relayUrls && connection!.relayUrls.length) {
-    renderUrls(connection!.relayUrls);
+  $('watch-relay-url').textContent = anchor
+    ? `http://127.0.0.1:${anchor.port}`
+    : '（本机锚点未就绪）';
+  // 锚定成功即展示本机锚点入口地址（供其它设备连接数据面）
+  if (anchor && anchor.urls.length) {
+    renderUrls(anchor.urls);
   }
-  setTab('send');
-  void loadRemoteStreams(true);
+  setTab('grid');
   void pollStatus();
 }
 
-function disconnect(): void {
-  if (running || starting) {
-    void stopStream();
-  }
-  connection = null;
-  targetRelay = null;
-  remoteStreams.clear();
-  streamsCache = null;
-  discoverCacheAt = 0;
-  stopStatusPolling();
-  $('app-view').classList.add('hidden');
-  $('connect-view').classList.remove('hidden');
-  $('conn-badge').textContent = '未连接';
-  $('conn-badge').classList.remove('ok');
-  const dbtn = $btn('disconnect-btn');
-  dbtn.classList.add('hidden');
-  dbtn.classList.remove('danger');
-  const dlabel = dbtn.querySelector('span');
-  if (dlabel) dlabel.textContent = '断开';
-  disconnectArmed = false;
-  void stopReceive();
-  setRunning(false);
-}
-
-/** 两段式断开确认：第一次点击进入「确认断开？」（3 秒后自动恢复），再点执行。 */
-function armDisconnect(): void {
-  const btn = $btn('disconnect-btn');
-  const label = btn.querySelector('span');
-  if (!disconnectArmed) {
-    disconnectArmed = true;
-    btn.classList.add('danger');
-    if (label) label.textContent = '确认断开？';
-    disconnectTimer = window.setTimeout(() => {
-      disconnectArmed = false;
-      btn.classList.remove('danger');
-      if (label) label.textContent = '断开';
-    }, 3000);
-    return;
-  }
-  if (disconnectTimer !== null) {
-    window.clearTimeout(disconnectTimer);
-    disconnectTimer = null;
-  }
-  disconnectArmed = false;
-  btn.classList.remove('danger');
-  if (label) label.textContent = '断开';
-  disconnect();
-}
-
-/** 状态轮询生命周期：连接后启动、断开即停。 */
+/** 状态轮询：应用打开期间常驻（本机状态，无需连接前提）。 */
 function startStatusPolling(): void {
   if (statusTimer !== null) return;
   statusTimer = window.setInterval(() => void pollStatus(), 2000);
 }
-function stopStatusPolling(): void {
-  if (statusTimer !== null) {
-    window.clearInterval(statusTimer);
-    statusTimer = null;
-  }
-}
 
 // ---------------------------------------------------------------- 模式切换
 
-function setTab(tab: 'send' | 'watch'): void {
+function setTab(tab: 'grid' | 'send' | 'watch'): void {
   currentTab = tab;
+  $('tab-grid-btn').classList.toggle('active', tab === 'grid');
   $('tab-send-btn').classList.toggle('active', tab === 'send');
   $('tab-watch-btn').classList.toggle('active', tab === 'watch');
+  const grid = $('tab-grid');
   const send = $('tab-send');
   const watch = $('tab-watch');
+  grid.classList.toggle('hidden', tab !== 'grid');
   send.classList.toggle('hidden', tab !== 'send');
   watch.classList.toggle('hidden', tab !== 'watch');
-  showView(tab === 'send' ? send : watch);
+  showView(tab === 'grid' ? grid : tab === 'send' ? send : watch);
+  if (tab === 'grid') {
+    void scanRemoteStreams(); // TTL 内命中缓存，不重复扫描
+  }
   if (tab === 'watch') {
     void loadRemoteStreams();
-    void scanRemoteStreams();
   }
 }
 
@@ -616,11 +595,16 @@ function renderIps(ips: string[]): void {
   ips.forEach((ip) => {
     const li = document.createElement('li');
     li.textContent = ip;
-    li.title = '点击填入中继地址';
+    li.title = '点击复制';
     makeClickable(li, () => {
-      (document.querySelector('input[name="conn"][value="remote"]') as HTMLInputElement).checked = true;
-      $('remote-row').classList.remove('hidden');
-      $input('relay-addr').value = `http://${ip}:8777`;
+      navigator.clipboard?.writeText(ip).then(() => {
+        li.style.borderColor = 'var(--ok)';
+        li.textContent = '已复制 ' + ip;
+        setTimeout(() => {
+          li.style.borderColor = '';
+          li.textContent = ip;
+        }, 1500);
+      });
     });
     ul.appendChild(li);
   });
@@ -648,7 +632,24 @@ function roleChip(role: string): HTMLElement {
   return c;
 }
 
-/** 扫描局域网内其它设备（mDNS）；打开应用时自动执行一次，也可手动重扫。 */
+/** 设备卡片数据（mDNS 或手动添加）。 */
+interface DeviceCard {
+  /** http://host:port 归一化基址（设备筛选键）。 */
+  base: string;
+  name: string;
+  meta: string;
+  roles: string[];
+  /** 手动添加（无 mDNS 角色信息）。 */
+  manual: boolean;
+}
+
+/** 归一化设备基址：取 urls[0] 并去掉尾部斜杠。 */
+function deviceBase(r: { urls: string[] }): string {
+  return (r.urls[0] || '').replace(/\/+$/, '');
+}
+
+/** 扫描局域网内其它设备（mDNS + 手动添加）；打开应用时自动执行，也可手动重扫。
+ *  点设备卡片切换「只看该设备串流」（「局域网串流」联动过滤）。 */
 async function scanRelays(): Promise<void> {
   if (scanInFlight) return; // 防并发重复扫描
   scanInFlight = true;
@@ -657,45 +658,62 @@ async function scanRelays(): Promise<void> {
   box.innerHTML = '<p class="hint">扫描中…</p>';
   try {
     const relays = (await call('scan_relays')) as RelayInfo[];
-    // 剔除本机（本机中继走「本机」选项）
+    // 剔除本机（本机锚点单独展示）
     const others = relays.filter((r) => !r.ip || MY_IPS.indexOf(r.ip) === -1);
+    const cards: DeviceCard[] = others.map((r) => ({
+      base: deviceBase(r),
+      name: r.name || 'Stross 设备',
+      meta: r.ip ? r.ip + ':' + r.port : deviceBase(r),
+      roles: r.roles || [],
+      manual: false,
+    }));
+    // 手动添加的设备（历史持久化）也进设备列表
+    manualRelays.forEach((addr) => {
+      const base = addr.replace(/\/+$/, '');
+      if (!cards.some((c) => c.base === base)) {
+        const hostPort = addr.replace(/^https?:\/\//, '');
+        cards.push({ base, name: hostPort, meta: hostPort, roles: [], manual: true });
+      }
+    });
     box.innerHTML = '';
-    if (!others.length) {
-      box.appendChild(emptyState('radio', '未发现局域网内其它设备（mDNS）。可手动输入地址。'));
+    if (!cards.length) {
+      box.appendChild(emptyState('radio', '未发现局域网内其它设备（mDNS）。可手动输入地址添加。'));
       return;
     }
-    others.forEach((r) => {
-      const url = r.urls[0];
+    cards.forEach((c) => {
       const card = document.createElement('button');
       card.type = 'button';
-      card.className = 'scan-card';
+      card.className = 'scan-card' + (selectedDevice === c.base ? ' selected' : '');
       const ic = document.createElement('span');
       ic.className = 'card-ic';
-      ic.innerHTML = icon('radio');
+      ic.innerHTML = icon(c.manual ? 'link' : 'radio');
       card.appendChild(ic);
       const body = document.createElement('span');
       body.className = 'card-body';
       const nameLine = document.createElement('span');
       nameLine.className = 'scan-name';
-      nameLine.textContent = r.name || 'Stross 设备';
+      nameLine.textContent = c.name + (c.manual ? '（手动）' : '');
       const metaLine = document.createElement('span');
       metaLine.className = 'scan-meta';
-      metaLine.appendChild(document.createTextNode(r.ip ? r.ip + ':' + r.port : url));
-      if (r.roles && r.roles.length) {
+      metaLine.appendChild(document.createTextNode(c.meta));
+      if (c.roles.length) {
         const chips = document.createElement('span');
         chips.className = 'chips';
-        r.roles.forEach((role) => chips.appendChild(roleChip(role)));
+        c.roles.forEach((role) => chips.appendChild(roleChip(role)));
         metaLine.appendChild(chips);
       }
       body.appendChild(nameLine);
       body.appendChild(metaLine);
       card.appendChild(body);
-      card.title = '点击连接 ' + url;
+      card.title = selectedDevice === c.base ? '取消只看该设备' : '只看该设备的串流';
       card.onclick = () => {
-        $input('relay-addr').value = url;
-        (document.querySelector('input[name="conn"][value="remote"]') as HTMLInputElement).checked = true;
-        $('remote-row').classList.remove('hidden');
-        void connect();
+        // 按需建立：点设备 = 临时连锚点看其串流（再点一次取消）
+        const next = selectedDevice === c.base ? null : c.base;
+        selectedDevice = next;
+        document.querySelectorAll('#scan-results .scan-card').forEach((el) => el.classList.remove('selected'));
+        if (next) card.classList.add('selected');
+        card.title = next ? '取消只看该设备' : '只看该设备的串流';
+        void scanRemoteStreams(true); // 强制刷新（过滤/取消过滤）
       };
       box.appendChild(card);
     });
@@ -742,24 +760,25 @@ function buildConfig(): StreamConfig {
 
 /** 推流端按媒体类型自动选传输（与接收端 auto 同规则）：
  *  含视频 → SRT（Adaptive：丢包不阻塞、关键帧自愈）> QUIC > WS
- *  纯音频 → QUIC（无损：音频不可丢）> WS */
+ *  纯音频 → QUIC（无损：音频不可丢）> WS
+ *  推流锚定本机中继（免先连：无需先连接其它设备）。 */
 function pushRelayUrl(cfg: StreamConfig): string {
-  if (!connection) return '';
+  if (!anchor) return '';
   const hasVideo = !!cfg.video;
   if (hasVideo) {
-    if (connection.srtUrl) return connection.srtUrl;
-    if (connection.quicUrl) return connection.quicUrl;
-  } else if (connection.quicUrl) {
-    return connection.quicUrl;
+    if (anchor.srtUrl) return anchor.srtUrl;
+    if (anchor.quicUrl) return anchor.quicUrl;
+  } else if (anchor.quicUrl) {
+    return anchor.quicUrl;
   }
-  return connection.wsUrl;
+  return `ws://127.0.0.1:${anchor.port}/ws/push`;
 }
 
 /** Android：与桌面统一走 start_stream（cfg 携带画质/音频；原生采集在 Rust 后端适配）。 */
 async function startStream(): Promise<void> {
   hideError();
-  if (!connection) {
-    showFatal('请先连接中继');
+  if (!anchor) {
+    showFatal('本机锚点未就绪，无法推流。请到「网格」页查看锚点状态并重试。');
     return;
   }
   savePrefs();
@@ -805,7 +824,7 @@ async function stopStream(): Promise<void> {
 
 /** Android：轮询采集真实状态（Kotlin 控制帧 t=9 回报 → capture_status）。 */
 async function pollMobileStatus(): Promise<void> {
-  if (!IS_ANDROID || !connection) return;
+  if (!IS_ANDROID) return;
   try {
     const s = (await call('capture_status')) as CaptureStatus;
     if (!s.active) {
@@ -838,7 +857,6 @@ async function pollMobileStatus(): Promise<void> {
 }
 
 async function pollStatus(): Promise<void> {
-  if (!connection) return;
   if (IS_ANDROID) {
     // Android 每 2 秒轮询真实采集状态
     if (running || starting) void pollMobileStatus();
@@ -848,7 +866,7 @@ async function pollStatus(): Promise<void> {
     const s = (await call('stream_status')) as StreamStatus;
     setRunning(s.running);
     $('stream-meta').textContent = s.running
-      ? `「${s.title}」(${s.streamId}) · 已推流 ${fmtElapsed((Date.now() / 1000) - s.startedAt!)} · 中继端口 ${s.relayPort} · 局域网设备可在「观看（收）」页接收`
+      ? `「${s.title}」(${s.streamId}) · 已推流 ${fmtElapsed((Date.now() / 1000) - s.startedAt!)} · 中继端口 ${s.relayPort} · 局域网设备可在「网格」页发现并接收`
       : '';
   } catch (_) {
     /* ignore */
@@ -876,8 +894,8 @@ function setRunning(r: boolean, phase: 'idle' | 'starting' | 'live' = r ? 'live'
   } else if (phase === 'live') {
     dot.className = 'dot live';
     text.textContent = '推流中';
-    // 明确告知去向（D1：无浏览器观看端，接收走「观看（收）」页原生播放）
-    $('stream-meta').textContent = '推流中 · 局域网设备可在「观看（收）」页选择本机流接收';
+    // 明确告知去向（D1：无浏览器观看端，接收走原生播放；P0：推流锚定本机）
+    $('stream-meta').textContent = '推流中 · 局域网设备可在「网格」页发现本机流并接收';
   } else {
     dot.className = 'dot idle';
     text.textContent = '未推流';
@@ -885,31 +903,34 @@ function setRunning(r: boolean, phase: 'idle' | 'starting' | 'live' = r ? 'live'
   }
 }
 
+/** 可复制的 URL 列表项（点击复制，1.5s 反馈「已复制」）。 */
+function urlListItem(u: string): HTMLLIElement {
+  const li = document.createElement('li');
+  const tag = document.createElement('span');
+  tag.className = 'tag';
+  tag.innerHTML = icon('play');
+  li.appendChild(tag);
+  li.appendChild(document.createTextNode(u));
+  li.title = '点击复制';
+  makeClickable(li, () => {
+    navigator.clipboard?.writeText(u).then(() => {
+      li.style.borderColor = 'var(--ok)';
+      li.innerHTML = '<span class="tag ok">' + icon('check') + '</span>已复制';
+      setTimeout(() => {
+        li.style.borderColor = '';
+        li.innerHTML = '';
+        li.appendChild(tag);
+        li.appendChild(document.createTextNode(u));
+      }, 1500);
+    });
+  });
+  return li;
+}
+
 function renderUrls(urls: string[]): void {
   const ul = $('url-list');
   ul.innerHTML = '';
-  urls.forEach((u) => {
-    const li = document.createElement('li');
-    const tag = document.createElement('span');
-    tag.className = 'tag';
-    tag.innerHTML = icon('play');
-    li.appendChild(tag);
-    li.appendChild(document.createTextNode(u));
-    li.title = '点击复制';
-    makeClickable(li, () => {
-      navigator.clipboard?.writeText(u).then(() => {
-        li.style.borderColor = 'var(--ok)';
-        li.innerHTML = '<span class="tag ok">' + icon('check') + '</span>已复制';
-        setTimeout(() => {
-          li.style.borderColor = '';
-          li.innerHTML = '';
-          li.appendChild(tag);
-          li.appendChild(document.createTextNode(u));
-        }, 1500);
-      });
-    });
-    ul.appendChild(li);
-  });
+  urls.forEach((u) => ul.appendChild(urlListItem(u)));
 }
 
 // ---------------------------------------------------------------- 接收（原生播放，1e）
@@ -967,10 +988,10 @@ function clearCardSelection(): void {
   document.querySelectorAll('.recv-streams .scan-card').forEach((c) => c.classList.remove('selected'));
 }
 
-/** 拉取当前中继的在线串流列表（GET /api/streams），渲染可选卡片。 */
+/** 拉取本机锚点的在线串流列表（GET /api/streams），渲染可选卡片。 */
 async function loadRemoteStreams(force = false): Promise<void> {
   const box = $('recv-streams');
-  if (!connection) {
+  if (!anchor) {
     box.innerHTML = '';
     return;
   }
@@ -986,7 +1007,7 @@ async function loadRemoteStreams(force = false): Promise<void> {
         onPick: (card) => {
           clearCardSelection();
           card.classList.add('selected');
-          targetRelay = null; // 回已连接中继
+          targetRelay = null; // 回本机锚点
           remoteStreams.set(s.streamId, s);
           $input('recv-stream-input').value = s.streamId;
           void startReceive();
@@ -996,10 +1017,10 @@ async function loadRemoteStreams(force = false): Promise<void> {
     return;
   }
   try {
-    const resp = await fetch(connection.url + '/api/streams', { cache: 'no-store' });
+    const resp = await fetch(`http://127.0.0.1:${anchor.port}/api/streams`, { cache: 'no-store' });
     if (!resp.ok) {
       box.innerHTML = '';
-      box.appendChild(emptyState('video', '中继未提供串流列表（HTTP ' + resp.status + '）', true));
+      box.appendChild(emptyState('video', '本机锚点未提供串流列表（HTTP ' + resp.status + '）', true));
       return;
     }
     const data = (await resp.json()) as { streams?: RemoteStream[] } | RemoteStream[];
@@ -1007,7 +1028,7 @@ async function loadRemoteStreams(force = false): Promise<void> {
     streamsCache = { at: Date.now(), list };
     box.innerHTML = '';
     if (!list.length) {
-      box.appendChild(emptyState('video', '该中继暂无在线串流。可先在「推流」页开始推流。'));
+      box.appendChild(emptyState('video', '本机锚点暂无在线串流。可先在「推流」页开始推流。'));
       return;
     }
     for (const s of list) {
@@ -1019,7 +1040,7 @@ async function loadRemoteStreams(force = false): Promise<void> {
         onPick: (card) => {
           clearCardSelection();
           card.classList.add('selected');
-          targetRelay = null; // 回已连接中继
+          targetRelay = null; // 回本机锚点
           remoteStreams.set(s.streamId, s);
           $input('recv-stream-input').value = s.streamId;
           void startReceive();
@@ -1032,7 +1053,9 @@ async function loadRemoteStreams(force = false): Promise<void> {
   }
 }
 
-/** 接收页自动发现：扫描局域网中继（mDNS），聚合各中继的在线串流（跨设备观看）。 */
+/** 网格页自动发现：扫描局域网设备（mDNS + 手动添加），聚合各设备的在线串流。
+ *  点设备卡片后只显示该设备串流；点流卡片 = 按需建立连接（直连锚点，失败自动
+ *  经本机级联代理），并跳转「观看（收）」页接收。 */
 async function scanRemoteStreams(force = false): Promise<void> {
   if (discoverInFlight) return; // 防并发
   if (!force && discoverCacheAt && Date.now() - discoverCacheAt < DISCOVER_TTL_MS) return;
@@ -1050,9 +1073,24 @@ async function scanRemoteStreams(force = false): Promise<void> {
   }
   try {
     const others = relays.filter((r) => !r.ip || MY_IPS.indexOf(r.ip) === -1);
+    // 手动添加的设备并入聚合（无 mDNS 时也能看到其串流）
+    manualRelays.forEach((addr) => {
+      const base = addr.replace(/\/+$/, '');
+      if (!others.some((r) => deviceBase(r) === base)) {
+        others.push({
+          port: 0,
+          urls: [base + '/'],
+          name: addr.replace(/^https?:\/\//, ''),
+          kind: null,
+          roles: [],
+          transports: [],
+          ip: null,
+        });
+      }
+    });
     if (!others.length) {
       box.innerHTML = '';
-      box.appendChild(emptyState('radio', '未发现局域网其它设备（mDNS）。可手动输入地址连接。'));
+      box.appendChild(emptyState('radio', '未发现局域网其它设备（mDNS）。可手动输入地址添加。'));
       return;
     }
     interface Found {
@@ -1064,9 +1102,9 @@ async function scanRemoteStreams(force = false): Promise<void> {
     }
     const found: Found[] = [];
     for (const r of others) {
-      const base = (r.urls[0] || '').replace(/\/+$/, '');
+      const base = deviceBase(r);
       if (!base) continue;
-      // 传输端口：/api/info（旧版本中继无此端点 → 该中继走 WS）
+      // 传输端口：/api/info（旧版本中继无此端点 → 该设备走 WS）
       let info: { srtPort?: number; quicPort?: number } | null = null;
       try {
         const iresp = await fetch(base + '/api/info', { cache: 'no-store' });
@@ -1077,24 +1115,33 @@ async function scanRemoteStreams(force = false): Promise<void> {
         if (!sresp.ok) continue;
         const data = (await sresp.json()) as { streams?: RemoteStream[] } | RemoteStream[];
         const list = Array.isArray(data) ? data : (data.streams || []);
-        const host = base.replace(/^https?:\/\//, '');
+        // SRT/QUIC 是独立 UDP 端口：拨号地址 = srt://<纯主机>:<srt_port>
+        // （不能带 http 端口；base 形如 http://ip:8777/）
+        const hostOnly = base.replace(/^https?:\/\//, '').replace(/:\d+$/, '');
         for (const st of list) {
           found.push({
             relayName: r.name || r.ip || base,
             relayBase: base,
             stream: st,
-            srtUrl: info && info.srtPort ? `srt://${host}:${info.srtPort}` : null,
-            quicUrl: info && info.quicPort ? `quic://${host}:${info.quicPort}` : null,
+            srtUrl: info && info.srtPort ? `srt://${hostOnly}:${info.srtPort}` : null,
+            quicUrl: info && info.quicPort ? `quic://${hostOnly}:${info.quicPort}` : null,
           });
         }
-      } catch (_) { /* 该中继不可达，跳过 */ }
+      } catch (_) { /* 该设备不可达，跳过 */ }
     }
+    // 设备筛选：「点设备只看其流」（selectedDevice = relayBase 键）
+    const shown = selectedDevice ? found.filter((f) => f.relayBase === selectedDevice) : found;
     box.innerHTML = '';
-    if (!found.length) {
-      box.appendChild(emptyState('radio', '局域网内暂无在线串流（可手动输入流 id）。'));
+    if (!shown.length) {
+      box.appendChild(emptyState(
+        'radio',
+        selectedDevice
+          ? '该设备暂无在线串流（或不可达）。再点一次设备卡片取消筛选。'
+          : '局域网内暂无在线串流（可手动输入流 id）。',
+      ));
       return;
     }
-    for (const it of found) {
+    for (const it of shown) {
       box.appendChild(streamCard({
         title: it.stream.title || it.stream.streamId,
         sub: it.relayName,
@@ -1102,10 +1149,11 @@ async function scanRemoteStreams(force = false): Promise<void> {
         onPick: (card) => {
           clearCardSelection();
           card.classList.add('selected');
-          // 目标切到该中继：地址 + 流信息（传输自动选择按流类型决策）
+          // 按需建立：目标切到该设备锚点（直连失败自动经本机级联代理）
           targetRelay = { wsBase: it.relayBase.replace(/^http/, 'ws'), srtUrl: it.srtUrl, quicUrl: it.quicUrl };
           remoteStreams.set(it.stream.streamId, it.stream);
           $input('recv-stream-input').value = it.stream.streamId;
+          setTab('watch'); // 点流即看：跳转接收页
           void startReceive();
         },
       }));
@@ -1126,11 +1174,12 @@ function hideRecvError(): void {
   $('recv-error').classList.add('hidden');
 }
 
-/** 开始原生接收：watch（WS/SRT/QUIC）→ 解码 → canvas 绘制。 */
+/** 开始原生接收：watch（WS/SRT/QUIC）→ 解码 → canvas 绘制。
+ *  目标 = 网格页点选的设备锚点（`targetRelay`）或本机锚点；直连失败自动级联。 */
 async function startReceive(): Promise<void> {
   hideRecvError();
-  if (!connection && !targetRelay) {
-    showRecvError('请先连接中继，或从上方「局域网串流」自动发现选择');
+  if (!anchor && !targetRelay) {
+    showRecvError('本机锚点未就绪且未选择局域网串流。请从「网格」页选择一串流。');
     return;
   }
   const streamId = $input('recv-stream-input').value.trim();
@@ -1145,7 +1194,7 @@ async function startReceive(): Promise<void> {
     const stream = remoteStreams.get(streamId) || null; // 流类型（video/audio）供传输自动选择
     const relay = pickRelayUrl(stream); // 按传输选择 + 流媒体类型：ws / srt / quic（UDP 不可用回退）
     if (!relay) {
-      showRecvError('无可用接收目标（请先连接中继或从局域网串流选择）');
+      showRecvError('无可用接收目标（本机锚点未就绪或未选择局域网串流）');
       return;
     }
     await call('start_receive', {
@@ -1233,20 +1282,15 @@ async function pollReceiveStatus(): Promise<void> {
 
 // ---------------------------------------------------------------- 事件
 
-document.querySelectorAll<HTMLInputElement>('input[name="conn"]').forEach((r) =>
-  r.addEventListener('change', () => {
-    $('remote-row').classList.toggle('hidden', r.value !== 'remote');
-  })
-);
 document.querySelectorAll<HTMLInputElement>('input[name="video"]').forEach((r) =>
   r.addEventListener('change', () => {
     $('camera-row').classList.toggle('hidden', r.value !== 'camera');
   })
 );
 
-$btn('connect-btn').onclick = () => void connect();
 $btn('scan-btn').onclick = () => void scanRelays();
-$btn('disconnect-btn').onclick = armDisconnect;
+$btn('manual-add-btn').onclick = () => void addManualRelay();
+$btn('tab-grid-btn').onclick = () => setTab('grid');
 $btn('tab-send-btn').onclick = () => setTab('send');
 $btn('tab-watch-btn').onclick = () => setTab('watch');
 $btn('discover-btn').onclick = () => void scanRemoteStreams(true);
@@ -1255,5 +1299,13 @@ $btn('stop-btn').onclick = () => void stopStream();
 $btn('recv-start-btn').onclick = () => void startReceive();
 $btn('recv-stop-btn').onclick = () => void stopReceive();
 
+// 手动地址输入框回车 = 添加设备
+$input('manual-addr').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    void addManualRelay();
+  }
+});
+
 void init();
-// 状态轮询由 connect() 成功后启动、disconnect() 停止（不再全局无条件轮询）
+// 状态轮询由 init 锚定后启动（本机状态，无连接前提）

@@ -146,73 +146,77 @@
       </div>
     </div>
     <div class="header-right">
-      <button id="disconnect-btn" class="ghost-btn hidden" type="button">
-        <svg class="ic"><use href="#i-x" /></svg><span>断开</span>
-      </button>
-      <span id="conn-badge" class="badge">未连接</span>
+      <span id="anchor-badge" class="badge">锚定中…</span>
       <span id="ffmpeg-badge" class="badge">检查 ffmpeg…</span>
       <span id="ver-badge" class="badge muted">v-</span>
     </div>
   </header>
 
   <main>
-    <!-- ==================== 连接视图 ==================== -->
-    <section id="connect-view" class="card connect-card">
-      <h2>连接中继</h2>
-      <p class="hint">先连接一台中继（本机或局域网内任意设备），连接后可以选择<strong>推流（发）</strong>或<strong>观看（收）</strong>。</p>
-
-      <div class="row">
-        <label class="seg" data-conn="local">
-          <input type="radio" name="conn" value="local" checked />
-          <svg class="ic"><use href="#i-monitor" /></svg>
-          <span>本机（自动启动中继）</span>
-        </label>
-        <label class="seg" data-conn="remote">
-          <input type="radio" name="conn" value="remote" />
-          <svg class="ic"><use href="#i-globe" /></svg>
-          <span>局域网中继</span>
-        </label>
-      </div>
-
-      <div class="row hidden" id="remote-row">
-        <input id="relay-addr" type="text" placeholder="http://192.168.1.100:8777" />
-        <button id="scan-btn" type="button">
-          <svg class="ic"><use href="#i-search" /></svg><span>重新扫描</span>
-        </button>
-      </div>
-
-      <div id="scan-results" class="scan-results hidden"></div>
-
-      <div id="recent-block" class="hidden">
-        <h2>最近连接</h2>
-        <ul id="recent-list" class="url-list"></ul>
-      </div>
-
-      <div class="actions">
-        <button id="connect-btn" class="primary" type="button">连接</button>
-      </div>
-      <div id="connect-error" class="error hidden"></div>
-
-      <h2>本机 IP</h2>
-      <ul id="ip-list" class="url-list">
-        <li class="hint">读取中…</li>
-      </ul>
-    </section>
-
-    <!-- ==================== 主界面（连接后） ==================== -->
-    <section id="app-view" class="hidden">
+    <!-- ==================== 主界面（免先连：打开即进入设备网格） ==================== -->
+    <section id="app-view">
       <nav class="tabs">
-        <button id="tab-send-btn" class="tab active" type="button">
+        <button id="tab-grid-btn" class="tab active" type="button">
+          <svg class="ic"><use href="#i-radio" /></svg><span>网格</span>
+        </button>
+        <button id="tab-send-btn" class="tab" type="button">
           <svg class="ic"><use href="#i-upload" /></svg><span>推流（发）</span>
         </button>
         <button id="tab-watch-btn" class="tab" type="button">
           <svg class="ic"><use href="#i-download" /></svg><span>观看（收）</span>
         </button>
-        <span class="tab-conn" id="tab-conn-label">未连接</span>
       </nav>
 
-      <!-- 推流 -->
-      <div id="tab-send" class="tab-pane">
+      <!-- 网格：打开即见全网设备/流，连接按需建立（点流卡片临时连锚点/本机级联） -->
+      <div id="tab-grid" class="tab-pane">
+        <div class="pane-grid">
+          <section class="card">
+            <h2>本机锚点</h2>
+            <p class="hint">打开即自动锚定本机（启动受控中继 + mDNS 广播）。推流锚定本机；局域网设备发现本机后可直接接收。</p>
+            <div id="anchor-box" class="anchor-box">锚定中…</div>
+            <h2>本机入口</h2>
+            <p class="hint">供其它设备直接连接（数据面 ws://ip:port/ws/*，REST /api/*）：</p>
+            <ul id="ip-list" class="url-list">
+              <li class="hint">读取中…</li>
+            </ul>
+          </section>
+
+          <section class="card">
+            <h2>局域网设备</h2>
+            <p class="hint">mDNS 自动发现；点设备卡片只看该设备的串流（「局域网串流」联动），再点一次取消。</p>
+            <div class="row">
+              <button id="scan-btn" type="button">
+                <svg class="ic"><use href="#i-search" /></svg><span>重新扫描</span>
+              </button>
+              <input id="manual-addr" type="text" placeholder="http://192.168.1.100:8777" class="grow" />
+              <button id="manual-add-btn" type="button">添加</button>
+            </div>
+            <div id="scan-results" class="scan-results"></div>
+            <div id="recent-block" class="hidden">
+              <h2>手动添加历史</h2>
+              <ul id="recent-list" class="url-list"></ul>
+            </div>
+          </section>
+
+          <section class="card span-2">
+            <h2>局域网串流</h2>
+            <div class="row">
+              <span class="hint icon-hint">
+                <svg class="ic"><use href="#i-radio" /></svg>
+                <span>自动发现（直连锚点，失败自动经本机级联代理）：</span>
+              </span>
+              <button id="discover-btn" type="button">
+                <svg class="ic"><use href="#i-refresh" /></svg><span>重扫</span>
+              </button>
+            </div>
+            <div id="discover-streams" class="recv-streams"></div>
+            <div id="grid-error" class="error hidden"></div>
+          </section>
+        </div>
+      </div>
+
+      <!-- 推流（发）：锚定本机 -->
+      <div id="tab-send" class="tab-pane hidden">
         <div class="pane-grid">
           <section class="card">
             <h2>串流源</h2>
@@ -301,33 +305,22 @@
               <div id="error-box" class="error hidden"></div>
             </div>
 
-            <h2>中继入口</h2>
-            <p class="hint">本机中继入口地址（数据面 ws://ip:port/ws/*，REST /api/*）：</p>
+            <h2>本机锚点入口</h2>
+            <p class="hint">推流锚定本机中继；局域网设备可在「网格」页发现本机并接收：</p>
             <ul id="url-list" class="url-list">
-              <li class="hint">连接中继后显示入口地址</li>
+              <li class="hint">锚定后显示入口地址</li>
             </ul>
           </section>
         </div>
       </div>
 
-      <!-- 观看（原生接收，D6/D1） -->
+      <!-- 观看（收）：原生接收（D6/D1） -->
       <div id="tab-watch" class="tab-pane hidden">
         <div class="pane-grid pane-grid-watch">
           <section class="card">
             <h2>接收（原生播放）</h2>
-            <p class="hint">已连接中继：<span id="watch-relay-url" class="mono"></span></p>
-            <p class="hint">自动发现局域网内其它中继的在线串流（跨设备观看），或选择已连接中继的串流，或直接输入流 id。</p>
-            <div class="row">
-              <span class="hint icon-hint">
-                <svg class="ic"><use href="#i-radio" /></svg>
-                <span>局域网串流（自动发现）：</span>
-              </span>
-              <button id="discover-btn" type="button">
-                <svg class="ic"><use href="#i-refresh" /></svg><span>重扫</span>
-              </button>
-            </div>
-            <div id="discover-streams" class="recv-streams"></div>
-            <p class="hint">选择要接收的串流（接收端有选择权，F2.1），或直接输入流 id。</p>
+            <p class="hint">本机锚点：<span id="watch-relay-url" class="mono"></span></p>
+            <p class="hint">从「网格」页点选局域网串流会自动跳转并接收；也可选本机串流，或直接输入流 id。</p>
             <div id="recv-streams" class="recv-streams"></div>
             <div class="row">
               <input id="recv-stream-input" type="text" placeholder="流 id（如 sess-1 或 demo-1234）" class="grow" />

@@ -392,17 +392,34 @@ impl AccessUnitBuilder {
     }
 
     /// 推入一个 NAL；遇到新的一帧（`first_mb_in_slice == 0`）时产出上一帧。
+    ///
+    /// 配置 NAL（SPS/PPS/SEI，`pending`）归属**随后的 slice 所在帧**：新一帧的
+    /// 首个 slice 到达时，先把 `pending` 并入新帧开头，再产出上一帧——
+    /// 否则 SPS/PPS 会配给上一帧，关键帧变成"光杆 IDR"（无 SPS/PPS），
+    /// 中途接入的观看端（含级联代理）无法解析分辨率，解码 0 帧。
     pub fn push(&mut self, nal: Vec<u8>) -> Option<AccessUnit> {
         match nal_type(&nal) {
             Some(NAL_SLICE_NON_IDR) | Some(NAL_SLICE_IDR) => {
                 let is_idr = nal_type(&nal) == Some(NAL_SLICE_IDR);
                 let first_slice = first_mb_in_slice(&nal).is_none_or(|v| v == 0);
-                if first_slice && !self.current.is_empty() {
-                    let au = self.take();
-                    self.current.push(nal);
+                if first_slice {
+                    // 产出上一帧（pending 不属于它）
+                    let prev = if self.current.is_empty() {
+                        None
+                    } else {
+                        Some(AccessUnit {
+                            nals: std::mem::take(&mut self.current),
+                            keyframe: std::mem::take(&mut self.keyframe),
+                        })
+                    };
+                    // 新帧 = 待附配置（SPS/PPS/SEI）+ 本 slice
+                    let mut nals = std::mem::take(&mut self.pending);
+                    nals.push(nal);
+                    self.current = nals;
                     self.keyframe = is_idr;
-                    return Some(au);
+                    return prev;
                 }
+                // 同帧后续 slice（多 slice 编码）：追加
                 self.current.push(nal);
                 self.keyframe = is_idr;
                 None
@@ -505,18 +522,55 @@ mod tests {
         let p = b.push(nal(NAL_SLICE_NON_IDR, 0)).unwrap();
         assert!(!p.keyframe);
         assert_eq!(p.nals.len(), 1);
-        // 第二个 GOP：SPS IDR P（IDR 到来会先切出上一帧，SPS 随上一帧走）
+        // 第二个 GOP：SPS IDR P（SPS 归关键帧：IDR 到达先切出上一帧，SPS 并入新帧）
         assert!(b.push(nal(NAL_SPS, 0)).is_none());
         let prev = b.push(nal(NAL_SLICE_IDR, 0)).expect("IDR 应先切出上一帧");
         assert!(!prev.keyframe);
-        assert_eq!(prev.nals.len(), 2); // [SPS, P]
+        assert_eq!(prev.nals.len(), 1); // [P]——上一帧不带 SPS
         let kf2 = b.push(nal(NAL_SLICE_NON_IDR, 0)).unwrap();
         assert!(kf2.keyframe);
-        assert_eq!(kf2.nals.len(), 1); // [IDR]
+        assert_eq!(kf2.nals.len(), 2); // [SPS, IDR]——关键帧含 SPS（自愈前提）
         let p2 = b.push(nal(NAL_SLICE_NON_IDR, 0)).unwrap();
         assert!(!p2.keyframe);
         let last = b.finish().expect("finish 应切出最后一帧");
         assert!(!last.keyframe);
+    }
+
+    /// 回归：repeat_headers=1 流中**每个**关键帧必须携带 SPS/PPS。
+    ///
+    /// 曾修 bug：配置 NAL（pending）被配给上一帧，后续关键帧变成"光杆 IDR"，
+    /// relay 缓存它转发后，中途接入的观看端（含级联代理）无法解析分辨率
+    /// （`parse_sps_size` 失败），解码 0 帧。
+    #[test]
+    fn every_keyframe_carries_sps() {
+        let mut b = AccessUnitBuilder::new();
+        // GOP1：SPS PPS SEI IDR P
+        assert!(b.push(nal(NAL_SPS, 0)).is_none());
+        assert!(b.push(nal(NAL_PPS, 0)).is_none());
+        assert!(b.push(nal(6, 0)).is_none(), "SEI 进 pending");
+        assert!(b.push(nal(NAL_SLICE_IDR, 0)).is_none(), "首帧不产出");
+        let kf1 = b.push(nal(NAL_SLICE_NON_IDR, 0)).expect("切出关键帧 1");
+        assert!(kf1.keyframe);
+        let types1: Vec<u8> = kf1.nals.iter().filter_map(|n| nal_type(n)).collect();
+        assert!(
+            types1.contains(&NAL_SPS) && types1.contains(&NAL_PPS),
+            "关键帧 1 必须含 SPS/PPS: {types1:?}"
+        );
+        // 两个 P 帧
+        assert!(!b.push(nal(NAL_SLICE_NON_IDR, 0)).unwrap().keyframe);
+        assert!(!b.push(nal(NAL_SLICE_NON_IDR, 0)).unwrap().keyframe);
+        // GOP2：SPS PPS IDR P（IDR 先切出上一 P 帧，SPS 并入关键帧）
+        assert!(b.push(nal(NAL_SPS, 0)).is_none());
+        assert!(b.push(nal(NAL_PPS, 0)).is_none());
+        let prev = b.push(nal(NAL_SLICE_IDR, 0)).expect("IDR 切出上一帧");
+        assert!(!prev.keyframe);
+        let kf2 = b.push(nal(NAL_SLICE_NON_IDR, 0)).expect("切出关键帧 2");
+        assert!(kf2.keyframe);
+        let types2: Vec<u8> = kf2.nals.iter().filter_map(|n| nal_type(n)).collect();
+        assert!(
+            types2.contains(&NAL_SPS) && types2.contains(&NAL_PPS),
+            "关键帧 2 必须含 SPS/PPS（级联/中途接入依赖）: {types2:?}"
+        );
     }
 
     #[test]

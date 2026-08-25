@@ -1,7 +1,5 @@
 //! `stross relay`：启动局域网中继（等同独立 `stross-relay`）。
 
-use std::net::{IpAddr, Ipv4Addr};
-
 use clap::Args;
 use stross_core::relay::{DEFAULT_PORT, RelayServer};
 use stross_proto::message::{CodecId, DiscoveryInfo, RoleId, TransportId};
@@ -41,9 +39,7 @@ pub async fn run(args: RelayArgs) -> anyhow::Result<()> {
     if !args.no_advertise {
         let mut discovery = stross_core::discovery::Discovery::start(
             &format!("relay-{}", handle.port),
-            ips.first()
-                .copied()
-                .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            &ips,
             handle.port,
             &DiscoveryInfo {
                 v: DiscoveryInfo::VERSION,

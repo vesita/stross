@@ -872,7 +872,9 @@ mod tests {
 
     /// 从 `base` 中继观看 `stream_id`，直到收到关键帧（带超时）。
     async fn watch_until_keyframe(base: &str, stream_id: &str) {
-        let session = connect_watch(base, stream_id).await.expect("watch 连接应成功");
+        let session = connect_watch(base, stream_id)
+            .await
+            .expect("watch 连接应成功");
         loop {
             match tokio::time::timeout(Duration::from_secs(5), session.recv()).await {
                 Ok(Ok(Some(SessionPacket::Media(f)))) if f.header.is_keyframe() => break,
@@ -974,10 +976,7 @@ mod tests {
             r2.streams().iter().all(|s| s.stream_id != "short-1"),
             "上游流结束后代理应自动清理"
         );
-        assert!(
-            r2.state().proxies().is_empty(),
-            "代理任务表应清空"
-        );
+        assert!(r2.state().proxies().is_empty(), "代理任务表应清空");
 
         r1.stop().await;
         r2.stop().await;

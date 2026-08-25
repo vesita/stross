@@ -65,7 +65,7 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
         duration_secs: Some(args.secs as u32),
     };
     if args.audio {
-        cfg.audio = Some(AudioSourceConfig::default());
+        cfg.audio = Some(AudioSourceConfig::synthetic_test());
     }
 
     let engine = match SenderEngine::start(
@@ -80,7 +80,13 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
         Err(_) if args.audio => {
             tracing::warn!("音频启动失败，退回纯视频");
             cfg.audio = None;
-            SenderEngine::start(cfg, Arc::new(FfmpegBackend::new()), args.relay.clone(), args.port).await?
+            SenderEngine::start(
+                cfg,
+                Arc::new(FfmpegBackend::new()),
+                args.relay.clone(),
+                args.port,
+            )
+            .await?
         }
         Err(e) => return Err(e),
     };

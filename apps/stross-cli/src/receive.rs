@@ -16,13 +16,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Args;
+use stross_core::SessionPacket;
 use stross_core::session_channel::{ChannelKind, SessionDataManager};
 use stross_core::watch;
-use stross_core::SessionPacket;
-use stross_proto::frame::TRACK_VIDEO;
 use stross_media::playback::{
     AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackSink, VideoOut,
 };
+use stross_proto::frame::TRACK_VIDEO;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum AudioOutArg {
@@ -107,8 +107,7 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
     let mut max_pts: Option<u32> = None;
     let mut video_seen = 0u32;
     loop {
-        let remaining = Duration::from_secs(args.secs)
-            .saturating_sub(start.elapsed());
+        let remaining = Duration::from_secs(args.secs).saturating_sub(start.elapsed());
         if remaining.is_zero() {
             break;
         }

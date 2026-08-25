@@ -173,9 +173,7 @@ impl PlaybackSession {
                     self.inner.stats.lock().unwrap().dropped_push += 1;
                     // 视频丢帧会撕裂解码链 → 置失步，writer 等关键帧重建
                     // （H.264 花屏帧不喂解码器，最多一个 GOP 后干净恢复）
-                    if is_video
-                        && let Some(r) = self.inner.video_resync.as_ref()
-                    {
+                    if is_video && let Some(r) = self.inner.video_resync.as_ref() {
                         r.store(true, Ordering::Relaxed);
                     }
                     Ok(())

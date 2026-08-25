@@ -125,7 +125,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 duration_secs: Some(secs as u32),
             };
             if audio {
-                config.audio = Some(AudioSourceConfig::default());
+                config.audio = Some(AudioSourceConfig::synthetic_test());
             }
             let req = CtrlRequest::StartStream {
                 config,

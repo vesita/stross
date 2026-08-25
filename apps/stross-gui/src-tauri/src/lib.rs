@@ -155,7 +155,9 @@ async fn start_receive(
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        state.start_receive_raw(relay.clone(), stream.clone()).await?;
+        state
+            .start_receive_raw(relay.clone(), stream.clone())
+            .await?;
         let frames = match state.take_receive_raw_frames() {
             Some(r) => r,
             None => return Err("接收会话已启动但没有编码帧通道".into()),
@@ -347,37 +349,32 @@ pub fn run_relay_only(args: &[String]) {
         tracing::info!("Ctrl+C 退出");
 
         let _discovery = if advertise {
-            match local_ips().into_iter().next() {
-                Some(ip) => {
-                    match Discovery::start(
-                        &format!("sender-relay-{}", handle.port),
-                        ip,
-                        handle.port,
-                        &DiscoveryInfo {
-                            v: DiscoveryInfo::VERSION,
-                            name: "Stross 中继".into(),
-                            roles: vec![RoleId::Relay, RoleId::Sender, RoleId::Viewer],
-                            media: vec![],
-                            transports: vec![
-                                TransportId::Ws,
-                                TransportId::WebRtc,
-                                TransportId::Srt,
-                                TransportId::Quic,
-                            ],
-                            codecs: vec![CodecId::H264, CodecId::Aac],
-                        },
-                    ) {
-                        Ok(d) => {
-                            tracing::info!("mDNS 广播中…");
-                            Some(d)
-                        }
-                        Err(e) => {
-                            tracing::warn!("mDNS 广播失败: {e}");
-                            None
-                        }
-                    }
+            match Discovery::start(
+                &format!("sender-relay-{}", handle.port),
+                &local_ips(),
+                handle.port,
+                &DiscoveryInfo {
+                    v: DiscoveryInfo::VERSION,
+                    name: "Stross 中继".into(),
+                    roles: vec![RoleId::Relay, RoleId::Sender, RoleId::Viewer],
+                    media: vec![],
+                    transports: vec![
+                        TransportId::Ws,
+                        TransportId::WebRtc,
+                        TransportId::Srt,
+                        TransportId::Quic,
+                    ],
+                    codecs: vec![CodecId::H264, CodecId::Aac],
+                },
+            ) {
+                Ok(d) => {
+                    tracing::info!("mDNS 广播中…");
+                    Some(d)
                 }
-                None => None,
+                Err(e) => {
+                    tracing::warn!("mDNS 广播失败: {e}");
+                    None
+                }
             }
         } else {
             None

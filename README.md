@@ -1,12 +1,14 @@
-# 📡 Stross — 局域网串流器
+# 📡 Stross — 局域网设备共享（一站式）
 
-用 **Rust** 实现的局域网（LAN）实时串流工具：把电脑/手机的**屏幕、摄像头、麦克风、系统声音**
-实时推流到局域网，任意设备（手机、平板、电脑）用浏览器打开一个网址即可观看。
+用 **Rust** 实现的局域网（LAN）一站式设备共享：设备自动发现，协商后把本机的
+**屏幕、摄像头、麦克风、系统声音**以流式方式共享给目标设备；**任何设备既可是源也可是汇**
+（"电脑用手机麦克风"是核心验收场景）。接收端全部原生（桌面 ffmpeg 解码 / Android
+MediaCodec），**无需浏览器**。
 
 | | 支持平台 | 说明 |
 |---|---|---|
 | **推流端** | Linux / Windows / Android | 桌面端用 ffmpeg 采集编码；Android 用 MediaProjection + MediaCodec 原生采集 |
-| **观看端** | 任意带浏览器的设备 | 内嵌 Web 播放器（MSE 解码），无需安装任何软件 |
+| **接收端** | Linux / Windows / Android | 原生接收播放（ffmpeg 解码 / Kotlin MediaCodec），无需安装额外软件 |
 
 > 借鉴的开源项目：媒体管线与中继模型参考 [OBS](https://github.com/obsproject/obs-studio) 和
 > [MediaMTX](https://github.com/bluenviron/mediamtx)；Android 屏幕采集参考
@@ -30,27 +32,21 @@ cargo run -p stross-gui          # 桌面应用（Tauri）
 **PC 端是整合的单一应用**（`stross-gui`），两种模式：
 
 ```bash
-stross-gui                      # 桌面应用：连接 → 推流（发）/ 观看（收）
+stross-gui                      # 桌面应用：打开即进入设备网格（免先连）
 stross-gui --relay-only         # 无界面中继（服务器/常驻部署，不依赖图形环境）
 stross-gui --relay-only --port 9000 --no-advertise   # 自定义端口 / 关闭 mDNS 广播
 ```
 
-应用采用「**先连接，再收/发**」的交互：
+应用采用「**免先连进入网格**」的交互（无"服务器"概念，设备到设备）：
 
-1. **连接**：选择「本机」（自动启动一个内嵌中继）或「局域网中继」
-   （输入地址、最近连接一键连、或 mDNS 扫描局域网内的中继）；
-2. **推流（发）**：选屏幕/摄像头/麦克风/系统声音，点「开始推流」，
-   画面推送到所连接的中继；
-3. **观看（收）**：切到「观看」页，内嵌播放器直接列出该中继上的
-   在线串流，点选即看。
-
-同时，局域网内任意设备（手机 / 平板 / 电脑）用浏览器打开中继地址：
-
-```
-http://192.168.1.100:8777/
-```
-
-无需安装任何软件即可观看。
+1. **打开即锚定本机**：自动启动受控中继 + mDNS 广播，本机成为网格中的一个锚点
+   （推流锚定本机，无需先连接任何设备）；
+2. **网格页**：自动扫描局域网设备（mDNS）并聚合各设备的在线串流
+   （手动添加地址也可）；点设备卡片只看该设备的串流；
+3. **点流即看**：点串流卡片 = 按需建立连接——直连该设备锚点，
+   直连失败自动经本机中继**级联代理**兜底（跨网段/防火墙）；
+4. **推流（发）**：选屏幕/摄像头/麦克风/系统声音，点「开始推流」即锚定本机，
+   局域网设备在网格页发现本机串流即可接收。
 
 > `stross-relay` 保留为**可选的服务器组件**（独立部署、多机中继），
 > 日常使用 PC 端一个应用即可。
@@ -94,7 +90,7 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
   srt（自适应，rsrt 纯 Rust）、quic（无损多路复用，quinn）。
   `stross-core` re-export 保持路径兼容。
 - **② 共享模块**（`stross-core`）：纯数据共享逻辑 —— 中继服务器（axum + WS/WebRTC）、
-  推流客户端、mDNS 发现、内嵌观看端页面。不含任何采集/平台代码。
+  推流客户端、mDNS 发现、观看/级联代理。不含任何采集/平台代码。
 - **④ 系统适配模块**（`stross-media`）：把"本机媒体源变成协议帧"的平台适配 ——
   ffmpeg 采集管线、设备枚举、H.264/AAC 流切帧，以及统一的
   [`CaptureBackend`](crates/stross-media/src/capture.rs) trait（Source）与
@@ -109,17 +105,19 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 数据流：
 
 ```
-┌──────────────┐   H.264/AAC 原始流    ┌─────────┐   H.264/AAC      ┌──────────────┐
-│ 推流端        │ ── WebSocket push ──▶ │ 中继     │ ── broadcast ─▶ │ 观看端(浏览器) │
-│ (CaptureBackend)│  (逐帧 + 时间戳)    │ (Rust)  │   (关键帧对齐)  │ (MSE + jmuxer)│
-└──────────────┘                       └─────────┘                  └──────────────┘
+┌──────────────┐   H.264/AAC 原始流    ┌─────────┐   H.264/AAC      ┌────────────────┐
+│ 推流端        │ ── WebSocket push ──▶ │ 中继     │ ── broadcast ─▶ │ 接收端（原生）    │
+│ (CaptureBackend)│  (逐帧 + 时间戳)    │ (Rust)  │   (关键帧对齐)  │ (ffmpeg/MediaCodec)│
+└──────────────┘                       └─────────┘                  └────────────────┘
 ```
 
 - **推流端**：桌面 = `FfmpegBackend`（ffmpeg 子进程：视频 H.264 Annex-B、音频 AAC ADTS）；
   Android = `AndroidCapture`（Kotlin 插件 MediaProjection + MediaCodec 经 Channel 回传帧）。
 - **中继**：tokio + axum，`/ws/push` 收流、`/ws/watch` 广播、`/api/streams` 列流、
-  `/` 内嵌观看端页面。新观众**先收到最近关键帧**再对齐播放。
-- **观看端**：WebSocket 收帧 → jmuxer 封成 fMP4 → MSE 播放，支持断线自动重连。
+  `/api/proxy` 级联代理。新观众**先收到最近关键帧**再对齐播放。
+- **接收端**：WS/SRT/QUIC watch → 抖动缓冲（SessionDataManager）→ 原生解码播放
+  （桌面 ffmpeg PlaybackSink；Android Kotlin MediaCodec）；直连锚点失败时自动经
+  本机中继级联代理兜底。
 
 详细设计见 [docs/architecture.md](docs/architecture.md)、[docs/protocol.md](docs/protocol.md)。
 下一阶段规划（设备路由 / 原生播放器 / AV 同步）见 [docs/roadmap.md](docs/roadmap.md)。
@@ -131,9 +129,8 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 crates/
   stross-proto/      ① 协议：帧头 + 控制消息（serde）
   stross-transport/  ①½ 传输插件层：Transport/DataSession + ws/webrtc/srt/quic 实现
-  stross-core/       ② 局域网共享：中继 / 推流客户端 / mDNS 发现 / 观看端页面
+  stross-core/       ② 局域网共享：中继 / 推流客户端 / mDNS 发现 / 级联代理
     src/relay/        中继：mod（转发）/ http（路由·API·信令）/ peers（设备发现）
-    src/embedded.rs   内嵌观看端页面（编译期 include_str!）
   stross-media/      ④ 系统适配：ffmpeg 管线 / 设备枚举 / NAL·ADTS / CaptureBackend / Sink
     src/pipeline/     管线：mod（配置·会话）/ args（ffmpeg 命令构建）
   stross-app/        ③ 核心封装：StrossApp 状态机 / SenderEngine / Kernel（无 UI 依赖，可单测）
@@ -148,7 +145,6 @@ apps/
 scripts/
   setup-android.sh   Android 工程装配脚本
   check-frontend.sh  前端 app.js 防漂移检查
-crates/stross-core/assets/viewer/   观看端页面（编译期内嵌进中继）
 ```
 
 > 命名约定：`apps/` 放二进制（`stross-relay` 中继、`stross-gui` 客户端），
@@ -165,16 +161,27 @@ crates/stross-core/assets/viewer/   观看端页面（编译期内嵌进中继�
 ```bash
 cargo test --workspace          # 单元 + 集成测试
 cargo test -p stross-app --test sender_e2e -- --nocapture   # 真实 ffmpeg 端到端
+npx -y -p "typescript@5.9.3" tsc -p apps/stross-gui/web/tsconfig.json  # 前端类型检查（改 app.ts 后）
+
+scripts/check.sh                # 本地全量检查：fmt + clippy(-D warnings) + 测试 + 前端
+scripts/check.sh --quick        # 提交前快速检查（秒级）
+scripts/check.sh --e2e          # 追加双设备端到端（直连/中途/级联）
+scripts/install-hooks.sh        # 安装 pre-commit 钩子（每次提交自动快速检查；--remove 卸载）
+scripts/build.sh cli|relay|gui|android   # 参数化构建（可选 --release）
+node scripts/test-frontend.mjs  # 前端网格交互无头测试（jsdom，24 项断言，自动拉依赖）
+scripts/dual-device-test.sh     # 本地双设备端到端：直连 / 中途接入 / 级联代理 三段接收全解码
 ```
 
 ## 路线图
 
 - [x] 桌面推流（屏幕/摄像头/麦克风/系统声音）
-- [x] 浏览器观看端（MSE，延迟 ≈ 1–2 秒）
 - [x] Android 屏幕 + 麦克风推流（Kotlin 插件）
+- [x] 原生接收播放（D1 去浏览器观看端；桌面 ffmpeg / Android MediaCodec）
+- [x] 免先连设备网格：打开即见全网设备/流，点流即看，级联代理兜底
+- [ ] 跨设备推流（反向外设：手机麦克风 → 电脑，需跨机会话协商）
 - [ ] WebRTC 低延迟（<300ms）通道
 - [ ] 摄像头推流（Android，nokhwa/Camera2）
-- [ ] 观看端原生 App（复用同一协议）
+- [ ] 无损共享（文件/剪贴板，二期）
 - [ ] 推流鉴权 / 多流房间
 
 ## License

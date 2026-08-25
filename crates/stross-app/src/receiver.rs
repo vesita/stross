@@ -12,18 +12,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use stross_core::SessionPacket;
 use stross_core::relay::RelayState;
 use stross_core::session_channel::{ChannelKind, SessionDataManager};
 use stross_core::watch;
-use stross_core::SessionPacket;
 // 桌面解码播放路径（ffmpeg 子进程）；Android 走 `start_raw` 编码帧转发，
 // 由 Kotlin MediaCodec 解码（见 stross-gui `mobile::spawn_android_playback`）。
+use stross_media::playback::RenderedFrame;
 #[cfg(not(target_os = "android"))]
 use stross_media::playback::{
     AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackSession, PlaybackSink,
     VideoOut,
 };
-use stross_media::playback::RenderedFrame;
 use stross_proto::frame::Frame;
 use tokio::sync::mpsc;
 
@@ -309,10 +309,10 @@ async fn receive_raw_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stross_core::DataSession;
     use stross_core::relay::RelayServer;
     use stross_core::transport::ws::WsTransport;
     use stross_core::transport::{PeerAddr, SessionParams, Transport};
-    use stross_core::DataSession;
     use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_VIDEO};
     use stross_proto::message::{ControlMessage, ReliabilityProfile};
     use tokio::time::Duration;
@@ -365,7 +365,9 @@ mod tests {
         let base = format!("ws://127.0.0.1:{}", r.port);
         let _push = push_keyframe(&base, "direct-1").await;
 
-        let session = connect_with_proxy(&base, "direct-1", None).await.expect("直连应成功");
+        let session = connect_with_proxy(&base, "direct-1", None)
+            .await
+            .expect("直连应成功");
         // 应收到关键帧
         loop {
             match tokio::time::timeout(Duration::from_secs(5), session.recv()).await {
@@ -406,9 +408,6 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("不可达锚点应失败"),
         };
-        assert!(
-            !err.contains("代理"),
-            "无代理时不应提及代理: {err}"
-        );
+        assert!(!err.contains("代理"), "无代理时不应提及代理: {err}");
     }
 }

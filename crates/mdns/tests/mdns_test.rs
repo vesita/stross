@@ -1440,6 +1440,85 @@ fn hostname_resolution_timeout() {
 }
 
 #[test]
+fn test_cross_browse_cache_persists() {
+    // Regression test for the cross-browse cache change: `stop_browse` must no
+    // longer wipe the cache.  On lossy wireless, starting each scan from an
+    // empty cache re-gambles a multi-round-trip discovery; keeping the cache
+    // until TTL expiry makes subsequent scans resolve devices instantly.
+    let d = ServiceDaemon::new().expect("Failed to create daemon");
+
+    let service = "_cache-persist._udp.local.";
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    let instance_name = now.as_micros().to_string();
+    let host_name = "cache_persist_host.local.";
+    let port = 5203;
+    let ipv4: Vec<_> = my_ip_interfaces()
+        .iter()
+        .map(|i| i.ip())
+        .filter(|ip| ip.is_ipv4())
+        .collect();
+    let my_service = ServiceInfo::new(service, &instance_name, host_name, &ipv4[..], port, None)
+        .expect("valid service info");
+    d.register(my_service).expect("Failed to register");
+
+    // First browse: full network discovery.
+    let browse_chan = d.browse(service).unwrap();
+    let timeout = Duration::from_secs(3);
+    let mut resolved = false;
+    while let Ok(event) = browse_chan.recv_timeout(timeout) {
+        if let ServiceEvent::ServiceResolved(info) = event
+            && info.get_fullname().contains(&instance_name)
+        {
+            println!("first browse resolved: {}", info.get_fullname());
+            resolved = true;
+            break;
+        }
+    }
+    assert!(resolved, "first browse should resolve the local service");
+    d.stop_browse(service).unwrap();
+
+    // Give any in-flight resolve retransmission time to fire (it is cancelled
+    // by stop_browse under the new semantics; harmless either way).
+    sleep(Duration::from_millis(300));
+
+    // The cache must survive stop_browse.
+    let metrics_receiver = d.get_metrics().unwrap();
+    let metrics = metrics_receiver.recv().unwrap();
+    println!("metrics after stop_browse: {:?}", metrics);
+    assert!(
+        metrics.get("cached-ptr").copied().unwrap_or(0) >= 1,
+        "PTR cache should be kept across stop_browse"
+    );
+    assert!(
+        metrics.get("cached-srv").copied().unwrap_or(0) >= 1,
+        "SRV cache should be kept across stop_browse"
+    );
+    assert!(
+        metrics.get("cached-addr").copied().unwrap_or(0) >= 1,
+        "ADDR cache should be kept across stop_browse"
+    );
+
+    // Second browse: must resolve again (from cache or fresh query).
+    let browse_chan = d.browse(service).unwrap();
+    let mut resolved_again = false;
+    while let Ok(event) = browse_chan.recv_timeout(timeout) {
+        if let ServiceEvent::ServiceResolved(info) = event
+            && info.get_fullname().contains(&instance_name)
+        {
+            println!("second browse resolved: {}", info.get_fullname());
+            resolved_again = true;
+            break;
+        }
+    }
+    assert!(resolved_again, "second browse should resolve too");
+    d.stop_browse(service).unwrap();
+
+    d.shutdown().unwrap();
+}
+
+#[test]
 fn test_cache_flush_record() {
     // Create a daemon
     let server = ServiceDaemon::new().expect("Failed to create server");
@@ -1531,11 +1610,22 @@ fn test_cache_flush_record() {
                 // Verify the address flushed and updated.
                 let new_addrs = info.get_addresses();
                 timed_println(format!("new address resolved: {:?}", new_addrs));
+                // The cache is KEPT across stop_browse (cross-browse cache), so
+                // the first resolve of the re-browse may still serve the stale
+                // pre-flush address; the cache-flush A record then replaces it
+                // within a second.  Accept the stale event, require the updated
+                // address to show up within the browse window.
                 if new_addrs.len() == 1 {
                     let first_addr = new_addrs.iter().next().unwrap();
-                    assert_eq!(&first_addr.to_ip_addr(), &service_ip_addr);
-                    resolved = true;
-                    break;
+                    if first_addr.to_ip_addr() == service_ip_addr {
+                        resolved = true;
+                        break;
+                    }
+                    timed_println(format!(
+                        "stale cached address first: {} (awaiting flush)",
+                        first_addr.to_ip_addr()
+                    ));
+                    continue;
                 }
             }
             e => {

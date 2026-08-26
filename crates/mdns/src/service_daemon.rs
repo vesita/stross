@@ -3929,11 +3929,24 @@ impl Zeroconf {
 
     fn exec_command_resolve(&mut self, instance: String, try_count: u16) {
         let pending_query = self.query_unresolved(&instance);
-        let max_try = 3;
-        if pending_query && try_count < max_try {
-            // Note that if the current try already succeeds, the next retransmission
-            // will be no-op as the cache has been updated.
-            let next_time = current_time_millis() + RESOLVE_WAIT_IN_MILLIS;
+        // Upstream capped this at 3 tries with a fixed 500 ms spacing, i.e. a
+        // ~1.5 s resolve window total.  On lossy wireless multicast each
+        // query→response round trip can be lost, so that window is far too
+        // short for a single 4 s browse (Stross BROWSE_TIMEOUT) — measured
+        // single-browse resolve success was only ~20-40%.
+        //
+        // Retry with doubling back-off up to 5 attempts (gaps 0.5/1/2/4 s):
+        // queries land at ~0.5/1.0/2.0/4.0/8.0 s after the PTR was seen,
+        // covering the whole browse window and a final late attempt.  If the
+        // instance resolves, the next retransmission is a no-op because the
+        // cache has been updated (`query_unresolved` returns false); resolve
+        // retries are dropped on `stop_browse`, so no stale attempts outlive
+        // the browse.
+        const MAX_RESOLVE_TRIES: u16 = 5;
+        if pending_query && try_count < MAX_RESOLVE_TRIES {
+            // 500 ms, 1 s, 2 s, 4 s after the previous attempt.
+            let gap = RESOLVE_WAIT_IN_MILLIS << try_count.saturating_sub(1).min(3);
+            let next_time = current_time_millis() + gap;
             self.add_retransmission(next_time, Command::Resolve(instance, try_count + 1));
         }
     }
@@ -4049,8 +4062,21 @@ impl Zeroconf {
                     i += 1;
                 }
 
-                // Remove cache entries.
-                self.cache.remove_service_type(&ty_domain);
+                // Cancel in-flight resolve retries for this type's instances:
+                // while a browse is active they are useful, after it they only
+                // burn multicast bandwidth for events nobody listens to.
+                self.cancel_pending_resolves_for_type(&ty);
+
+                // Do NOT wipe the cache (upstream deleted the whole service
+                // type here).  Keeping PTR/SRV/TXT/A records until their TTLs
+                // expire gives every later browse instant resolutions from the
+                // cache — the cross-browse cache fix.  On lossy wireless,
+                // starting each scan from an empty cache re-gambles a
+                // multi-round-trip discovery (~20-40% resolve success upstream);
+                // with the cache, subsequent scans return devices immediately
+                // and only refresh in the background.  Stale records self-heal:
+                // SRV/A carry a 120 s TTL and are evicted by `run`, so a device
+                // that left the network drops out of resolution quickly.
 
                 // Notify the client.
                 match sender.send(ServiceEvent::SearchStopped(ty_domain)) {
@@ -4058,6 +4084,56 @@ impl Zeroconf {
                     Err(e) => debug!("Failed to send SearchStopped: {}", e),
                 }
             }
+        }
+    }
+
+    /// Drops pending resolve retransmissions for every instance currently
+    /// advertised under `ty_domain` and unregisters them from
+    /// `pending_resolves`, so a later browse re-schedules a fresh resolve
+    /// from the (kept) cache.
+    fn cancel_pending_resolves_for_type(&mut self, ty_domain: &str) {
+        let now = current_time_millis();
+        let instances: Vec<String> = self
+            .cache
+            .all_ptr()
+            .get(ty_domain)
+            .into_iter()
+            .flatten()
+            .filter(|r| !r.record.expires_soon(now))
+            .filter_map(|r| {
+                r.record
+                    .any()
+                    .downcast_ref::<DnsPointer>()
+                    .map(|ptr| ptr.alias().to_string())
+            })
+            .collect();
+
+        if instances.is_empty() {
+            return;
+        }
+
+        let mut i = 0;
+        while i < self.retransmissions.len() {
+            let pending = matches!(
+                &self.retransmissions[i].command,
+                Command::Resolve(instance, _) if instances.iter().any(|x| x == instance)
+            );
+            if pending {
+                let instance =
+                    if let Command::Resolve(instance, _) = &self.retransmissions[i].command {
+                        instance.clone()
+                    } else {
+                        unreachable!()
+                    };
+                self.retransmissions.remove(i);
+                trace!("StopBrowse: dropped pending resolve for {instance}");
+                continue;
+            }
+            i += 1;
+        }
+
+        for instance in instances {
+            self.pending_resolves.remove(&instance);
         }
     }
 
@@ -4247,7 +4323,11 @@ fn add_answer_of_service(
         );
     }
 
-    if qtype == RRType::SRV {
+    // Address additionals for SRV *and* ANY answers.  Resolve queries for an
+    // instance whose SRV is missing are sent as `ANY` (see `query_unresolved`);
+    // without the address records the peer must answer a second A/AAAA round
+    // trip, doubling the chance of losing a leg on lossy wireless multicast.
+    if qtype == RRType::SRV || qtype == RRType::ANY {
         for address in intf_addrs {
             out.add_additional_answer(DnsAddress::new(
                 service.get_hostname(),
@@ -4378,6 +4458,8 @@ enum Command {
 
     /// Send query to resolve a service instance.
     /// This is used when a PTR record exists but SRV & TXT records are missing.
+    /// Retried with doubling back-off (see `exec_command_resolve`) and dropped
+    /// on `stop_browse`.
     Resolve(String, u16), // (service_instance_fullname, try_count)
 
     /// Read the current values of the counters
@@ -6215,6 +6297,70 @@ mod tests {
 
         // Check TTL is set properly for the TXT record
         assert_eq!(answer.0.get_record().get_ttl(), my_service.get_other_ttl());
+    }
+
+    #[test]
+    fn test_any_answer_includes_address_additionals() {
+        // Stross resolve: when the SRV record is missing, the daemon sends an
+        // `ANY` query for the instance (`query_unresolved`).  The response must
+        // carry SRV + TXT answers AND the A/AAAA additionals, so a single
+        // round trip completes resolution instead of a second A/AAAA query.
+        let service_type = "_test_any_answer._udp.local.";
+        let instance = "test_instance";
+        let host_name = "any_answer_host.local.";
+        let service_intf = my_ip_interfaces(false)
+            .into_iter()
+            .find(|iface| iface.ip().is_ipv4())
+            .unwrap();
+        let service_ip_addr = service_intf.ip();
+        let my_service = ServiceInfo::new(
+            service_type,
+            instance,
+            host_name,
+            service_ip_addr,
+            5023,
+            None,
+        )
+        .unwrap();
+
+        let mut out = DnsOutgoing::new(FLAGS_QR_RESPONSE | FLAGS_AA);
+        let mut dummy_data = out.to_data_on_wire(MAX_PKT_DEFAULT, true);
+        let interface_id = InterfaceId::from(&service_intf);
+        let incoming = DnsIncoming::new(dummy_data.pop().unwrap(), interface_id).unwrap();
+
+        let if_addrs = vec![service_ip_addr];
+        add_answer_of_service(
+            &mut out,
+            &incoming,
+            instance,
+            &my_service,
+            RRType::ANY,
+            if_addrs,
+        );
+
+        // SRV + TXT answers.
+        assert!(
+            out.answers_count() >= 2,
+            "ANY response should carry SRV + TXT answers, got {}",
+            out.answers_count()
+        );
+
+        // At least one address record (A/AAAA) for the service hostname.
+        let addr_additionals: Vec<_> = out
+            .additionals()
+            .iter()
+            .filter(|r| matches!(r.get_type(), RRType::A | RRType::AAAA))
+            .collect();
+        assert!(
+            !addr_additionals.is_empty(),
+            "ANY response should include A/AAAA additionals for one-shot resolution"
+        );
+        assert!(
+            addr_additionals
+                .iter()
+                .any(|r| r.get_name().eq_ignore_ascii_case(host_name)),
+            "address additionals should target the service hostname"
+        );
     }
 
     #[test]

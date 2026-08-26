@@ -18,9 +18,11 @@ pub const SERVICE_TYPE: &str = "_stross._tcp.local.";
 
 /// browse 默认超时。
 ///
-/// **真机实测**：2 秒约 80% 概率漏掉对端（mDNS 查询→响应→resolve 需多轮
-/// 往返），4 秒有所缓解但仍偶发漏（约 20-40% 成功率）。根治方向在 mdns
-/// crate 内部（resolve 重试 + 跨 browse 缓存），见 crates/mdns 维护说明。
+/// 根因（mdns-sd 0.21 的 resolve 二次链路）已在本地 fork（crates/mdns）
+/// 内部根治：resolve 查询指数退避重试（0.5/1/2/4 s，覆盖整个 browse
+/// 窗口）+ stop_browse 保留缓存（跨 browse 秒回，SRV/A 由 120s TTL 自愈），
+/// ANY 查询响应同时携带 A/AAAA additionals（单往返完成解析）。4 秒仍保留
+/// 为浏览窗口：足够 3 次 resolve 尝试落网，同时兼顾首扫冷发现。
 pub const BROWSE_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// 一个被发现的服务实例。

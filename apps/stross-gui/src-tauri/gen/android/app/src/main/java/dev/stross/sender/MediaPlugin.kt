@@ -57,6 +57,8 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
         var bitrateKbps: Int = 2500
         var withAudio: Boolean = true
         var channel: Channel? = null
+        /** 纯麦克风采集（B2 手机反向推流）：跳过屏幕录制授权/前台服务。 */
+        var micOnly: Boolean = false
     }
 
     // Plugin 基类的 activity 是 private，这里保存一份供本类使用
@@ -71,6 +73,8 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
     private var fps = 30
     private var bitrateKbps = 2500
     private var withAudio = true
+    /** 当前是否为纯麦克风采集（B2：无屏幕授权/前台服务/虚拟显示）。 */
+    private var micOnly = false
 
     // 视频
     private var encoder: MediaCodec? = null
@@ -112,7 +116,22 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
             height = args.height.coerceIn(240, 2160)
             fps = args.fps.coerceIn(10, 60)
             bitrateKbps = args.bitrateKbps.coerceIn(200, 20_000)
-            withAudio = args.withAudio
+            withAudio = args.withAudio || args.micOnly
+
+            // 纯麦克风采集（B2）：不请求屏幕录制授权/前台服务/虚拟显示，
+            // 直接申请麦克风权限并启动 AudioRecord 编码。立即 resolve
+            // （Rust 侧无需等待系统弹窗；真实状态由 t=9 控制帧回报）。
+            if (args.micOnly) {
+                if (!running.compareAndSet(false, true)) {
+                    invoke.reject("已经在采集")
+                    return
+                }
+                micOnly = true
+                invoke.resolve(JSObject().apply { put("started", true) })
+                requestMicAndStart()
+                return
+            }
+            micOnly = false
 
             // 屏幕录制授权（系统弹窗）。注意：startActivityForResult 必须在主线程
             // （Rust 侧 run_mobile_plugin 在 blocking 线程调用本命令），否则不弹窗；
@@ -262,7 +281,6 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
         val inputSurface = codec.createInputSurface()
         codec.start()
 
-        val dm = host.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         virtualDisplay = proj.createVirtualDisplay(
             "stross-display",
             width,
@@ -288,7 +306,7 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
         }
     }
 
-    /** 请求麦克风运行时权限；拒绝则仅采集屏幕。 */
+    /** 请求麦克风运行时权限；拒绝时纯麦克风模式报错，屏幕模式仅采集屏幕。 */
     private fun requestMicAndStart() {
         if (Build.VERSION.SDK_INT < 23) {
             startAudio()
@@ -304,9 +322,23 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
                     startAudio()
                 } else {
                     Log.w(TAG, "麦克风权限被拒绝，仅采集屏幕")
+                    if (micOnly) {
+                        failCapture("麦克风权限被拒绝")
+                    }
                 }
             }
         }
+    }
+
+    /** 纯麦克风模式下采集启动失败：回传 t=9 错误帧并复位（无屏幕兜底）。 */
+    private fun failCapture(err: String) {
+        sendControl(JSObject().apply {
+            put("t", 9)
+            put("started", false)
+            put("err", err)
+        })
+        running.set(false)
+        channel = null
     }
 
     private fun drainVideoLoop(proj: MediaProjection) {
@@ -360,6 +392,7 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
         )
         if (minBuf <= 0) {
             Log.w(TAG, "AudioRecord 不支持 48k 立体声")
+            if (micOnly) failCapture("麦克风初始化失败（AudioRecord 不可用）")
             return
         }
         val record = AudioRecord(
@@ -371,6 +404,7 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
         )
         if (record.state != AudioRecord.STATE_INITIALIZED) {
             Log.w(TAG, "AudioRecord 初始化失败")
+            if (micOnly) failCapture("麦克风初始化失败")
             return
         }
         audioRecord = record
@@ -387,6 +421,13 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
         record.startRecording()
 
         audioThread = Thread { drainAudioLoop(record) }.apply { start() }
+        // 纯麦克风模式没有屏幕路径的 started 回报，在此补发（t=9 控制帧）
+        if (micOnly) {
+            sendControl(JSObject().apply {
+                put("t", 9)
+                put("started", true)
+            })
+        }
         Log.i(TAG, "麦克风采集启动")
     }
 

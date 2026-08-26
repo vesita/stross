@@ -118,6 +118,21 @@ fn create_session(
         .map_err(|e| e.to_user_string())
 }
 
+/// 签发「接收手机麦克风」接入凭证（B2）：建会话 + 签发一次性 ShareToken。
+///
+/// 电脑端点击「接收手机麦克风」时调用：内核建本机会话并签发凭证，返回
+/// 凭证字符串（含 stream_id / PIN / 时效）供前端展示，手机出示即可推入
+/// 本机受控中继（B0 凭证式接入：零远程控制面暴露）。
+#[tauri::command]
+fn issue_share_token(
+    state: State<'_, StrossApp>,
+    ttl_secs: Option<u64>,
+) -> Result<stross_app::app::ShareTokenView, String> {
+    state
+        .issue_share_token(ttl_secs)
+        .map_err(|e| e.to_user_string())
+}
+
 /// 会话鉴权：校验访问码（PIN）；成功后该会话的控制操作放行。
 #[tauri::command]
 fn authorize_session(
@@ -256,6 +271,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         kernel_nodes,
         kernel_sessions,
         create_session,
+        issue_share_token,
         authorize_session,
         route_session,
         teardown_session,

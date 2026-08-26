@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
   <title>Stross 串流器</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -142,7 +143,7 @@
       </span>
       <div>
         <h1>Stross</h1>
-        <span class="subtitle">局域网串流器</span>
+        <span class="subtitle">局域网设备共享</span>
       </div>
     </div>
     <div class="header-right">
@@ -153,216 +154,102 @@
   </header>
 
   <main>
-    <!-- ==================== 主界面（免先连：打开即进入设备网格） ==================== -->
-    <section id="app-view">
-      <nav class="tabs">
-        <button id="tab-grid-btn" class="tab active" type="button">
-          <svg class="ic"><use href="#i-radio" /></svg><span>网格</span>
-        </button>
-        <button id="tab-send-btn" class="tab" type="button">
-          <svg class="ic"><use href="#i-upload" /></svg><span>推流（发）</span>
-        </button>
-        <button id="tab-watch-btn" class="tab" type="button">
-          <svg class="ic"><use href="#i-download" /></svg><span>观看（收）</span>
-        </button>
-      </nav>
+    <div id="error-box" class="error hidden"></div>
 
-      <!-- 网格：打开即见全网设备/流，连接按需建立（点流卡片临时连锚点/本机级联） -->
-      <div id="tab-grid" class="tab-pane">
-        <div class="pane-grid">
-          <section class="card">
-            <h2>本机锚点</h2>
-            <p class="hint">打开即自动锚定本机（启动受控中继 + mDNS 广播）。推流锚定本机；局域网设备发现本机后可直接接收。</p>
-            <div id="anchor-box" class="anchor-box">锚定中…</div>
-            <h2>本机入口</h2>
-            <p class="hint">供其它设备直接连接（数据面 ws://ip:port/ws/*，REST /api/*）：</p>
-            <ul id="ip-list" class="url-list">
-              <li class="hint">读取中…</li>
-            </ul>
-          </section>
-
-          <section class="card">
-            <h2>局域网设备</h2>
-            <p class="hint">mDNS 自动发现；点设备卡片只看该设备的串流（「局域网串流」联动），再点一次取消。</p>
-            <div class="row">
-              <button id="scan-btn" type="button">
-                <svg class="ic"><use href="#i-search" /></svg><span>重新扫描</span>
-              </button>
-              <input id="manual-addr" type="text" placeholder="http://192.168.1.100:8777" class="grow" />
-              <button id="manual-add-btn" type="button">添加</button>
-            </div>
-            <div id="scan-results" class="scan-results"></div>
-            <div id="recent-block" class="hidden">
-              <h2>手动添加历史</h2>
-              <ul id="recent-list" class="url-list"></ul>
-            </div>
-          </section>
-
-          <section class="card span-2">
-            <h2>局域网串流</h2>
-            <div class="row">
-              <span class="hint icon-hint">
-                <svg class="ic"><use href="#i-radio" /></svg>
-                <span>自动发现（直连锚点，失败自动经本机级联代理）：</span>
-              </span>
-              <button id="discover-btn" type="button">
-                <svg class="ic"><use href="#i-refresh" /></svg><span>重扫</span>
-              </button>
-            </div>
-            <div id="discover-streams" class="recv-streams"></div>
-            <div id="grid-error" class="error hidden"></div>
-          </section>
-        </div>
-      </div>
-
-      <!-- 推流（发）：锚定本机 -->
-      <div id="tab-send" class="tab-pane hidden">
-        <div class="pane-grid">
-          <section class="card">
-            <h2>串流源</h2>
-
-          <fieldset>
-            <legend>视频</legend>
-            <div class="row" id="video-seg-row">
-              <label class="seg" data-video="screen">
-                <input type="radio" name="video" value="screen" checked />
-                <svg class="ic"><use href="#i-monitor" /></svg>
-                <span>屏幕</span>
-              </label>
-              <label class="seg" data-video="camera">
-                <input type="radio" name="video" value="camera" />
-                <svg class="ic"><use href="#i-camera" /></svg>
-                <span>摄像头</span>
-              </label>
-              <label class="seg" data-video="synthetic">
-                <input type="radio" name="video" value="synthetic" />
-                <svg class="ic"><use href="#i-flask" /></svg>
-                <span>测试画面</span>
-              </label>
-            </div>
-            <div class="row hidden" id="android-video-note">
-              <svg class="ic"><use href="#i-phone" /></svg>
-              <span>屏幕（MediaProjection，首次会请求系统授权）</span>
-            </div>
-            <div class="row hidden" id="camera-row">
-              <select id="camera-select"></select>
-              <span class="hint">未发现摄像头设备</span>
-            </div>
-            <div class="row">
-              <label>画质
-                <select id="quality-select">
-                  <option value="LOW">低 (640×360 @24fps)</option>
-                  <option value="MEDIUM" selected>中 (1280×720 @30fps)</option>
-                  <option value="HIGH">高 (1920×1080 @30fps)</option>
-                </select>
-              </label>
-            </div>
-          </fieldset>
-
-          <fieldset>
-            <legend>音频</legend>
-            <div class="row">
-              <label class="check">
-                <input type="checkbox" id="mic-enable" checked />
-                <svg class="ic"><use href="#i-mic" /></svg>
-                <span>麦克风</span>
-              </label>
-              <select id="mic-select" class="grow"></select>
-              <span class="hint" id="mic-hint"></span>
-            </div>
-            <div class="row" id="sys-row">
-              <label class="check">
-                <input type="checkbox" id="sys-enable" />
-                <svg class="ic"><use href="#i-speaker" /></svg>
-                <span>系统声音</span>
-              </label>
-              <select id="sys-select" class="grow"></select>
-              <span class="hint" id="sys-hint"></span>
-            </div>
-          </fieldset>
-
-          <div class="row">
-            <label>串流名称
-              <input id="title-input" type="text" value="我的串流" maxlength="40" />
-            </label>
-          </div>
-
-          <div class="actions">
-            <button id="start-btn" class="primary" type="button">
-              <svg class="ic"><use href="#i-play" /></svg><span>开始推流</span>
+    <!-- ============ 设备 × 共享流 组合管理 ============
+         组织方式：设备是实体（本机 + 局域网设备），共享流是设备之间的连接实例。
+         左栏「设备」：点设备卡片展开 → 对它发起的共享（广播/定向）与该设备的在线共享。
+         右栏「共享流」：本机全部活动共享统一管理（方向 / 媒体 / 对端 / 状态 / 停止）。 -->
+    <div class="dual">
+      <!-- ── 左栏：设备 ── -->
+      <section class="card" id="device-pane">
+        <div class="pane-head">
+          <h2>设备</h2>
+          <div class="row pane-tools">
+            <button id="scan-btn" type="button">
+              <svg class="ic"><use href="#i-search" /></svg><span>扫描</span>
             </button>
-            <button id="stop-btn" type="button" disabled>
-              <svg class="ic"><use href="#i-stop" /></svg><span>停止</span>
-            </button>
+            <input id="manual-addr" type="text" placeholder="http://ip:port（手动添加）" />
+            <button id="manual-add-btn" type="button">添加</button>
           </div>
-          </section>
-
-          <section class="card">
-            <h2>状态</h2>
-            <div id="status" class="status">
-              <div class="status-line"><span class="dot idle" id="status-dot"></span><span id="status-text">未推流</span></div>
-              <div id="stream-meta" class="meta"></div>
-              <div id="error-box" class="error hidden"></div>
-            </div>
-
-            <h2>本机锚点入口</h2>
-            <p class="hint">推流锚定本机中继；局域网设备可在「网格」页发现本机并接收：</p>
-            <ul id="url-list" class="url-list">
-              <li class="hint">锚定后显示入口地址</li>
-            </ul>
-          </section>
         </div>
-      </div>
-
-      <!-- 观看（收）：原生接收（D6/D1） -->
-      <div id="tab-watch" class="tab-pane hidden">
-        <div class="pane-grid pane-grid-watch">
-          <section class="card">
-            <h2>接收（原生播放）</h2>
-            <p class="hint">本机锚点：<span id="watch-relay-url" class="mono"></span></p>
-            <p class="hint">从「网格」页点选局域网串流会自动跳转并接收；也可选本机串流，或直接输入流 id。</p>
-            <div id="recv-streams" class="recv-streams"></div>
-            <div class="row">
-              <input id="recv-stream-input" type="text" placeholder="流 id（如 sess-1 或 demo-1234）" class="grow" />
-              <select id="recv-transport-select" title="观看传输（UDP 需要中继支持 /api/info）">
-                <option value="auto" selected>自动（优先 UDP）</option>
-                <option value="ws">WebSocket</option>
-                <option value="srt">SRT</option>
-                <option value="quic">QUIC</option>
-              </select>
-              <select id="recv-audio-select" title="音频输出方式">
-                <option value="device" selected>设备播放</option>
-                <option value="discard">静音</option>
-              </select>
-              <button id="recv-start-btn" class="primary" type="button">
-                <svg class="ic"><use href="#i-play" /></svg><span>开始接收</span>
-              </button>
-              <button id="recv-stop-btn" type="button" disabled>
-                <svg class="ic"><use href="#i-stop" /></svg><span>停止</span>
-              </button>
-            </div>
-            <div id="recv-error" class="error hidden"></div>
-          </section>
-
-          <section class="card">
-            <h2>画面</h2>
-            <div class="canvas-wrap">
-              <canvas id="recv-canvas" width="640" height="360"></canvas>
-              <div class="canvas-overlay hidden" id="recv-overlay">
-                <span class="spinner"></span>
-                <span>等待流数据…</span>
-              </div>
-            </div>
-            <div class="status-line">
-              <span class="dot idle" id="recv-dot"></span>
-              <span id="recv-status">未接收</span>
-            </div>
-            <div id="recv-meta" class="meta"></div>
-          </section>
+        <div id="grid-error" class="error hidden"></div>
+        <!-- 本机卡片 + 局域网设备卡片（每张卡片 = 一个设备实体） -->
+        <div id="device-list"></div>
+        <div id="recent-block" class="hidden">
+          <h2>手动添加历史</h2>
+          <ul id="recent-list" class="url-list"></ul>
         </div>
-      </div>
-    </section>
+      </section>
+
+      <!-- ── 右栏：共享流管理 ── -->
+      <section class="card" id="share-pane">
+        <div class="pane-head">
+          <h2>共享流</h2>
+          <span class="hint">本机全部活动共享：↑ 共享出去（广播/定向）· ↓ 接收进来</span>
+        </div>
+        <div id="share-list">
+          <div class="empty hint">暂无活动共享。点左侧设备卡片发起共享，或点设备的在线共享条目接收。</div>
+        </div>
+        <div id="recv-error" class="error hidden"></div>
+        <!-- 接收画面：有视频帧时显示，纯音频隐藏 -->
+        <div class="canvas-wrap hidden" id="recv-canvas-wrap">
+          <canvas id="recv-canvas" width="640" height="360"></canvas>
+          <div class="canvas-overlay hidden" id="recv-overlay">
+            <span class="spinner"></span>
+            <span>等待流数据…</span>
+          </div>
+        </div>
+        <div class="status-line hidden" id="recv-status-line">
+          <span class="dot idle" id="recv-dot"></span>
+          <span id="recv-status">未接收</span>
+        </div>
+        <div id="recv-meta" class="meta"></div>
+      </section>
+    </div>
   </main>
+
+  <!-- 共享弹窗（发起共享：广播屏幕 / 定向麦克风等） -->
+  <div id="share-modal" class="modal hidden">
+    <div class="modal-box">
+      <h2 id="share-modal-title">共享</h2>
+      <p class="hint" id="share-modal-sub"></p>
+      <div id="share-modal-opts"></div>
+      <div class="row">
+        <button id="share-start-btn" class="primary" type="button">
+          <svg class="ic"><use href="#i-play" /></svg><span>开始</span>
+        </button>
+        <button id="share-cancel-btn" type="button">
+          <svg class="ic"><use href="#i-x" /></svg><span>取消</span>
+        </button>
+      </div>
+      <div id="share-status" class="meta"></div>
+      <div id="share-error" class="error hidden"></div>
+    </div>
+  </div>
+
+  <!-- 共享麦克风凭证弹窗（手机端：出示电脑端凭证反向推流） -->
+  <div id="mic-modal" class="modal hidden">
+    <div class="modal-box">
+      <h2>共享麦克风</h2>
+      <p class="hint" id="mic-modal-device"></p>
+      <textarea id="mic-token-input" class="mono" rows="4"
+        placeholder="粘贴电脑端展示的接入凭证"></textarea>
+      <div class="row">
+        <button id="mic-start-btn" class="primary" type="button">
+          <svg class="ic"><use href="#i-play" /></svg><span>开始推流</span>
+        </button>
+        <button id="mic-stop-btn" type="button" disabled>
+          <svg class="ic"><use href="#i-stop" /></svg><span>停止</span>
+        </button>
+        <button id="mic-close-btn" type="button">
+          <svg class="ic"><use href="#i-x" /></svg><span>关闭</span>
+        </button>
+      </div>
+      <div id="mic-status" class="meta"></div>
+      <div id="mic-error" class="error hidden"></div>
+    </div>
+  </div>
 
   <!-- 前端脚本：app/ 目录按依赖序加载（script 全局作用域共享，勿改顺序） -->
   <script src="app/state.js"></script>

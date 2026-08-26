@@ -1,6 +1,8 @@
-// Stross 前端 —— 接收域：观看连接、解码帧绘制、统计轮询（script 全局作用域）。
+// Stross 前端 —— 接收域 + 共享流面板（script 全局作用域）：
+// 从本机/设备锚点接收共享流（直连，失败自动级联）→ canvas 绘制 / 扬声器播放；
+// 右栏「共享流」面板把全部活动共享（出站广播/定向 + 入站接收）统一呈现与停止。
 
-/** 当前接收目标中继（点选的局域网设备优先，否则本机锚点；均无则 null）。 */
+/** 当前接收目标中继（点选的局域网设备锚点优先，否则本机锚点；均无则 null）。 */
 function currentRelay(): TargetRelay | null {
   if (targetRelay) return targetRelay;
   if (!anchor) return null;
@@ -11,9 +13,7 @@ function currentRelay(): TargetRelay | null {
   };
 }
 
-/** 按流媒体类型自动选传输（auto 模式）：
- *  含视频 → SRT（Adaptive：丢包不阻塞、关键帧自愈）> QUIC > WS
- *  纯音频 → QUIC（无损：音频不可丢）> WS */
+/** 按流媒体类型自动选传输：含视频 → SRT（Adaptive）> QUIC > WS；纯音频 → QUIC > WS。 */
 function autoRelayUrl(stream: RemoteStream | null): string {
   const r = currentRelay();
   if (!r) return '';
@@ -27,182 +27,34 @@ function autoRelayUrl(stream: RemoteStream | null): string {
   return r.wsBase;
 }
 
-/** 按「接收传输」下拉 + 流媒体类型构造 relay 拨号地址；UDP 端口不可用回退 WS。 */
-function pickRelayUrl(stream: RemoteStream | null): string {
-  const sel = $select('recv-transport-select').value;
-  const r = currentRelay();
-  if (!r) return '';
-  if (sel === 'srt' && r.srtUrl) return r.srtUrl;
-  if (sel === 'quic' && r.quicUrl) return r.quicUrl;
-  if (sel === 'auto') return autoRelayUrl(stream);
-  if (sel === 'srt' || sel === 'quic') {
-    showRecvError(`该中继未提供 ${sel.toUpperCase()} 端口（/api/info 不可用），已回退 WebSocket`);
-  }
-  return r.wsBase;
-}
-
-/** 流类型小标签（视频/音频 chip）。 */
-function trackChips(s: RemoteStream): HTMLElement {
-  const wrap = document.createElement('span');
-  wrap.className = 'chips';
-  if (s.video) wrap.appendChild(chipEl('video', '视频'));
-  if (s.audio) wrap.appendChild(chipEl('audio', '音频'));
-  return wrap;
-}
-
-/** 观看人数（眼睛图标 + 数字）。 */
-function watcherCount(n: number): HTMLElement {
-  const w = document.createElement('span');
-  w.className = 'watchers';
-  w.innerHTML = icon('eye') + '<span>' + n + ' 人观看</span>';
-  return w;
-}
-
-/** 接收等待浮层：接收中且尚未收到首帧时显示。 */
-function updateRecvOverlay(): void {
-  $('recv-overlay').classList.toggle('hidden', !receiving || recvFrameCount > 0);
-}
-
-/** 串流卡片（图标 + 名称 + 元信息：流 id/中继名 + 轨道 chip + 观看人数）。 */
-function streamCard(o: {
-  title: string;
-  sub: string;
-  stream: RemoteStream;
-  onPick: (card: HTMLButtonElement) => void;
-}): HTMLButtonElement {
-  const card = document.createElement('button');
-  card.type = 'button';
-  card.className = 'scan-card';
-  const ic = document.createElement('span');
-  ic.className = 'card-ic';
-  ic.innerHTML = icon(o.stream.video ? 'video' : o.stream.audio ? 'music' : 'radio');
-  const body = document.createElement('span');
-  body.className = 'card-body';
-  const name = document.createElement('span');
-  name.className = 'scan-name';
-  name.textContent = o.title;
-  const meta = document.createElement('span');
-  meta.className = 'scan-meta';
-  meta.appendChild(document.createTextNode(o.sub));
-  meta.appendChild(trackChips(o.stream));
-  if (o.stream.watchers) meta.appendChild(watcherCount(o.stream.watchers));
-  body.appendChild(name);
-  body.appendChild(meta);
-  card.appendChild(ic);
-  card.appendChild(body);
-  card.title = '点击接收 ' + o.stream.streamId;
-  card.onclick = () => o.onPick(card);
-  return card;
-}
-
-/** 清空所有串流卡片的选中态。 */
-function clearCardSelection(): void {
-  document.querySelectorAll('.recv-streams .scan-card').forEach((c) => c.classList.remove('selected'));
-}
-
-/** 拉取本机锚点的在线串流列表（GET /api/streams），渲染可选卡片。 */
-async function loadRemoteStreams(force = false): Promise<void> {
-  const box = $('recv-streams');
-  if (!anchor) {
-    box.innerHTML = '';
-    return;
-  }
-  // TTL 缓存：3 秒内不重复请求；force（推流后/手动）绕过缓存
-  if (!force && streamsCache && Date.now() - streamsCache.at < STREAMS_TTL_MS) {
-    box.innerHTML = '';
-    for (const s of streamsCache.list) {
-      remoteStreams.set(s.streamId, s);
-      box.appendChild(streamCard({
-        title: s.title || s.streamId,
-        sub: s.streamId,
-        stream: s,
-        onPick: (card) => {
-          clearCardSelection();
-          card.classList.add('selected');
-          targetRelay = null; // 回本机锚点
-          remoteStreams.set(s.streamId, s);
-          $input('recv-stream-input').value = s.streamId;
-          void startReceive();
-        },
-      }));
-    }
-    return;
-  }
-  try {
-    const resp = await fetch(`http://127.0.0.1:${anchor.port}/api/streams`, { cache: 'no-store' });
-    if (!resp.ok) {
-      box.innerHTML = '';
-      box.appendChild(emptyState('video', '本机锚点未提供串流列表（HTTP ' + resp.status + '）', true));
-      return;
-    }
-    const data = (await resp.json()) as { streams?: RemoteStream[] } | RemoteStream[];
-    const list = Array.isArray(data) ? data : (data.streams || []);
-    streamsCache = { at: Date.now(), list };
-    box.innerHTML = '';
-    if (!list.length) {
-      box.appendChild(emptyState('video', '本机锚点暂无在线串流。可先在「推流」页开始推流。'));
-      return;
-    }
-    for (const s of list) {
-      remoteStreams.set(s.streamId, s);
-      box.appendChild(streamCard({
-        title: s.title || s.streamId,
-        sub: s.streamId,
-        stream: s,
-        onPick: (card) => {
-          clearCardSelection();
-          card.classList.add('selected');
-          targetRelay = null; // 回本机锚点
-          remoteStreams.set(s.streamId, s);
-          $input('recv-stream-input').value = s.streamId;
-          void startReceive();
-        },
-      }));
-    }
-  } catch (e) {
-    box.innerHTML = '';
-    box.appendChild(emptyState('video', '拉取串流列表失败：' + (e as Error).message, true));
-  }
-}
-
-/** 开始原生接收：watch（WS/SRT/QUIC）→ 解码 → canvas 绘制。
- *  目标 = 网格页点选的设备锚点（`targetRelay`）或本机锚点；直连失败自动级联。 */
-async function startReceive(): Promise<void> {
+/** 开始接收流 `streamId`（调用方已设置目标中继/本机锚点）。
+ *  音频固定设备播放（B3）；视频帧 → canvas 绘制，纯音频 → 扬声器。 */
+async function startReceive(streamId: string): Promise<void> {
   hideRecvError();
   if (!anchor && !targetRelay) {
-    showRecvError('本机锚点未就绪且未选择局域网串流。请从「网格」页选择一串流。');
+    showRecvError('本机锚点未就绪且未选择设备共享。请从「设备」列表选择一条共享。');
     return;
   }
-  const streamId = $input('recv-stream-input').value.trim();
   if (!streamId) {
-    showRecvError('请输入流 id，或从上方选择一串流');
+    showRecvError('缺少流 id');
     return;
   }
-  const btn = $btn('recv-start-btn');
-  setBtnLoading(btn, true);
   try {
-    const audio = $select('recv-audio-select').value; // 'device' | 'discard'（与 AudioOut serde 一致）
-    const stream = remoteStreams.get(streamId) || null; // 流类型（video/audio）供传输自动选择
-    const relay = pickRelayUrl(stream); // 按传输选择 + 流媒体类型：ws / srt / quic（UDP 不可用回退）
+    const stream = remoteStreams.get(streamId) || null; // 流类型（视频/音频）供传输自动选择
+    const relay = autoRelayUrl(stream);
     if (!relay) {
-      showRecvError('无可用接收目标（本机锚点未就绪或未选择局域网串流）');
+      showRecvError('无可用接收目标（本机锚点未就绪）');
       return;
     }
-    await call('start_receive', {
-      relay,
-      stream: streamId,
-      audio,
-    });
+    await call('start_receive', { relay, stream: streamId, audio: 'device' });
     receiving = true;
     recvFrameCount = 0;
-    $('recv-status').textContent = '接收中…';
-    $('recv-dot').className = 'dot starting';
-    $btn('recv-stop-btn').disabled = false;
-    setBtnLoading(btn, false);
-    btn.disabled = true; // 接收中不可重复开始
-    updateRecvOverlay(); // 等待首帧 → 显示浮层
+    recvAudioBlocks = 0;
+    recvError = null;
+    recvStreamId = streamId;
+    setReceiving(true);
     // 订阅解码帧事件 → canvas（载荷为 base64 字符串——桌面/Android 统一格式，
-    // Rust 侧编码；比 JSON 数字数组紧凑 ~4 倍，前端 atob 原生解码）
+    // Rust 侧编码；前端 atob 原生解码）
     recvUnlisten = await listen('receive-frame', (p: { pts: number; width: number; height: number; data: string }) => {
       drawReceiveFrame(p.width, p.height, p.data);
       recvFrameCount += 1;
@@ -210,7 +62,6 @@ async function startReceive(): Promise<void> {
     });
     void pollReceiveStatus();
   } catch (e) {
-    setBtnLoading(btn, false);
     showRecvError('接收失败：' + (e as Error).message);
     setReceiving(false);
   }
@@ -232,31 +83,169 @@ async function stopReceive(): Promise<void> {
 
 function setReceiving(r: boolean): void {
   receiving = r;
-  $btn('recv-start-btn').disabled = r;
-  $btn('recv-stop-btn').disabled = !r;
+  if (!r) {
+    recvAudioBlocks = 0;
+    recvStreamId = null;
+  }
+  const line = $('recv-status-line');
+  line.classList.toggle('hidden', !r);
   $('recv-dot').className = 'dot ' + (r ? 'live' : 'idle');
   $('recv-status').textContent = r ? '接收中' : '未接收';
-  if (!r) $('recv-meta').textContent = '';
+  $('recv-meta').textContent = '';
   updateRecvOverlay();
+  void renderShares();
 }
 
-/** 轮询接收统计（帧数 / 解码 / 音频块）。 */
+/** 接收等待浮层：接收中且既无视频帧也无音频块（纯音频流 B2：有音频即算有数据）。 */
+function updateRecvOverlay(): void {
+  $('recv-overlay').classList.toggle(
+    'hidden',
+    !receiving || recvFrameCount > 0 || recvAudioBlocks > 0,
+  );
+  // 画布仅在收到视频帧时显示（纯音频流不占画面区）
+  $('recv-canvas-wrap').classList.toggle('hidden', recvFrameCount === 0);
+}
+
+/** 轮询接收统计（帧数 / 解码 / 音频块）并同步共享面板。 */
 async function pollReceiveStatus(): Promise<void> {
   if (!receiving) return;
   try {
     const s = (await call('receive_status')) as ReceiveStats;
-    if (!s.running && recvFrameCount === 0 && !s.error) {
-      $('recv-dot').className = 'dot starting';
-      $('recv-status').textContent = '等待流数据…';
-    } else if (recvFrameCount > 0 && $('recv-status').textContent === '等待流数据…') {
-      // 帧已在绘制（Android 解码在 Kotlin 侧，Rust 的 running 可能滞后）：
-      // 翻回接收中，避免状态卡死在「等待流数据」
+    recvAudioBlocks = s.audioBlocks;
+    if (s.error) recvError = s.error;
+    const status = $('recv-status');
+    if (recvFrameCount > 0) {
+      status.textContent = '接收中';
       $('recv-dot').className = 'dot live';
-      $('recv-status').textContent = '接收中';
+    } else if (s.audioBlocks > 0) {
+      // 纯音频流（B2）：无视频帧，音频块持续增长即视为已接通
+      status.textContent = '音频播放中';
+      $('recv-dot').className = 'dot live';
+      updateRecvOverlay();
+    } else if (!s.running && !s.error) {
+      status.textContent = '等待流数据…';
+      $('recv-dot').className = 'dot starting';
     }
     $('recv-meta').textContent = s.error
       ? '错误：' + s.error
-      : `收到 ${s.received} 帧 · 解码 ${s.decodedVideo} 帧 · 音频 ${s.audioBlocks} 块 · 已绘制 ${recvFrameCount} 帧`;
+      : `收到 ${s.received} 帧 · 解码 ${s.decodedVideo} 帧 · 音频 ${s.audioBlocks} 块`
+        + (recvFrameCount ? ` · 已绘制 ${recvFrameCount} 帧` : '');
+    void renderShares();
   } catch (_) { /* ignore */ }
   if (receiving) setTimeout(() => void pollReceiveStatus(), 1000);
+}
+
+// ---------------------------------------------------------------------------
+// 共享流面板（右栏）：全部活动共享统一管理
+// ---------------------------------------------------------------------------
+
+/** 汇总当前活动共享条目（出站广播/定向 + 入站接收）。 */
+function shareItems(): ShareItem[] {
+  const items: ShareItem[] = [];
+  // 出站：定向凭证共享（B2 手机麦克风 → 目标设备）
+  if (micShare && micShare.active) {
+    const dev = deviceViews.find((d) => d.base === micShare!.base);
+    items.push({
+      id: 'mic-out-' + micShare.base,
+      direction: 'out',
+      media: 'mic',
+      target: dev ? dev.name : micShare.base,
+      state: 'live',
+      detail: '凭证推流中（QUIC/WS）',
+    });
+  }
+  // 出站：广播共享（屏幕 / 麦克风 → 局域网）
+  if (streaming && streamInfo && !(micShare && micShare.active)) {
+    const media = shareKind === 'mic' ? 'mic' : 'screen';
+    items.push({
+      id: 'out-' + streamInfo.streamId,
+      direction: 'out',
+      media,
+      target: '局域网广播',
+      state: starting ? 'starting' : 'live',
+      detail: `已推 ${fmtElapsed(Math.floor(Date.now() / 1000) - streamInfo.startedAt)}`,
+    });
+  }
+  // 入站：接收中的共享（观看 / 反向麦克风）
+  if (receiving) {
+    const stream = recvStreamId ? remoteStreams.get(recvStreamId) : undefined;
+    const media = stream && stream.video ? 'screen' : 'mic';
+    const source = stream ? stream.title || stream.streamId : recvStreamId || '';
+    items.push({
+      id: 'in-' + (recvStreamId || 'recv'),
+      direction: 'in',
+      media,
+      target: source + ' 的共享',
+      state: recvError ? 'error' : recvAudioBlocks > 0 || recvFrameCount > 0 ? 'live' : 'starting',
+      detail: recvError || (recvAudioBlocks > 0
+        ? `音频 ${recvAudioBlocks} 块 · 播放中`
+        : recvFrameCount > 0
+          ? `已绘制 ${recvFrameCount} 帧`
+          : '等待数据…'),
+    });
+  }
+  return items;
+}
+
+/** 当前接收中的流 id（供共享面板定位流信息）。 */
+let recvStreamId: string | null = null;
+
+const MEDIA_LABELS: Record<ShareMedia, string> = {
+  screen: '屏幕',
+  camera: '摄像头',
+  mic: '麦克风',
+  systemAudio: '系统声',
+};
+
+/** 渲染右栏共享面板。 */
+function renderShares(): void {
+  const box = $('share-list');
+  const items = shareItems();
+  box.innerHTML = '';
+  if (!items.length) {
+    box.appendChild(emptyState('activity', '暂无活动共享。点左侧设备卡片发起共享，或点设备的在线共享条目接收。'));
+    return;
+  }
+  for (const it of items) box.appendChild(shareItemEl(it));
+}
+
+/** 单条共享条目：方向箭头 + 媒体图标 + 对端 + 状态 + 停止。 */
+function shareItemEl(it: ShareItem): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'share-item ' + it.direction + ' ' + it.state;
+
+  const arrow = document.createElement('span');
+  arrow.className = 'share-arrow';
+  arrow.textContent = it.direction === 'out' ? '↑' : '↓';
+  arrow.title = it.direction === 'out' ? '本机共享出去' : '本机接收进来';
+  el.appendChild(arrow);
+
+  const ic = document.createElement('span');
+  ic.className = 'share-ic';
+  ic.innerHTML = icon(it.media === 'mic' ? 'mic' : it.media === 'screen' ? 'monitor' : 'music');
+  el.appendChild(ic);
+
+  const body = document.createElement('span');
+  body.className = 'card-body';
+  const name = document.createElement('span');
+  name.className = 'scan-name';
+  name.textContent = (it.direction === 'out' ? '共享 ' : '接收 ') + MEDIA_LABELS[it.media] + ' ' + (it.direction === 'out' ? '→ ' : '← ') + it.target;
+  const meta = document.createElement('span');
+  meta.className = 'scan-meta';
+  const dotClass = it.state === 'error' ? 'err' : it.state === 'live' ? 'ok' : 'starting';
+  meta.innerHTML = `<span class="dot ${dotClass}"></span>${it.state === 'error' ? '错误' : it.state === 'live' ? '进行中' : '启动中'} · ${it.detail}`;
+  body.appendChild(name);
+  body.appendChild(meta);
+  el.appendChild(body);
+
+  const stop = document.createElement('button');
+  stop.type = 'button';
+  stop.className = 'share-stop';
+  stop.innerHTML = icon('stop') + '<span>停止</span>';
+  stop.onclick = () => {
+    if (it.direction === 'out') void stopStream();
+    else void stopReceive();
+  };
+  el.appendChild(stop);
+  return el;
 }

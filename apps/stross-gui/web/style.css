@@ -158,17 +158,36 @@ header {
 /* ---------------- 布局 ---------------- */
 
 main {
+  display: block;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 28px 48px;
+}
+
+/* 设备 × 共享流 组合管理：左设备列表 / 右共享流面板（宽屏双栏，窄屏单栏） */
+.dual {
   display: grid;
   grid-template-columns: minmax(420px, 5fr) minmax(320px, 4fr);
   gap: 18px;
-  padding: 24px 28px 48px;
-  max-width: 1200px;
-  margin: 0 auto;
+  align-items: start;
 }
 
 @media (max-width: 860px) {
-  main { grid-template-columns: 1fr; }
+  .dual { grid-template-columns: 1fr; }
 }
+
+.pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.pane-head h2 { margin: 0; }
+.pane-tools { margin: 0; }
+.pane-tools input { min-width: 0; flex: 1; }
+.pane-tools .grow { flex: 1; min-width: 160px; }
 
 /* ---------------- 卡片 ---------------- */
 
@@ -732,6 +751,281 @@ button.danger:hover:not(:disabled) {
 
 .mono { font-family: var(--font-mono); }
 
+/* ---------------- 设备卡片（左栏：本机 + 局域网设备） ---------------- */
+
+#device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dev-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  transition: border-color 0.16s, background 0.16s;
+}
+.dev-card.expanded { border-color: rgba(91, 140, 255, 0.4); }
+
+.dev-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.dev-card.local .dev-head { cursor: default; }
+.dev-head:hover { background: var(--surface-3); }
+.dev-card.local .dev-head:hover { background: transparent; }
+.dev-head .card-ic.local {
+  color: #fff;
+  background: var(--accent-grad);
+  border: none;
+}
+.dev-card .card-ic { width: 32px; height: 32px; }
+.dev-card .card-ic .ic { width: 16px; height: 16px; }
+
+.badge-streams {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  color: var(--text-3);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+
+/* 设备展开区：共享操作 + 在线共享 */
+.dev-detail {
+  padding: 4px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px dashed var(--border);
+}
+.dev-detail.hidden { display: none; }
+
+.dev-ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 10px;
+}
+.dev-ops button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  font-size: 13px;
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: border-color 0.16s, color 0.16s, background 0.16s;
+}
+.dev-ops button:hover {
+  border-color: var(--accent);
+  color: var(--text-1);
+  background: rgba(91, 140, 255, 0.1);
+}
+.dev-ops button .ic { width: 14px; height: 14px; }
+
+.dev-streams { display: flex; flex-direction: column; gap: 6px; }
+.dev-streams h3 {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+}
+
+.dev-stream-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: border-color 0.16s, transform 0.16s;
+}
+.dev-stream-item:hover {
+  border-color: rgba(52, 211, 153, 0.45);
+  transform: translateY(-1px);
+}
+.dev-stream-item .card-ic { width: 28px; height: 28px; }
+.dev-stream-item .card-ic .ic { width: 14px; height: 14px; }
+
+/* ---------------- 共享流面板（右栏） ---------------- */
+
+#share-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.share-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.share-item.out { border-left: 3px solid var(--accent); }
+.share-item.in { border-left: 3px solid var(--ok); }
+.share-item.error { border-left: 3px solid var(--err); }
+
+.share-arrow {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 700;
+}
+.share-item.out .share-arrow { color: #9db8ff; background: rgba(91, 140, 255, 0.14); }
+.share-item.in .share-arrow { color: #6ee7b7; background: rgba(52, 211, 153, 0.12); }
+
+.share-ic {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--accent);
+  background: rgba(91, 140, 255, 0.12);
+  border: 1px solid rgba(91, 140, 255, 0.22);
+}
+.share-ic .ic { width: 15px; height: 15px; }
+
+.share-item .card-body { flex: 1; min-width: 0; }
+
+.share-stop {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color 0.16s, border-color 0.16s;
+}
+.share-stop:hover { color: var(--err); border-color: rgba(248, 113, 113, 0.5); }
+.share-stop .ic { width: 13px; height: 13px; }
+
+/* 接收状态行（纯音频流不显示画布） */
+#recv-status-line {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+#recv-status-line.hidden { display: none; }
+
+/* ---------------- B2 反向外设：共享麦克风 / 接收手机麦克风 ---------------- */
+
+/* 设备卡片上的「共享麦克风」二级操作（麦克风图标） */
+.scan-act {
+  width: 30px;
+  height: 30px;
+  margin-left: auto;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  color: var(--text-3);
+  background: rgba(52, 211, 153, 0.08);
+  border: 1px solid rgba(52, 211, 153, 0.22);
+  cursor: pointer;
+  transition: color 0.16s, background 0.16s, border-color 0.16s;
+}
+.scan-act:hover, .scan-act:focus-visible {
+  color: #6ee7b7;
+  background: rgba(52, 211, 153, 0.16);
+  border-color: rgba(52, 211, 153, 0.45);
+}
+.scan-act .ic { width: 15px; height: 15px; }
+.scan-card.selected .scan-act { background: rgba(52, 211, 153, 0.1); }
+
+/* 电脑端「接收手机麦克风」面板（本机锚点卡片内） */
+.mic-recv { margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--border); }
+#mic-recv-btn { width: 100%; justify-content: center; }
+.mic-recv-panel { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.pin {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border-radius: var(--r-pill);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: #6ee7b7;
+  background: rgba(52, 211, 153, 0.1);
+  border: 1px solid rgba(52, 211, 153, 0.3);
+}
+
+/* 弹窗（手机端共享麦克风 / 通用） */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(4, 6, 10, 0.6);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+.modal-box {
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-md);
+  animation: fadeUp 0.2s ease;
+}
+
+/* 凭证输入/展示框 */
+.modal-box textarea, #mic-recv-token {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-sizing: border-box;
+}
+.modal-box textarea:focus, #mic-recv-token:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 /* ---------------- 移动端适配 ---------------- */
 
 @media (max-width: 720px) {
@@ -766,6 +1060,8 @@ button.danger:hover:not(:disabled) {
     opacity: 1;
   }
   .header-right { gap: 6px; }
+  .scan-act { width: 44px; height: 44px; }
+  .modal-box textarea, #mic-recv-token { font-size: 14px; min-height: 110px; }
 }
 
 /* ---------------- 无障碍：减少动效 ---------------- */

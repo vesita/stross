@@ -30,7 +30,7 @@ use stross_proto::message::{DiscoveryInfo, MediaKind, RoleId, TransportId};
 use crate::engine::SenderEngine;
 use crate::error::{Error, Result};
 
-use crate::kernel::{Kernel, NodeInfo, NodeRole, RelayDataPlane};
+use crate::kernel::{Kernel, NodeInfo, NodeRole, RelayDataPlane, SessionPrefs};
 use crate::lock::MutexExt;
 
 /// 运行平台（UI 层注入）。
@@ -305,7 +305,14 @@ impl StrossApp {
     ///
     /// 新 UI 应先 `create_session` 取回内核签发的 id 再推流；旧 UI 直接传
     /// 自定义 id 时，在此兜底自动创建本机会话并改写 `cfg.stream_id`。
+    ///
+    /// **凭证推流（B1/B2）特例**：出示 `share_token` 推往远程接收端受控中继
+    /// 时，`stream_id` 必须是接收端签发的会话 id——本机内核无此会话，兜底
+    /// 改写会把 id 换成新会话，接收端将收不到流。因此凭证推流一律跳过。
     fn ensure_session(&self, cfg: &mut StreamConfig) -> Result<()> {
+        if cfg.share_token.is_some() {
+            return Ok(());
+        }
         if !self.kernel.has_data_plane() || self.kernel.has_session(&cfg.stream_id) {
             return Ok(());
         }
@@ -444,6 +451,34 @@ impl StrossApp {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // 跨设备凭证（B2：接收手机麦克风）
+    // -----------------------------------------------------------------------
+
+    /// 接收端入口：建本机会话 → 签发一次性接入凭证（默认 10 分钟）。
+    ///
+    /// 手机出示凭证直接推入本机受控中继（`Hello.share_token`），电脑随后
+    /// 用同一会话 id 原生接收——B0 凭证式接入，不开放任何远程控制面。
+    pub fn issue_share_token(&self, ttl_secs: Option<u64>) -> Result<ShareTokenView> {
+        let prefs = SessionPrefs {
+            title: "接收手机麦克风".into(),
+            ..Default::default()
+        };
+        let session = self
+            .kernel()
+            .create_session("local", &["local".into()], &prefs)?;
+        let ttl = Duration::from_secs(ttl_secs.unwrap_or(600));
+        let token = self
+            .kernel()
+            .create_share_token(&session.id, vec![MediaKind::Mic], ttl)?;
+        Ok(ShareTokenView {
+            token: token.to_token_string(),
+            stream_id: token.stream_id,
+            pin: token.pin,
+            expires_at: token.expires_at,
+        })
+    }
+
     /// 本机中继的代理能力（观看直连失败时级联兜底）；本机中继未启动时为 `None`。
     fn local_proxy(&self) -> Option<LocalProxy> {
         use stross_core::transport::RelayUrl;
@@ -550,6 +585,20 @@ pub struct CaptureStatusView {
     pub active: bool,
     pub started: bool,
     pub error: Option<String>,
+}
+
+/// 手机麦克风接入凭证视图（B2：电脑端签发后展示给手机）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareTokenView {
+    /// ShareToken JSON 字符串（手机端原样粘贴到「共享麦克风」）。
+    pub token: String,
+    /// 接收端签发的会话 id（= 接收时的流 id）。
+    pub stream_id: String,
+    /// 一次性 PIN（展示用；服务端签发表为准）。
+    pub pin: String,
+    /// 过期时间（Unix 秒）。
+    pub expires_at: u64,
 }
 
 fn relay_info(port: u16) -> RelayInfo {

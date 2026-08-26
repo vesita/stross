@@ -186,6 +186,9 @@ impl CaptureBackend for AndroidCapture {
         // 其它命令全部卡住（前端表现为"状态卡住/假推流"）。
         // 因此放到 spawn_blocking 独立线程，授权结果完全由 t=9 控制帧回报。
         let handle = self.handle.clone();
+        // 纯麦克风采集（B2：手机反向推流电脑）不请求屏幕录制授权/前台服务，
+        // 只采 AudioRecord——Kotlin 据此跳过 MediaProjection 全链路。
+        let mic_only = cfg.video.is_none();
         let payload = serde_json::json!({
             "streamId": cfg.stream_id,
             "title": cfg.title,
@@ -194,6 +197,7 @@ impl CaptureBackend for AndroidCapture {
             "fps": cfg.quality.fps,
             "bitrateKbps": cfg.quality.bitrate_kbps,
             "withAudio": cfg.audio.is_some(),
+            "micOnly": mic_only,
             "channel": channel,
         });
         tokio::task::spawn_blocking(move || {

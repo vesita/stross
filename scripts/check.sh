@@ -47,14 +47,25 @@ check_frontend() {
   $TSC -p apps/stross-gui/web/tsconfig.json --pretty false --noEmit \
     && ok "tsc" || fail "前端类型错误"
 
-  step "app.js 与 app.ts 同步（编译产物比对，不依赖 git 状态）"
+  step "app/*.js 与 app/*.ts 同步（编译产物比对，不依赖 git 状态）"
   local tmp
   tmp="$(mktemp -d)"
   $TSC -p apps/stross-gui/web/tsconfig.json --pretty false --outDir "$tmp" > /dev/null 2>&1
-  if cmp -s "$tmp/app.js" apps/stross-gui/web/app.js; then
-    ok "app.js 同步"
+  # 多文件产物逐个比对（--outDir 时 tsc 按公共根目录 app/ 平铺输出到 "$tmp"；
+  # .ts 是唯一真源，app/*.js 提交进仓库）
+  local ok_sync=1
+  for f in "$tmp"/*.js; do
+    local b
+    b="$(basename "$f")"
+    if ! cmp -s "$f" "apps/stross-gui/web/app/$b"; then
+      ok_sync=0
+      echo "  app/$b 与源不同步" >&2
+    fi
+  done
+  if [ "$ok_sync" = "1" ]; then
+    ok "app/*.js 同步"
   else
-    fail "app.js 与 app.ts 不一致：请运行 tsc 重新生成 app.js（.ts 是唯一真源）"
+    fail "app/*.js 与 app/*.ts 不一致：请运行 tsc 重新生成（.ts 是唯一真源）"
   fi
   rm -rf "$tmp"
 

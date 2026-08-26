@@ -9,5 +9,12 @@
     "useUnknownInCatchVariables": false,
     "types": []
   },
-  "files": ["app.ts"]
+  "files": [
+    "app/state.ts",
+    "app/ui.ts",
+    "app/watch.ts",
+    "app/grid.ts",
+    "app/send.ts",
+    "app/main.ts"
+  ]
 }

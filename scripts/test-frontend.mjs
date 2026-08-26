@@ -30,7 +30,11 @@ try {
 }
 const { JSDOM } = requireJsdom('jsdom');
 const html = readFileSync(join(root, 'apps/stross-gui/web/index.html'), 'utf8');
-const appJs = readFileSync(join(root, 'apps/stross-gui/web/app.js'), 'utf8');
+// app/ 目录按依赖序拼接（与 index.html 的 script 顺序一致；单次 eval 共享作用域）
+const appFiles = ['state', 'ui', 'watch', 'grid', 'send', 'main'];
+const appSrc = appFiles
+  .map((f) => readFileSync(join(root, 'apps/stross-gui/web/app', f + '.js'), 'utf8'))
+  .join('\n');
 
 const dom = new JSDOM(html, { url: 'http://localhost/', runScripts: 'outside-only', pretendToBeVisual: true });
 const { window } = dom;
@@ -98,7 +102,7 @@ function json(obj) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const $ = (id) => document.getElementById(id);
 
-window.eval(appJs);
+window.eval(appSrc);
 
 let failures = 0;
 function check(name, cond, extra = '') {

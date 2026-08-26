@@ -16,8 +16,6 @@ use stross_app::{CaptureStatusView, Platform, StrossApp};
 #[cfg(not(mobile))]
 use stross_media::capture::FfmpegBackend;
 use stross_media::pipeline::StreamConfig;
-#[cfg(not(mobile))]
-use stross_proto::message::DiscoveryInfo;
 use tauri::{Emitter, Manager, State};
 
 #[cfg(mobile)]
@@ -38,14 +36,14 @@ fn list_devices(state: State<'_, StrossApp>) -> stross_app::app::DeviceList {
 
 #[tauri::command]
 async fn start_relay(state: State<'_, StrossApp>) -> Result<stross_app::app::RelayInfo, String> {
-    state.start_relay().await
+    state.start_relay().await.map_err(|e| e.to_user_string())
 }
 
 #[tauri::command]
 async fn scan_relays(
     state: State<'_, StrossApp>,
 ) -> Result<Vec<stross_app::app::RelayInfo>, String> {
-    state.scan_relays().await
+    state.scan_relays().await.map_err(|e| e.to_user_string())
 }
 
 #[tauri::command]
@@ -54,12 +52,15 @@ async fn start_stream(
     cfg: StreamConfig,
     relay_url: Option<String>,
 ) -> Result<stross_app::app::StartResult, String> {
-    state.start_stream(cfg, relay_url).await
+    state
+        .start_stream(cfg, relay_url)
+        .await
+        .map_err(|e| e.to_user_string())
 }
 
 #[tauri::command]
 async fn stop_stream(state: State<'_, StrossApp>) -> Result<(), String> {
-    state.stop_stream().await
+    state.stop_stream().await.map_err(|e| e.to_user_string())
 }
 
 #[tauri::command]
@@ -93,7 +94,7 @@ fn kernel_sessions(state: State<'_, StrossApp>) -> Vec<stross_app::kernel::Sessi
 /// `access_code` 可选：设置后该会话启用访问码（PIN），控制操作
 /// （route / teardown）需先 `authorize_session`（设计文档 §7）。
 #[tauri::command]
-async fn create_session(
+fn create_session(
     state: State<'_, StrossApp>,
     src: String,
     sinks: Vec<String>,
@@ -105,7 +106,10 @@ async fn create_session(
         access_code,
         title: String::new(),
     };
-    state.kernel().create_session(&src, &sinks, &prefs).await
+    state
+        .kernel()
+        .create_session(&src, &sinks, &prefs)
+        .map_err(|e| e.to_user_string())
 }
 
 /// 会话鉴权：校验访问码（PIN）；成功后该会话的控制操作放行。
@@ -118,6 +122,7 @@ fn authorize_session(
     state
         .kernel()
         .authorize(&session_id, access_code.as_deref())
+        .map_err(|e| e.to_user_string())
 }
 
 /// 控制传输方向（会话存续期间动态改道）。
@@ -127,13 +132,19 @@ fn route_session(
     session_id: String,
     path: stross_proto::message::RoutePath,
 ) -> Result<(), String> {
-    state.kernel().route(&session_id, path)
+    state
+        .kernel()
+        .route(&session_id, path)
+        .map_err(|e| e.to_user_string())
 }
 
 /// 拆除会话。
 #[tauri::command]
-async fn teardown_session(state: State<'_, StrossApp>, session_id: String) -> Result<(), String> {
-    state.kernel().teardown(&session_id).await
+fn teardown_session(state: State<'_, StrossApp>, session_id: String) -> Result<(), String> {
+    state
+        .kernel()
+        .teardown(&session_id)
+        .map_err(|e| e.to_user_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +169,8 @@ async fn start_receive(
     {
         state
             .start_receive_raw(relay.clone(), stream.clone())
-            .await?;
+            .await
+            .map_err(|e| e.to_user_string())?;
         let frames = match state.take_receive_raw_frames() {
             Some(r) => r,
             None => return Err("接收会话已启动但没有编码帧通道".into()),
@@ -168,7 +180,10 @@ async fn start_receive(
     }
     #[cfg(not(target_os = "android"))]
     {
-        state.start_receive(relay, stream, audio).await?;
+        state
+            .start_receive(relay, stream, audio)
+            .await
+            .map_err(|e| e.to_user_string())?;
         let mut frames = match state.take_receive_frames() {
             Some(r) => r,
             None => return Err("接收会话已启动但没有帧通道".into()),
@@ -300,8 +315,6 @@ pub fn run() {
 /// 单独充当局域网中继（服务器 / 常驻部署场景，不依赖 webkit/GTK）。
 #[cfg(not(mobile))]
 pub fn run_relay_only(args: &[String]) {
-    use stross_core::discovery::Discovery;
-    use stross_core::net::local_ips;
     use stross_core::relay::{DEFAULT_PORT, RelayServer};
 
     tracing_subscriber::fmt()
@@ -331,48 +344,9 @@ pub fn run_relay_only(args: &[String]) {
 
     let rt = tokio::runtime::Runtime::new().expect("创建 tokio runtime 失败");
     rt.block_on(async {
-        let handle = match RelayServer::start(port).await {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!("中继启动失败: {e}");
-                return;
-            }
-        };
-        let ips = local_ips();
-        tracing::info!("📡 Stross 中继（无界面模式）已启动");
-        if ips.is_empty() {
-            tracing::info!("中继入口: http://127.0.0.1:{}/", handle.port);
+        if let Err(e) = RelayServer::run_standalone(port, advertise, "sender-relay").await {
+            tracing::error!("中继启动失败: {e}");
         }
-        for ip in &ips {
-            tracing::info!("中继入口: http://{ip}:{}/", handle.port);
-        }
-        tracing::info!("推流地址: ws://<中继IP>:{}/ws/push", handle.port);
-        tracing::info!("Ctrl+C 退出");
-
-        let _discovery = if advertise {
-            match Discovery::start(
-                &format!("sender-relay-{}", handle.port),
-                &local_ips(),
-                handle.port,
-                &DiscoveryInfo::relay_default("Stross 中继", vec![]),
-            ) {
-                Ok(d) => {
-                    tracing::info!("mDNS 广播中…");
-                    Some(d)
-                }
-                Err(e) => {
-                    tracing::warn!("mDNS 广播失败: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        tokio::signal::ctrl_c().await.ok();
-        tracing::info!("正在停止…");
-        handle.stop().await;
-        drop(_discovery);
     });
 }
 

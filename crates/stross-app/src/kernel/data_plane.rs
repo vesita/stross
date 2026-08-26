@@ -6,19 +6,22 @@
 //!
 //! 设计文档 `docs/requirements.md` §7：中继 = 受内核驱动的数据面后端（主从关系）。
 
-use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use stross_core::relay::{RelayEvent, RelayHandle, RelayState, ShareTokenValidator};
 
+use crate::error::Result;
+
 /// 数据面后端：内核通过它预授权 / 撤销流接入，并订阅流生命周期事件。
-#[async_trait]
+///
+/// 预授权 / 撤销是纯内存标记操作（受控中继按 id 放行 Hello），无需跨 await；
+/// 同步签名让会话创建 / 拆除保持同步，也避免调用方持锁跨 await。
 pub trait DataPlaneBackend: Send + Sync + 'static {
     /// 预授权一个会话 id（受控中继据此允许对应 Hello 接入）。
-    async fn authorize_stream(&self, session_id: &str) -> Result<(), String>;
+    fn authorize_stream(&self, session_id: &str) -> Result<()>;
     /// 撤销预授权（会话拆除时调用）。
-    async fn revoke_stream(&self, session_id: &str) -> Result<(), String>;
+    fn revoke_stream(&self, session_id: &str) -> Result<()>;
     /// 数据面事件订阅（StreamStarted / StreamEnded / WatchersChanged）。
     fn events(&self) -> broadcast::Receiver<RelayEvent>;
     /// 注入接入凭证校验器（B 阶段跨设备推流；默认不注入 = 行为与现状一致）。
@@ -42,14 +45,13 @@ impl RelayDataPlane {
     }
 }
 
-#[async_trait]
 impl DataPlaneBackend for RelayDataPlane {
-    async fn authorize_stream(&self, session_id: &str) -> Result<(), String> {
+    fn authorize_stream(&self, session_id: &str) -> Result<()> {
         self.state.authorize_stream(session_id);
         Ok(())
     }
 
-    async fn revoke_stream(&self, session_id: &str) -> Result<(), String> {
+    fn revoke_stream(&self, session_id: &str) -> Result<()> {
         self.state.revoke_stream(session_id);
         Ok(())
     }

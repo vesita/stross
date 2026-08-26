@@ -34,6 +34,9 @@ use stross_proto::message::{
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
+use crate::error::{Error, Result};
+use crate::lock::MutexExt;
+
 use self::graph::DeviceGraph;
 use self::session::{Router, SessionManager};
 
@@ -118,7 +121,7 @@ impl Kernel {
     /// 同时注入接入凭证校验器（B 阶段跨设备推流：受控中继在预授权之外
     /// 接受本内核签发的 [`ShareToken`]）。
     pub fn attach_data_plane(&self, backend: Arc<dyn DataPlaneBackend>) {
-        *self.data_plane.lock().unwrap() = Some(backend.clone());
+        *self.data_plane.lock_poisoned() = Some(backend.clone());
         backend.set_share_token_validator(self.token_validator());
         let mut rx = backend.events();
         let events = self.events.clone();
@@ -143,7 +146,7 @@ impl Kernel {
                 let _ = events.send(kernel_ev);
             }
         });
-        *self.data_plane_task.lock().unwrap() = Some(task);
+        *self.data_plane_task.lock_poisoned() = Some(task);
     }
 
     // -----------------------------------------------------------------------
@@ -159,13 +162,13 @@ impl Kernel {
         session_id: &str,
         media: Vec<MediaKind>,
         ttl: Duration,
-    ) -> Result<ShareToken, String> {
+    ) -> Result<ShareToken> {
         if !self.has_session(session_id) {
-            return Err(format!("会话 {session_id} 不存在"));
+            return Err(Error::SessionNotFound(session_id.to_string()));
         }
         let now = now_secs();
         // 惰性清理过期凭证，保持签发表有界
-        let mut tokens = self.share_tokens.lock().unwrap();
+        let mut tokens = self.share_tokens.lock_poisoned();
         tokens.retain(|_, t| !t.is_expired(now));
         let token = ShareToken {
             v: ShareToken::VERSION,
@@ -179,16 +182,18 @@ impl Kernel {
     }
 
     /// 校验凭证：已签发 + 未过期 + 与签发时逐字一致（防篡改 / 重放）。
-    pub fn verify_share_token(&self, token: &ShareToken) -> Result<(), String> {
-        let tokens = self.share_tokens.lock().unwrap();
-        let stored = tokens
-            .get(&token.stream_id)
-            .ok_or_else(|| format!("凭证无效：会话 {} 未签发凭证", token.stream_id))?;
+    pub fn verify_share_token(&self, token: &ShareToken) -> Result<()> {
+        let tokens = self.share_tokens.lock_poisoned();
+        let stored = tokens.get(&token.stream_id).ok_or_else(|| {
+            Error::Token(format!("凭证无效：会话 {} 未签发凭证", token.stream_id))
+        })?;
         if stored != token {
-            return Err("凭证无效：与签发时不符（可能被篡改或重放）".into());
+            return Err(Error::Token(
+                "凭证无效：与签发时不符（可能被篡改或重放）".into(),
+            ));
         }
         if stored.is_expired(now_secs()) {
-            return Err("凭证已过期".into());
+            return Err(Error::Token("凭证已过期".into()));
         }
         Ok(())
     }
@@ -202,7 +207,7 @@ impl Kernel {
 
     /// 是否已接入数据面。
     pub fn has_data_plane(&self) -> bool {
-        self.data_plane.lock().unwrap().is_some()
+        self.data_plane.lock_poisoned().is_some()
     }
 
     /// 会话是否存在（id 已由内核签发且未拆除）。
@@ -218,14 +223,13 @@ impl Kernel {
     pub fn upsert_node(&self, node: NodeInfo) {
         self.graph
             .nodes
-            .lock()
-            .unwrap()
+            .lock_poisoned()
             .insert(node.node_id.clone(), node);
     }
 
     /// 给已有节点追加一条能力（重复条目按 `media` 去重）。
     pub fn register_capability(&self, node_id: &str, desc: CapabilityDescriptor) {
-        let mut guard = self.graph.nodes.lock().unwrap();
+        let mut guard = self.graph.nodes.lock_poisoned();
         if let Some(node) = guard.get_mut(node_id)
             && !node.caps.contains(&desc)
         {
@@ -235,7 +239,7 @@ impl Kernel {
 
     /// 当前设备图快照（按节点 id 排序）。
     pub fn nodes(&self) -> Vec<NodeInfo> {
-        let guard = self.graph.nodes.lock().unwrap();
+        let guard = self.graph.nodes.lock_poisoned();
         let mut v: Vec<_> = guard.values().cloned().collect();
         v.sort_by(|a, b| a.node_id.cmp(&b.node_id));
         v
@@ -253,14 +257,14 @@ impl Kernel {
     ///
     /// 已接入数据面（[`Kernel::attach_data_plane`]）时，会话 id 由内核签发并
     /// **预授权**给受控中继（需求 F2.2「先会话后传输」/ D4：id 与 stream_id 合一）。
-    pub async fn create_session(
+    pub fn create_session(
         &self,
         src: &str,
         sinks: &[String],
         prefs: &SessionPrefs,
-    ) -> Result<Session, String> {
+    ) -> Result<Session> {
         if sinks.is_empty() {
-            return Err("会话至少需要一个接收端（sinks）".into());
+            return Err(Error::Message("会话至少需要一个接收端（sinks）".into()));
         }
         let id = format!("sess-{:x}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let requires_pin = prefs.access_code.is_some();
@@ -268,12 +272,11 @@ impl Kernel {
             self.auth.set_code(&id, prefs.access_code.as_deref());
         }
         // 数据面预授权：先授权成功再登记会话，避免"会话已建但无法推流"的中间态
-        // （先 clone 出 Arc 再 await，避免 MutexGuard 跨 await 使 future 非 Send）
-        let dp = self.data_plane.lock().unwrap().clone();
+        // （先 clone 出 Arc 再调用外部后端，不在持内核锁期间执行后端调用）
+        let dp = self.data_plane.lock_poisoned().clone();
         if let Some(dp) = dp {
             dp.authorize_stream(&id)
-                .await
-                .map_err(|e| format!("数据面预授权失败: {e}"))?;
+                .map_err(|e| Error::DataPlane(format!("预授权失败: {e}")))?;
         }
         let session = Session {
             id,
@@ -295,7 +298,7 @@ impl Kernel {
     /// 控制传输方向：会话存续期间动态改道。
     ///
     /// 会话启用访问码（PIN）且未通过 [`Kernel::authorize`] 时拒绝（设计文档 §7）。
-    pub fn route(&self, id: &str, path: RoutePath) -> Result<(), String> {
+    pub fn route(&self, id: &str, path: RoutePath) -> Result<()> {
         self.sessions.route(id, path.clone())?;
         let _ = self.events.send(KernelEvent::SessionRouted {
             session_id: id.to_string(),
@@ -307,10 +310,8 @@ impl Kernel {
     /// 会话鉴权：校验访问码；成功后该会话的控制操作放行。
     ///
     /// 未设置访问码的会话直接成功（无操作）。
-    pub fn authorize(&self, id: &str, access_code: Option<&str>) -> Result<(), String> {
-        self.auth
-            .authorize(id, access_code)
-            .map_err(|e| e.to_string())?;
+    pub fn authorize(&self, id: &str, access_code: Option<&str>) -> Result<()> {
+        self.auth.authorize(id, access_code)?;
         self.sessions.mark_authorized(id)
     }
 
@@ -332,8 +333,7 @@ impl Kernel {
         let caps: Vec<CapabilityDescriptor> = self
             .graph
             .nodes
-            .lock()
-            .unwrap()
+            .lock_poisoned()
             .get(src)
             .map(|n| n.caps.clone())
             .unwrap_or_default();
@@ -366,15 +366,14 @@ impl Kernel {
     }
 
     /// 拆除会话（同样受访问码鉴权约束）；已接入数据面时撤销流预授权。
-    pub async fn teardown(&self, id: &str) -> Result<(), String> {
+    pub fn teardown(&self, id: &str) -> Result<()> {
         self.sessions.require_authorized(id)?;
         self.sessions.remove(id);
         self.auth.set_code(id, None); // 清理访问码
-        let dp = self.data_plane.lock().unwrap().clone();
+        let dp = self.data_plane.lock_poisoned().clone();
         if let Some(dp) = dp {
             dp.revoke_stream(id)
-                .await
-                .map_err(|e| format!("数据面撤销失败: {e}"))?;
+                .map_err(|e| Error::DataPlane(format!("撤销失败: {e}")))?;
         }
         let _ = self.events.send(KernelEvent::SessionEnded {
             session_id: id.to_string(),
@@ -395,7 +394,7 @@ struct KernelTokenValidator {
 
 impl stross_core::relay::ShareTokenValidator for KernelTokenValidator {
     fn validate(&self, token: &ShareToken) -> bool {
-        let tokens = self.tokens.lock().unwrap();
+        let tokens = self.tokens.lock_poisoned();
         let Some(stored) = tokens.get(&token.stream_id) else {
             return false;
         };
@@ -459,7 +458,6 @@ mod tests {
         let k = Kernel::new();
         assert!(
             k.create_session("a", &[], &SessionPrefs::default())
-                .await
                 .is_err()
         );
     }
@@ -471,7 +469,6 @@ mod tests {
 
         let s = k
             .create_session("a", &["b".into()], &SessionPrefs::default())
-            .await
             .unwrap();
         assert_eq!(s.path, RoutePath::Direct { node: "b".into() });
         match rx.recv().now_or_never().unwrap().unwrap() {
@@ -482,7 +479,6 @@ mod tests {
         // 多接收端 → 组播（会再发一个 SessionStarted，先消费掉）
         let m = k
             .create_session("a", &["b".into(), "c".into()], &SessionPrefs::default())
-            .await
             .unwrap();
         assert!(matches!(m.path, RoutePath::Mesh { .. }));
         match rx.recv().now_or_never().unwrap().unwrap() {
@@ -510,7 +506,7 @@ mod tests {
         }
 
         // 拆除
-        k.teardown(&s.id).await.unwrap();
+        k.teardown(&s.id).unwrap();
         assert!(k.session(&s.id).is_none());
         match rx.recv().now_or_never().unwrap().unwrap() {
             KernelEvent::SessionEnded { session_id } => assert_eq!(session_id, s.id),
@@ -525,7 +521,7 @@ mod tests {
             k.route("nope", RoutePath::Direct { node: "b".into() })
                 .is_err()
         );
-        assert!(k.teardown("nope").await.is_err());
+        assert!(k.teardown("nope").is_err());
     }
 
     #[tokio::test]
@@ -550,7 +546,6 @@ mod tests {
         // 源只支持 ws → 协商出 ws + h264
         let s = k
             .create_session("a", &["b".into()], &SessionPrefs::default())
-            .await
             .unwrap();
         assert_eq!(s.negotiated.transport, TransportId::Ws);
         assert_eq!(s.negotiated.codec, CodecId::H264);
@@ -561,7 +556,7 @@ mod tests {
             access_code: None,
             title: String::new(),
         };
-        let s2 = k.create_session("a", &["b".into()], &prefs).await.unwrap();
+        let s2 = k.create_session("a", &["b".into()], &prefs).unwrap();
         assert_eq!(s2.negotiated.transport, TransportId::Ws);
     }
 
@@ -576,7 +571,7 @@ mod tests {
             access_code: Some("1234".into()),
             title: String::new(),
         };
-        let s = k.create_session("a", &["b".into()], &prefs).await.unwrap();
+        let s = k.create_session("a", &["b".into()], &prefs).unwrap();
         assert!(s.requires_pin);
         // 未授权：route / teardown 都被拒绝
         assert!(
@@ -584,7 +579,7 @@ mod tests {
                 .is_err(),
             "未授权 route 应被拒绝"
         );
-        assert!(k.teardown(&s.id).await.is_err(), "未授权 teardown 应被拒绝");
+        assert!(k.teardown(&s.id).is_err(), "未授权 teardown 应被拒绝");
         // 错误访问码
         assert!(k.authorize(&s.id, Some("9999")).is_err());
         assert!(
@@ -597,7 +592,7 @@ mod tests {
             k.route(&s.id, RoutePath::ViaRelay { node: "r".into() })
                 .is_ok()
         );
-        assert!(k.teardown(&s.id).await.is_ok());
+        assert!(k.teardown(&s.id).is_ok());
         // 会话不存在
         assert!(k.authorize("nope", Some("1234")).is_err());
     }
@@ -607,7 +602,6 @@ mod tests {
         let k = Kernel::new();
         let s = k
             .create_session("a", &["b".into()], &SessionPrefs::default())
-            .await
             .unwrap();
         assert!(!s.requires_pin);
         assert!(
@@ -623,7 +617,6 @@ mod tests {
         let k = Kernel::new();
         let s = k
             .create_session("a", &["b".into()], &SessionPrefs::default())
-            .await
             .unwrap();
 
         // 未知会话 → 拒绝

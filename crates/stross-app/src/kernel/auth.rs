@@ -1,5 +1,6 @@
 //! 控制面鉴权（设计文档 §7）。
 
+use super::super::lock::MutexExt;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -41,7 +42,7 @@ pub struct PinAuthPolicy {
 
 impl AuthPolicy for PinAuthPolicy {
     fn authorize(&self, session_id: &str, access_code: Option<&str>) -> Result<(), AuthError> {
-        let pin = self.pins.lock().unwrap().get(session_id).cloned();
+        let pin = self.pins.lock_poisoned().get(session_id).cloned();
         match pin {
             None => Ok(()), // 会话无访问码，放行
             Some(pin) => match access_code {
@@ -53,7 +54,7 @@ impl AuthPolicy for PinAuthPolicy {
     }
 
     fn set_code(&self, session_id: &str, code: Option<&str>) {
-        let mut pins = self.pins.lock().unwrap();
+        let mut pins = self.pins.lock_poisoned();
         match code {
             Some(code) => {
                 pins.insert(session_id.to_string(), code.to_string());

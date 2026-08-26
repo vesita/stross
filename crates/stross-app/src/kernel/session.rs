@@ -7,6 +7,9 @@ use serde::Serialize;
 
 use stross_proto::message::{CodecId, ReliabilityProfile, RoutePath, TransportId};
 
+use super::super::lock::MutexExt;
+use crate::error::{Error, Result};
+
 /// 会话协商结果（阶段 1 起由 Offer/Answer 填充）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,9 +51,9 @@ pub struct SessionPrefs {
 
 impl Session {
     /// 控制操作前的鉴权门禁：启用访问码且未通过 [`crate::kernel::Kernel::authorize`] → 拒绝。
-    pub(super) fn require_authorized(&self) -> Result<(), String> {
+    pub(super) fn require_authorized(&self) -> Result<()> {
         if self.requires_pin && !self.authorized {
-            return Err("会话需要访问码（PIN），请先 authorize".into());
+            return Err(Error::PinRequired);
         }
         Ok(())
     }
@@ -70,59 +73,60 @@ pub(super) struct SessionManager {
 impl SessionManager {
     /// 会话是否存在。
     pub(super) fn contains(&self, id: &str) -> bool {
-        self.sessions.lock().unwrap().contains_key(id)
+        self.sessions.lock_poisoned().contains_key(id)
     }
 
     /// 会话快照（不存在 → `None`）。
     pub(super) fn get(&self, id: &str) -> Option<Session> {
-        self.sessions.lock().unwrap().get(id).cloned()
+        self.sessions.lock_poisoned().get(id).cloned()
     }
 
     /// 登记会话。
     pub(super) fn insert(&self, session: Session) {
         self.sessions
-            .lock()
-            .unwrap()
+            .lock_poisoned()
             .insert(session.id.clone(), session);
     }
 
     /// 移除会话（返回被移除项；不存在 → `None`）。
     pub(super) fn remove(&self, id: &str) -> Option<Session> {
-        self.sessions.lock().unwrap().remove(id)
+        self.sessions.lock_poisoned().remove(id)
     }
 
     /// 全量快照（按 id 排序）。
     pub(super) fn snapshot(&self) -> Vec<Session> {
-        let guard = self.sessions.lock().unwrap();
+        let guard = self.sessions.lock_poisoned();
         let mut v: Vec<_> = guard.values().cloned().collect();
         v.sort_by(|a, b| a.id.cmp(&b.id));
         v
     }
 
     /// 控制操作前的鉴权门禁：会话必须存在且已授权（F2.5 / 设计文档 §7）。
-    pub(super) fn require_authorized(&self, id: &str) -> Result<(), String> {
-        let guard = self.sessions.lock().unwrap();
-        let s = guard.get(id).ok_or_else(|| format!("会话 {id} 不存在"))?;
+    pub(super) fn require_authorized(&self, id: &str) -> Result<()> {
+        let guard = self.sessions.lock_poisoned();
+        let s = guard
+            .get(id)
+            .ok_or_else(|| Error::SessionNotFound(id.to_string()))?;
         s.require_authorized()
     }
 
     /// 改道：校验鉴权后更新传输路径（F2.3 会话内动态改道）。
-    pub(super) fn route(&self, id: &str, path: RoutePath) -> Result<(), String> {
-        let mut guard = self.sessions.lock().unwrap();
+    pub(super) fn route(&self, id: &str, path: RoutePath) -> Result<()> {
+        let mut guard = self.sessions.lock_poisoned();
         let s = guard
             .get_mut(id)
-            .ok_or_else(|| format!("会话 {id} 不存在"))?;
+            .ok_or_else(|| Error::SessionNotFound(id.to_string()))?;
         s.require_authorized()?;
         s.path = path;
         Ok(())
     }
 
     /// 标记已鉴权（访问码校验成功后调用）。
-    pub(super) fn mark_authorized(&self, id: &str) -> Result<(), String> {
-        let mut guard = self.sessions.lock().unwrap();
+    pub(super) fn mark_authorized(&self, id: &str) -> Result<()> {
+        let mut guard = self.sessions.lock_poisoned();
         let s = guard
             .get_mut(id)
-            .ok_or_else(|| format!("会话 {id} 不存在"))?;
+            .ok_or_else(|| Error::SessionNotFound(id.to_string()))?;
         s.mark_authorized();
         Ok(())
     }

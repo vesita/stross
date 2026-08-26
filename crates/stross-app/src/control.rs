@@ -176,9 +176,9 @@ async fn handle_request(app: &StrossApp, text: &str) -> CtrlResponse {
                 title,
                 ..Default::default()
             };
-            match app.kernel().create_session("local", &sinks, &prefs).await {
+            match app.kernel().create_session("local", &sinks, &prefs) {
                 Ok(s) => CtrlResponse::ok(json!({ "sessionId": s.id, "title": s.title })),
-                Err(e) => CtrlResponse::err(e),
+                Err(e) => CtrlResponse::err(e.to_user_string()),
             }
         }
         CtrlRequest::Authorize {
@@ -186,11 +186,11 @@ async fn handle_request(app: &StrossApp, text: &str) -> CtrlResponse {
             access_code,
         } => match app.kernel().authorize(&session_id, access_code.as_deref()) {
             Ok(()) => CtrlResponse::ok(json!({ "sessionId": session_id, "authorized": true })),
-            Err(e) => CtrlResponse::err(e),
+            Err(e) => CtrlResponse::err(e.to_user_string()),
         },
-        CtrlRequest::Teardown { session_id } => match app.kernel().teardown(&session_id).await {
+        CtrlRequest::Teardown { session_id } => match app.kernel().teardown(&session_id) {
             Ok(()) => CtrlResponse::ok(json!({ "sessionId": session_id })),
-            Err(e) => CtrlResponse::err(e),
+            Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::StartStream { config, relay_url } => {
             match app.start_stream(config, relay_url).await {
@@ -199,7 +199,7 @@ async fn handle_request(app: &StrossApp, text: &str) -> CtrlResponse {
                     "watchUrls": r.watch_urls,
                     "streamId": r.stream_id,
                 })),
-                Err(e) => CtrlResponse::err(e),
+                Err(e) => CtrlResponse::err(e.to_user_string()),
             }
         }
         CtrlRequest::ShareToken {
@@ -220,12 +220,12 @@ async fn handle_request(app: &StrossApp, text: &str) -> CtrlResponse {
                     "expiresAt": token.expires_at,
                     "media": token.media.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>(),
                 })),
-                Err(e) => CtrlResponse::err(e),
+                Err(e) => CtrlResponse::err(e.to_user_string()),
             }
         }
         CtrlRequest::StopStream => match app.stop_stream().await {
             Ok(()) => CtrlResponse::ok(json!({ "stopped": true })),
-            Err(e) => CtrlResponse::err(e),
+            Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::ListSessions => {
             let sessions: Vec<serde_json::Value> = app

@@ -84,7 +84,6 @@ async fn kernel_session_drives_controlled_relay() {
     // 1) 创建会话：id 由内核签发并预授权
     let session = kernel
         .create_session("local", &["local".into()], &SessionPrefs::default())
-        .await
         .unwrap();
     expect_event!(events, KernelEvent::SessionStarted { .. } => {});
     assert!(kernel.has_session(&session.id), "会话应已登记");
@@ -149,7 +148,7 @@ async fn kernel_session_drives_controlled_relay() {
 
     // 5) 会话拆除 → 预授权撤销 + 流被同步拆除（SessionEnded 内核直发、
     //    StreamEnded 经数据面转发，顺序不保证，收集两者）
-    kernel.teardown(&session.id).await.unwrap();
+    kernel.teardown(&session.id).unwrap();
     assert!(!kernel.has_session(&session.id), "会话应已拆除");
     let mut seen_session_ended = false;
     let mut seen_stream_ended = false;
@@ -233,7 +232,6 @@ async fn share_token_grants_cross_device_push() {
     // 不 attach_data_plane：会话创建**不会**预授权给中继，只有凭证能放行
     let session = kernel
         .create_session("local", &["local".into()], &SessionPrefs::default())
-        .await
         .unwrap();
     assert!(relay.is_controlled(), "受控模式");
     // 注入内核的凭证校验器（attach_data_plane 之外直接注入，模拟"凭证接入"路径）
@@ -351,7 +349,6 @@ async fn remote_source_requires_token_even_when_authorized() {
     kernel.attach_data_plane(Arc::new(RelayDataPlane::new(&relay)));
     let session = kernel
         .create_session("local", &["local".into()], &SessionPrefs::default())
-        .await
         .unwrap();
     let lan_ip = local_ips()
         .into_iter()

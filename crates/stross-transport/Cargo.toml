@@ -16,7 +16,7 @@ tracing.workspace = true
 axum.workspace = true
 futures-util.workspace = true
 local-ip-address.workspace = true
-mdns-sd = { workspace = true, optional = true }
+mdns = { workspace = true, optional = true }
 tokio-tungstenite.workspace = true
 tungstenite.workspace = true
 # 纯 Rust WebRTC（MIT/Apache-2.0）；rust-crypto 后端避免 C 构建依赖
@@ -30,7 +30,7 @@ rustls.workspace = true
 [features]
 default = []
 # 启用 mDNS 候选解析（浏览器 WebRTC 的 .local 主机名；随 stross-core 的 discovery 传递）
-discovery = ["dep:mdns-sd"]
+discovery = ["dep:mdns"]
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

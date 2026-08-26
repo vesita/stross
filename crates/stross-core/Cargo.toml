@@ -17,13 +17,13 @@ async-trait.workspace = true
 tracing.workspace = true
 axum.workspace = true
 hostname.workspace = true
-mdns-sd = { workspace = true, optional = true }
+mdns = { workspace = true, optional = true }
 
 [features]
 default = []
 # 启用 mDNS 服务发现（局域网自动发现中继/推流端）；同时传递到传输层
 # （WebRTC 的 .local 候选解析）
-discovery = ["dep:mdns-sd", "stross-transport/discovery"]
+discovery = ["dep:mdns", "stross-transport/discovery"]
 
 [dev-dependencies]
 futures-util.workspace = true

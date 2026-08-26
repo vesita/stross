@@ -1,0 +1,32 @@
+[package]
+name = "mdns"
+version = "0.21.0"
+authors = ["keepsimple <keepsimple@gmail.com>", "Stross contributors"]
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/keepsimple1/mdns-sd"
+keywords = ["mdns", "service-discovery", "zeroconf", "dns-sd"]
+categories = ["network-programming"]
+description = "mDNS service discovery（fork 自 mdns-sd 0.21，本地维护）"
+
+[features]
+async = ["flume/async"]
+serde = ["dep:serde"]
+default = ["async", "serde"]
+
+[dependencies]
+fastrand.workspace = true
+flume = { workspace = true, default-features = false } # channel between threads
+if-addrs = { workspace = true, features = ["link-local"] } # get local IP addresses
+mio = { workspace = true, features = ["os-poll", "net"] } # select/poll sockets
+socket2 = { workspace = true, features = ["all"] } # socket APIs
+socket-pktinfo.workspace = true
+# support for serde's deserialize/serialize traits
+serde = { workspace = true, optional = true }
+tracing.workspace = true
+
+[dev-dependencies]
+env_logger = { workspace = true, default-features = false, features = ["humantime"] }
+humantime.workspace = true
+serde_json.workspace = true
+test-log.workspace = true

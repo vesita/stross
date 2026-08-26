@@ -263,7 +263,7 @@ impl StrossApp {
     /// 返回的 [`RelayInfo`] 透传 mDNS 能力引导信息（设备名 / 角色 / 传输），
     /// 供前端直接展示设备卡片，无需再手动输入地址。
     pub async fn scan_relays(&self) -> Result<Vec<RelayInfo>> {
-        let found = Discovery::browse(Duration::from_secs(2)).await?;
+        let found = Discovery::browse(stross_core::discovery::BROWSE_TIMEOUT).await?;
         tracing::debug!("scan_relays 发现 {} 台设备", found.len());
         Ok(found
             .into_iter()

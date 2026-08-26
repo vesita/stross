@@ -9,6 +9,7 @@ members = [
     "apps/stross-relay",
     "apps/stross-cli",
     "apps/stross-gui/src-tauri",
+    "crates/mdns",
 ]
 
 [workspace.package]
@@ -40,10 +41,20 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.23.1"
 clap = { version = "4", features = ["derive"] }
+# mDNS（crates/mdns）依赖：版本统一在此管理，mdns 内 xxx.workspace = true
+fastrand = "2.5.0"
+flume = { version = "0.12", default-features = false }
+if-addrs = { version = "0.15", features = ["link-local"] }
+mio = { version = "1.2.2", features = ["os-poll", "net"] }
+socket-pktinfo = "0.4.1"
+socket2 = { version = "0.6.5", features = ["all"] }
+# mDNS tests 的 dev-dependency（同样统一管理）
+env_logger = { version = "0.11.11", default-features = false, features = ["humantime"] }
+humantime = "2.3"
+test-log = "0.2.21"
 futures-util = "0.3"
 hostname = "0.4"
 local-ip-address = "0.6"
-mdns-sd = "0.21.0"
 quinn = "0.11"
 rcgen = "0.14.9"
 rsrt = "0.3"
@@ -66,6 +77,10 @@ stross-transport = { path = "crates/stross-transport", version = "0.1.0" }
 stross-core = { path = "crates/stross-core", version = "0.1.0" }
 stross-media = { path = "crates/stross-media", version = "0.1.0" }
 stross-app = { path = "crates/stross-app", version = "0.1.0" }
+
+# mDNS 服务发现：fork 自 mdns-sd 0.21（crates/mdns），本地维护以修跨设备
+# 发现（SO_REUSEPORT 端口竞争等）上游未覆盖的问题。
+mdns = { path = "crates/mdns" }
 
 [profile.release]
 codegen-units = 1

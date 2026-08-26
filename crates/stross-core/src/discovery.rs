@@ -7,13 +7,21 @@
 //! 见 [`stross_proto::message::DiscoveryInfo`]——注册侧传结构体，浏览侧解码结构体。
 
 use std::net::IpAddr;
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use stross_proto::message::DiscoveryInfo;
 
 /// mDNS 服务类型。
 pub const SERVICE_TYPE: &str = "_stross._tcp.local.";
+
+/// browse 默认超时。
+///
+/// **真机实测**：2 秒约 80% 概率漏掉对端（mDNS 查询→响应→resolve 需多轮
+/// 往返），4 秒有所缓解但仍偶发漏（约 20-40% 成功率）。根治方向在 mdns
+/// crate 内部（resolve 重试 + 跨 browse 缓存），见 crates/mdns 维护说明。
+pub const BROWSE_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// 一个被发现的服务实例。
 #[derive(Debug, Clone)]
@@ -24,9 +32,21 @@ pub struct Discovered {
     pub txt: Vec<(String, String)>,
 }
 
+/// 进程级共享的 mDNS daemon。
+///
+/// **关键**：register（广播本机）与 browse（扫描对端）必须共用**同一个**
+/// `ServiceDaemon`。若各自 `new()`（各起一个 bind 5353 的 socket），
+/// mdns-sd 默认 `SO_REUSEPORT` 会导致跨设备组播响应被另一个 socket 分摊抢走，
+/// browse 只能收到本机回环的自己广播、收不到对端（真机双向失效的根因）。
+fn daemon() -> &'static ServiceDaemon {
+    static DAEMON: OnceLock<ServiceDaemon> = OnceLock::new();
+    DAEMON.get_or_init(|| ServiceDaemon::new().expect("创建 mDNS daemon 失败"))
+}
+
 /// mDNS 广播句柄。
 pub struct Discovery {
-    daemon: Option<ServiceDaemon>,
+    /// 本句柄注册的服务全名（Drop 时反注册，不关闭全局 daemon）。
+    fullname: Option<String>,
 }
 
 impl Discovery {
@@ -41,10 +61,8 @@ impl Discovery {
         port: u16,
         info: &DiscoveryInfo,
     ) -> anyhow::Result<Self> {
-        let daemon = ServiceDaemon::new()?;
         let hostname = hostname::get().unwrap_or_else(|_| "stross".into());
         let host = format!("{}.local.", hostname.to_string_lossy());
-        // mdns-sd 0.21：TXT 属性走 IntoTxtProperties（HashMap<String, String>）；
         // 能力描述由 DiscoveryInfo 单 key JSON 编码（新增字段零维护）
         let props: std::collections::HashMap<String, String> = info.to_txt().into_iter().collect();
         // 多网卡广播：ServiceInfo::new 支持 AsIpAddrs（&[IpAddr]），
@@ -59,21 +77,21 @@ impl Discovery {
         )
         .map_err(|e| anyhow::anyhow!("ServiceInfo: {e}"))?;
         // 显式地址为准：**不启用 enable_addr_auto()**。
-        // 原因（Android 真机实测）：mdns-sd 的 `if_addrs::get_if_addrs()` 会枚举到
+        // 原因（Android 真机实测）：mdns 的 `if_addrs::get_if_addrs()` 会枚举到
         // dummy0/ifb0/ifb1 等虚拟接口及其 fe80 地址，auto 覆盖后把真实 wlan0 IPv4
         // （如 192.168.11.60）挤掉，导致对端扫到手机只有不可达的 fe80 地址。
         // 调用方 `local_ips()` 已返回真实局域网 IPv4，显式传入即可；
         // 代价：WiFi 切换时需重新 start_relay 再注册（本应用每次锚定都会重走）。
-        daemon.register(info)?;
+        let fullname = info.get_fullname().to_string();
+        daemon().register(info)?;
         Ok(Self {
-            daemon: Some(daemon),
+            fullname: Some(fullname),
         })
     }
 
     /// 在 `timeout` 内浏览局域网内的 Stross 服务。
     pub async fn browse(timeout: Duration) -> anyhow::Result<Vec<Discovered>> {
-        let daemon = ServiceDaemon::new()?;
-        let receiver = daemon.browse(SERVICE_TYPE)?;
+        let receiver = daemon().browse(SERVICE_TYPE)?;
         let deadline = tokio::time::Instant::now() + timeout;
         let mut out = Vec::new();
         loop {
@@ -136,14 +154,15 @@ impl Discovery {
                 Err(_) => break,
             }
         }
-        let _ = daemon.shutdown();
+        // 停止本次 browse（全局 daemon 持续存活，仅停止浏览，不 shutdown）
+        let _ = daemon().stop_browse(SERVICE_TYPE);
         Ok(out)
     }
 
-    /// 停止广播。
+    /// 停止广播（反注册本句柄注册的服务；全局 daemon 持续存活）。
     pub fn stop(&mut self) {
-        if let Some(d) = self.daemon.take() {
-            let _ = d.shutdown();
+        if let Some(fullname) = self.fullname.take() {
+            let _ = daemon().unregister(&fullname);
         }
     }
 }

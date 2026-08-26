@@ -56,7 +56,7 @@ pub(super) fn spawn_peer_refresh(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    match crate::discovery::Discovery::browse(Duration::from_secs(2)).await {
+                    match crate::discovery::Discovery::browse(crate::discovery::BROWSE_TIMEOUT).await {
                         Ok(found) => {
                             let self_ips = crate::net::local_ips();
                             let peers = filter_self(found, self_port, &self_ips);

@@ -469,9 +469,9 @@ async fn resolve_mdns_candidates(sdp: &str) -> String {
     {
         use std::sync::OnceLock;
 
-        static DAEMON: OnceLock<mdns_sd::ServiceDaemon> = OnceLock::new();
+        static DAEMON: OnceLock<mdns::ServiceDaemon> = OnceLock::new();
         let daemon =
-            DAEMON.get_or_init(|| mdns_sd::ServiceDaemon::new().expect("创建 mDNS daemon 失败"));
+            DAEMON.get_or_init(|| mdns::ServiceDaemon::new().expect("创建 mDNS daemon 失败"));
 
         let mut out = String::with_capacity(sdp.len() + 64);
         for line in sdp.lines() {
@@ -487,12 +487,12 @@ async fn resolve_mdns_candidates(sdp: &str) -> String {
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
                     while tokio::time::Instant::now() < deadline {
                         match rx.recv_async().await {
-                            Ok(mdns_sd::HostnameResolutionEvent::AddressesFound(_, addrs)) => {
+                            Ok(mdns::HostnameResolutionEvent::AddressesFound(_, addrs)) => {
                                 found = pick_first(&addrs);
                                 break;
                             }
-                            Ok(mdns_sd::HostnameResolutionEvent::SearchTimeout(_))
-                            | Ok(mdns_sd::HostnameResolutionEvent::SearchStopped(_)) => break,
+                            Ok(mdns::HostnameResolutionEvent::SearchTimeout(_))
+                            | Ok(mdns::HostnameResolutionEvent::SearchStopped(_)) => break,
                             _ => {}
                         }
                     }
@@ -530,7 +530,7 @@ async fn resolve_mdns_candidates(sdp: &str) -> String {
 }
 
 #[cfg(feature = "discovery")]
-fn pick_first(addrs: &HashSet<mdns_sd::ScopedIp>) -> Option<std::net::IpAddr> {
+fn pick_first(addrs: &HashSet<mdns::ScopedIp>) -> Option<std::net::IpAddr> {
     // 优先 IPv4（局域网常见）；mdns-sd 0.21 地址带接口信息（ScopedIp）
     addrs
         .iter()

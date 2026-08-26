@@ -4,16 +4,7 @@
   "version": "0.1.0",
   "identifier": "dev.stross.sender",
   "build": {
-    "frontendDist": [
-      "../web/index.html",
-      "../web/style.css",
-      "../web/app/state.js",
-      "../web/app/ui.js",
-      "../web/app/watch.js",
-      "../web/app/grid.js",
-      "../web/app/send.js",
-      "../web/app/main.js"
-    ]
+    "frontendDist": "../web"
   },
   "app": {
     "withGlobalTauri": true,

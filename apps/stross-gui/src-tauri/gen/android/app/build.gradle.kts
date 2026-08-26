@@ -15,6 +15,9 @@ val tauriProperties = Properties().apply {
 
 android {
     compileSdk = 36
+    // 钉死已安装的 build-tools（AGP 8.11 默认要 35.0.0 会触发自动下载 +
+    // 许可证检查；36.0.0 由 paru android-sdk-build-tools-36 提供）
+    buildToolsVersion = "36.0.0"
     namespace = "dev.stross.sender"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"

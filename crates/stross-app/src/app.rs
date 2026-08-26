@@ -477,6 +477,13 @@ impl StrossApp {
             .map(|r| r.stats())
             .unwrap_or_default()
     }
+
+    /// Android 播放路径回写：Kotlin `PlaybackPlugin` 每解码一帧回调一次。
+    pub fn note_android_decoded_frame(&self) {
+        if let Some(r) = self.receiver.lock_poisoned().as_ref() {
+            r.note_decoded_video();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

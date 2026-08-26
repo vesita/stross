@@ -250,6 +250,12 @@ async function pollReceiveStatus() {
             $('recv-dot').className = 'dot starting';
             $('recv-status').textContent = '等待流数据…';
         }
+        else if (recvFrameCount > 0 && $('recv-status').textContent === '等待流数据…') {
+            // 帧已在绘制（Android 解码在 Kotlin 侧，Rust 的 running 可能滞后）：
+            // 翻回接收中，避免状态卡死在「等待流数据」
+            $('recv-dot').className = 'dot live';
+            $('recv-status').textContent = '接收中';
+        }
         $('recv-meta').textContent = s.error
             ? '错误：' + s.error
             : `收到 ${s.received} 帧 · 解码 ${s.decodedVideo} 帧 · 音频 ${s.audioBlocks} 块 · 已绘制 ${recvFrameCount} 帧`;

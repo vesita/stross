@@ -246,6 +246,15 @@ impl Receiver {
         self.inner.stats.lock_poisoned().clone()
     }
 
+    /// Android 播放路径回写：Kotlin `PlaybackPlugin`（MediaCodec）每解码一帧
+    /// 回调一次，与桌面解码线程的 `decoded_video` 统计同口径（真机实测：
+    /// Android 观看页「解码 N」恒为 0，因解码发生在 Kotlin 侧）。
+    pub fn note_decoded_video(&self) {
+        let mut st = self.inner.stats.lock_poisoned();
+        st.decoded_video += 1;
+        st.running = true;
+    }
+
     /// 停止接收（后台线程收尾）。
     pub fn stop(&self) {
         self.inner.stopped.store(true, Ordering::Relaxed);

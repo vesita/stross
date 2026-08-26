@@ -34,6 +34,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::plugin::PluginHandle;
 use tauri::{AppHandle, Emitter, Manager, Wry};
 
+use stross_app::StrossApp;
 use stross_media::capture::{CaptureBackend, CaptureStatus};
 use stross_media::pipeline::StreamConfig;
 use stross_media::playback::AudioOut;
@@ -271,6 +272,10 @@ pub fn spawn_android_playback(app: &AppHandle<Wry>, rx: mpsc::Receiver<Frame>, a
             "receive-frame",
             serde_json::json!({ "pts": pts, "width": w, "height": h, "data": bytes }),
         );
+        // Android 解码统计回写：Kotlin 解码一帧 → 计数 +1（桌面由解码线程计数）
+        if let Some(sta) = app_emit.try_state::<StrossApp>() {
+            sta.note_android_decoded_frame();
+        }
         Ok(())
     });
 

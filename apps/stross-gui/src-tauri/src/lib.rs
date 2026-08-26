@@ -12,6 +12,9 @@
 
 use std::sync::Arc;
 
+// 桌面接收路径 emit base64 帧载荷需要（Android 走 mobile_jni，不经此模块）。
+#[cfg(not(target_os = "android"))]
+use base64::Engine as _;
 use stross_app::{CaptureStatusView, Platform, StrossApp};
 #[cfg(not(mobile))]
 use stross_media::capture::FfmpegBackend;
@@ -20,6 +23,9 @@ use tauri::{Emitter, Manager, State};
 
 #[cfg(mobile)]
 mod mobile;
+// Android 播放 JNI 桥（Kotlin ⇄ Rust 直传）：仅 Android 目标编译，依赖 jni。
+#[cfg(all(mobile, target_os = "android"))]
+mod mobile_jni;
 // ---------------------------------------------------------------------------
 // 命令面（桌面与 Android 完全一致）
 // ---------------------------------------------------------------------------
@@ -188,10 +194,14 @@ async fn start_receive(
             Some(r) => r,
             None => return Err("接收会话已启动但没有帧通道".into()),
         };
-        // 帧转发：RGBA 最近邻缩放到宽度 ≤ 480 → 事件（显示可跳帧，不反压）
+        // 帧转发：RGBA 最近邻缩放到宽度 ≤ 480 → 事件（显示可跳帧，不反压）。
+        // 载荷统一为 base64 字符串（桌面/Android 同格式）：serde 直序列化
+        // Vec<u8> 会输出每字节一个数字的 JSON 数组（480×270×4 ≈ 51.8 万元素，
+        // ~2.5MB/帧），base64 字符串 ~4 倍紧凑且前端 atob 原生解码。
         tokio::spawn(async move {
             while let Some(f) = frames.recv().await {
                 let (w, h, data) = scale_rgba(&f.rgba, f.width, f.height, 480);
+                let data = base64::engine::general_purpose::STANDARD.encode(data);
                 let _ = app.emit(
                     "receive-frame",
                     serde_json::json!({ "pts": f.pts_ms, "width": w, "height": h, "data": data }),

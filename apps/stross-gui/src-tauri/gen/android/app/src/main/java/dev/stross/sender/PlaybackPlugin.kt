@@ -11,7 +11,6 @@ import android.util.Log
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
-import app.tauri.plugin.Channel
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
@@ -21,35 +20,45 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Stross Android 播放插件（1f-3）：与采集侧对称的"帧 → 设备"路径。
+ * Stross Android 播放插件（1f-3）—— **MediaCodec/AudioTrack 系统 API 薄壳**。
  *
- * 由 Rust 侧 `register_android_plugin` 自动实例化（构造签名必须为 `(Activity)`）。
+ * 架构（解码跟不上接收的根治方向）：解析、转换、缩放、事件规整全部下沉 Rust
+ * （stross-gui `mobile_jni.rs`，通过 JNI 直传字节，零 base64 JSON 往返）：
  *
- * - 视频：`feedVideo` 喂 Annex-B H.264 帧 → MediaCodec 解码 → YUV420 → RGBA →
- *   最近邻缩放到 ≤480 宽 → Channel 回传 Rust（`receive-frame` 事件 → 前端 canvas）
- * - 音频：`feedAudio` 喂 ADTS AAC → MediaCodec 解码 → PCM → AudioTrack 播放
- *   （队列线程写设备，避免音频满阻塞视频链路）
- * - `startPlayback` / `stopPlayback`：生命周期（AudioTrack 可选，`audio=false`
- *   时 Rust 侧根本不喂音频帧，Kotlin 不建 AudioTrack）
+ * - `feedVideo`（Rust→Kotlin）：把 H.264 帧**入队立即返回**（不再在命令线程
+ *   同步解码）；csd（SPS/PPS）与尺寸由 Rust 解析随帧下发，这里直接用。
+ * - 独立解码线程消费队列：`dequeueInputBuffer` 用**短超时**（解码器忙即丢帧，
+ *   不阻塞 5s）；解码输出 YUV → `nativeSubmitYuvFrame`（JNI 直调 Rust）→
+ *   Rust 转换缩放 + base64 事件 `receive-frame` → 前端 canvas。
+ * - `feedAudio`：ADTS→AAC→PCM→AudioTrack（队列线程写设备，已有）。
+ * - 本文件不再包含：BitReader/SPS 位级解析（~120 行，Rust `nal.rs` 已有）、
+ *   逐像素 YUV→RGBA 转换（~60 行，Rust `yuv.rs`）、base64 事件回传。
  *
- * 帧消息格式（Rust → Kotlin，JSON）：`{"d": "<base64>", "k": bool, "c": bool, "p": pts_ms}`
- * 回传（Kotlin → Rust）：`{"w": int, "h": int, "pts": int, "d": "<base64 RGBA>"}`
+ * JNI（由 Rust `mobile_jni.rs` 导出）：
+ * ```kotlin
+ * private external fun nativeSubmitYuvFrame(
+ *     yuv: ByteArray, w: Int, h: Int,
+ *     colorFormat: Int, strideY: Int, sliceH: Int, pts: Long,
+ * )
+ * ```
  */
 @TauriPlugin
 class PlaybackPlugin(activity: Activity) : Plugin(activity) {
 
     companion object {
         private const val TAG = "StrossPlay"
-        /** 回传画面最大宽度（与桌面 scale_rgba 一致，控制 IPC 流量）。 */
-        private const val MAX_FRAME_W = 480
+        /** MediaCodec 输出格式常量（与 Rust `Yuv420Layout` 枚举对应）。 */
         private const val COLOR_FORMAT_YUV420_PLANAR = 19
         private const val COLOR_FORMAT_YUV420_SEMIPLANAR = 21
+        /** 视频输入队列上界：解码跟不上时丢帧，避免积压无限膨胀（内存有界）。 */
+        private const val VIDEO_QUEUE_CAP = 8
+        /** `dequeueInputBuffer` 超时：解码器忙时到此即丢帧（不再阻塞 5s）。 */
+        private const val INPUT_TIMEOUT_US = 2_000L
     }
 
     @InvokeArg
     class StartArgs {
         var audio: Boolean = false
-        var channel: Channel? = null
     }
 
     @InvokeArg
@@ -58,18 +67,37 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
         var k: Boolean = false
         var c: Boolean = false
         var p: Long = 0
+        // Rust 解析 SPS 后下发：csd（SPS+PPS base64）与编码尺寸（宽高）
+        var w: Int = 0
+        var h: Int = 0
+        var csd: String? = null
     }
 
-    private var channel: Channel? = null
+    /** 一帧视频输入（解码线程消费）。 */
+    private class VideoJob(
+        val data: ByteArray,
+        val keyframe: Boolean,
+        val isConfig: Boolean,
+        val ptsMs: Long,
+        val w: Int,
+        val h: Int,
+        val csd: ByteArray?,
+    )
+
     private val running = AtomicBoolean(false)
 
-    // 视频解码
+    // 视频解码：有界队列 + 独立解码线程（命令线程只入队立即返回）
+    private val videoQueue = LinkedBlockingQueue<VideoJob>(VIDEO_QUEUE_CAP)
+    private var videoThread: Thread? = null
+
+    // 视频解码器
     private var vDecoder: MediaCodec? = null
     private var vWidth = 0
     private var vHeight = 0
     private var vColorFormat = COLOR_FORMAT_YUV420_SEMIPLANAR
     private var vStrideY = 0
     private var vSliceH = 0
+    private val vLock = Any()
 
     // 音频
     private var aDecoder: MediaCodec? = null
@@ -80,17 +108,31 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
     private var audioChannels = 2
 
     // ------------------------------------------------------------------
+    // JNI（Rust mobile_jni.rs）：YUV → RGBA 缩放 → base64 事件 → 统计
+    // ------------------------------------------------------------------
+
+    private external fun nativeSubmitYuvFrame(
+        yuv: ByteArray,
+        w: Int,
+        h: Int,
+        colorFormat: Int,
+        strideY: Int,
+        sliceH: Int,
+        pts: Long,
+    )
+
+    // ------------------------------------------------------------------
     // 生命周期
     // ------------------------------------------------------------------
 
     @Command
     fun startPlayback(invoke: Invoke) {
         val args = invoke.parseArgs(StartArgs::class.java)
-        channel = args.channel
         running.set(true)
         if (args.audio) {
             startAudioTrack()
         }
+        startVideoThread()
         invoke.resolve(JSObject().apply { put("started", true) })
     }
 
@@ -103,7 +145,7 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
     }
 
     // ------------------------------------------------------------------
-    // 视频：Annex-B → MediaCodec → RGBA（缩放）→ Channel
+    // 视频：入队立即返回（命令线程不被解码拖住）→ 解码线程 → JNI 直调 Rust
     // ------------------------------------------------------------------
 
     @Command
@@ -115,105 +157,70 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
         }
         try {
             val bytes = Base64.decode(args.d, Base64.NO_WRAP)
-            if (args.c) {
-                // 独立配置帧（SPS/PPS）：建（或重建）解码器
-                createVideoDecoder(bytes)
-            } else {
-                if (vDecoder == null) {
-                    // 协议流不单独发 config 帧：SPS/PPS 内嵌在关键帧的 Annex-B
-                    // 载荷里（发送侧 AccessUnit 组装），从中提取 csd 建解码器
-                    val csd = extractSpsPps(bytes)
-                    if (csd == null) {
-                        invoke.resolve(JSObject())
-                        return // 首个含 SPS 的关键帧未到：丢弃等下一帧
-                    }
-                    createVideoDecoder(csd)
+            val csd = args.csd?.let { Base64.decode(it, Base64.NO_WRAP) }
+            val job = VideoJob(bytes, args.k, args.c, args.p, args.w, args.h, csd)
+            // 有界队列：满时**有选择地丢帧**（优先丢非关键帧，保关键帧对齐）。
+            // 队列满且新帧关键帧时清队重入（重建参考），否则丢弃该帧。
+            if (!videoQueue.offer(job)) {
+                if (job.keyframe || job.isConfig) {
+                    videoQueue.clear()
+                    videoQueue.offer(job)
+                } else {
+                    Log.d(TAG, "视频队列满，丢非关键帧（pts=${job.ptsMs}）")
                 }
-                decodeVideoFrame(bytes, args.p)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "feedVideo 失败: ${e.message}")
+            Log.w(TAG, "feedVideo 入队失败: ${e.message}")
         }
         invoke.resolve(JSObject())
     }
 
-    /** 从 Annex-B 访问单元提取 SPS(+PPS) 的 NAL 内容（无起始码）作 csd-0。 */
-    private fun extractSpsPps(au: ByteArray): ByteArray? {
-        val nals = ArrayList<ByteArray>()
-        var i = 0
-        while (i + 3 < au.size) {
-            val sc = when {
-                au[i].toInt() == 0 && au[i + 1].toInt() == 0 && au[i + 2].toInt() == 1 -> 3
-                i + 4 <= au.size && au[i].toInt() == 0 && au[i + 1].toInt() == 0 &&
-                    au[i + 2].toInt() == 0 && au[i + 3].toInt() == 1 -> 4
-                else -> 0
-            }
-            if (sc == 0) {
-                i++
-                continue
-            }
-            val hdr = i + sc
-            if (hdr >= au.size) break
-            val nalType = au[hdr].toInt() and 0x1F
-            if (nalType == 7 || nalType == 8) {
-                // 该 NAL 结束于下一个起始码（或帧尾）
-                var end = au.size
-                var k = hdr
-                while (k + 2 < au.size) {
-                    val nextSc = (au[k].toInt() == 0 && au[k + 1].toInt() == 0 && au[k + 2].toInt() == 1) ||
-                        (k + 3 < au.size && au[k].toInt() == 0 && au[k + 1].toInt() == 0 &&
-                            au[k + 2].toInt() == 0 && au[k + 3].toInt() == 1)
-                    if (nextSc) {
-                        end = k
-                        break
-                    }
-                    k++
+    /** 视频解码线程：消费队列 → MediaCodec → YUV → JNI → Rust。 */
+    private fun startVideoThread() {
+        videoThread = Thread {
+            try {
+                Log.i(TAG, "视频解码线程启动")
+                while (running.get()) {
+                    val job = videoQueue.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                    handleVideoJob(job)
                 }
-                nals.add(au.copyOfRange(hdr, end))
-                i = end
-                if (nalType == 8) break // SPS+PPS 已齐
-            } else if (nals.isNotEmpty()) {
-                break // 已收集 SPS，后续是 IDR 等：停止
-            } else {
-                i += sc
+            } catch (e: Exception) {
+                Log.w(TAG, "视频解码线程退出: ${e.message}")
+            } finally {
+                Log.i(TAG, "视频解码线程结束")
+                releaseVideoDecoder()
             }
-        }
-        if (nals.isEmpty()) return null
-        val total = nals.sumOf { it.size }
-        val out = ByteArray(total)
-        var off = 0
-        for (n in nals) {
-            System.arraycopy(n, 0, out, off, n.size)
-            off += n.size
-        }
-        return out
+        }.apply { start() }
     }
 
-    /** 从 Annex-B 配置帧解析 SPS 尺寸并创建 AVC 解码器（csd-0 = SPS/PPS）。 */
-    private fun createVideoDecoder(csd: ByteArray) {
-        releaseVideoDecoder()
-        val dims = parseSpsDimensions(csd) ?: (1280 to 720)
-        val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, dims.first, dims.second).apply {
-            setByteBuffer("csd-0", ByteBuffer.wrap(csd))
-            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024)
+    private fun handleVideoJob(job: VideoJob) {
+        val codec: MediaCodec
+        synchronized(vLock) {
+            if (vDecoder == null) {
+                val csd = job.csd ?: return // 未带 SPS/PPS：等下一关键帧（自愈对齐）
+                try {
+                    createVideoDecoder(csd, job.w, job.h)
+                } catch (e: Exception) {
+                    Log.w(TAG, "建解码器失败: ${e.message}")
+                    return
+                }
+            }
+            codec = vDecoder ?: return
         }
-        val codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        codec.configure(fmt, null, null, 0)
-        codec.start()
-        vDecoder = codec
-        vWidth = 0
-        vHeight = 0
-        Log.i(TAG, "视频解码器就绪（SPS ${dims.first}x${dims.second}）")
-    }
-
-    private fun decodeVideoFrame(data: ByteArray, ptsMs: Long) {
-        val codec = vDecoder ?: return // 尚未收到 SPS/PPS：丢弃（等配置帧）
-        val inIdx = codec.dequeueInputBuffer(5_000)
-        if (inIdx < 0) return
+        if (job.isConfig) {
+            // 配置帧只用于建解码器（上面已完成），不喂数据
+            return
+        }
+        val inIdx = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
+        if (inIdx < 0) {
+            // 解码器忙：丢帧（Rust 侧积压跳帧已在源头减负，此处兜底）
+            Log.d(TAG, "解码器输入忙，丢帧 (pts=${job.ptsMs})")
+            return
+        }
         val inBuf = codec.getInputBuffer(inIdx) ?: return
         inBuf.clear()
-        inBuf.put(data)
-        codec.queueInputBuffer(inIdx, 0, data.size, ptsMs * 1000, 0)
+        inBuf.put(job.data)
+        codec.queueInputBuffer(inIdx, 0, job.data.size, job.ptsMs * 1000, 0)
         drainVideoOutput(codec)
     }
 
@@ -236,9 +243,20 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
                     val flags = info.flags
                     if (size > 0 && flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0 && vWidth > 0) {
                         val buf = codec.getOutputBuffer(idx) ?: continue
-                        buf.position(info.offset)
-                        buf.limit(info.offset + size)
-                        sendRgbaFrame(buf, vWidth, vHeight, vColorFormat, info.presentationTimeUs / 1000, info.offset)
+                        val yuv = ByteArray(size)
+                        val dup = buf.duplicate()
+                        dup.position(info.offset)
+                        dup.get(yuv)
+                        // JNI 直调 Rust：YUV→RGBA 缩放 + base64 事件 + 解码统计。
+                        // 不做逐像素 Java 循环，不 base64 回传——CPU 大头在 Rust。
+                        try {
+                            nativeSubmitYuvFrame(
+                                yuv, vWidth, vHeight, vColorFormat, vStrideY, vSliceH,
+                                info.presentationTimeUs / 1000,
+                            )
+                        } catch (e: Throwable) {
+                            Log.w(TAG, "JNI 提交 YUV 失败: ${e.message}")
+                        }
                     }
                     codec.releaseOutputBuffer(idx, false)
                 }
@@ -247,67 +265,22 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
         }
     }
 
-    /** YUV420 → RGBA（最近邻缩放到 ≤480 宽）→ Channel 回传。 */
-    private fun sendRgbaFrame(
-        buf: ByteBuffer,
-        w: Int,
-        h: Int,
-        colorFormat: Int,
-        ptsMs: Long,
-        offset: Int,
-    ) {
-        val strideY = if (vStrideY > 0) vStrideY else w
-        val sliceH = if (vSliceH > 0) vSliceH else h
-        // 缩放目标尺寸（保持宽高比，与桌面 scale_rgba 相同算法）
-        val tw = minOf(w, MAX_FRAME_W)
-        val th = maxOf(1, h * tw / w)
-        val out = ByteArray(tw * th * 4)
-        val planeSize = strideY * sliceH
-        val uvStart = planeSize
-        val uvStride = if (colorFormat == COLOR_FORMAT_YUV420_PLANAR) strideY / 2 else strideY
-
-        for (y in 0 until th) {
-            val sy = y * h / th
-            for (x in 0 until tw) {
-                val sx = x * w / tw
-                val yIdx = offset + sy * strideY + sx
-                val yv = buf.get(yIdx).toInt() and 0xFF
-                val uIdx = offset + uvStart + (sy / 2) * uvStride + (sx / 2)
-                val uv = if (colorFormat == COLOR_FORMAT_YUV420_PLANAR) {
-                    // I420：U 平面、V 平面分开
-                    val u = buf.get(uIdx).toInt() and 0xFF
-                    val v = buf.get(uIdx + planeSize / 4).toInt() and 0xFF
-                    u to v
-                } else {
-                    // NV12：UV 交错（U 在前）
-                    val u = buf.get(uIdx).toInt() and 0xFF
-                    val v = buf.get(uIdx + 1).toInt() and 0xFF
-                    u to v
-                }
-                val c = yv - 16
-                val d = uv.first - 128
-                val e = uv.second - 128
-                val r = clampByte((298 * c + 409 * e + 128) shr 8)
-                val g = clampByte((298 * c - 100 * d - 208 * e + 128) shr 8)
-                val b = clampByte((298 * c + 516 * d + 128) shr 8)
-                val o = (y * tw + x) * 4
-                out[o] = r
-                out[o + 1] = g
-                out[o + 2] = b
-                out[o + 3] = 255.toByte()
-            }
+    /** 用 Rust 解析好的 csd（SPS+PPS）与宽高创建 AVC 解码器——不再解析 SPS。 */
+    private fun createVideoDecoder(csd: ByteArray, w: Int, h: Int) {
+        releaseVideoDecoder()
+        val width = if (w > 0) w else 1280
+        val height = if (h > 0) h else 720
+        val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+            setByteBuffer("csd-0", ByteBuffer.wrap(csd))
+            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024)
         }
-        channel?.send(JSObject().apply {
-            put("w", tw)
-            put("h", th)
-            put("pts", ptsMs)
-            put("d", Base64.encodeToString(out, Base64.NO_WRAP))
-        })
-    }
-
-    private fun clampByte(v: Int): Byte {
-        val c = if (v < 0) 0 else if (v > 255) 255 else v
-        return c.toByte()
+        val codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        codec.configure(fmt, null, null, 0)
+        codec.start()
+        vDecoder = codec
+        vWidth = 0
+        vHeight = 0
+        Log.i(TAG, "视频解码器就绪（csd 由 Rust 解析，${width}x$height）")
     }
 
     // ------------------------------------------------------------------
@@ -389,7 +362,7 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
         audioSampleRate = sampleRateOf(freqIdx) ?: audioSampleRate
 
         val codec = aDecoder ?: createAudioDecoder(profile, freqIdx, channels) ?: return
-        val inIdx = codec.dequeueInputBuffer(5_000)
+        val inIdx = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
         if (inIdx < 0) return
         val inBuf = codec.getInputBuffer(inIdx) ?: return
         inBuf.clear()
@@ -441,138 +414,14 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
     }
 
     // ------------------------------------------------------------------
-    // SPS 解析（H.264 序列参数集 → 宽高）
-    // ------------------------------------------------------------------
-
-    /** 从 Annex-B 配置帧里找 SPS（NAL type 7），解析宽高；找不到返回 null。 */
-    private fun parseSpsDimensions(csd: ByteArray): Pair<Int, Int>? {
-        var i = 0
-        while (i + 3 < csd.size) {
-            if ((csd[i].toInt() and 0xFF) == 0 && (csd[i + 1].toInt() and 0xFF) == 0
-                && (csd[i + 2].toInt() and 0xFF) == 1
-            ) {
-                val nalType = (csd[i + 3].toInt() and 0x1F)
-                if (nalType == 7) {
-                    return parseSps(csd, i + 4)
-                }
-                i += 3
-            } else {
-                i++
-            }
-        }
-        return null
-    }
-
-    /** 解析 SPS 载荷（跳过 NAL header 后），返回 (宽, 高)。 */
-    private fun parseSps(sps: ByteArray, start: Int): Pair<Int, Int>? {
-        if (start >= sps.size) return null
-        val br = BitReader(sps, start)
-        val profileIdc = br.readBits(8)
-        br.readBits(8) // constraint flags + reserved
-        br.readBits(8) // level_idc
-        br.readUE() // seq_parameter_set_id
-        if (isHighProfile(profileIdc)) {
-            val chromaFormat = br.readUE()
-            if (chromaFormat == 3) br.readBits(1) // separate_colour_plane_flag
-            br.readUE() // bit_depth_luma_minus8
-            br.readUE() // bit_depth_chroma_minus8
-            br.readBits(1) // qpprime_y_zero_transform_bypass_flag
-            if (br.readBits(1) == 1) {
-                // seq_scaling_matrix_present_flag：跳过 scaling lists
-                val n = if (chromaFormat != 3) 8 else 12
-                for (list in 0 until n) {
-                    if (br.readBits(1) == 1) {
-                        val size = if (list < 6) 16 else 64
-                        skipScalingList(br, size)
-                    }
-                }
-            }
-        }
-        br.readUE() // log2_max_frame_num_minus4
-        val pocType = br.readUE()
-        if (pocType == 0) {
-            br.readUE() // log2_max_pic_order_cnt_lsb_minus4
-        } else if (pocType == 1) {
-            br.readBits(1) // delta_pic_order_always_zero_flag
-            br.readSE() // offset_for_non_ref_pic
-            br.readSE() // offset_for_top_to_bottom_field
-            val n = br.readUE()
-            for (i in 0 until n) br.readSE() // offset_for_ref_frame
-        }
-        br.readUE() // max_num_ref_frames
-        br.readBits(1) // gaps_in_frame_num_value_allowed_flag
-        val wMbs = br.readUE() + 1
-        val hMapUnits = br.readUE() + 1
-        val frameMbsOnly = br.readBits(1)
-        val height = hMapUnits * 16 * (2 - frameMbsOnly)
-        val width = wMbs * 16
-        if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return null
-        return width to height
-    }
-
-    private fun isHighProfile(p: Int): Boolean = p == 100 || p == 110 || p == 122 || p == 244 ||
-        p == 44 || p == 83 || p == 86 || p == 118 || p == 128 || p == 138 ||
-        p == 139 || p == 134 || p == 135
-
-    /** 跳过一组 scaling list（仅 delta_scale 序列，不建表）。 */
-    private fun skipScalingList(br: BitReader, size: Int) {
-        var lastScale = 8
-        var nextScale = 8
-        for (j in 0 until size) {
-            if (nextScale != 0) {
-                val delta = br.readSE()
-                nextScale = (lastScale + delta + 256) % 256
-            }
-            if (nextScale != 0) lastScale = nextScale
-        }
-    }
-
-    /** 逐位读取器（含 ue/se 哥伦布）。 */
-    private class BitReader(private val data: ByteArray, private var pos: Int) {
-        private var bitPos = 0
-
-        fun readBits(n: Int): Int {
-            var v = 0
-            for (i in 0 until n) {
-                v = (v shl 1) or readBit()
-            }
-            return v
-        }
-
-        private fun readBit(): Int {
-            if (pos >= data.size) return 0
-            val b = (data[pos].toInt() and 0xFF) shr (7 - bitPos) and 1
-            bitPos++
-            if (bitPos == 8) {
-                bitPos = 0
-                pos++
-            }
-            return b
-        }
-
-        /** 无符号指数哥伦布（Exp-Golomb）。 */
-        fun readUE(): Int {
-            var zeros = 0
-            while (readBit() == 0) zeros++
-            if (zeros == 0) return 0
-            return (1 shl zeros) - 1 + readBits(zeros)
-        }
-
-        /** 有符号指数哥伦布。 */
-        fun readSE(): Int {
-            val ue = readUE()
-            if (ue == 0) return 0
-            return if (ue % 2 == 0) -(ue / 2) else (ue + 1) / 2
-        }
-    }
-
-    // ------------------------------------------------------------------
     // 清理
     // ------------------------------------------------------------------
 
     private fun stopEverything() {
-        releaseVideoDecoder()
-        channel = null
+        synchronized(vLock) {
+            releaseVideoDecoder()
+        }
+        videoQueue.clear()
         // 音频：清队 + 停线程 + 释放
         audioQueue.clear()
         audioThread?.interrupt()

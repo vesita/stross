@@ -22,6 +22,7 @@ pub mod nal;
 pub mod pipeline;
 pub mod playback;
 pub mod sink;
+pub mod yuv;
 
 pub use capture::{CaptureBackend, CaptureStatus};
 pub use devices::{CameraDevice, list_audio_inputs, list_cameras, list_system_audio};

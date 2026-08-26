@@ -61,9 +61,13 @@
 ### P1 手机端原生播放器
 
 > D1 已移除浏览器观看页（无 iframe 依赖）；本阶段为手机端**原生接收**播放器
-> （与 iteration-plan 阶段 D1「Android GUI」合并推进）。
+> （与 iteration-plan 阶段 D1「Android GUI」合并推进）。播放链路 B7 已 Rust 化：
+> Android「点流即看」已通（MediaCodec 解码 + AudioTrack 播放 + Rust 侧
+> YUV→RGBA/事件规整，见 iteration-plan B7）。
 
-- [ ] Android GUI 原生接收：网格页点流即看（MediaCodec 解码 + AudioTrack 播放）
+- [x] Android GUI 原生接收：网格页点流即看（MediaCodec 解码 + AudioTrack 播放），
+      播放链路 Rust 化（B7）：解码与事件处理不再受 Java 逐像素转换/JSON 数组
+      拖累，JNI 直传 Rust 完成 YUV→RGBA 缩放与 base64 事件
 - [ ] 播放器可配置：选流、画质、缓冲策略、断线重连
 - [ ] 为独立接收 App（stross-viewer）打基础
 

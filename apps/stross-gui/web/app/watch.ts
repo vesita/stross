@@ -201,8 +201,9 @@ async function startReceive(): Promise<void> {
     setBtnLoading(btn, false);
     btn.disabled = true; // 接收中不可重复开始
     updateRecvOverlay(); // 等待首帧 → 显示浮层
-    // 订阅解码帧事件 → canvas
-    recvUnlisten = await listen('receive-frame', (p: { pts: number; width: number; height: number; data: number[] }) => {
+    // 订阅解码帧事件 → canvas（载荷为 base64 字符串——桌面/Android 统一格式，
+    // Rust 侧编码；比 JSON 数字数组紧凑 ~4 倍，前端 atob 原生解码）
+    recvUnlisten = await listen('receive-frame', (p: { pts: number; width: number; height: number; data: string }) => {
       drawReceiveFrame(p.width, p.height, p.data);
       recvFrameCount += 1;
       updateRecvOverlay();

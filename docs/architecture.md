@@ -177,8 +177,12 @@ crates/stross-media/src/playback.rs）：
    音频 → ffmpeg 子进程解码（AAC → PCM）+ cpal 输出扬声器（D6：与采集侧同一
    ffmpeg 二进制与子进程编排模式，零新增原生构建依赖）。
 
-Android 接收：编码帧直接交给 Kotlin（MediaCodec 解码 + AudioTrack 播放），
-实现同一 `PlaybackSink` trait（1f）。
+Android 接收（B7 Rust 化）：编码帧 → Kotlin `PlaybackPlugin`（**MediaCodec/
+AudioTrack 系统 API 薄壳**，`feedVideo` 入队立即返回 + 独立解码线程 + 短超时）；
+解码输出 YUV 经 **JNI 直传 Rust**（stross-gui `mobile_jni.rs`）——SPS/csd 解析
+（`stross_media::nal`）、YUV→RGBA 缩放（`stross_media::yuv`）、base64 事件
+`receive-frame`、解码统计回写全部在 Rust 完成，Java 不再做位级解析与逐像素
+转换（四重瓶颈根治：同步解码 / 纯 Java 像素循环 / 5s 阻塞 / JSON 数字数组事件）。
 
 > 中继侧"新观众先收最近关键帧 + Lagged 重对齐"机制（§4）与接收端抖动缓冲互补，
 > 保证随时接入可解码。

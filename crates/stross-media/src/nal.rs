@@ -182,6 +182,100 @@ fn first_mb_in_slice(nal: &[u8]) -> Option<u64> {
     Some((1u64 << m) - 1 + value)
 }
 
+/// 从 Annex-B 访问单元中提取 SPS/PPS 的 csd-0（不含起始码的 NAL 拼接）。
+///
+/// Android 播放端（MediaCodec）创建 AVC 解码器需要 `csd-0` = SPS+PPS 的
+/// 原始载荷（无起始码）。此前由 Kotlin `PlaybackPlugin.extractSpsPps` 逐字节
+/// 扫描实现；下沉本函数后 Java 侧无需再解析 Annex-B。
+///
+/// 返回 `None` 表示访问单元中没有 SPS（或数据非法），调用方应等下一关键帧。
+pub fn extract_avc_csd(au: &[u8]) -> Option<Vec<u8>> {
+    extract_avc_config(au).map(|cfg| cfg.csd)
+}
+
+/// 访问单元的 AVC 配置信息：csd-0（SPS+PPS 拼接）+ 编码尺寸。
+///
+/// 同步解析出尺寸，供接收端（桌面 PlaybackSink / Android MediaCodec）创建
+/// 解码器——Android 侧据此免去重复实现 SPS 位级解析（原 Kotlin
+/// `BitReader`/`parseSpsDimensions` ~120 行的职责）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvcConfig {
+    /// csd-0：SPS+PPS 载荷拼接（无起始码），直接作 MediaCodec `csd-0`。
+    pub csd: Vec<u8>,
+    /// 编码宽高（来自 SPS，含 crop）。
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 从 Annex-B 访问单元提取 AVC 配置（csd + 尺寸）。
+///
+/// 扫描起始码（00 00 01 / 00 00 00 01），收集 SPS(type 7) 与 PPS(type 8)；
+/// 同时用 [`sps_dimensions`] 解析 SPS 得尺寸。返回 `None` = 无 SPS（非法/截断）。
+pub fn extract_avc_config(au: &[u8]) -> Option<AvcConfig> {
+    // 扫描起始码（00 00 01 / 00 00 00 01），收集 SPS(type 7) 与 PPS(type 8)
+    let mut csd = Vec::new();
+    let mut saw_sps = false;
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut i = 0usize;
+    while i + 3 <= au.len() {
+        let sc_len = if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
+            3
+        } else if i + 4 <= au.len()
+            && au[i] == 0
+            && au[i + 1] == 0
+            && au[i + 2] == 0
+            && au[i + 3] == 1
+        {
+            4
+        } else {
+            i += 1;
+            continue;
+        };
+        let hdr = i + sc_len;
+        if hdr >= au.len() {
+            break;
+        }
+        let kind = nal_type(&au[hdr..])?;
+        // 找到该 NAL 的结尾（下一个起始码或帧尾）
+        let mut end = au.len();
+        let mut k = hdr + 1;
+        while k + 2 < au.len() {
+            let next = (au[k] == 0 && au[k + 1] == 0 && au[k + 2] == 1)
+                || (k + 3 < au.len()
+                    && au[k] == 0
+                    && au[k + 1] == 0
+                    && au[k + 2] == 0
+                    && au[k + 3] == 1);
+            if next {
+                end = k;
+                break;
+            }
+            k += 1;
+        }
+        match kind {
+            NAL_SPS => {
+                csd.extend_from_slice(&au[hdr..end]);
+                saw_sps = true;
+                if let Some((w, h)) = sps_dimensions(&au[hdr..end]) {
+                    width = w;
+                    height = h;
+                }
+            }
+            NAL_PPS => {
+                csd.extend_from_slice(&au[hdr..end]);
+            }
+            _ if saw_sps => break, // SPS 之后遇到 slice：SPS/PPS 已收集齐
+            _ => {}
+        }
+        i = end;
+    }
+    if !saw_sps || width == 0 || height == 0 {
+        return None;
+    }
+    Some(AvcConfig { csd, width, height })
+}
+
 /// 从 SPS NAL（不含起始码）解析图像宽高（含 `frame_cropping` 裁剪）。
 ///
 /// rawvideo 解码输出需要"每帧字节数 = 宽 × 高 × 像素字节"，而编码分辨率
@@ -827,5 +921,59 @@ mod tests {
             0x03, 0x00, 0x08, 0x00, 0x00, 0x03, 0x01, 0x84, 0x78, 0xb1, 0x75,
         ];
         assert_eq!(sps_dimensions(&sps), Some((640, 360)));
+    }
+
+    /// `extract_avc_csd`：SPS/PPS/IDR 访问单元 → 拼接 csd-0（无起始码）。
+    #[test]
+    fn avc_csd_sps_pps_concatenated() {
+        let sps = nal(NAL_SPS, 7);
+        let pps = nal(NAL_PPS, 8);
+        let idr = nal(NAL_SLICE_IDR, 5);
+        let mut au = Vec::new();
+        au.extend_from_slice(&[0, 0, 1]);
+        au.extend_from_slice(&sps);
+        au.extend_from_slice(&[0, 0, 1]);
+        au.extend_from_slice(&pps);
+        au.extend_from_slice(&[0, 0, 0, 1]); // 4 字节码也应识别
+        au.extend_from_slice(&idr);
+        let csd = extract_avc_csd(&au).expect("含 SPS/PPS 的关键帧应提取出 csd");
+        // csd = SPS 载荷 + PPS 载荷，无起始码
+        let mut expect = sps.clone();
+        expect.extend_from_slice(&pps);
+        assert_eq!(csd, expect);
+        assert_eq!(nal_type(&csd), Some(NAL_SPS));
+    }
+
+    /// `extract_avc_csd`：无 SPS（纯 P 帧）返回 None——等下一关键帧。
+    #[test]
+    fn avc_csd_missing_sps_is_none() {
+        let p = nal(NAL_SLICE_NON_IDR, 1);
+        let mut au = Vec::new();
+        au.extend_from_slice(&[0, 0, 1]);
+        au.extend_from_slice(&p);
+        assert_eq!(extract_avc_csd(&au), None);
+    }
+
+    /// `extract_avc_csd`：PPS 后的 slice 应停止收集（不把 slice 塞进 csd）。
+    #[test]
+    fn avc_csd_stops_at_first_slice() {
+        let sps = nal(NAL_SPS, 7);
+        let pps = nal(NAL_PPS, 8);
+        let idr = nal(NAL_SLICE_IDR, 5);
+        let mut au = Vec::new();
+        au.extend_from_slice(&[0, 0, 1]);
+        au.extend_from_slice(&sps);
+        au.extend_from_slice(&[0, 0, 1]);
+        au.extend_from_slice(&pps);
+        au.extend_from_slice(&[0, 0, 1]);
+        au.extend_from_slice(&idr);
+        au.extend_from_slice(&[0, 0, 1]);
+        au.extend_from_slice(&nal(NAL_SLICE_NON_IDR, 1));
+        let csd = extract_avc_csd(&au).unwrap();
+        assert_eq!(
+            csd.len(),
+            sps.len() + pps.len(),
+            "csd 只含 SPS+PPS，不吞 slice"
+        );
     }
 }

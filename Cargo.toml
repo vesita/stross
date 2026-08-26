@@ -53,6 +53,9 @@ str0m = { version = "0.23", default-features = false, features = ["rust-crypto"]
 tauri = { version = "2", features = [] }
 tokio-tungstenite = "0.30.0"
 tungstenite = "0.30.0"
+# Android 播放桥（Kotlin ⇄ Rust JNI）：只有 stross-gui 在 Android 目标使用；
+# 版本与 tauri 2.11 锁定的 jni 0.21 一致，避免同一 .so 内两个 jni 版本符号冲突。
+jni = "0.21"
 
 [profile.release]
 codegen-units = 1

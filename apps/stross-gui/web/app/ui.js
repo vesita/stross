@@ -157,7 +157,8 @@ function canvasCtx() {
     const c = $('recv-canvas');
     return c.getContext('2d');
 }
-/** 把 RGBA 帧画到 canvas（宽度自适应，等比缩放）。 */
+/** 把 RGBA 帧画到 canvas（宽度自适应，等比缩放）。
+ *  `data` 为 base64 字符串（Rust 侧编码，桌面/Android 统一；atob 原生解码）。 */
 function drawReceiveFrame(w, h, data) {
     const ctx = canvasCtx();
     if (!ctx)
@@ -167,7 +168,11 @@ function drawReceiveFrame(w, h, data) {
         canvas.width = w;
     if (canvas.height !== h)
         canvas.height = h;
-    const img = new ImageData(new Uint8ClampedArray(data), w, h);
+    const bin = atob(data);
+    const rgba = new Uint8ClampedArray(bin.length);
+    for (let i = 0; i < bin.length; i++)
+        rgba[i] = bin.charCodeAt(i);
+    const img = new ImageData(rgba, w, h);
     ctx.putImageData(img, 0, 0);
 }
 // ---------------------------------------------------------------- 提示

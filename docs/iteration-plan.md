@@ -122,12 +122,12 @@ GStreamer 流水线。
 
 ### B3 电脑端音频输出 Sink（PlaybackSink）
 
-- [ ] `PlaybackSink` trait 桌面实现（D6 已定）：ffmpeg 子进程解码
+- [x] `PlaybackSink` trait 桌面实现（D6 已定）：ffmpeg 子进程解码
       AAC→PCM + cpal 输出扬声器；与采集侧同一二进制、零新增原生依赖；
-- [ ] 播放路径接入现有 watch 链路：接收音频帧 → 解码 → 扬声器；
+- [x] 播放路径接入现有 watch 链路：接收音频帧 → 解码 → 扬声器；
 - [ ] （二期增强，WO Mic 路线）录音设备注入：Windows WASAPI 虚拟麦克风 /
       Linux PipeWire 虚拟源——"录音设备播放手机声音"的完整版；
-- 验收：电脑扬声器听到手机麦克风声音（D3 验收 3）。
+- 验收：电脑扬声器听到手机麦克风声音（D3 验收 3，CLI 双端已验证）。
 
 ### B4 反向音频低延迟路径（≤100–200ms 预算）✅ 测量设施，待 SRT 调参
 
@@ -167,6 +167,36 @@ GStreamer 流水线。
       测试同步补 seq 填充
 - [x] 回归：全量测试 + clippy 干净；`dual-device-test.sh`（SRT 推流路径）与
       `share-token-test.sh` 全绿
+
+### B7 Android 播放链路 Rust 化（解码跟不上接收的根治）✅ 代码落地，待真机复测
+
+> 真机暴露问题：Android 观看端解码速度远跟不上接收——Kotlin 命令线程同步
+> 解码 + 纯 Java 逐像素 YUV→RGBA + `dequeueInputBuffer(5_000)` 可能阻塞 5s +
+> 事件载荷是 serde 序列化的 51.8 万元素 JSON 数组（~2.5MB/帧），四重瓶颈叠加。
+
+- [x] **stross-media 新增 `yuv.rs`**：YUV420（NV12 半平面 / I420 平面）→ RGBA
+      最近邻缩放纯函数 + 4 单测（两布局同色一致 / 缩放保比例 / 非紧凑 stride /
+      非法输入拒绝）——替代 Kotlin `sendRgbaFrame` 60 行逐像素 Java 循环
+- [x] **stross-media `nal.rs` 新增 `extract_avc_config`**：从关键帧 Annex-B 提取
+      csd（SPS+PPS）+ 尺寸 + 3 单测——替代 Kotlin `BitReader`/`parseSpsDimensions`
+      ~120 行位级解析（Rust `sps_dimensions` 早已实现，Java 重复造轮子）
+- [x] **Kotlin `PlaybackPlugin` 瘦身为 MediaCodec/AudioTrack 薄壳**：
+      `feedVideo` 入队立即返回（命令线程不再被解码拖住）；独立解码线程 +
+      有界队列（满时优先丢非关键帧、关键帧清队重入对齐）；`dequeueInputBuffer`
+      短超时（2ms，忙即丢帧，不再阻塞 5s）
+- [x] **JNI 直传（stross-gui `mobile_jni.rs`，jni 0.21 = tauri 锁定版本）**：
+      Kotlin 解码线程持 YUV 调 `nativeSubmitYuvFrame` → Rust 转换缩放 + base64
+      事件 `receive-frame` + 解码统计回写，零 base64/JSON 往返
+- [x] **事件载荷 base64 化**（桌面 + Android 统一）：替代 serde 对 `Vec<u8>`
+      输出每字节一个数字的 JSON 数组（518KB RGBA → ~2.5MB/帧）——base64
+      字符串 ~4 倍紧凑，前端 `atob` 原生解码
+- [x] **接收侧积压跳帧**（mobile.rs）：消费循环超过 `DROP_BACKLOG` 阈值时
+      丢非关键帧追实时（关键帧/配置帧绝不跳）——修复 mpsc(32) 满丢**新**帧
+      导致"永远吃旧帧、滞后累积"的劣化
+- [x] 回归：桌面全量测试 / clippy（桌面 + Android 双目标）/ fmt / 前端 jsdom /
+      双设备端到端全绿；Android 目标编译通过（NDK 28 clang，本机 toolchain）
+- [ ] 待办：真机复测「电脑屏幕 → 手机观看」解码帧率追平（目标 ≥ 接收帧率，
+      对比旧版「解码落后 30%+」）；Phase B2 手机反向麦克风推流闭环顺带验证
 
 ### B6 会话控制完善（F2.3/F5.3）
 

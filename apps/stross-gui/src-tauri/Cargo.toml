@@ -25,3 +25,7 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 base64.workspace = true
+# Android 播放桥：Kotlin PlaybackPlugin 直调 Rust 导出函数（YUV→RGBA、缩放、
+# 事件规整在 Rust 侧完成，Java 只留 MediaCodec 薄壳）。仅 Android 目标编译。
+[target.'cfg(target_os = "android")'.dependencies]
+jni.workspace = true

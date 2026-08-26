@@ -1,40 +1,28 @@
-//! 移动端（Android）原生采集桥接 —— 系统适配模块的 Android 实现。
+//! Android 播放桥（1f-3）：编码帧 → Kotlin MediaCodec 薄壳 → Rust 转换缩放 →
+//! 前端 canvas。
 //!
-//! 实现 [`stross_media::capture::CaptureBackend`]，把 Kotlin 插件（MediaProjection
-//! + MediaCodec）包装成统一的采集后端，上层 [`stross_app`] 无需感知平台差异。
+//! 职责划分（解码跟不上接收的根治方向）：
 //!
-//! 分工：
+//! * **Rust**（本文件 + [`mobile_jni`]）：Annex-B/SPS 解析（[`stross_media::nal`]）、
+//!   csd（SPS/PPS）与尺寸提取、积压跳帧、YUV→RGBA 转换缩放
+//!   （[`stross_media::yuv`]）、base64 事件规整、解码统计回写。
+//! * **Kotlin**（`PlaybackPlugin.kt`）：只剩 MediaCodec 生命周期与编解码 buffer
+//!   搬运（系统 API 薄壳），不再做任何位级解析 / 像素转换。
 //!
-//! * **Rust**（本文件）：实现 [`CaptureBackend`]；用 [`tauri::ipc::Channel`]
-//!   接收 Kotlin 插件回传的编码帧（base64 JSON），转成协议帧送入推流通道。
-//! * **Kotlin**（`android/MediaPlugin.kt`）：MediaProjection 屏幕采集 + MediaCodec
-//!   H.264 编码、AudioRecord + MediaCodec AAC 编码。
-//!
-//! 播放方向（D3 反向音频 / 1f-3 Android 播放）：桌面由 ffmpeg 子进程解码
-//! （PlaybackSink）；Android 无 ffmpeg，走 [`spawn_android_playback`]：
-//! 编码帧（raw）→ Kotlin `PlaybackPlugin`（MediaCodec 解码，视频 I420→RGBA 缩放
-//! 回传、音频 → AudioTrack）→ 缩放 RGBA 经事件 `receive-frame` 推到前端 canvas，
-//! 与桌面接收路径共用同一前端。
-//!
-//! 帧消息格式（Kotlin → Rust，JSON）：
-//! `{"t": 0|1, "k": true|false, "c": true|false, "p": pts_ms, "d": "<base64>"}`
-//! * `t` track：0 视频 / 1 音频；`t=9` 为采集状态控制帧
-//! * `k` keyframe、`c` config（SPS/PPS 或 AudioSpecificConfig）
-//! * `p` 演示时间戳（毫秒）、`d` base64 编码的 Annex-B / ADTS 数据
-//!
-//! 注意：tauri 2.11 没有公开的 `plugin_handle()` 访问器，`PluginHandle` 只能在
-//! setup 阶段由 `register_android_plugin` 取得，因此存入托管状态
-//! [`MobilePluginHandle`] 供命令使用。
+//! 帧消息格式（Rust → Kotlin，JSON）：
+//! `{"d": "<base64>", "k": bool, "c": bool, "p": pts_ms, "csd": "<base64 SPS+PPS>", "w": int, "h": int}`
+//! * `csd` 仅在关键帧/配置帧下发（Rust 用 [`stross_media::nal::extract_avc_csd`]
+//!   解析），Kotlin 用它 + `w/h` 创建解码器，无需自行解析 SPS。
 
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use serde_json::Value;
+use stross_media::nal;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::plugin::PluginHandle;
-use tauri::{AppHandle, Emitter, Manager, Wry};
+use tauri::{AppHandle, Manager, Wry};
 
-use stross_app::StrossApp;
 use stross_media::capture::{CaptureBackend, CaptureStatus};
 use stross_media::pipeline::StreamConfig;
 use stross_media::playback::AudioOut;
@@ -45,6 +33,9 @@ use stross_proto::message::{
     CapabilityDescriptor, CapabilityKind, CodecId, MediaKind, ReliabilityProfile, TransportId,
 };
 use tokio::sync::mpsc;
+
+#[cfg(target_os = "android")]
+use crate::mobile_jni;
 
 /// setup 阶段注册的 Android 采集插件句柄（`MediaPlugin`）。
 pub struct CapturePluginHandle(pub PluginHandle<Wry>);
@@ -229,67 +220,37 @@ impl CaptureBackend for AndroidCapture {
 }
 
 // ---------------------------------------------------------------------------
-// Android 播放桥（1f-3）：编码帧 → Kotlin MediaCodec → 缩放 RGBA → 前端 canvas
+// Android 播放桥（1f-3）：编码帧 → Kotlin MediaCodec 薄壳 → Rust 转换缩放 →
+// 前端 canvas
 // ---------------------------------------------------------------------------
+
+/// 开始接收消费循环前的积压阈值（帧数）：超过即进入"跳帧追实时"——
+/// 丢弃非关键帧直到下一个关键帧。接收侧 mpsc(32) 满时丢新帧，会导致
+/// 解码端永远在消费旧帧（画面滞后累积）；跳帧在消费端主动放弃中间帧，
+/// 解码负载与画面新鲜度取得平衡（与 B5 关键帧重对齐同思路）。
+const DROP_BACKLOG: usize = 8;
 
 /// 启动 Android 播放链路：
 ///
-/// 1. 通知 Kotlin `PlaybackPlugin.startPlayback`（建解码器 + AudioTrack；`audio`
-///    为 `Device` 时音频输出到扬声器，否则 Kotlin 侧跳过音频）。
-/// 2. 消费 `rx` 里的编码帧：视频帧 → `feedVideo`、音频帧 → `feedAudio`
-///    （`run_mobile_plugin` 同步阻塞，因此放 `spawn_blocking`，与采集侧一致）。
-/// 3. Kotlin 解码后把**缩放好的 RGBA**（宽 ≤ 480）经 Channel 回传，这里
-///    转发为 Tauri 事件 `receive-frame`——与桌面接收路径同一前端事件。
+/// 1. 注册 JNI 桥全局 AppHandle（`mobile_jni::init`）——Kotlin 解码线程随后
+///    经 JNI 直调 Rust（`nativeSubmitYuvFrame`：YUV→RGBA 缩放 + base64 事件）。
+/// 2. 通知 Kotlin `PlaybackPlugin.startPlayback`（建解码器 + AudioTrack）。
+/// 3. 消费 `rx` 里的编码帧：视频帧 →（Rust 解析 SPS 尺寸/csd）`feedVideo`、
+///    音频帧 → `feedAudio`；积压超过 [`DROP_BACKLOG`] 时跳非关键帧追实时。
 ///
-/// 调用方（`start_receive` 命令）在停止接收时自行结束 `rx`（会话 stop）。
+/// 接收结束（rx 关闭）时通知 Kotlin 释放解码器 / AudioTrack。
 pub fn spawn_android_playback(app: &AppHandle<Wry>, rx: mpsc::Receiver<Frame>, audio: AudioOut) {
+    #[cfg(target_os = "android")]
+    mobile_jni::init(app);
     let handle = app.state::<PlaybackPluginHandle>().0.clone();
-
-    // Kotlin → Rust：解码缩放后的 RGBA 帧（base64）→ 事件 → 前端 canvas
-    let app_emit = app.clone();
-    let channel: Channel<Value> = Channel::new(move |body| {
-        let v: Value = match body {
-            InvokeResponseBody::Json(s) => match serde_json::from_str(&s) {
-                Ok(v) => v,
-                Err(_) => return Ok(()),
-            },
-            InvokeResponseBody::Raw(_) => return Ok(()),
-        };
-        let Some(w) = v.get("w").and_then(|x| x.as_u64()) else {
-            return Ok(());
-        };
-        let Some(h) = v.get("h").and_then(|x| x.as_u64()) else {
-            return Ok(());
-        };
-        let Some(data) = v.get("d").and_then(|x| x.as_str()) else {
-            return Ok(());
-        };
-        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
-            return Ok(());
-        };
-        let pts = v.get("pts").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-        let _ = app_emit.emit(
-            "receive-frame",
-            serde_json::json!({ "pts": pts, "width": w, "height": h, "data": bytes }),
-        );
-        // Android 解码统计回写：Kotlin 解码一帧 → 计数 +1（桌面由解码线程计数）
-        if let Some(sta) = app_emit.try_state::<StrossApp>() {
-            sta.note_android_decoded_frame();
-        }
-        Ok(())
-    });
 
     // 启动 Kotlin 播放器（同步等待 resolve；放 blocking 线程避免冻结 runtime）
     {
         let handle = handle.clone();
-        let chan = channel;
         tokio::task::spawn_blocking(move || {
             let _ = handle.run_mobile_plugin::<serde_json::Value>(
                 "startPlayback",
-                serde_json::json!({
-                    "audio": audio == AudioOut::Device,
-                    "channel": chan,
-                }),
+                serde_json::json!({ "audio": audio == AudioOut::Device }),
             );
         });
     }
@@ -297,21 +258,51 @@ pub fn spawn_android_playback(app: &AppHandle<Wry>, rx: mpsc::Receiver<Frame>, a
     // 编码帧 → Kotlin（放 blocking 线程：run_mobile_plugin 同步阻塞）
     tokio::task::spawn_blocking(move || {
         let mut rx = rx;
+        let mut skipping = false; // 积压跳帧状态：跳非关键帧直到关键帧
         while let Some(f) = rx.blocking_recv() {
             let is_config = f.header.flags & FLAG_CONFIG != 0;
             let keyframe = f.header.flags & FLAG_KEYFRAME != 0;
-            let payload = serde_json::json!({
-                "d": base64::engine::general_purpose::STANDARD.encode(&f.payload),
-                "k": keyframe,
-                "c": is_config,
-                "p": f.header.pts_ms,
-            });
-            let cmd = match f.header.track {
-                TRACK_VIDEO => "feedVideo",
-                TRACK_AUDIO if audio == AudioOut::Device => "feedAudio",
-                _ => continue,
-            };
-            let _ = handle.run_mobile_plugin::<serde_json::Value>(cmd, payload);
+
+            // 视频轨道积压跳帧：消费端落后太多时主动丢非关键帧（追实时）。
+            // 关键帧（重建参考）与配置帧（建解码器必需）绝不跳过。
+            if f.header.track == TRACK_VIDEO {
+                if rx.len() >= DROP_BACKLOG {
+                    skipping = true;
+                }
+                if skipping && !keyframe && !is_config {
+                    continue;
+                }
+                if keyframe {
+                    skipping = false;
+                }
+
+                // 关键帧/配置帧由 Rust 解析 SPS：取 csd（SPS+PPS）+ 尺寸，
+                // 随帧下发——Kotlin 直接用，不再自行解析（删 ~120 行 Java 位解析）。
+                let (mut w, mut h, mut csd) = (0i32, 0i32, None);
+                if (is_config || keyframe)
+                    && let Some(cfg) = nal::extract_avc_config(&f.payload)
+                {
+                    w = cfg.width as i32;
+                    h = cfg.height as i32;
+                    csd = Some(base64::engine::general_purpose::STANDARD.encode(&cfg.csd));
+                }
+                let payload = serde_json::json!({
+                    "d": base64::engine::general_purpose::STANDARD.encode(&f.payload),
+                    "k": keyframe,
+                    "c": is_config,
+                    "p": f.header.pts_ms,
+                    "w": w,
+                    "h": h,
+                    "csd": csd,
+                });
+                let _ = handle.run_mobile_plugin::<serde_json::Value>("feedVideo", payload);
+            } else if f.header.track == TRACK_AUDIO && audio == AudioOut::Device {
+                let payload = serde_json::json!({
+                    "d": base64::engine::general_purpose::STANDARD.encode(&f.payload),
+                    "p": f.header.pts_ms,
+                });
+                let _ = handle.run_mobile_plugin::<serde_json::Value>("feedAudio", payload);
+            }
         }
         // 接收结束：通知 Kotlin 释放解码器 / AudioTrack
         let _ =

@@ -1072,3 +1072,36 @@ button.danger:hover:not(:disabled) {
     transition: none !important;
   }
 }
+
+/* ---------------- 权限自动化（B2.5）：防火墙横幅 + 授权确认 ---------------- */
+
+.fw-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+  padding: 10px 14px;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: var(--r-md);
+  color: var(--text-2);
+  font-size: 13px;
+}
+.fw-banner-text { display: flex; align-items: center; gap: 8px; }
+.fw-banner .ic { color: #f59e0b; flex-shrink: 0; }
+.fw-banner b { color: var(--text-1); font-family: var(--font-mono); font-weight: 500; }
+
+button.sm { padding: 6px 12px; font-size: 12.5px; }
+
+/* 设备接入授权确认（弹窗内复选行与提示） */
+.check-row {
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  font-size: 13px;
+  color: var(--text-2);
+}
+.check-row input { accent-color: var(--accent); }

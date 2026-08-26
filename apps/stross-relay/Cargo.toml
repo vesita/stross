@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-stross-core = { path = "../../crates/stross-core", version = "0.1.0" }
+stross-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

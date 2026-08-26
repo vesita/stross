@@ -3,7 +3,8 @@
 // 用 jsdom 加载真实 index.html + 编译后的 app.js，mock Tauri invoke 与 fetch，
 // 驱动并断言：免先连锚定 → 设备列表渲染 → 设备展开/在线共享 → 点共享条目即收
 // （UDP 优先→QUIC/WS）→ 本机广播共享（弹窗）→ 手动添加设备 → B2 接收手机
-// 麦克风（签凭证+面板）→ B2 共享麦克风到设备（凭证推流）。
+// 麦克风（签凭证+面板）→ B2 共享麦克风到设备（凭证推流）→ 凭证自动协商
+// （免粘贴）→ 设备授权弹窗（允许/记住/拒绝）→ 防火墙一键放行（41 项断言）。
 //
 // 运行（无需安装任何包，npx 临时拉 jsdom）：
 //   npx -y -p jsdom@24 node scripts/test-frontend.mjs
@@ -45,6 +46,7 @@ Object.defineProperty(window.navigator, 'clipboard', {
 const calls = [];
 let sharedTokenJson = null; // B2 签发结果的回放
 let streamRunning = false; // 与 start_stream/stop_stream 联动（真实行为）
+let fwMissing = ['18779/tcp', '33464/udp']; // 防火墙自检回放（缺 SRT? 实际缺两个）
 const invoke = async (cmd, args) => {
   calls.push({ cmd, args: JSON.parse(JSON.stringify(args || {})) });
   switch (cmd) {
@@ -52,6 +54,15 @@ const invoke = async (cmd, args) => {
       return { version: '0.1.0', platform: 'desktop', ffmpeg: true, ips: ['192.168.1.50'] };
     case 'list_devices':
       return { cameras: [], audioInputs: ['default'], systemAudio: [] };
+    case 'device_identity':
+      return { deviceId: 'dev-pc-test', deviceName: '测试电脑' };
+    case 'firewall_status':
+      return { ufwActive: true, defaultDenyIncoming: true, rules: [], missing: fwMissing };
+    case 'firewall_allow':
+      fwMissing = [];
+      return undefined;
+    case 'negotiator_respond':
+      return undefined;
     case 'start_relay':
       return { port: 8777, urls: ['http://192.168.1.50:8777/'], name: 'Stross 本机中继', kind: 'relay', roles: [], transports: [], ip: null };
     case 'scan_relays':
@@ -88,15 +99,29 @@ const invoke = async (cmd, args) => {
       return undefined;
   }
 };
+// —— mock：Tauri 事件（negotiator-request 等）触发句柄 ——
+const eventHandlers = {};
 window.__TAURI__ = {
   core: { invoke },
-  event: { listen: () => Promise.resolve(() => {}) },
+  event: {
+    listen: (evt, cb) => {
+      eventHandlers[evt] = cb;
+      return Promise.resolve(() => {});
+    },
+  },
 };
 
-// —— mock：HTTP（/api/info + /api/streams；SRT/QUIC 为独立 UDP 端口）——
-window.fetch = async (url) => {
-  calls.push({ fetch: String(url) });
+// —— mock：HTTP（/api/info + /api/streams + 协商端点；SRT/QUIC 为独立 UDP 端口）——
+let negGrant = null; // 协商端点回放：null = 设备不支持协商（404），否则签发的凭证
+window.fetch = async (url, opts) => {
+  calls.push({ fetch: String(url), body: opts && opts.body });
   const u = String(url);
+  if (u.includes('/api/negotiator/request')) {
+    if (!negGrant) {
+      return { ok: false, status: 404, json: async () => ({ error: '协商端点不存在' }) };
+    }
+    return { ok: true, status: 200, json: async () => negGrant };
+  }
   if (u.includes('/api/info')) {
     return json({ srtPort: 9001, quicPort: 9002 });
   }
@@ -230,6 +255,63 @@ check('cfg.shareToken = 凭证原样', sc2[0] && sc2[0].args.cfg.shareToken === 
 check('纯音频（video=null）', sc2[0] && sc2[0].args.cfg.video === null);
 check('推流目标 = 电脑B（quic://192.168.1.52:9002）', sc2[0] && sc2[0].args.relayUrl === 'quic://192.168.1.52:9002', JSON.stringify(sc2[0]?.args?.relayUrl));
 check('共享面板出现定向出站条目（共享 麦克风 → 电脑B）', $('share-list').textContent.includes('共享 麦克风 → 电脑B'));
+
+console.log('\n[8] 凭证自动协商（权限自动化：免粘贴，设备支持协商端点时直接推流）');
+await window.__TAURI__.core.invoke('stop_stream', {});
+await sleep(200);
+// 设备支持协商端点 → 返回签发凭证（trusted=true 自动签发）
+negGrant = {
+  token: '{"v":1,"streamId":"sess-auto","pin":"111222","expiresAt":9999999999,"media":["mic"]}',
+  streamId: 'sess-auto',
+  pin: '111222',
+  expiresAt: 9999999999,
+  trusted: true,
+};
+const phoneCard2 = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
+phoneCard2.querySelector('.dev-head').click();
+await sleep(200);
+const phoneExpanded2 = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
+phoneExpanded2.querySelector('[data-act="mic-to"]').click();
+await sleep(600);
+check('协商请求 POST 到设备 18779 端口', calls.some((c) => c.fetch && c.fetch.includes(':18779/api/negotiator/request')), '未发现协商请求');
+check('协商请求携带本机身份', calls.some((c) => c.body && c.body.includes('dev-pc-test')), '未携带 deviceId');
+const sc3 = calls.filter((c) => c.cmd === 'start_stream' && c.args.cfg.shareToken && c.args.cfg.streamId === 'sess-auto');
+check('直接用协商签发的凭证推流（streamId=sess-auto）', sc3.length === 1, `实际 ${sc3.length}`);
+check('自动推流目标 = 手机A（quic://192.168.1.51:9002）', sc3[0] && sc3[0].args.relayUrl === 'quic://192.168.1.51:9002', JSON.stringify(sc3[0]?.args?.relayUrl));
+check('弹窗显示自动凭证成功状态', $('mic-status').textContent.includes('自动获取凭证'));
+// 停止，恢复手动粘贴路径备用
+await window.__TAURI__.core.invoke('stop_stream', {});
+await sleep(200);
+
+console.log('\n[9] 设备接入授权弹窗（电脑端首次人工确认：允许/记住）');
+// 设备不支持协商（404）时不弹电脑端确认——[7] 已覆盖回退；这里通过 negotiator-request
+// 事件驱动电脑端弹窗（与真实路径一致：Rust 协商服务 → Tauri 事件 → 前端弹窗，
+// 注意 listen 包装解包 e.payload）
+await eventHandlers['negotiator-request']({ payload: { id: 'n9', deviceId: 'dev-phone-x', deviceName: '手机X', media: ['mic'], createdAt: 0 } });
+await sleep(100);
+check('授权弹窗打开', !$('approve-modal').classList.contains('hidden'));
+check('弹窗显示设备名', $('approve-device').textContent.includes('手机X'));
+check('弹窗显示申请媒体', $('approve-media').textContent.includes('mic'));
+$('approve-allow-btn').click();
+await sleep(100);
+const ar = calls.filter((c) => c.cmd === 'negotiator_respond');
+check('negotiator_respond 被调用（allow=true, remember=true）', ar.length === 1 && ar[0].args.allow === true && ar[0].args.remember === true, JSON.stringify(ar[0]?.args));
+check('授权后弹窗关闭', $('approve-modal').classList.contains('hidden'));
+await eventHandlers['negotiator-request']({ payload: { id: 'n10', deviceId: 'dev-phone-y', deviceName: '手机Y', media: ['mic'], createdAt: 0 } });
+await sleep(100);
+$('approve-deny-btn').click();
+await sleep(100);
+const ar2 = calls.filter((c) => c.cmd === 'negotiator_respond');
+check('拒绝路径：allow=false', ar2.length === 2 && ar2[1].args.allow === false, JSON.stringify(ar2[1]?.args));
+
+console.log('\n[10] 防火墙自动放行（权限自动化：自检横幅 + 一键放行）');
+check('防火墙横幅出现（缺放行）', !$('fw-banner').classList.contains('hidden'));
+check('横幅列出缺失端口', $('fw-missing').textContent.includes('18779/tcp') && $('fw-missing').textContent.includes('33464/udp'));
+$('fw-allow-btn').click();
+await sleep(150);
+check('firewall_allow 被调用', calls.some((c) => c.cmd === 'firewall_allow'));
+check('放行成功后横幅隐藏', $('fw-banner').classList.contains('hidden'));
+$('fw-close-btn').click();
 
 console.log(failures === 0 ? '\n✅ 全部通过' : `\n❌ ${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

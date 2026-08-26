@@ -17,6 +17,12 @@ pub struct ServeArgs {
     /// 控制面端口（0 = 随机；仅回环绑定，D7）
     #[arg(long, default_value_t = 18778)]
     pub ctrl_port: u16,
+    /// SRT 传输端口（0 = 随机；固定便于防火墙放行）
+    #[arg(long, default_value_t = stross_app::DEFAULT_SRT_PORT)]
+    pub srt_port: u16,
+    /// QUIC 传输端口（0 = 随机；固定便于防火墙放行）
+    #[arg(long, default_value_t = stross_app::DEFAULT_QUIC_PORT)]
+    pub quic_port: u16,
 }
 
 pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
@@ -25,7 +31,7 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     app.set_backend(Arc::new(FfmpegBackend::new()));
 
     let relay = app
-        .start_relay_on(args.port)
+        .start_relay_fixed(args.port, args.srt_port, args.quic_port)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     tracing::info!("中继已启动: ws://127.0.0.1:{}/ws/push", relay.port);

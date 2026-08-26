@@ -57,6 +57,16 @@ tungstenite = "0.30.0"
 # 版本与 tauri 2.11 锁定的 jni 0.21 一致，避免同一 .so 内两个 jni 版本符号冲突。
 jni = "0.21"
 
+# ---------------------------------------------------------------------------
+# 工作区内部 crate：路径/版本统一在此；成员一律 `xxx.workspace = true` 引用
+# （需要开启 feature 的成员可写 `xxx = { workspace = true, features = [...] }`）。
+# ---------------------------------------------------------------------------
+stross-proto = { path = "crates/stross-proto", version = "0.1.0" }
+stross-transport = { path = "crates/stross-transport", version = "0.1.0" }
+stross-core = { path = "crates/stross-core", version = "0.1.0" }
+stross-media = { path = "crates/stross-media", version = "0.1.0" }
+stross-app = { path = "crates/stross-app", version = "0.1.0" }
+
 [profile.release]
 codegen-units = 1
 lto = true

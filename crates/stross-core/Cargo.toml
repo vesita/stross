@@ -6,8 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-stross-proto = { path = "../stross-proto", version = "0.1.0" }
-stross-transport = { path = "../stross-transport", version = "0.1.0" }
+stross-proto.workspace = true
+stross-transport.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

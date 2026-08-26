@@ -14,6 +14,9 @@ const QUALITIES = {
 const LS_RELAY = 'stross.lastRelay';
 const LS_TITLE = 'stross.lastTitle';
 const LS_RECENT = 'stross.recentRelays';
+// —— 权限自动化（B2.5：凭证自动协商 + 防火墙） ——
+/** 协商端点固定端口（与 Rust `stross_app::DEFAULT_NEGOTIATOR_PORT` 一致）。 */
+const NEGOTIATOR_PORT = 18779;
 let devices = { cameras: [], audioInputs: [], systemAudio: [] };
 /** 是否正在启动共享（Android 采集启动中，等待 capture_status 真实回报）。 */
 let starting = false;

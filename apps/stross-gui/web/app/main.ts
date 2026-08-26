@@ -44,6 +44,9 @@ async function init(): Promise<void> {
     void scanRelays();
     void scanRemoteStreams(true);
     void renderShares();
+    // 权限自动化：防火墙自检（缺放行则提示一键放行）+ 协商授权事件桥
+    void checkFirewall();
+    void listen('negotiator-request', (req: PendingRequest) => onApproveRequest(req));
   } catch (e) {
     showFatal(String(e));
   }
@@ -59,6 +62,81 @@ function startStatusPolling(): void {
 
 async function loadDevices(): Promise<void> {
   devices = (await call('list_devices')) as DeviceList;
+}
+
+// ---------------------------------------------------------------- 权限自动化
+
+/** 当前等待人工确认的协商请求（negotiator-request 事件送达；null = 无）。 */
+let pendingApprove: PendingRequest | null = null;
+
+/** 电脑端收到设备接入请求：展示授权确认弹窗（首次人工确认，信任门控）。 */
+function onApproveRequest(req: PendingRequest): void {
+  pendingApprove = req;
+  $('approve-device').textContent =
+    `${req.deviceName}（${req.deviceId.slice(0, 12)}…）`;
+  $('approve-media').textContent =
+    '申请共享：' + (req.media.length ? req.media.join('、') : '未知媒体');
+  $('approve-error').classList.add('hidden');
+  $('approve-status').textContent = '';
+  $('approve-modal').classList.remove('hidden');
+}
+
+/** 应答协商请求：允许（可勾选记住）或拒绝。允许成功后自动监听接收该流。 */
+async function respondApprove(allow: boolean): Promise<void> {
+  if (!pendingApprove) return;
+  const reqId = pendingApprove.id;
+  const remember = $input('approve-remember') as HTMLInputElement;
+  let grant: ShareGrant | null = null;
+  try {
+    grant = (await call('negotiator_respond', {
+      reqId,
+      allow,
+      remember: remember.checked,
+    })) as ShareGrant | null;
+  } catch (e) {
+    $('approve-error').textContent = '应答失败：' + (e as Error).message;
+    $('approve-error').classList.remove('hidden');
+    return;
+  }
+  pendingApprove = null;
+  if (allow && grant && grant.streamId) {
+    // 电脑端自动监听该会话流：出现在 /api/streams 即原生接收
+    // （与「接收手机麦克风」一致；手机随后自动推流进入）
+    micRecv = { streamId: grant.streamId, checking: false, received: false };
+    void pollMicRecv();
+    $('approve-status').textContent = '已允许，等待手机接入…';
+  } else {
+    $('approve-status').textContent = allow ? '已允许并通知设备' : '已拒绝';
+  }
+  $('approve-modal').classList.add('hidden');
+}
+
+/** 防火墙自检：ufw 入站拦截 Stross 端口时显示「一键放行」横幅（仅 Linux 桌面）。 */
+async function checkFirewall(): Promise<void> {
+  if (IS_ANDROID) return;
+  try {
+    const st = (await call('firewall_status')) as FirewallStatus;
+    if (st.missing && st.missing.length > 0) {
+      $('fw-missing').textContent = st.missing.join('、');
+      $('fw-banner').classList.remove('hidden');
+    }
+  } catch (_) { /* 非 Linux / 未安装 ufw：静默忽略 */ }
+}
+
+/** 一键放行：polkit 弹一次系统授权，自动添加精确放行规则。 */
+async function allowFirewall(): Promise<void> {
+  const btn = $btn('fw-allow-btn');
+  btn.disabled = true;
+  try {
+    await call('firewall_allow');
+    $('fw-banner').classList.add('hidden');
+  } catch (e) {
+    const box = $('grid-error');
+    box.textContent = '防火墙放行失败：' + (e as Error).message;
+    box.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ---------------------------------------------------------------- 事件绑定
@@ -123,6 +201,36 @@ $btn('mic-close-btn').onclick = () => $('mic-modal').classList.add('hidden');
 $('mic-modal').addEventListener('click', (e) => {
   if (e.target === $('mic-modal')) $('mic-modal').classList.add('hidden');
 });
+// 「自动获取凭证」重试（自动协商失败后手动重试，免粘贴）
+$btn('mic-auto-btn').onclick = async () => {
+  if (!micShare) return;
+  const dev = deviceViews.find((d) => d.base === micShare!.base);
+  if (!dev) return;
+  $('mic-error').classList.add('hidden');
+  $('mic-status').textContent = '正在向设备申请凭证…';
+  const r = await autoNegotiateMic(dev);
+  if (r.ok && r.token && r.streamId && micShare) {
+    try {
+      await startMicShareWith({
+        token: r.token,
+        streamId: r.streamId,
+        base: micShare.base,
+        quicPort: micShare.quicPort,
+      });
+      $('mic-status').textContent = '已自动获取凭证，推流中…';
+      setMicRunning(true);
+    } catch (_) { /* 错误已显示在弹窗 */ }
+  } else {
+    $('mic-status').textContent = '自动协商未成功（' + (r.error || '未知原因') + '），请粘贴凭证';
+  }
+};
+
+// 设备接入授权确认（权限自动化：首次人工确认）
+$btn('approve-allow-btn').onclick = () => void respondApprove(true);
+$btn('approve-deny-btn').onclick = () => void respondApprove(false);
+// 防火墙一键放行
+$btn('fw-allow-btn').onclick = () => void allowFirewall();
+$btn('fw-close-btn').onclick = () => $('fw-banner').classList.add('hidden');
 
 $btn('scan-btn').onclick = () => void scanRelays();
 $btn('manual-add-btn').onclick = () => void addManualRelay();

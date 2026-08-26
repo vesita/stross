@@ -10,10 +10,10 @@ name = "stross"
 path = "src/main.rs"
 
 [dependencies]
-stross-app = { path = "../../crates/stross-app", version = "0.1.0" }
-stross-core = { path = "../../crates/stross-core", version = "0.1.0", features = ["discovery"] }
-stross-media = { path = "../../crates/stross-media", version = "0.1.0" }
-stross-proto = { path = "../../crates/stross-proto", version = "0.1.0" }
+stross-app.workspace = true
+stross-core = { workspace = true, features = ["discovery"] }
+stross-media.workspace = true
+stross-proto.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 futures-util.workspace = true

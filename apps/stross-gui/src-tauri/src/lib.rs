@@ -26,35 +26,48 @@ mod mobile;
 // Android 播放 JNI 桥（Kotlin ⇄ Rust 直传）：仅 Android 目标编译，依赖 jni。
 #[cfg(all(mobile, target_os = "android"))]
 mod mobile_jni;
+// 防火墙自动放行（权限自动化）：仅 Linux 桌面（ufw + polkit）。
+#[cfg(all(not(mobile), target_os = "linux"))]
+mod firewall;
 // ---------------------------------------------------------------------------
 // 命令面（桌面与 Android 完全一致）
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn app_info(state: State<'_, StrossApp>) -> stross_app::app::AppInfo {
+fn app_info(state: State<'_, Arc<StrossApp>>) -> stross_app::app::AppInfo {
     state.app_info()
 }
 
 #[tauri::command]
-fn list_devices(state: State<'_, StrossApp>) -> stross_app::app::DeviceList {
+fn list_devices(state: State<'_, Arc<StrossApp>>) -> stross_app::app::DeviceList {
     state.list_devices()
 }
 
 #[tauri::command]
-async fn start_relay(state: State<'_, StrossApp>) -> Result<stross_app::app::RelayInfo, String> {
-    state.start_relay().await.map_err(|e| e.to_user_string())
+async fn start_relay(
+    state: State<'_, Arc<StrossApp>>,
+) -> Result<stross_app::app::RelayInfo, String> {
+    // 固定端口（含 SRT/QUIC）：防火墙只放行已知端口（权限自动化）
+    state
+        .start_relay_fixed(
+            stross_core::relay::DEFAULT_PORT,
+            stross_app::DEFAULT_SRT_PORT,
+            stross_app::DEFAULT_QUIC_PORT,
+        )
+        .await
+        .map_err(|e| e.to_user_string())
 }
 
 #[tauri::command]
 async fn scan_relays(
-    state: State<'_, StrossApp>,
+    state: State<'_, Arc<StrossApp>>,
 ) -> Result<Vec<stross_app::app::RelayInfo>, String> {
     state.scan_relays().await.map_err(|e| e.to_user_string())
 }
 
 #[tauri::command]
 async fn start_stream(
-    state: State<'_, StrossApp>,
+    state: State<'_, Arc<StrossApp>>,
     cfg: StreamConfig,
     relay_url: Option<String>,
 ) -> Result<stross_app::app::StartResult, String> {
@@ -65,17 +78,17 @@ async fn start_stream(
 }
 
 #[tauri::command]
-async fn stop_stream(state: State<'_, StrossApp>) -> Result<(), String> {
+async fn stop_stream(state: State<'_, Arc<StrossApp>>) -> Result<(), String> {
     state.stop_stream().await.map_err(|e| e.to_user_string())
 }
 
 #[tauri::command]
-fn stream_status(state: State<'_, StrossApp>) -> stross_app::app::StreamStatus {
+fn stream_status(state: State<'_, Arc<StrossApp>>) -> stross_app::app::StreamStatus {
     state.stream_status()
 }
 
 #[tauri::command]
-fn capture_status(state: State<'_, StrossApp>) -> CaptureStatusView {
+fn capture_status(state: State<'_, Arc<StrossApp>>) -> CaptureStatusView {
     state.capture_status()
 }
 
@@ -85,13 +98,13 @@ fn capture_status(state: State<'_, StrossApp>) -> CaptureStatusView {
 
 /// 设备图快照（本机能力 + 发现结果）。
 #[tauri::command]
-fn kernel_nodes(state: State<'_, StrossApp>) -> Vec<stross_app::kernel::NodeInfo> {
+fn kernel_nodes(state: State<'_, Arc<StrossApp>>) -> Vec<stross_app::kernel::NodeInfo> {
     state.kernel().nodes()
 }
 
 /// 会话列表快照。
 #[tauri::command]
-fn kernel_sessions(state: State<'_, StrossApp>) -> Vec<stross_app::kernel::Session> {
+fn kernel_sessions(state: State<'_, Arc<StrossApp>>) -> Vec<stross_app::kernel::Session> {
     state.kernel().sessions()
 }
 
@@ -101,7 +114,7 @@ fn kernel_sessions(state: State<'_, StrossApp>) -> Vec<stross_app::kernel::Sessi
 /// （route / teardown）需先 `authorize_session`（设计文档 §7）。
 #[tauri::command]
 fn create_session(
-    state: State<'_, StrossApp>,
+    state: State<'_, Arc<StrossApp>>,
     src: String,
     sinks: Vec<String>,
     access_code: Option<String>,
@@ -125,7 +138,7 @@ fn create_session(
 /// 本机受控中继（B0 凭证式接入：零远程控制面暴露）。
 #[tauri::command]
 fn issue_share_token(
-    state: State<'_, StrossApp>,
+    state: State<'_, Arc<StrossApp>>,
     ttl_secs: Option<u64>,
 ) -> Result<stross_app::app::ShareTokenView, String> {
     state
@@ -136,7 +149,7 @@ fn issue_share_token(
 /// 会话鉴权：校验访问码（PIN）；成功后该会话的控制操作放行。
 #[tauri::command]
 fn authorize_session(
-    state: State<'_, StrossApp>,
+    state: State<'_, Arc<StrossApp>>,
     session_id: String,
     access_code: Option<String>,
 ) -> Result<(), String> {
@@ -149,7 +162,7 @@ fn authorize_session(
 /// 控制传输方向（会话存续期间动态改道）。
 #[tauri::command]
 fn route_session(
-    state: State<'_, StrossApp>,
+    state: State<'_, Arc<StrossApp>>,
     session_id: String,
     path: stross_proto::message::RoutePath,
 ) -> Result<(), String> {
@@ -161,11 +174,197 @@ fn route_session(
 
 /// 拆除会话。
 #[tauri::command]
-fn teardown_session(state: State<'_, StrossApp>, session_id: String) -> Result<(), String> {
+fn teardown_session(state: State<'_, Arc<StrossApp>>, session_id: String) -> Result<(), String> {
     state
         .kernel()
         .teardown(&session_id)
         .map_err(|e| e.to_user_string())
+}
+
+// ---------------------------------------------------------------------------
+// 防火墙自动放行（权限自动化：仅 Linux 桌面，ufw + polkit）
+// ---------------------------------------------------------------------------
+
+#[cfg(all(not(mobile), target_os = "linux"))]
+fn required_firewall_ports(state: &StrossApp) -> (Vec<String>, Vec<String>) {
+    // 实际端口（回退默认）：中继 WS + 凭证协商 TCP；SRT/QUIC UDP
+    let (ws, srt, quic) = state.relay_ports().unwrap_or((
+        stross_core::relay::DEFAULT_PORT,
+        Some(stross_app::DEFAULT_SRT_PORT),
+        Some(stross_app::DEFAULT_QUIC_PORT),
+    ));
+    let tcp = vec![
+        format!("{ws}/tcp"),
+        format!("{}/tcp", stross_app::DEFAULT_NEGOTIATOR_PORT),
+    ];
+    let mut udp = Vec::new();
+    if let Some(p) = srt {
+        udp.push(format!("{p}/udp"));
+    }
+    if let Some(p) = quic {
+        udp.push(format!("{p}/udp"));
+    }
+    (tcp, udp)
+}
+
+/// 防火墙自检：只读执行 `ufw status verbose`，返回缺失放行端口。
+///
+/// ufw 未启用 / 入站默认允许 → 无需任何规则（跨设备共享不受阻）。
+#[cfg(all(not(mobile), target_os = "linux"))]
+#[tauri::command]
+async fn firewall_status(
+    state: State<'_, Arc<StrossApp>>,
+) -> Result<firewall::FirewallStatus, String> {
+    let out = tokio::process::Command::new("ufw")
+        .args(["status", "verbose"])
+        .output()
+        .await
+        .map_err(|e| format!("无法执行 ufw: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ufw status 失败: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let ips = stross_core::net::local_ips();
+    let subnet = firewall::lan_subnet(&ips);
+    let mut status = firewall::parse_ufw_verbose(&text);
+    let (tcp, udp) = required_firewall_ports(&state);
+    let required: Vec<&str> = tcp.iter().chain(udp.iter()).map(|s| s.as_str()).collect();
+    status.missing = match subnet {
+        Some(sub) => firewall::missing_rules(
+            &required,
+            &status.rules,
+            &sub,
+            status.ufw_active,
+            status.default_deny_incoming,
+        ),
+        None => {
+            // 无局域网 IPv4（纯回环 / 未联网）：不提示放行
+            Vec::new()
+        }
+    };
+    Ok(status)
+}
+
+/// 一键放行：经 polkit（`pkexec`）弹一次系统授权，把缺失的 Stross 端口
+/// 按本机局域网子网加入 ufw（精确收窄，不放行整个网段）。
+#[cfg(all(not(mobile), target_os = "linux"))]
+#[tauri::command]
+async fn firewall_allow(state: State<'_, Arc<StrossApp>>) -> Result<(), String> {
+    let ips = stross_core::net::local_ips();
+    let subnet = firewall::lan_subnet(&ips)
+        .ok_or_else(|| "未找到局域网 IPv4 地址，无法生成放行规则（请先连接网络）".to_string())?;
+    // 只放行当前确实缺失的端口
+    let status = match firewall_status(state.clone()).await {
+        Ok(s) => s,
+        Err(e) => return Err(e),
+    };
+    if status.missing.is_empty() {
+        return Ok(()); // 已就绪
+    }
+    let (_, _) = required_firewall_ports(&state);
+    // missing 形如 "18777/tcp" / "33462/udp"，按协议分组
+    let tcp: Vec<String> = status
+        .missing
+        .iter()
+        .filter(|m| m.ends_with("/tcp"))
+        .map(|m| m.trim_end_matches("/tcp").to_string())
+        .collect();
+    let udp: Vec<String> = status
+        .missing
+        .iter()
+        .filter(|m| m.ends_with("/udp"))
+        .map(|m| m.trim_end_matches("/udp").to_string())
+        .collect();
+
+    run_pkexec_ufw(&subnet, &tcp, "tcp").await?;
+    run_pkexec_ufw(&subnet, &udp, "udp").await?;
+    tracing::info!("防火墙放行完成: {subnet} tcp={tcp:?} udp={udp:?}");
+    Ok(())
+}
+
+/// 经 `pkexec` 执行 `ufw allow from <subnet> to any port <ports> proto <proto>`。
+#[cfg(all(not(mobile), target_os = "linux"))]
+async fn run_pkexec_ufw(subnet: &str, ports: &[String], proto: &str) -> Result<(), String> {
+    if ports.is_empty() {
+        return Ok(());
+    }
+    // 一条规则可带多个端口（ufw 支持逗号分隔）
+    let port_list = ports.join(",");
+    let out = tokio::process::Command::new("pkexec")
+        .args([
+            "ufw", "allow", "from", subnet, "to", "any", "port", &port_list, "proto", proto,
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("无法执行 pkexec/ufw: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "防火墙放行被拒绝或失败（{proto}: {port_list}）: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 凭证自动协商（权限自动化）：/api/negotiator/request + 信任记忆
+// ---------------------------------------------------------------------------
+
+/// 协商服务运行句柄（桌面启动后持有；Android 为空——仅作协商客户端）。
+struct NegotiatorHandle(Arc<std::sync::Mutex<Option<Arc<stross_app::ShareNegotiator>>>>);
+
+/// 协商事件 → Tauri 事件桥（电脑端 GUI 弹授权确认）。
+#[cfg(not(mobile))]
+struct NegotiatorUiBridge {
+    app: tauri::AppHandle,
+}
+
+#[cfg(not(mobile))]
+impl stross_app::NegotiatorUi for NegotiatorUiBridge {
+    fn request_pending(&self, req: &stross_app::PendingRequest) {
+        let _ = self.app.emit("negotiator-request", req);
+    }
+}
+
+/// 本机持久化身份（device_id / device_name；首次运行生成，之后稳定）。
+///
+/// 桌面与 Android 共用：设备作为**协商申请方**时向目标设备出示本身份，
+/// 目标设备据此做首次人工确认 / 信任记忆。
+#[tauri::command]
+fn device_identity(app: tauri::AppHandle) -> stross_app::DeviceIdentity {
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let name = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "Stross 设备".into());
+    stross_app::load_or_create_identity(&base, &name)
+}
+
+/// 应答凭证协商请求（电脑端授权确认弹窗操作后调用）。
+///
+/// 允许时返回签发的凭证（前端据此启动自动接收监听——与「接收手机麦克风」
+/// 一致：轮询本机 /api/streams 出现该流即原生接收）。
+#[tauri::command]
+fn negotiator_respond(
+    state: State<'_, NegotiatorHandle>,
+    req_id: String,
+    allow: bool,
+    remember: bool,
+) -> Result<Option<stross_app::ShareGrant>, String> {
+    match state
+        .0
+        .lock()
+        .map_err(|_| "协商状态锁不可用".to_string())?
+        .as_ref()
+    {
+        Some(neg) => neg.respond(&req_id, allow, remember),
+        None => Err("凭证协商服务未启动".into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +380,7 @@ fn teardown_session(state: State<'_, StrossApp>, session_id: String) -> Result<(
 #[tauri::command]
 async fn start_receive(
     app: tauri::AppHandle,
-    state: State<'_, StrossApp>,
+    state: State<'_, Arc<StrossApp>>,
     relay: String,
     stream: String,
     audio: stross_media::playback::AudioOut,
@@ -229,13 +428,13 @@ async fn start_receive(
 
 /// 停止接收。
 #[tauri::command]
-fn stop_receive(state: State<'_, StrossApp>) {
+fn stop_receive(state: State<'_, Arc<StrossApp>>) {
     state.stop_receive();
 }
 
 /// 接收统计（帧数 / 解码 / 音频块）。
 #[tauri::command]
-fn receive_status(state: State<'_, StrossApp>) -> stross_app::ReceiveStats {
+fn receive_status(state: State<'_, Arc<StrossApp>>) -> stross_app::ReceiveStats {
     state.receive_status()
 }
 
@@ -259,6 +458,8 @@ fn scale_rgba(src: &[u8], w: u32, h: u32, max_w: u32) -> (u32, u32, Vec<u8>) {
 // ---------------------------------------------------------------------------
 
 fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    // generate_handler! 支持在命令上携带属性（展开到 match arm），
+    // 防火墙命令仅 Linux 桌面编译注册
     tauri::generate_handler![
         app_info,
         list_devices,
@@ -277,7 +478,13 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         teardown_session,
         start_receive,
         stop_receive,
-        receive_status
+        receive_status,
+        device_identity,
+        negotiator_respond,
+        #[cfg(all(not(mobile), target_os = "linux"))]
+        firewall_status,
+        #[cfg(all(not(mobile), target_os = "linux"))]
+        firewall_allow
     ]
 }
 
@@ -303,17 +510,52 @@ pub fn run() {
     app_state.set_backend(Arc::new(FfmpegBackend::new()));
 
     let builder = tauri::Builder::default()
-        .manage(app_state)
+        .manage(Arc::new(app_state))
         .setup(|app| {
             #[cfg(mobile)]
             {
                 let backend = Arc::new(mobile::AndroidCapture::from_app(app.handle()));
-                app.state::<StrossApp>().set_backend(backend);
+                app.state::<Arc<StrossApp>>().set_backend(backend);
+            }
+            // 凭证协商服务（权限自动化）：桌面启动；Android 仅作客户端不启动
+            #[cfg(not(mobile))]
+            {
+                let handle_arc = Arc::new(std::sync::Mutex::new(None));
+                app.manage(NegotiatorHandle(handle_arc.clone()));
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let base = app_handle
+                        .path()
+                        .app_data_dir()
+                        .unwrap_or_else(|_| std::env::temp_dir());
+                    let ui = NegotiatorUiBridge {
+                        app: app_handle.clone(),
+                    };
+                    let app_state = app_handle.state::<Arc<StrossApp>>().inner().clone();
+                    match stross_app::ShareNegotiator::start(
+                        app_state,
+                        Arc::new(ui),
+                        &base,
+                        stross_app::DEFAULT_NEGOTIATOR_PORT,
+                    )
+                    .await
+                    {
+                        Ok(neg) => {
+                            tracing::info!("凭证协商端点已启动: 0.0.0.0:{}", neg.port);
+                            *handle_arc.lock().unwrap() = Some(Arc::new(neg));
+                        }
+                        Err(e) => tracing::error!("凭证协商端点启动失败: {e}"),
+                    }
+                });
+            }
+            #[cfg(mobile)]
+            {
+                app.manage(NegotiatorHandle(Arc::new(std::sync::Mutex::new(None))));
             }
             // 内核事件桥：订阅 KernelEvent，转发为 Tauri 事件「kernel-event」
             // （前端可订阅替代轮询；设计文档 §3.2）
             {
-                let mut rx = app.state::<StrossApp>().kernel().subscribe();
+                let mut rx = app.state::<Arc<StrossApp>>().kernel().subscribe();
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     while let Ok(ev) = rx.recv().await {

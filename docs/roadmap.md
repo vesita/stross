@@ -76,16 +76,25 @@
 - [x] 发送/接收角色解耦（随 P0 免先连落地）：推流端与观看端各自独立启动、
       通过发现机制互相找到，不再绑定在「连接 → 推/看」流程里
 - [x] 跨设备推流（反向外设：手机麦克风 → 电脑）——**凭证式协商已落地
-      （B1）+ GUI 闭环（B2）**：接收端内核建会话并签发一次性 `ShareToken`
-      （`ctrl share-token`；GUI 本机卡片「接收手机麦克风」→ `issue_share_token`
-      签发展示 PIN/凭证 + 轮询自动接收），推流端 `push --share-token` 或
-      GUI「共享麦克风到 TA」（凭证弹窗，QUIC 优先）出示即接入对方受控中继；
-      来源感知门控（回环=本机预授权，非回环=必须凭证）杜绝远程冒用预授权；
-      凭证推流跳过 `ensure_session` 会话改写（stream_id 必须为接收端签发）；
-      Android 纯音频采集走 `micOnly`（跳过屏幕授权，只 AudioRecord→AAC）。
+      （B1）+ GUI 闭环（B2）+ 自动协商免粘贴（B2.5）**：接收端内核建会话
+      并签发一次性 `ShareToken`（`ctrl share-token`；GUI 本机卡片「接收
+      手机麦克风」→ `issue_share_token` 签发展示 PIN/凭证 + 轮询自动接收），
+      推流端 `push --share-token` 或 GUI「共享麦克风到 TA」出示即接入对方
+      受控中继；**B2.5 免粘贴**：手机对设备点共享 → `POST
+      /api/negotiator/request` 自动申请凭证（设备身份 + 首次人工确认 +
+      「记住此设备」信任记忆，免确认自动签发；手动粘贴兜底）；来源感知门控
+      （回环=本机预授权，非回环=必须凭证）杜绝远程冒用预授权；凭证推流跳过
+      `ensure_session` 会话改写（stream_id 必须为接收端签发）；Android 纯
+      音频采集走 `micOnly`（跳过屏幕授权，只 AudioRecord→AAC）。
+      真机（OPPO PLC110 ↔ 本机）：手机「共享麦克风到 TA」→ 电脑弹窗允许 →
+      自动 QUIC 推流（`推流开始: sess-1`）→ 电脑 GUI 自动接收（watchers:1），
+      `trusted_devices.json` 持久化生效（二次共享免确认）。
       双 PC 端到端验证脚本 `scripts/share-token-test.sh` 全绿。
       剩余（B3/B4 真机）：电脑扬声器播放手机声音的真机闭环、
       反向音频 ≤200ms 低延迟路径实测
+- [x] 防火墙自动放行（权限自动化，B2.5）：SRT/QUIC 固定端口 33462/33464 +
+      `firewall_status` 自检 + `firewall_allow` polkit 一键放行（精确端口 ×
+      局域网子网，不再手敲 sudo、不放行整个网段）
 - [ ] 数据面/控制面通道分离：媒体帧（大流量）与控制元数据
       （流列表/状态/心跳）分通道传输
 

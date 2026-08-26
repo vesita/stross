@@ -2,6 +2,8 @@
 //!
 //! 数据面转发见 [`super::data_plane`]，共享状态见 [`super::state::RelayState`]。
 
+use std::net::SocketAddr;
+
 use axum::serve::{Listener, ListenerExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
@@ -115,17 +117,34 @@ impl RelayServer {
     /// 返回的 [`RelayHandle::port`] 上；SRT/QUIC 推流监听随机端口，
     /// 见 [`RelayHandle::srt_port`] / [`RelayHandle::quic_port`]。
     pub async fn start(port: u16) -> anyhow::Result<RelayHandle> {
-        Self::start_inner(port, false).await
+        Self::start_inner(port, false, 0, 0).await
     }
 
     /// 启动**受控模式**中继：只有 [`RelayHandle::authorize_stream`] 预授权的
     /// stream id 才能推流（对应需求 F2.2「先会话后传输」/ D4「id 内核签发」，
     /// 内嵌中继由内核驱动时使用）。
     pub async fn start_controlled(port: u16) -> anyhow::Result<RelayHandle> {
-        Self::start_inner(port, true).await
+        Self::start_inner(port, true, 0, 0).await
     }
 
-    async fn start_inner(port: u16, controlled: bool) -> anyhow::Result<RelayHandle> {
+    /// 受控模式 + SRT/QUIC 固定端口（`0` = 随机）。
+    ///
+    /// 固定端口便于防火墙仅放行已知端口（权限自动化）；被占用时仍回退随机，
+    /// 实际端口见 [`RelayHandle::srt_port`] / [`RelayHandle::quic_port`]。
+    pub async fn start_controlled_with(
+        port: u16,
+        srt_port: u16,
+        quic_port: u16,
+    ) -> anyhow::Result<RelayHandle> {
+        Self::start_inner(port, true, srt_port, quic_port).await
+    }
+
+    async fn start_inner(
+        port: u16,
+        controlled: bool,
+        srt_hint: u16,
+        quic_hint: u16,
+    ) -> anyhow::Result<RelayHandle> {
         // TCP_NODELAY：媒体每帧一个 WS 消息，Nagle 会叠加延迟（LAN 也受影响）
         let listener = TcpListener::bind(("0.0.0.0", port)).await?.tap_io(|s| {
             let _ = s.set_nodelay(true);
@@ -135,20 +154,35 @@ impl RelayServer {
 
         // SRT 推流/观看监听：原生端可经 srt://<host>:<srt_port> 推流或观看，
         // 数据面与 WS 完全一致（handle_connect 按首条消息分流 Hello/Watch）
+        let srt_bind = if srt_hint == 0 {
+            "0.0.0.0:0".to_string()
+        } else {
+            format!("0.0.0.0:{srt_hint}")
+        };
         let srt_listener = SrtTransport::new()
-            .bind("0.0.0.0:0")
+            .bind(&srt_bind)
             .await
             .map_err(|e| anyhow::anyhow!("SRT 监听失败: {e}"))?;
         let srt_port = srt_listener.local_addr().port();
+        if srt_hint != 0 && srt_port != srt_hint {
+            tracing::warn!("SRT 端口 {srt_hint} 被占用，回退到随机端口 {srt_port}");
+        }
         tracing::info!("SRT 推流/观看监听: 0.0.0.0:{srt_port}");
 
         // QUIC 推流/观看监听：一条连接 control/media 双 stream 多路复用，
         // 原生端可推流（Hello）或观看（Watch）（Lossless；自签名 + 局域网可信模型）
         let quic_listener = QuicTransport::new()
-            .bind("0.0.0.0:0".parse().expect("静态地址"))
+            .bind(if quic_hint == 0 {
+                "0.0.0.0:0".parse().expect("静态地址")
+            } else {
+                SocketAddr::from(([0, 0, 0, 0], quic_hint))
+            })
             .await
             .map_err(|e| anyhow::anyhow!("QUIC 监听失败: {e}"))?;
         let quic_port = quic_listener.local_addr().port();
+        if quic_hint != 0 && quic_port != quic_hint {
+            tracing::warn!("QUIC 端口 {quic_hint} 被占用，回退到随机端口 {quic_port}");
+        }
         tracing::info!("QUIC 推流/观看监听: 0.0.0.0:{quic_port}");
 
         let state =

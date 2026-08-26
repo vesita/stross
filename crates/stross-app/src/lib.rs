@@ -18,6 +18,7 @@ pub mod engine;
 pub mod error;
 pub mod kernel;
 mod lock;
+pub mod negotiator;
 pub mod receiver;
 
 pub use app::{CaptureStatusView, Platform, StrossApp};
@@ -28,4 +29,12 @@ pub use kernel::{
     AuthError, AuthPolicy, DataPlaneBackend, Kernel, KernelEvent, NodeInfo, NodeRole,
     PinAuthPolicy, RelayDataPlane, Session, SessionPrefs,
 };
+pub use negotiator::{
+    DEFAULT_NEGOTIATOR_PORT, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest, ShareGrant,
+    ShareNegotiator, ShareRequest, TrustStore, load_or_create_identity,
+};
 pub use receiver::{ReceiveStats, Receiver};
+
+/// SRT/QUIC 固定传输端口（权限自动化：防火墙只放行已知端口）。
+pub const DEFAULT_SRT_PORT: u16 = 33462;
+pub const DEFAULT_QUIC_PORT: u16 = 33464;

@@ -101,6 +101,46 @@ interface ShareTokenView {
   expiresAt: number;
 }
 
+// —— 权限自动化（B2.5：凭证自动协商 + 防火墙） ——
+
+/** 协商端点固定端口（与 Rust `stross_app::DEFAULT_NEGOTIATOR_PORT` 一致）。 */
+const NEGOTIATOR_PORT = 18779;
+
+/** 本机持久化身份（Rust `device_identity` 返回值）。 */
+interface DeviceIdentity {
+  deviceId: string;
+  deviceName: string;
+}
+
+/** 协商签发的接入凭证（Rust `ShareGrant`：ShareTokenView + trusted）。 */
+interface ShareGrant {
+  token: string;
+  streamId: string;
+  pin: string;
+  expiresAt: number;
+  /** 是否因设备受信任而自动签发（未人工确认）。 */
+  trusted: boolean;
+}
+
+/** 待人工确认的挂起请求（Rust `PendingRequest`，经 `negotiator-request` 事件送达）。 */
+interface PendingRequest {
+  id: string;
+  deviceId: string;
+  deviceName: string;
+  /** 序列化后的媒体名（camelCase）。 */
+  media: string[];
+  createdAt: number;
+}
+
+/** 防火墙自检结果（Rust `firewall_status`，仅 Linux 桌面）。 */
+interface FirewallStatus {
+  ufwActive: boolean;
+  defaultDenyIncoming: boolean;
+  rules: { portProto: string; from: string }[];
+  /** 缺失放行的 `port/proto`（空 = 已就绪）。 */
+  missing: string[];
+}
+
 /** 设备实体（左栏卡片）：本机或局域网发现/手动添加的设备。 */
 interface DeviceView {
   /** 唯一键：'local' 或设备 http://host:port 基址。 */

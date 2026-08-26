@@ -62,6 +62,25 @@
   级联代理），原生播放（`PlaybackSink`，D6），**无浏览器观看端**（D1）。
 - 反向（D3 核心验收）：电脑「接收手机麦克风」→ `issue_share_token` 建会话
   签凭证 → 手机出示凭证推流 → 电脑自动原生接收播放（B2/B3）。
+- **凭证自动协商（权限自动化，B2.5）**：同网设备首次**不需要复制粘贴**
+  凭证——手机对设备点「共享麦克风到 TA」→ `POST /api/negotiator/request`
+  向对方申请凭证（携带本机 `device_id`/`device_name`）→ 电脑 GUI 首次
+  **人工确认**（可勾选“记住此设备”）→ 签发一次性短时凭证 → 手机自动
+  推流、电脑自动接收；已信任设备再申请**免确认自动签发**；手动粘贴
+  保留为兜底（对方版本不支持协商时自动回退）。
+
+  ```text
+  手机（申请方）                       电脑（接收方，凭证柜台）
+  ┌──────────────────────┐   POST    ┌──────────────────────────┐
+  │ 共享麦克风到 TA ───────┼─────────▶│ /api/negotiator/request  │
+  │ (device_id+name+media)│  Json     │  · 信任清单命中 → 自动签发│
+  │                      │  ◀────────┼  · 未知设备 → GUI 人工确认│
+  │ 自动推流(QUIC) ───────▶│ token    │  · 签发 ShareToken(短时)  │
+  └──────────────────────┘           │  · 自动接收监听 (pollRecv)│
+                                     └──────────────────────────┘
+  安全：协商端点只签发一次性短时凭证（凭证柜台），不暴露任何控制操作
+  （建会话/拆会话/启停仍在回环控制面 18778）；首次人工确认 + 信任记忆。
+  ```
 
 ## 1. 总体数据流
 
@@ -212,11 +231,14 @@ AudioTrack 系统 API 薄壳**，`feedVideo` 入队立即返回 + 独立解码�
 | 方法 | 说明 |
 |---|---|
 | `start_relay()` | 启动/复用本机常驻中继 + mDNS 广播 |
+| `start_relay_fixed(port, srt, quic)` | 以固定端口启动（含 SRT/QUIC；防火墙放行前提） |
 | `scan_relays()` | mDNS 扫描局域网中继 |
+| `issue_share_token_for(title, media, ttl)` | 建会话 + 签发一次性凭证（手动路径与协商端点共用） |
 | `start_stream(cfg, relay_url)` | 组合引擎：外部中继 / 本机中继 / 内嵌中继 |
 | `stop_stream()` / `stream_status()` | 推流生命周期 |
 | `capture_status()` | 采集真实状态（Android 异步回报） |
 | `app_info()` / `list_devices()` | 信息与设备 |
+| `relay_ports()` | 本机中继实际监听端口（WS/SRT/QUIC；防火墙放行按实际端口） |
 
 UI 层（桌面 / Android）只把 `invoke` 命令转发到这里，因此命令面两边完全一致：
 桌面 `start_stream` 与 Android 走同一条路径，平台差异被 `CaptureBackend` 隔离。
@@ -244,3 +266,7 @@ UI 层（桌面 / Android）只把 `invoke` 命令转发到这里，因此命令
 | 传输层独立 crate（阶段 2） | 传输实现（str0m/未来 quic/srt）的重依赖不进入 core/media/app 的依赖树；core re-export 保持路径兼容 |
 | `CaptureBackend` trait | 桌面 ffmpeg 与 Android 原生采集统一抽象，UI 命令面两边一致 |
 | `Sink` trait（阶段 2） | 录制/渲染/注入统一为接收侧能力，与 Source 共用能力描述与协商 |
+| 凭证协商端点 = 凭证柜台（B2.5） | LAN 端点只签发一次性短时凭证，不暴露控制操作；首次人工确认 + 信任记忆（持久化 identity/trusted_devices.json）；手动粘贴兜底 |
+| SRT/QUIC 固定端口（33462/33464） | 防火墙只需放行已知端口（精确收窄，不放行整个网段）；被占用时回退随机并按实际端口放行 |
+| ufw 自检 + polkit 一键放行 | `firewall_status` 只读自检（无权限）；`firewall_allow` 经 polkit 弹一次系统授权自动加精确规则，避免手敲 sudo |
+| 性能敏感逻辑一律 Rust | 编解码/缩放/解析/转换/凭证签发校验/防火墙检测全在 Rust；前端 JS 只做 UI 与轻量 IO；Kotlin 只留系统 API 薄壳 |

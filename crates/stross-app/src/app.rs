@@ -143,6 +143,19 @@ impl StrossApp {
 
     /// 在指定端口启动中继（受内核控制的数据面）；被占用时回退随机端口。
     pub async fn start_relay_on(&self, port: u16) -> Result<RelayInfo> {
+        self.start_relay_fixed(port, 0, 0).await
+    }
+
+    /// 在指定端口启动中继，并固定 SRT/QUIC 传输端口（`0` = 随机）。
+    ///
+    /// 固定端口便于防火墙只放行已知端口（权限自动化）；SRT/QUIC 被占用时
+    /// 各自回退随机端口（实际端口经 `scan_relays` / `/api/info` 可见）。
+    pub async fn start_relay_fixed(
+        &self,
+        port: u16,
+        srt_port: u16,
+        quic_port: u16,
+    ) -> Result<RelayInfo> {
         {
             let guard = self.anchor.lock_poisoned();
             if let Some(a) = guard.as_ref() {
@@ -150,7 +163,7 @@ impl StrossApp {
             }
         }
         // 优先指定端口；被占用时回退随机端口（本机中继"能用就行"，不因端口冲突失败）
-        let handle = match RelayServer::start_controlled(port).await {
+        let handle = match RelayServer::start_controlled_with(port, srt_port, quic_port).await {
             Ok(h) => h,
             Err(_) => {
                 tracing::warn!("端口 {port} 被占用，本机中继回退到随机端口");
@@ -396,6 +409,17 @@ impl StrossApp {
         self.anchor.lock_poisoned().as_ref().map(|a| a.port)
     }
 
+    /// 本机中继全部监听端口：`(ws, srt, quic)`（未启动时为 `None`）。
+    ///
+    /// 防火墙自动放行按实际端口生成规则（SRT/QUIC 固定端口被占用回退随机时
+    /// 也能放行真实端口）。
+    pub fn relay_ports(&self) -> Option<(u16, Option<u16>, Option<u16>)> {
+        self.anchor
+            .lock_poisoned()
+            .as_ref()
+            .map(|a| (a.port, a.handle.srt_port, a.handle.quic_port))
+    }
+
     // -----------------------------------------------------------------------
     // 接收播放（1e）
     // -----------------------------------------------------------------------
@@ -460,17 +484,25 @@ impl StrossApp {
     /// 手机出示凭证直接推入本机受控中继（`Hello.share_token`），电脑随后
     /// 用同一会话 id 原生接收——B0 凭证式接入，不开放任何远程控制面。
     pub fn issue_share_token(&self, ttl_secs: Option<u64>) -> Result<ShareTokenView> {
+        self.issue_share_token_for("接收手机麦克风".into(), vec![MediaKind::Mic], ttl_secs)
+    }
+
+    /// 通用凭证签发（媒体 / 标题可定制；协商端点与手动路径共用）。
+    pub fn issue_share_token_for(
+        &self,
+        title: String,
+        media: Vec<MediaKind>,
+        ttl_secs: Option<u64>,
+    ) -> Result<ShareTokenView> {
         let prefs = SessionPrefs {
-            title: "接收手机麦克风".into(),
+            title,
             ..Default::default()
         };
         let session = self
             .kernel()
             .create_session("local", &["local".into()], &prefs)?;
         let ttl = Duration::from_secs(ttl_secs.unwrap_or(600));
-        let token = self
-            .kernel()
-            .create_share_token(&session.id, vec![MediaKind::Mic], ttl)?;
+        let token = self.kernel().create_share_token(&session.id, media, ttl)?;
         Ok(ShareTokenView {
             token: token.to_token_string(),
             stream_id: token.stream_id,
@@ -588,7 +620,7 @@ pub struct CaptureStatusView {
 }
 
 /// 手机麦克风接入凭证视图（B2：电脑端签发后展示给手机）。
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareTokenView {
     /// ShareToken JSON 字符串（手机端原样粘贴到「共享麦克风」）。

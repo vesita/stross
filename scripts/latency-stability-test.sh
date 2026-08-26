@@ -91,7 +91,6 @@ run_round() {
   RSS1=$(ps -o rss= -p "$A_PID" 2>/dev/null | tr -d ' ')
   kill "$A_PID" 2>/dev/null; wait "$A_PID" 2>/dev/null; A_PID=""
   kill "$B_PID" 2>/dev/null; wait "$B_PID" 2>/dev/null; B_PID=""
-  rm -rf "$OUT/$trans" "$OUT"/start.json 2>/dev/null
 
   echo "  接收: ${FRAMES}/${EXPECT_FRAMES} 帧 | 音频块 ${AUDIO}/${EXPECT_AUDIO}"
   [ -n "$ABS_MIN" ] && echo "  绝对端到端延迟 ms: min=${ABS_MIN} p99=${ABS_P99:-?}（含 ffmpeg 预热上界）"
@@ -107,7 +106,14 @@ run_round() {
       'BEGIN { if (b - a > t) { print "  ❌ 尾延迟超限 (p99−min=" b-a "ms > " t "ms)"; exit 1 } }' \
       || ok=0
   fi
-  [ "$ok" -eq 1 ] && echo "  ✅ $trans 稳定 + 延迟达标" || { echo "  ❌ $trans 未达标"; return 1; }
+  if [ "$ok" -eq 1 ]; then
+    echo "  ✅ $trans 稳定 + 延迟达标"
+    rm -rf "$OUT/$trans" "$OUT"/start.json 2>/dev/null
+  else
+    mv "$OUT/$trans" "$OUT/failed-$trans" 2>/dev/null || true
+    echo "  ❌ $trans 未达标（日志保留在 $OUT/failed-$trans/ 供排查）"
+    return 1
+  fi
 }
 
 FAILED=0

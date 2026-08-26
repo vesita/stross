@@ -12,7 +12,7 @@
 //! #        -i /tmp/out/frame_%04d.rgba -c:v libx264 /tmp/out/out.mp4
 //! ```
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use clap::Args;
@@ -122,7 +122,15 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
     let mut max_pts: Option<u32> = None;
     let mut video_seen = 0u32;
     // 绝对端到端延迟：`--calibrate` 读推流端 --report-start 写的 JSON
-    // （同一文件一次读取：会话起点墙上毫秒 + 首帧 pts0 修正）
+    // （同一文件一次读取：会话起点墙上毫秒 + 首帧 pts0 修正）。
+    // 墙上时刻用单调钟递推（校准读取时采一次「墙上 − 单调」偏差，样本
+    // now = 偏差 + 单调流逝）：运行中系统墙钟若被 NTP/hwclock 步进，
+    // 不会污染延迟样本（长跑 QUIC 轮曾测得整体 +467ms 假偏移）。
+    let wall_0 = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let wall_mono_offset = wall_0 - start.elapsed().as_secs_f64() * 1000.0;
     let (session_start_ms, first_pts): (Option<u64>, f64) = match &args.calibrate {
         Some(path) => {
             let raw = std::fs::read_to_string(path)
@@ -164,10 +172,8 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
                             }
                             // 绝对端到端延迟（校准模式）：到达墙上时刻 − (会话起点 + pts)
                             if let Some(s0) = session_start_ms {
-                                let now_ms = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs_f64() * 1000.0)
-                                    .unwrap_or(0.0);
+                                let now_ms =
+                                    wall_mono_offset + start.elapsed().as_secs_f64() * 1000.0;
                                 abs_latency.push(now_ms - (s0 as f64 + pts as f64 - first_pts));
                             }
                         }

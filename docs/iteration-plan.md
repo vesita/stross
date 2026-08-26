@@ -50,9 +50,14 @@ GStreamer 流水线。
       §8 决策表）、protocol.md（HTTP 表删 `/`、`/app.js`、`/jmuxer.js`，
       补 /api/info、/api/peers、/api/proxy、/api/proxies；术语统一为
       "接收端"）、plugin-architecture.md、roadmap.md P1 同步
-- [ ] A4 三设备实测（roadmap P0 最后一项）：A 推流 → B 直连看；C 跨网段经 B
+- [~] A4 三设备实测（roadmap P0 最后一项）：A 推流 → B 直连看；C 跨网段经 B
       中继级联看（真机；单机双实例已覆盖逻辑，重点验证 mDNS 跨网卡与
       SRT/QUIC 跨设备拨号）
+      **2026-08-26 真机进展**：OPPO（Android 16）作为设备 B 完成「发现（双向 mDNS）
+      → 连接（SRT 直连，watchers=1）→ 观看（Canvas 渲染）」，并暴露/修复：
+      frontendDist 数组导致 Android 前端资源缺失、mDNS 广播/浏览混入 fe80
+      link-local（点不开的卡片）、Android 观看统计解码计数不回写、状态文案卡死。
+      待办：C 设备级联观看未测；手机麦克风反向推流（阶段 B2）未测。
 - 验收：A2 后多网卡设备在网格中被各网卡网段正确发现；A4 三设备拓扑全通。
 
 ## 阶段 B：反向外设——跨设备推流（D3，一期核心验收）

@@ -29,6 +29,19 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     let app = Arc::new(StrossApp::new(Platform::Desktop));
     // 桌面采集后端（ffmpeg），供 ctrl start-stream 使用
     app.set_backend(Arc::new(FfmpegBackend::new()));
+    // 注入本机持久化身份：mDNS 实例名携带 device_id 前缀（与 GUI 同源，
+    // ~/.local/share/stross/identity.json），多 serve/gui 同端口不碰撞。
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| std::path::Path::new(&h).join(".local/share/stross"))
+                .unwrap_or_else(|_| std::path::PathBuf::from("stross-data"))
+        });
+    let name = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "Stross 设备".into());
+    app.set_identity(stross_app::load_or_create_identity(&base, &name));
 
     let relay = app
         .start_relay_fixed(args.port, args.srt_port, args.quic_port)

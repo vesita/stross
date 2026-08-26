@@ -49,6 +49,21 @@ impl Platform {
     }
 }
 
+/// 本机中继的 mDNS 实例名：携带持久化 `device_id` 前 8 位 + 端口，保证
+/// 局域网内多设备同端口广播时实例名唯一（mdns-sd browse 按实例名键控，
+/// 同名实例会互相覆盖导致扫描不到，实测）。
+///
+/// 未注入身份时回退旧格式 `sender-{port}`（兼容无 UI 接入方）。
+fn relay_mdns_instance(device_id: Option<&str>, port: u16) -> String {
+    match device_id {
+        Some(id) if !id.is_empty() => {
+            let short = id.chars().take(8).collect::<String>();
+            format!("stross-{short}-{port}")
+        }
+        _ => format!("sender-{port}"),
+    }
+}
+
 /// 应用全局状态。
 pub struct StrossApp {
     platform: Platform,
@@ -61,6 +76,9 @@ pub struct StrossApp {
     kernel: Kernel,
     /// 接收播放（1e）：WS 收流 → SessionDataManager → PlaybackSink 解码。
     receiver: Mutex<Option<Arc<Receiver>>>,
+    /// 本机持久化身份（UI 层 `load_or_create_identity` 注入；用于 mDNS
+    /// 实例名唯一化——多设备同端口广播不再同名串扰）。
+    identity: Mutex<Option<crate::negotiator::DeviceIdentity>>,
 }
 
 /// 本机锚点（免先连：应用打开即自动建立；推流 / 观看 / 局域网发现共用）。
@@ -92,6 +110,7 @@ impl StrossApp {
             backend: Mutex::new(None),
             kernel: Kernel::new(),
             receiver: Mutex::new(None),
+            identity: Mutex::new(None),
         }
     }
 
@@ -103,6 +122,11 @@ impl StrossApp {
     /// 注入采集后端（UI 层在启动时调用一次）。
     pub fn set_backend(&self, backend: Arc<dyn CaptureBackend>) {
         *self.backend.lock_poisoned() = Some(backend);
+    }
+
+    /// 注入本机持久化身份（UI 层启动时调用；缺失时 mDNS 实例名回退旧格式）。
+    pub fn set_identity(&self, id: crate::negotiator::DeviceIdentity) {
+        *self.identity.lock_poisoned() = Some(id);
     }
 
     // -----------------------------------------------------------------------
@@ -181,7 +205,17 @@ impl StrossApp {
         // 多网卡：广播全部局域网 IP（Discovery::start 内部处理空列表回退回环），
         // 避免只广播第一个 IP 导致其它网卡网段扫描不到本机
         let discovery = {
-            let instance = format!("sender-{port}");
+            // mDNS 实例名唯一化：同名实例（LAN 内多设备同为 8777 端口 →
+            // 旧 `sender-8777`）会被 mdns-sd browse 按键控互覆盖，导致
+            // 扫不到对方（实测）。实例名携带持久化 device_id（前 8 位）
+            // + 端口，任何设备同端口广播也不碰撞；未注入身份时回退旧格式。
+            let instance = relay_mdns_instance(
+                self.identity
+                    .lock_poisoned()
+                    .as_ref()
+                    .map(|id| id.device_id.as_str()),
+                port,
+            );
             let info = DiscoveryInfo::relay_default(
                 "Stross 本机中继",
                 vec![
@@ -230,6 +264,7 @@ impl StrossApp {
     /// 供前端直接展示设备卡片，无需再手动输入地址。
     pub async fn scan_relays(&self) -> Result<Vec<RelayInfo>> {
         let found = Discovery::browse(Duration::from_secs(2)).await?;
+        tracing::debug!("scan_relays 发现 {} 台设备", found.len());
         Ok(found
             .into_iter()
             .map(|d| {
@@ -721,5 +756,39 @@ mod tests {
     fn platform_str() {
         assert_eq!(Platform::Desktop.as_str(), "desktop");
         assert_eq!(Platform::Android.as_str(), "android");
+    }
+
+    #[test]
+    fn relay_mdns_instance_unique_per_device_same_port() {
+        // 不同 device_id、同端口：实例名必须不同（mdns-sd 同名互覆盖的根因）
+        let a = relay_mdns_instance(Some("0123456789abcdef0123456789abcdef"), 8777);
+        let b = relay_mdns_instance(Some("fedcba9876543210fedcba9876543210"), 8777);
+        assert_ne!(a, b, "同端口不同设备实例名必须不同");
+        assert!(
+            a.starts_with("stross-01234567-8777"),
+            "实例名携带设备前缀: {a}"
+        );
+    }
+
+    #[test]
+    fn relay_mdns_instance_same_device_stable() {
+        // 同一设备（同 device_id）跨启动实例名稳定（端口不变时）
+        let id = "deadbeefcafe0123deadbeefcafe0123";
+        assert_eq!(
+            relay_mdns_instance(Some(id), 8777),
+            relay_mdns_instance(Some(id), 8777)
+        );
+        // 端口变化只影响后缀（设备身份恒在前缀）
+        assert_ne!(
+            relay_mdns_instance(Some(id), 8777),
+            relay_mdns_instance(Some(id), 33462)
+        );
+    }
+
+    #[test]
+    fn relay_mdns_instance_fallback_without_identity() {
+        // 未注入身份：回退旧格式（兼容无 UI 接入方）
+        assert_eq!(relay_mdns_instance(None, 8777), "sender-8777");
+        assert_eq!(relay_mdns_instance(Some(""), 8777), "sender-8777");
     }
 }

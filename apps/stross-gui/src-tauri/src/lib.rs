@@ -517,6 +517,20 @@ pub fn run() {
                 let backend = Arc::new(mobile::AndroidCapture::from_app(app.handle()));
                 app.state::<Arc<StrossApp>>().set_backend(backend);
             }
+            // 注入本机持久化身份：mDNS 实例名携带 device_id 前缀，
+            // 多设备同端口广播时实例名唯一（否则 mdns-sd 同名互覆盖）。
+            // 与 `device_identity` 命令同源（同一 identity.json）。
+            {
+                let base = app
+                    .path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| std::env::temp_dir());
+                let name = hostname::get()
+                    .map(|h| h.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| "Stross 设备".into());
+                let id = stross_app::load_or_create_identity(&base, &name);
+                app.state::<Arc<StrossApp>>().set_identity(id);
+            }
             // 凭证协商服务（权限自动化）：桌面启动；Android 仅作客户端不启动
             #[cfg(not(mobile))]
             {

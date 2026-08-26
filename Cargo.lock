@@ -4829,6 +4829,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures-util",
+ "hostname",
  "serde_json",
  "stross-app",
  "stross-core",

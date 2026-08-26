@@ -81,12 +81,11 @@ impl Transport for QuicTransport {
         peer: &PeerAddr,
         _params: &SessionParams,
     ) -> Result<Box<dyn DataSession>, TransportError> {
-        let addr: SocketAddr = peer
-            .addr
-            .strip_prefix("quic://")
-            .unwrap_or(&peer.addr)
-            .parse()
-            .map_err(|e| TransportError::Connect(format!("QUIC 地址解析失败: {e}")))?;
+        // 解析收口在 RelayUrl（去 scheme → host:port → SocketAddr）
+        let addr: SocketAddr = super::RelayUrl::parse(&peer.addr)
+            .and_then(|u| format!("{}:{}", u.host(), u.port()).parse().ok())
+            .or_else(|| peer.addr.parse().ok())
+            .ok_or_else(|| TransportError::Connect(format!("QUIC 地址解析失败: {}", peer.addr)))?;
         let endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().expect("静态地址"))
             .map_err(|e| TransportError::Io(e.to_string()))?;
         let connecting = endpoint

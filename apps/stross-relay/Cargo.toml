@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 stross-core = { path = "../../crates/stross-core", version = "0.1.0" }
-stross-proto = { path = "../../crates/stross-proto", version = "0.1.0" }
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

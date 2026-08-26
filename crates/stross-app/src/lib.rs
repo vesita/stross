@@ -15,12 +15,15 @@
 pub mod app;
 pub mod control;
 pub mod engine;
+pub mod error;
 pub mod kernel;
+mod lock;
 pub mod receiver;
 
 pub use app::{CaptureStatusView, Platform, StrossApp};
 pub use control::{CtrlRequest, CtrlResponse, CtrlServer, DEFAULT_CTRL_PORT};
 pub use engine::SenderEngine;
+pub use error::{Error, Result};
 pub use kernel::{
     AuthError, AuthPolicy, DataPlaneBackend, Kernel, KernelEvent, NodeInfo, NodeRole,
     PinAuthPolicy, RelayDataPlane, Session, SessionPrefs,

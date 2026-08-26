@@ -11,7 +11,8 @@
 
 use stross_proto::message::ControlMessage;
 
-use crate::transport::{DataSession, PeerAddr, SessionPacket, SessionParams, Transport};
+use crate::error::WatchError;
+use crate::transport::{DataSession, PeerAddr, RelayUrl, SessionPacket, SessionParams};
 
 /// 连接中继并请求观看 `stream_id`；返回已就绪（收到 `Ready`）的数据会话。
 ///
@@ -20,18 +21,11 @@ use crate::transport::{DataSession, PeerAddr, SessionPacket, SessionParams, Tran
 pub async fn connect_watch(
     relay_url: &str,
     stream_id: &str,
-) -> Result<Box<dyn DataSession>, String> {
-    let (transport, addr): (Box<dyn Transport>, String) = if relay_url.starts_with("ws://") {
-        (
-            crate::transport::transport_for_url(relay_url),
-            format!("{relay_url}/ws/watch?stream={stream_id}"),
-        )
-    } else {
-        (
-            crate::transport::transport_for_url(relay_url),
-            relay_url.to_string(),
-        )
-    };
+) -> Result<Box<dyn DataSession>, WatchError> {
+    let url =
+        RelayUrl::parse(relay_url).ok_or_else(|| WatchError::InvalidUrl(relay_url.to_string()))?;
+    let addr = url.watch_url(stream_id);
+    let transport = crate::transport::transport_for_url(relay_url);
     let peer = PeerAddr {
         transport: transport.id(),
         addr,
@@ -43,16 +37,16 @@ pub async fn connect_watch(
     let session = transport
         .connect(&peer, &params)
         .await
-        .map_err(|e| format!("连接中继失败: {e}"))?;
+        .map_err(|e| WatchError::Connect(e.to_string()))?;
 
     // WS 由 URL 查询参数声明流；SRT/QUIC 需显式 Watch 请求
-    if !relay_url.starts_with("ws://") {
+    if !url.is_ws() {
         session
             .send(SessionPacket::Control(ControlMessage::Watch {
                 stream_id: stream_id.to_string(),
             }))
             .await
-            .map_err(|e| format!("发送 Watch 请求失败: {e}"))?;
+            .map_err(|e| WatchError::SendWatch(e.to_string()))?;
     }
 
     // 等待 Ready（或 Error / 关闭）
@@ -62,11 +56,11 @@ pub async fn connect_watch(
                 return Ok(session);
             }
             Ok(Some(SessionPacket::Control(ControlMessage::Error { message }))) => {
-                return Err(format!("中继错误: {message}"));
+                return Err(WatchError::Rejected(message));
             }
             Ok(Some(_)) => continue,
-            Ok(None) => return Err("中继连接已关闭".into()),
-            Err(e) => return Err(format!("等待就绪失败: {e}")),
+            Ok(None) => return Err(WatchError::Closed),
+            Err(e) => return Err(WatchError::WaitReady(e.to_string())),
         }
     }
 }
@@ -74,6 +68,7 @@ pub async fn connect_watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::Transport;
     use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_VIDEO};
     use tokio::time::Duration;
 

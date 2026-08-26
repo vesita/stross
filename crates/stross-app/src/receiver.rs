@@ -27,6 +27,10 @@ use stross_media::playback::{
 use stross_proto::frame::Frame;
 use tokio::sync::mpsc;
 
+use crate::error::{Error, Result};
+
+use crate::lock::MutexExt;
+
 /// 接收统计（可观测、可测试）。
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,7 +79,7 @@ async fn watch_consume_loop<C, S>(
     let data = match connect_with_proxy(&relay_url, &stream_id, local_proxy.as_ref()).await {
         Ok(d) => d,
         Err(e) => {
-            inner.stats.lock().unwrap().error = Some(e);
+            inner.stats.lock_poisoned().error = Some(e.to_user_string());
             return;
         }
     };
@@ -91,7 +95,7 @@ async fn watch_consume_loop<C, S>(
         }
         match data.recv().await {
             Ok(Some(SessionPacket::Media(frame))) => {
-                inner.stats.lock().unwrap().received += 1;
+                inner.stats.lock_poisoned().received += 1;
                 // 单次借用通道：push + poll 共用一个 &mut（热路径）
                 let channel = mgr.channel(&stream_id, channel_kind);
                 channel.push(frame, Instant::now());
@@ -121,22 +125,26 @@ async fn connect_with_proxy(
     relay_url: &str,
     stream_id: &str,
     local_proxy: Option<&LocalProxy>,
-) -> Result<Box<dyn stross_core::DataSession>, String> {
+) -> Result<Box<dyn stross_core::DataSession>> {
     match watch::connect_watch(relay_url, stream_id).await {
         Ok(d) => Ok(d),
         Err(direct_err) => {
             let Some(proxy) = local_proxy else {
-                return Err(direct_err);
+                return Err(Error::Link(direct_err.to_string()));
             };
             tracing::warn!(
                 "直连观看失败（{direct_err}），尝试经本机中继级联代理: {relay_url} → {stream_id}"
             );
             if let Err(e) = proxy.state.start_proxy(relay_url, stream_id, None) {
-                return Err(format!("直连失败: {direct_err}；本机代理失败: {e}"));
+                return Err(Error::Link(format!(
+                    "直连失败: {direct_err}；本机代理失败: {e}"
+                )));
             }
             watch::connect_watch(&proxy.ws_base, stream_id)
                 .await
-                .map_err(|e| format!("直连失败: {direct_err}；代理建立后观看失败: {e}"))
+                .map_err(|e| {
+                    Error::Link(format!("直连失败: {direct_err}；代理建立后观看失败: {e}"))
+                })
         }
     }
 }
@@ -166,7 +174,7 @@ impl Receiver {
         stream_id: String,
         audio_out: AudioOut,
         local_proxy: Option<LocalProxy>,
-    ) -> Result<Arc<Self>, String> {
+    ) -> Result<Arc<Self>> {
         let (frame_tx, frame_rx) = mpsc::channel::<RenderedFrame>(16);
         let inner = Arc::new(ReceiverInner {
             stopped: AtomicBool::new(false),
@@ -185,7 +193,7 @@ impl Receiver {
                     out: audio_out,
                 }),
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Error::Message(format!("播放会话打开失败: {e}")))?;
         tokio::spawn(receive_loop(
             inner.clone(),
             relay_url,
@@ -205,7 +213,7 @@ impl Receiver {
         relay_url: String,
         stream_id: String,
         local_proxy: Option<LocalProxy>,
-    ) -> Result<Arc<Self>, String> {
+    ) -> Result<Arc<Self>> {
         let (frame_tx, frame_rx) = mpsc::channel::<Frame>(32);
         let inner = Arc::new(ReceiverInner {
             stopped: AtomicBool::new(false),
@@ -225,17 +233,17 @@ impl Receiver {
 
     /// 取出解码帧通道（每会话一次；`None` = 已取过）。
     pub fn take_frames(&self) -> Option<mpsc::Receiver<RenderedFrame>> {
-        self.inner.frames.lock().unwrap().take()
+        self.inner.frames.lock_poisoned().take()
     }
 
     /// 取出编码帧通道（`start_raw` 会话；每会话一次）。
     pub fn take_raw_frames(&self) -> Option<mpsc::Receiver<Frame>> {
-        self.inner.raw_frames.lock().unwrap().take()
+        self.inner.raw_frames.lock_poisoned().take()
     }
 
     /// 当前统计。
     pub fn stats(&self) -> ReceiveStats {
-        self.inner.stats.lock().unwrap().clone()
+        self.inner.stats.lock_poisoned().clone()
     }
 
     /// 停止接收（后台线程收尾）。
@@ -285,7 +293,7 @@ async fn receive_loop(
         },
         move || {
             let s = session_stats.stats();
-            let mut st = inner2.stats.lock().unwrap();
+            let mut st = inner2.stats.lock_poisoned();
             st.decoded_video = s.video_frames_out;
             st.audio_blocks = s.audio_blocks_out;
             st.dropped = s.dropped_push;
@@ -295,7 +303,7 @@ async fn receive_loop(
     .await;
     session.stop();
     fwd.abort();
-    inner.stats.lock().unwrap().running = false;
+    inner.stats.lock_poisoned().running = false;
 }
 
 /// 编码帧转发主循环：watch 收帧 → 无损通道 → 直接转发（不解码）。
@@ -318,15 +326,15 @@ async fn receive_raw_loop(
         local_proxy,
         move |f| {
             if frame_tx.try_send(f).is_err() {
-                inner2.stats.lock().unwrap().dropped += 1;
+                inner2.stats.lock_poisoned().dropped += 1;
             }
         },
         move || {
-            inner3.stats.lock().unwrap().running = true;
+            inner3.stats.lock_poisoned().running = true;
         },
     )
     .await;
-    inner.stats.lock().unwrap().running = false;
+    inner.stats.lock_poisoned().running = false;
 }
 
 #[cfg(test)]
@@ -415,7 +423,7 @@ mod tests {
         };
         // 锚点不可达（无服务端口）→ 直连失败 → 本机代理也连不上 → 错误含两段原因
         let err = match connect_with_proxy("ws://127.0.0.1:1", "no-such", Some(&proxy)).await {
-            Err(e) => e,
+            Err(e) => e.to_user_string(),
             Ok(_) => panic!("不可达锚点应失败"),
         };
         assert!(
@@ -429,7 +437,7 @@ mod tests {
     #[tokio::test]
     async fn no_local_proxy_reports_direct_error() {
         let err = match connect_with_proxy("ws://127.0.0.1:1", "no-such", None).await {
-            Err(e) => e,
+            Err(e) => e.to_user_string(),
             Ok(_) => panic!("不可达锚点应失败"),
         };
         assert!(!err.contains("代理"), "无代理时不应提及代理: {err}");

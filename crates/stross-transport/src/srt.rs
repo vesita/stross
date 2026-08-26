@@ -95,8 +95,11 @@ impl Transport for SrtTransport {
         peer: &PeerAddr,
         _params: &SessionParams,
     ) -> Result<Box<dyn DataSession>, TransportError> {
-        let addr = peer.addr.strip_prefix("srt://").unwrap_or(&peer.addr);
-        let sock = rsrt::SrtSocket::connect(addr, rsrt::SrtOptions::default())
+        // rsrt 拨号需要 `host:port`（无 scheme）；解析收口在 RelayUrl
+        let addr = super::RelayUrl::parse(&peer.addr)
+            .map(|u| format!("{}:{}", u.host(), u.port()))
+            .unwrap_or_else(|| peer.addr.clone());
+        let sock = rsrt::SrtSocket::connect(&addr, rsrt::SrtOptions::default())
             .await
             .map_err(|e| TransportError::Connect(format!("SRT 连接失败: {e}")))?;
         tracing::info!("SRT 已连接: {addr}");

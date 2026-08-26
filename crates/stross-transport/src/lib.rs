@@ -16,9 +16,12 @@
 pub mod memory;
 pub mod net;
 pub mod quic;
+pub mod relay_url;
 pub mod srt;
 pub mod webrtc;
 pub mod ws;
+
+pub use relay_url::RelayUrl;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -97,13 +100,14 @@ pub struct SessionParams {
 
 /// 按 relay URL scheme 选传输实现（推流 `RelayClient` / 观看 `connect_watch`
 /// 共用，避免各调用点重复 if-else；可靠性契约由 [`Transport::profile`] 给出）。
+///
+/// scheme 判定收口在 [`RelayUrl`]：`srt://` → SRT，`quic://` → QUIC，
+/// 其余（`ws://` / `wss://` / 无法解析）→ WS。
 pub fn transport_for_url(url: &str) -> Box<dyn Transport> {
-    if url.starts_with("srt://") {
-        Box::new(srt::SrtTransport::new())
-    } else if url.starts_with("quic://") {
-        Box::new(quic::QuicTransport::new())
-    } else {
-        Box::new(ws::WsTransport::new())
+    match RelayUrl::parse(url).map(|u| u.transport()) {
+        Some(TransportId::Srt) => Box::new(srt::SrtTransport::new()),
+        Some(TransportId::Quic) => Box::new(quic::QuicTransport::new()),
+        _ => Box::new(ws::WsTransport::new()),
     }
 }
 

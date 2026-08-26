@@ -1,7 +1,7 @@
 //! HTTP 层：路由 / 静态页面 / REST API / WebSocket 升级 / WebRTC 信令。
 //!
-//! 数据面转发逻辑在 [`super::handle_push`] / [`super::handle_watch`]（传输无关）；
-//! 本模块只负责把 HTTP/WS 入口接到转发逻辑上。
+//! 数据面转发逻辑在 [`super::data_plane::handle_push`] / [`super::data_plane::handle_watch`]
+//! （传输无关）；本模块只负责把 HTTP/WS 入口接到转发逻辑上。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use stross_proto::message::StreamInfo;
 
-use crate::relay::{PeerInfo, RelayState, handle_push, handle_watch};
+use crate::relay::data_plane::{handle_push, handle_watch};
+use crate::relay::{PeerInfo, RelayState};
 use crate::transport::webrtc::{PeerCommand, WebRtcTransport};
 use crate::transport::ws::WsTransport;
 
@@ -108,7 +109,7 @@ async fn api_proxy_start(
             "streamId": id,
             "proxied": true,
         }))),
-        Err(e) => Err(api_err(StatusCode::CONFLICT, e)),
+        Err(e) => Err(api_err(StatusCode::CONFLICT, e.to_string())),
     }
 }
 

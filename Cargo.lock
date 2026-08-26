@@ -4806,7 +4806,6 @@ name = "stross-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
  "futures-util",
  "hostname",
@@ -4815,6 +4814,7 @@ dependencies = [
  "stross-core",
  "stross-media",
  "stross-proto",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",
@@ -4856,6 +4856,7 @@ dependencies = [
  "str0m",
  "stross-proto",
  "stross-transport",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",
@@ -4915,7 +4916,6 @@ dependencies = [
  "anyhow",
  "clap",
  "stross-core",
- "stross-proto",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -109,7 +109,7 @@ fn peer_from_discovered(d: crate::discovery::Discovered) -> PeerInfo {
             .as_ref()
             .map(|i| i.transports.clone())
             .unwrap_or_default(),
-        url: format!("http://{}:{}/", d.ip, d.port),
+        url: crate::transport::RelayUrl::http(&d.ip.to_string(), d.port),
     }
 }
 

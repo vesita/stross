@@ -21,6 +21,7 @@
 
 #[cfg(feature = "discovery")]
 pub mod discovery;
+pub mod error;
 pub mod jitter;
 pub mod relay;
 pub mod sender;
@@ -35,3 +36,5 @@ pub use stross_transport::{DataSession, SessionPacket, Transport, TransportError
 
 pub use relay::{RelayHandle, RelayServer};
 pub use sender::RelayClient;
+
+pub use error::{RelayOpError, WatchError};

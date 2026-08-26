@@ -28,7 +28,10 @@ use stross_proto::frame::Frame;
 use stross_proto::message::{DiscoveryInfo, MediaKind, RoleId, TransportId};
 
 use crate::engine::SenderEngine;
+use crate::error::{Error, Result};
+
 use crate::kernel::{Kernel, NodeInfo, NodeRole, RelayDataPlane};
+use crate::lock::MutexExt;
 
 /// 运行平台（UI 层注入）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +94,7 @@ impl StrossApp {
 
     /// 注入采集后端（UI 层在启动时调用一次）。
     pub fn set_backend(&self, backend: Arc<dyn CaptureBackend>) {
-        *self.backend.lock().unwrap() = Some(backend);
+        *self.backend.lock_poisoned() = Some(backend);
     }
 
     // -----------------------------------------------------------------------
@@ -126,14 +129,14 @@ impl StrossApp {
     /// 本机中继以**受控模式**启动（需求 F2.2「先会话后传输」）：只有内核
     /// 创建的会话 id 才能推流；中继作为数据面后端接入内核
     /// （[`Kernel::attach_data_plane`]），流生命周期事件转发为 [`KernelEvent`]。
-    pub async fn start_relay(&self) -> Result<RelayInfo, String> {
+    pub async fn start_relay(&self) -> Result<RelayInfo> {
         self.start_relay_on(DEFAULT_PORT).await
     }
 
     /// 在指定端口启动中继（受内核控制的数据面）；被占用时回退随机端口。
-    pub async fn start_relay_on(&self, port: u16) -> Result<RelayInfo, String> {
+    pub async fn start_relay_on(&self, port: u16) -> Result<RelayInfo> {
         {
-            let guard = self.relay.lock().unwrap();
+            let guard = self.relay.lock_poisoned();
             if let Some(r) = guard.as_ref() {
                 return Ok(relay_info(r.port));
             }
@@ -143,16 +146,14 @@ impl StrossApp {
             Ok(h) => h,
             Err(_) => {
                 tracing::warn!("端口 {port} 被占用，本机中继回退到随机端口");
-                RelayServer::start_controlled(0)
-                    .await
-                    .map_err(|e| e.to_string())?
+                RelayServer::start_controlled(0).await?
             }
         };
         let port = handle.port;
         // 中继接入内核（数据面后端）：订阅流事件、会话预授权
         self.kernel
             .attach_data_plane(Arc::new(RelayDataPlane::new(&handle)));
-        *self.relay.lock().unwrap() = Some(handle);
+        *self.relay.lock_poisoned() = Some(handle);
         // 把本机注册进内核设备图（含采集能力，供会话协商）
         self.register_local_node();
         // mDNS 广播本机中继，局域网内其它设备（如电脑端 Stross）可扫描发现。
@@ -172,7 +173,7 @@ impl StrossApp {
             );
             match Discovery::start(&instance, &local_ips(), port, &info) {
                 Ok(d) => {
-                    *self.discovery.lock().unwrap() = Some(d);
+                    *self.discovery.lock_poisoned() = Some(d);
                 }
                 Err(e) => tracing::warn!("mDNS 广播失败: {e}"),
             }
@@ -192,7 +193,7 @@ impl StrossApp {
             caps: vec![],
             endpoints: vec![],
         });
-        if let Some(backend) = self.backend.lock().unwrap().as_ref() {
+        if let Some(backend) = self.backend.lock_poisoned().as_ref() {
             kernel.register_capability("local", backend.descriptor());
         }
     }
@@ -201,16 +202,14 @@ impl StrossApp {
     ///
     /// 返回的 [`RelayInfo`] 透传 mDNS 能力引导信息（设备名 / 角色 / 传输），
     /// 供前端直接展示设备卡片，无需再手动输入地址。
-    pub async fn scan_relays(&self) -> Result<Vec<RelayInfo>, String> {
-        let found = Discovery::browse(Duration::from_secs(2))
-            .await
-            .map_err(|e| e.to_string())?;
+    pub async fn scan_relays(&self) -> Result<Vec<RelayInfo>> {
+        let found = Discovery::browse(Duration::from_secs(2)).await?;
         Ok(found
             .into_iter()
             .map(|d| {
                 // 单 key JSON 解码（F1.2）；旧设备 / 缺失时回退默认值
                 let info = DiscoveryInfo::from_txt(&d.txt);
-                let url = format!("http://{}:{}/", d.ip, d.port);
+                let url = stross_core::transport::RelayUrl::http(&d.ip.to_string(), d.port);
                 RelayInfo {
                     port: d.port,
                     urls: vec![url],
@@ -244,55 +243,35 @@ impl StrossApp {
         &self,
         mut cfg: StreamConfig,
         relay_url: Option<String>,
-    ) -> Result<StartResult, String> {
-        if self.engine.lock().unwrap().is_some() {
-            return Err("已经在推流中，请先停止".into());
+    ) -> Result<StartResult> {
+        if self.engine.lock_poisoned().is_some() {
+            return Err(Error::Message("已经在推流中，请先停止".into()));
         }
         let backend = self
             .backend
-            .lock()
-            .unwrap()
+            .lock_poisoned()
             .clone()
-            .ok_or("采集后端未初始化")?;
+            .ok_or_else(|| Error::Message("采集后端未初始化".into()))?;
         // 会话兜底：受控中继只接受内核会话 id；未建会话时自动创建
-        if self.kernel.has_data_plane() && !self.kernel.has_session(&cfg.stream_id) {
-            tracing::info!(
-                "stream_id {} 未关联内核会话，自动创建本机会话",
-                cfg.stream_id
-            );
-            let session = self
-                .kernel
-                .create_session(
-                    "local",
-                    &["local".into()],
-                    &crate::SessionPrefs {
-                        title: cfg.title.clone(),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|e| format!("创建会话失败: {e}"))?;
-            cfg.stream_id = session.id;
-        }
+        self.ensure_session(&mut cfg)?;
         // 未指定中继时，推到已连接（常驻）的本机中继；
         // 推流地址按媒体类型自动选传输（视频→SRT>QUIC>WS，纯音频→QUIC>WS）
         let relay_url = match relay_url {
             Some(u) => Some(u),
             None => {
-                let guard = self.relay.lock().unwrap();
+                let guard = self.relay.lock_poisoned();
                 guard.as_ref().map(|r| r.auto_push_url(cfg.video.is_some()))
             }
         };
-        let engine = SenderEngine::start(cfg.clone(), backend, relay_url.clone(), DEFAULT_PORT)
-            .await
-            .map_err(|e| e.to_string())?;
+        let engine =
+            SenderEngine::start(cfg.clone(), backend, relay_url.clone(), DEFAULT_PORT).await?;
         // 有效中继端口：内嵌中继 > 常驻中继 > 默认端口
         let relay_port = engine
             .relay_port()
-            .or_else(|| self.relay.lock().unwrap().as_ref().map(|r| r.port))
+            .or_else(|| self.relay.lock_poisoned().as_ref().map(|r| r.port))
             .unwrap_or(DEFAULT_PORT);
         let started_at = stross_proto::time::unix_secs();
-        *self.engine.lock().unwrap() = Some(RunningStream {
+        *self.engine.lock_poisoned() = Some(RunningStream {
             engine,
             relay_port,
             title: cfg.title.clone(),
@@ -306,9 +285,34 @@ impl StrossApp {
         })
     }
 
+    /// 确保 `cfg.stream_id` 是内核已签发会话（受控中继只接受内核会话 id，
+    /// 需求 F2.2 / D4：id 与 stream_id 合一）。
+    ///
+    /// 新 UI 应先 `create_session` 取回内核签发的 id 再推流；旧 UI 直接传
+    /// 自定义 id 时，在此兜底自动创建本机会话并改写 `cfg.stream_id`。
+    fn ensure_session(&self, cfg: &mut StreamConfig) -> Result<()> {
+        if !self.kernel.has_data_plane() || self.kernel.has_session(&cfg.stream_id) {
+            return Ok(());
+        }
+        tracing::info!(
+            "stream_id {} 未关联内核会话，自动创建本机会话",
+            cfg.stream_id
+        );
+        let session = self.kernel.create_session(
+            "local",
+            &["local".into()],
+            &crate::SessionPrefs {
+                title: cfg.title.clone(),
+                ..Default::default()
+            },
+        )?;
+        cfg.stream_id = session.id;
+        Ok(())
+    }
+
     /// 停止推流。
-    pub async fn stop_stream(&self) -> Result<(), String> {
-        let engine = self.engine.lock().unwrap().take();
+    pub async fn stop_stream(&self) -> Result<()> {
+        let engine = self.engine.lock_poisoned().take();
         if let Some(stream) = engine {
             tokio::spawn(async move {
                 stream.engine.stop().await;
@@ -319,7 +323,7 @@ impl StrossApp {
 
     /// 推流状态。
     pub fn stream_status(&self) -> StreamStatus {
-        let guard = self.engine.lock().unwrap();
+        let guard = self.engine.lock_poisoned();
         match guard.as_ref() {
             Some(s) => StreamStatus {
                 running: true,
@@ -340,8 +344,9 @@ impl StrossApp {
 
     /// 采集真实状态（Android 由原生控制帧异步回报；桌面在启动后即为就绪）。
     pub fn capture_status(&self) -> CaptureStatusView {
-        let active = self.engine.lock().unwrap().is_some();
-        let (started, error) = match self.engine.lock().unwrap().as_ref() {
+        let guard = self.engine.lock_poisoned();
+        let active = guard.is_some();
+        let (started, error) = match guard.as_ref() {
             Some(s) => {
                 let st = s.engine.capture_status();
                 (st.started, st.error)
@@ -358,8 +363,7 @@ impl StrossApp {
     /// 运行中推流的中继端口（供"打开观看端"使用）。
     pub fn stream_relay_port(&self) -> u16 {
         self.engine
-            .lock()
-            .unwrap()
+            .lock_poisoned()
             .as_ref()
             .map(|s| s.relay_port)
             .unwrap_or(DEFAULT_PORT)
@@ -367,7 +371,7 @@ impl StrossApp {
 
     /// 本机主中继端口（`start_relay` / `start_relay_on` 启动的那个）。
     pub fn relay_port(&self) -> Option<u16> {
-        self.relay.lock().unwrap().as_ref().map(|r| r.port)
+        self.relay.lock_poisoned().as_ref().map(|r| r.port)
     }
 
     // -----------------------------------------------------------------------
@@ -386,15 +390,15 @@ impl StrossApp {
         relay_url: String,
         stream_id: String,
         audio_out: AudioOut,
-    ) -> Result<Arc<Receiver>, String> {
+    ) -> Result<Arc<Receiver>> {
         {
-            let guard = self.receiver.lock().unwrap();
+            let guard = self.receiver.lock_poisoned();
             if let Some(r) = guard.as_ref() {
                 r.stop(); // 先停旧的
             }
         }
         let r = Receiver::start(relay_url, stream_id, audio_out, self.local_proxy()).await?;
-        *self.receiver.lock().unwrap() = Some(r.clone());
+        *self.receiver.lock_poisoned() = Some(r.clone());
         Ok(r)
     }
 
@@ -406,38 +410,38 @@ impl StrossApp {
         &self,
         relay_url: String,
         stream_id: String,
-    ) -> Result<Arc<Receiver>, String> {
+    ) -> Result<Arc<Receiver>> {
         {
-            let guard = self.receiver.lock().unwrap();
+            let guard = self.receiver.lock_poisoned();
             if let Some(r) = guard.as_ref() {
                 r.stop(); // 先停旧的
             }
         }
         let r = Receiver::start_raw(relay_url, stream_id, self.local_proxy()).await?;
-        *self.receiver.lock().unwrap() = Some(r.clone());
+        *self.receiver.lock_poisoned() = Some(r.clone());
         Ok(r)
     }
 
     /// 停止接收。
     pub fn stop_receive(&self) {
-        if let Some(r) = self.receiver.lock().unwrap().take() {
+        if let Some(r) = self.receiver.lock_poisoned().take() {
             r.stop();
         }
     }
 
     /// 本机中继的代理能力（观看直连失败时级联兜底）；本机中继未启动时为 `None`。
     fn local_proxy(&self) -> Option<LocalProxy> {
-        self.relay.lock().unwrap().as_ref().map(|h| LocalProxy {
+        use stross_core::transport::RelayUrl;
+        self.relay.lock_poisoned().as_ref().map(|h| LocalProxy {
             state: h.state(),
-            ws_base: format!("ws://127.0.0.1:{}", h.port),
+            ws_base: RelayUrl::ws("127.0.0.1", h.port, None).to_string(),
         })
     }
 
     /// 取出当前接收会话的解码帧通道（每会话一次）。
     pub fn take_receive_frames(&self) -> Option<mpsc::Receiver<RenderedFrame>> {
         self.receiver
-            .lock()
-            .unwrap()
+            .lock_poisoned()
             .as_ref()
             .and_then(|r| r.take_frames())
     }
@@ -445,8 +449,7 @@ impl StrossApp {
     /// 取出当前接收会话的编码帧通道（`start_receive_raw`；每会话一次）。
     pub fn take_receive_raw_frames(&self) -> Option<mpsc::Receiver<Frame>> {
         self.receiver
-            .lock()
-            .unwrap()
+            .lock_poisoned()
             .as_ref()
             .and_then(|r| r.take_raw_frames())
     }
@@ -454,8 +457,7 @@ impl StrossApp {
     /// 当前接收统计。
     pub fn receive_status(&self) -> ReceiveStats {
         self.receiver
-            .lock()
-            .unwrap()
+            .lock_poisoned()
             .as_ref()
             .map(|r| r.stats())
             .unwrap_or_default()
@@ -529,14 +531,8 @@ pub struct CaptureStatusView {
 }
 
 fn relay_info(port: u16) -> RelayInfo {
-    let ips = local_ips();
-    let mut urls: Vec<String> = ips
-        .iter()
-        .map(|ip| format!("http://{ip}:{port}/"))
-        .collect();
-    if urls.is_empty() {
-        urls.push(format!("http://127.0.0.1:{port}/"));
-    }
+    // 多网卡：列出全部局域网 IP 入口（无局域网 IP 时回退回环）
+    let urls = stross_core::transport::RelayUrl::http_entries(port);
     RelayInfo {
         port,
         urls,
@@ -558,19 +554,10 @@ fn relay_info(port: u16) -> RelayInfo {
 /// * 推到外部中继（`relay_url` 非回环地址）→ 直接指向该中继
 /// * 本机中继（回环地址 / 未指定）→ 列出本机局域网 IP
 fn watch_urls(relay_url: Option<&str>, relay_port: u16) -> Vec<String> {
-    if let Some(url) = relay_url {
-        // ws://host:port/ws/push → 中继入口 http://host:port/
-        if let Some(rest) = url
-            .strip_prefix("ws://")
-            .or_else(|| url.strip_prefix("wss://"))
-        {
-            let host_port: String = rest.split('/').next().unwrap_or("").to_string();
-            if !host_port.starts_with("127.0.0.1")
-                && !host_port.starts_with("localhost")
-                && !host_port.starts_with("0.0.0.0")
-            {
-                return vec![format!("http://{host_port}/")];
-            }
+    if let Some(url) = relay_url.and_then(stross_core::transport::RelayUrl::parse) {
+        // 仅 ws 基址可直接反推 HTTP 入口（srt/quic 属 UDP 数据面端口，入口仍是本机 HTTP）
+        if url.is_ws() && !url.is_loopback() {
+            return vec![url.base_http()];
         }
     }
     relay_info(relay_port).urls

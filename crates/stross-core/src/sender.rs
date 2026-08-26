@@ -38,6 +38,10 @@ impl RelayClient {
     /// `srt://host:port`（自适应，relay 的 [`RelayHandle::srt_port`]）与
     /// `quic://host:port`（无损多路复用，relay 的 [`RelayHandle::quic_port`]）。
     pub async fn connect(url: &str, hello: ControlMessage) -> Result<(Self, mpsc::Sender<Frame>)> {
+        // 地址解析收口在 RelayUrl：未知 scheme / 缺端口提前失败（错误信息优于
+        // 落到传输层再报「连接失败」）
+        crate::transport::RelayUrl::parse(url)
+            .ok_or_else(|| anyhow::anyhow!("无法解析中继地址: {url}"))?;
         let stream_id = match &hello {
             ControlMessage::Hello { stream_id, .. } => stream_id.clone(),
             _ => String::new(),

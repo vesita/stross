@@ -11,13 +11,15 @@ use tokio::task::JoinHandle;
 
 use stross_proto::message::StreamInfo;
 
+#[cfg(feature = "discovery")]
+use super::peers;
+#[cfg(feature = "discovery")]
 use crate::net::local_ips;
 use crate::transport::quic::QuicTransport;
 use crate::transport::srt::SrtTransport;
 
 use super::data_plane;
 use super::http;
-use super::peers;
 use super::state::{RelayEvent, RelayState};
 
 /// 默认中继端口。

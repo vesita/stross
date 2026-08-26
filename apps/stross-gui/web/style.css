@@ -231,34 +231,7 @@ legend {
 .row .grow { flex: 1; min-width: 160px; }
 
 .hint { color: var(--text-3); font-size: 12px; margin: 0; }
-.icon-hint { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
-.icon-hint .ic { width: 15px; height: 15px; }
 .hidden { display: none !important; }
-
-/* ---------------- 分段选择（seg） ---------------- */
-
-.seg {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-pill);
-  background: var(--surface-2);
-  color: var(--text-2);
-  cursor: pointer;
-  user-select: none;
-  transition: border-color 0.15s, background 0.15s, color 0.15s, box-shadow 0.15s;
-}
-.seg:hover { border-color: var(--border-strong); color: var(--text-1); }
-.seg:has(input:checked) {
-  background: linear-gradient(180deg, rgba(91, 140, 255, 0.17), rgba(91, 140, 255, 0.06));
-  border-color: rgba(91, 140, 255, 0.55);
-  color: #d4e2ff;
-  box-shadow: inset 0 0 0 1px rgba(91, 140, 255, 0.18), var(--shadow-sm);
-}
-.seg input { display: none; }
-.seg .ic { width: 16px; height: 16px; }
 
 /* ---------------- 表单控件 ---------------- */
 
@@ -331,20 +304,7 @@ button.danger:hover:not(:disabled) {
   border-color: var(--err);
 }
 
-.ghost-btn {
-  background: transparent;
-  border-color: transparent;
-  color: var(--text-2);
-}
-.ghost-btn:hover:not(:disabled) {
-  color: var(--err);
-  background: rgba(248, 113, 113, 0.08);
-  border-color: rgba(248, 113, 113, 0.4);
-  transform: none;
-  filter: none;
-}
-
-.small-btn { padding: 6px 12px; font-size: 13px; border-radius: var(--r-sm); }
+/* ---------------- 表单/胶囊等 ---------------- */
 
 /* 加载中：按钮内 spinner（JS 通过 setBtnLoading 切换） */
 .spinner {
@@ -358,8 +318,6 @@ button.danger:hover:not(:disabled) {
 }
 .spinner.dark { border-color: rgba(91, 140, 255, 0.25); border-top-color: var(--accent); }
 @keyframes spin { to { transform: rotate(360deg); } }
-
-.actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
 
 /* ---------------- 状态指示 ---------------- */
 
@@ -482,76 +440,6 @@ button.danger:hover:not(:disabled) {
 }
 .url-list li .recent-del .ic { width: 14px; height: 14px; }
 
-/* ---------------- 连接视图 ---------------- */
-
-.connect-card {
-  grid-column: 1 / -1;
-  max-width: 760px;
-  margin: 0 auto;
-  width: 100%;
-  container-type: inline-size; /* 扫描结果多列网格的查询锚点 */
-}
-
-/* 主界面（推流/观看）跨满两列网格，卡片按单列流式排布 */
-#app-view { grid-column: 1 / -1; }
-
-.scan-results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
-
-/* ---------------- 本机锚点卡片 ---------------- */
-
-.anchor-box {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 10px;
-  padding: 12px 14px;
-  background: var(--surface-2);
-  border: 1px solid rgba(52, 211, 153, 0.3);
-  border-radius: var(--r-md);
-}
-.anchor-box.err {
-  border-color: rgba(248, 113, 113, 0.4);
-}
-.anchor-box .url-list { margin-top: 0; }
-.anchor-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-1);
-}
-.anchor-line .ic { width: 16px; height: 16px; color: var(--ok); }
-.anchor-box.err .anchor-line .ic { color: var(--err); }
-
-/* 网格页串流区跨满两栏（宽容器下） */
-.span-2 { grid-column: 1 / -1; }
-
-.scan-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  width: 100%;
-  text-align: left;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: 12px 14px;
-  cursor: pointer;
-  transition: border-color 0.16s, background 0.16s, transform 0.16s, box-shadow 0.16s;
-}
-.scan-card:hover {
-  border-color: rgba(91, 140, 255, 0.55);
-  background: var(--surface-3);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-sm);
-}
-.scan-card.selected {
-  border-color: var(--accent);
-  background: linear-gradient(180deg, rgba(91, 140, 255, 0.13), rgba(91, 140, 255, 0.04));
-  box-shadow: inset 0 0 0 1px rgba(91, 140, 255, 0.25);
-}
-
 .card-ic {
   width: 34px;
   height: 34px;
@@ -576,7 +464,7 @@ button.danger:hover:not(:disabled) {
   font-size: 12px;
   font-family: var(--font-mono);
 }
-.card-body .scan-meta .chips, .card-body .scan-meta .watchers { font-family: var(--font-sans); }
+.card-body .scan-meta .chips { font-family: var(--font-sans); }
 
 .chips { display: inline-flex; gap: 4px; align-items: center; }
 .chip {
@@ -603,14 +491,6 @@ button.danger:hover:not(:disabled) {
 }
 .chip .ic { width: 12px; height: 12px; }
 
-.watchers {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-3);
-}
-.watchers .ic { width: 13px; height: 13px; }
-
 .err-text { color: var(--err); }
 
 /* ---------------- 空状态 ---------------- */
@@ -631,87 +511,6 @@ button.danger:hover:not(:disabled) {
 .empty .ic { width: 22px; height: 22px; opacity: 0.55; }
 .empty p { margin: 0; font-size: 12px; }
 .empty .hint { font-size: 12px; }
-
-/* ---------------- 主界面 Tabs ---------------- */
-
-.tabs {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 18px;
-  padding: 6px;
-  background: var(--surface-1);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-sm);
-}
-.tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 20px;
-  border: none;
-  border-radius: var(--r-md);
-  background: transparent;
-  color: var(--text-2);
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.18s, color 0.18s, box-shadow 0.18s;
-}
-.tab:hover:not(.active) { background: rgba(255, 255, 255, 0.045); color: var(--text-1); transform: none; }
-.tab.active {
-  background: var(--accent-grad);
-  color: #fff;
-  box-shadow: var(--shadow-accent);
-}
-.tab .ic { width: 17px; height: 17px; }
-.tab-conn {
-  margin-left: auto;
-  padding: 0 12px;
-  color: var(--text-3);
-  font-size: 12px;
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 46%;
-}
-
-.tab-pane {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  /* 容器查询锚点：内部 pane-grid / 流列表按实际容器宽度自适应折叠 */
-  container-type: inline-size;
-}
-
-/* 面板布局：宽容器两栏（配置+状态 / 控制+画面），窄容器自动折叠单栏 */
-.pane-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
-}
-@container (min-width: 780px) {
-  .pane-grid { grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); }
-}
-
-/* 流列表 / 扫描结果：宽容器多列网格，窄容器单列 */
-.recv-streams { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
-@container (min-width: 560px) {
-  .recv-streams {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-    gap: 8px;
-  }
-  .scan-results {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: 8px;
-  }
-}
-.recv-streams .empty, .scan-results .empty { grid-column: 1 / -1; }
 
 /* 视图 / 面板切换过渡 */
 .view-enter { animation: fadeUp 0.26s ease; }
@@ -940,29 +739,6 @@ button.danger:hover:not(:disabled) {
 
 /* ---------------- B2 反向外设：共享麦克风 / 接收手机麦克风 ---------------- */
 
-/* 设备卡片上的「共享麦克风」二级操作（麦克风图标） */
-.scan-act {
-  width: 30px;
-  height: 30px;
-  margin-left: auto;
-  flex: none;
-  display: grid;
-  place-items: center;
-  border-radius: var(--r-md);
-  color: var(--text-3);
-  background: rgba(52, 211, 153, 0.08);
-  border: 1px solid rgba(52, 211, 153, 0.22);
-  cursor: pointer;
-  transition: color 0.16s, background 0.16s, border-color 0.16s;
-}
-.scan-act:hover, .scan-act:focus-visible {
-  color: #6ee7b7;
-  background: rgba(52, 211, 153, 0.16);
-  border-color: rgba(52, 211, 153, 0.45);
-}
-.scan-act .ic { width: 15px; height: 15px; }
-.scan-card.selected .scan-act { background: rgba(52, 211, 153, 0.1); }
-
 /* 电脑端「接收手机麦克风」面板（本机锚点卡片内） */
 .mic-recv { margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--border); }
 #mic-recv-btn { width: 100%; justify-content: center; }
@@ -1026,32 +802,67 @@ button.danger:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
-/* ---------------- 移动端适配 ---------------- */
+/* ---------------- 移动端适配（窄屏 / 触屏：设备 × 共享流 界面） ---------------- */
 
 @media (max-width: 720px) {
+  /* 基础：字号 + 头部 + 单栏（.dual 由 860px 断点已折叠，此处收紧间距） */
   html, body { font-size: 15px; }
-  main { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
-  header { padding: 10px 14px; }
+  main { padding: 12px; gap: 12px; }
+  header { padding: 10px 14px; flex-wrap: wrap; gap: 6px; }
   .logo-mark { width: 32px; height: 32px; border-radius: 9px; }
   .brand h1 { font-size: 16px; }
+  .brand .subtitle { font-size: 11px; }
+  .header-right { gap: 6px; flex-wrap: wrap; }
+  .header-right .badge { font-size: 11px; padding: 4px 9px; }
 
-  /* 触控目标 ≥ 44px */
+  /* 双栏单列：左右两栏垂直堆叠，共享流面板置于接收画布之上 */
+  .dual { gap: 12px; }
+
+  /* 触控目标 ≥ 44px（通用控件） */
   button {
     padding: 12px 18px;
     min-height: 44px;
     font-size: 15px;
   }
-  .seg { padding: 12px 14px; flex: 1; text-align: center; justify-content: center; }
-  select, input[type="text"] { padding: 11px 12px; font-size: 15px; min-height: 44px; }
+  select, input[type="text"], textarea { padding: 11px 12px; font-size: 15px; min-height: 44px; }
   .check { min-height: 44px; }
+  .check .ic { width: 18px; height: 18px; }
 
-  .tabs { flex-wrap: wrap; gap: 6px; }
-  .tab { flex: 1; padding: 12px 8px; font-size: 14px; }
-  .tab-conn { flex-basis: 100%; max-width: none; margin-left: 0; margin-top: 4px; text-align: center; }
+  /* 设备卡片：头部触控 + 操作按钮 + 点流即收条目 */
+  .dev-head { padding: 14px 14px; gap: 10px; }
+  .dev-card .card-ic { width: 38px; height: 38px; }
+  .dev-card .card-ic .ic { width: 19px; height: 19px; }
+  .dev-detail { padding: 4px 12px 12px; }
+  .dev-ops { gap: 10px; }
+  .dev-ops button {
+    min-height: 44px;
+    padding: 10px 14px;
+    font-size: 14px;
+    flex: 1 1 auto;
+  }
+  .dev-stream-item {
+    min-height: 50px;
+    padding: 12px 12px;
+    gap: 10px;
+  }
+  .dev-stream-item .card-ic { width: 32px; height: 32px; }
 
-  .actions { flex-wrap: wrap; }
-  .actions button { flex: 1; }
+  /* 共享流面板：条目触控 + 停止按钮 */
+  .share-item { padding: 12px; gap: 10px; }
+  .share-ic { width: 34px; height: 34px; }
+  .share-arrow { width: 26px; height: 26px; }
+  .share-stop { min-height: 44px; padding: 10px 12px; }
 
+  /* 接收画布：满宽、触屏比例 */
+  .canvas-wrap { margin: 10px 0; }
+  #recv-canvas { max-height: 50vh; }
+
+  /* 弹窗：小屏内边距收紧 + 高弹窗可滚动 */
+  .modal { padding: 12px; align-items: flex-start; overflow-y: auto; }
+  .modal-box { padding: 16px; max-height: calc(100vh - 24px); overflow-y: auto; }
+  .modal-box textarea, #mic-recv-token { font-size: 14px; min-height: 110px; }
+
+  /* 手动添加历史条目 + 删除按钮触控 */
   .url-list li { padding: 12px 14px; font-size: 14px; }
   .url-list li .recent-del {
     width: 40px;
@@ -1059,9 +870,8 @@ button.danger:hover:not(:disabled) {
     margin: -8px -6px -8px 0;
     opacity: 1;
   }
-  .header-right { gap: 6px; }
-  .scan-act { width: 44px; height: 44px; }
-  .modal-box textarea, #mic-recv-token { font-size: 14px; min-height: 110px; }
+  .pane-tools { gap: 8px; }
+  .pane-tools button { flex: none; }
 }
 
 /* ---------------- 无障碍：减少动效 ---------------- */

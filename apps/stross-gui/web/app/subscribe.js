@@ -1,7 +1,7 @@
 "use strict";
-// Stross 前端 —— 接收域 + 共享流面板（script 全局作用域）：
-// 从本机/设备锚点接收共享流（直连，失败自动级联）→ canvas 绘制 / 扬声器播放；
-// 右栏「共享流」面板把全部活动共享（出站广播/定向 + 入站接收）统一呈现与停止。
+// Stross 前端 —— 订阅（入站接收）域 + 共享流面板（script 全局作用域）：
+// 本机订阅目标的共享流（点流即收 + B2 接收手机麦克风）→ canvas 绘制 / 扬声器播放；
+// 右栏「共享流」面板把全部活动共享（出站发布 + 入站订阅）统一呈现与停止。
 /** 当前接收目标中继（点选的局域网设备锚点优先，否则本机锚点；均无则 null）。 */
 function currentRelay() {
     if (targetRelay)
@@ -159,15 +159,15 @@ function shareItems() {
         });
     }
     // 出站：广播共享（屏幕 / 麦克风 → 局域网）
-    if (streaming && streamInfo && !(micShare && micShare.active)) {
+    if (publishing && publishInfo && !(micShare && micShare.active)) {
         const media = shareKind === 'mic' ? 'mic' : 'screen';
         items.push({
-            id: 'out-' + streamInfo.streamId,
+            id: 'out-' + publishInfo.streamId,
             direction: 'out',
             media,
             target: '局域网广播',
-            state: starting ? 'starting' : 'live',
-            detail: `已推 ${fmtElapsed(Math.floor(Date.now() / 1000) - streamInfo.startedAt)}`,
+            state: publishStarting ? 'starting' : 'live',
+            detail: `已推 ${fmtElapsed(Math.floor(Date.now() / 1000) - publishInfo.startedAt)}`,
         });
     }
     // 入站：接收中的共享（观看 / 反向麦克风）
@@ -190,14 +190,6 @@ function shareItems() {
     }
     return items;
 }
-/** 当前接收中的流 id（供共享面板定位流信息）。 */
-let recvStreamId = null;
-const MEDIA_LABELS = {
-    screen: '屏幕',
-    camera: '摄像头',
-    mic: '麦克风',
-    systemAudio: '系统声',
-};
 /** 渲染右栏共享面板。 */
 function renderShares() {
     const box = $('share-list');
@@ -247,4 +239,63 @@ function shareItemEl(it) {
     };
     el.appendChild(stop);
     return el;
+} // 电脑端「接收手机麦克风」：签发展示凭证 + 自动等待接入并播放
+// ---------------------------------------------------------------------------
+/** 签发凭证并展示：手机在自身设备列表点本机 → 共享麦克风 → 粘贴凭证即可。
+ *  随后轮询本机串流列表，流出现即自动原生接收（扬声器播放，B3）。 */
+async function startMicReceive() {
+    const btn = $btn('mic-recv-btn');
+    setBtnLoading(btn, true);
+    hideGridError();
+    try {
+        const v = (await call('issue_share_token', { ttlSecs: 600 }));
+        $('mic-recv-panel').classList.remove('hidden');
+        $('mic-recv-pin').textContent = 'PIN ' + v.pin;
+        $input('mic-recv-token').value = v.token;
+        beginAwaitMicStream(v.streamId);
+        $('mic-recv-status').textContent = '等待手机接入…（凭证 ' + fmtSecs(v.expiresAt) + ' 过期）';
+        setBtnLoading(btn, false);
+    }
+    catch (e) {
+        setBtnLoading(btn, false);
+        showGridError('签发凭证失败：' + e.message);
+    }
+}
+/** 统一入口：电脑端已授权某流 id，开始轮询等待其接入，出现即自动订阅。
+ *  供「接收手机麦克风」签凭证与「协商允许」两条路径共用，消除重复状态机。 */
+function beginAwaitMicStream(streamId) {
+    micRecv = { streamId, checking: false, received: false };
+    void pollMicRecv();
+}
+/** 到期时间倒计时文案（Unix 秒 → "约 N 分钟"）。 */
+function fmtSecs(expiresAt) {
+    const mins = Math.max(1, Math.round((expiresAt - Date.now() / 1000) / 60));
+    return `约 ${mins} 分钟`;
+}
+/** 轮询本机受控中继串流列表：凭证对应的流接入后自动开始原生接收。 */
+async function pollMicRecv() {
+    if (!micRecv || micRecv.checking || micRecv.received)
+        return;
+    micRecv.checking = true;
+    try {
+        if (anchor) {
+            const resp = await fetch(`http://127.0.0.1:${anchor.port}/api/streams`, { cache: 'no-store' });
+            if (resp.ok) {
+                const data = (await resp.json());
+                const list = Array.isArray(data) ? data : (data.streams || []);
+                if (list.some((s) => s.streamId === micRecv.streamId)) {
+                    micRecv.received = true;
+                    $('mic-recv-status').textContent = '手机已接入，正在通过电脑扬声器播放…';
+                    $('mic-recv-status').style.color = 'var(--ok)';
+                    // 自动原生接收（音频设备输出；纯音频流无画面属正常）
+                    void startReceive(micRecv.streamId);
+                    return;
+                }
+            }
+        }
+    }
+    catch (_) { /* 中继短暂不可达，下一轮重试 */ }
+    micRecv.checking = false;
+    if (micRecv)
+        setTimeout(() => void pollMicRecv(), 2000);
 }

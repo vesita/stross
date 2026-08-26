@@ -49,7 +49,7 @@ impl Discovery {
         let props: std::collections::HashMap<String, String> = info.to_txt().into_iter().collect();
         // 多网卡广播：ServiceInfo::new 支持 AsIpAddrs（&[IpAddr]），
         // 一次注册携带全部地址记录
-        let mut info = ServiceInfo::new(
+        let info = ServiceInfo::new(
             SERVICE_TYPE,
             instance,
             &host,
@@ -58,7 +58,12 @@ impl Discovery {
             props,
         )
         .map_err(|e| anyhow::anyhow!("ServiceInfo: {e}"))?;
-        info = info.enable_addr_auto();
+        // 显式地址为准：**不启用 enable_addr_auto()**。
+        // 原因（Android 真机实测）：mdns-sd 的 `if_addrs::get_if_addrs()` 会枚举到
+        // dummy0/ifb0/ifb1 等虚拟接口及其 fe80 地址，auto 覆盖后把真实 wlan0 IPv4
+        // （如 192.168.11.60）挤掉，导致对端扫到手机只有不可达的 fe80 地址。
+        // 调用方 `local_ips()` 已返回真实局域网 IPv4，显式传入即可；
+        // 代价：WiFi 切换时需重新 start_relay 再注册（本应用每次锚定都会重走）。
         daemon.register(info)?;
         Ok(Self {
             daemon: Some(daemon),
@@ -101,6 +106,14 @@ impl Discovery {
                             }
                         })
                         .collect();
+                    tracing::debug!(
+                        "mDNS 解析到服务 {}，地址 {:?}",
+                        info.get_fullname(),
+                        info.get_addresses()
+                            .iter()
+                            .map(|s| s.to_ip_addr().to_string())
+                            .collect::<Vec<_>>(),
+                    );
                     let ip = reachable
                         .iter()
                         .find(|i| i.is_ipv4())

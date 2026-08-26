@@ -17,51 +17,74 @@ const LS_RECENT = 'stross.recentRelays';
 // —— 权限自动化（B2.5：凭证自动协商 + 防火墙） ——
 /** 协商端点固定端口（与 Rust `stross_app::DEFAULT_NEGOTIATOR_PORT` 一致）。 */
 const NEGOTIATOR_PORT = 18779;
+// ---------------------------------------------------------------------------
+// 单一状态源：全部运行时状态集中在此，各域文件显式读写；
+// 渲染是状态（state）的纯函数，消灭「散文件 let 全局变量 + 脆弱互斥拼真相」。
+// ---------------------------------------------------------------------------
+/** 运行平台 / 环境。 */
+let IS_ANDROID = false;
+let MY_IPS = [];
+/** 本机采集设备（相机/音频输入/系统声；由 list_devices 填充）。 */
 let devices = { cameras: [], audioInputs: [], systemAudio: [] };
-/** 是否正在启动共享（Android 采集启动中，等待 capture_status 真实回报）。 */
-let starting = false;
-let startingSince = 0;
-const START_TIMEOUT_MS = 60000;
-/** 本机锚点（免先连：init 自动 `start_relay`；共享/级联兜底的数据面入口）。 */
+/** 本机锚点（免先连：init 自动 `start_relay`；推流/级联兜底的数据面入口）。 */
 let anchor = null;
 /** 手动添加的设备地址（http://host:port，免 mDNS；与最近历史共享持久化）。 */
 let manualRelays = [];
-/** 当前接收目标中继（点选设备的锚点；null = 本机锚点）。 */
-let targetRelay = null;
 /** 设备列表（本机 + 局域网设备；渲染左栏）。 */
 let deviceViews = [];
 /** 当前选中的设备 key（展开态保持）。 */
 let expandedDevice = null;
 /** 流 id → 流信息缓存（接收传输自动选择按 video/audio 类型决策）。 */
 const remoteStreams = new Map();
-let IS_ANDROID = false;
-let MY_IPS = [];
-// —— 交互状态 ——
+/** 本机在线共享缓存（供本机卡片流区渲染）。 */
+let localStreams = [];
+// —— 交互状态（轮询句柄 / in-flight 防重入） ——
 let statusTimer = null; // 状态轮询句柄（应用打开期间常驻）
 let scanInFlight = false; // 「扫描设备」in-flight
 let discoverInFlight = false; // 设备流聚合 in-flight
 let discoverCacheAt = 0;
 const DISCOVER_TTL_MS = 5000;
-// —— 共享（出站）状态 ——
-let streaming = false; // 本机广播/定向共享是否进行中（流层）
-let shareKind = null; // 当前广播共享的媒体类型（屏幕/麦克风）
-let streamInfo = null;
-// —— 接收（入站）状态 ——
-let receiving = false;
-let recvFrameCount = 0;
-let recvAudioBlocks = 0; // 纯音频流（B2）：收到音频块即视为"有数据"
-let recvError = null;
-let recvUnlisten = null;
-// —— B2 反向外设状态 ——
-/** 手机端「共享麦克风」目标设备与推流状态（null = 未打开弹窗）。 */
+// —— 发布（出站共享）状态 ——
+/** 本机共享是否进行中（流层：广播/定向共用同一推流引擎）。 */
+let publishing = false;
+/** Android 采集启动中（等待 capture_status 真实回报）。 */
+let publishStarting = false;
+let publishStartingSince = 0;
+const START_TIMEOUT_MS = 60000;
+/** 当前共享的媒体类型（屏幕/麦克风）。 */
+let shareKind = null;
+/** 当前共享的流元信息。 */
+let publishInfo = null;
+/** B2 定向共享（手机麦克风 → 目标设备；null = 未打开弹窗）。 */
 let micShare = null;
 /** 最近一次凭证共享的目标设备基址（重开弹窗时恢复进行中状态用）。 */
 let micShareLastBase = null;
 /** 电脑端「接收手机麦克风」凭证与接入轮询状态（null = 未签发）。 */
 let micRecv = null;
+// —— 订阅（入站接收）状态 ——
+/** 本机是否正在接收（订阅）流。 */
+let receiving = false;
+/** 当前订阅中的流 id（供共享面板定位流信息）。 */
+let recvStreamId = null;
+let recvFrameCount = 0;
+let recvAudioBlocks = 0; // 纯音频流（B2）：收到音频块即视为"有数据"
+let recvError = null;
+let recvUnlisten = null;
+/** 当前接收目标中继（点选设备的锚点；null = 本机锚点）。 */
+let targetRelay = null;
+// —— 协商 / 授权状态 ——
+/** 当前等待人工确认的协商请求（negotiator-request 事件送达；null = 无）。 */
+let pendingApprove = null;
 /** 角色英文 → 中文显示（mDNS TXT `roles`）。 */
 const ROLE_LABELS = {
     sender: '共享',
     viewer: '接收',
     relay: '中继',
+};
+/** 共享媒体 → 中文显示。 */
+const MEDIA_LABELS = {
+    screen: '屏幕',
+    camera: '摄像头',
+    mic: '麦克风',
+    systemAudio: '系统声',
 };

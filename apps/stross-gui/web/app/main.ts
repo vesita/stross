@@ -1,8 +1,8 @@
 // Stross 前端 —— 初始化与事件绑定（script 全局作用域，按依赖序最后加载）。
 //
-// 界面模型：设备 × 共享流 组合管理（v6 界面改版）——
+// 界面模型：本机能力 → 发现对端 → 订阅对端推送的流（「设备 × 共享流」双栏）。
 //   左栏「设备」：本机 + 局域网设备卡片，点设备展开 → 发起共享（广播/定向）
-//             与该设备的在线共享（点条目即接收）；B2 接收手机麦克风入口在本机卡片。
+//             与该设备的在线共享（点条目即订阅接收）；B2 接收手机麦克风入口在本机卡片。
 //   右栏「共享流」：全部活动共享统一管理（方向 ↑↓ / 媒体 / 对端 / 状态 / 停止）。
 //
 // 生成 app/ 下的 JS：`npx tsc -p apps/stross-gui/web/tsconfig.json`
@@ -66,9 +66,6 @@ async function loadDevices(): Promise<void> {
 
 // ---------------------------------------------------------------- 权限自动化
 
-/** 当前等待人工确认的协商请求（negotiator-request 事件送达；null = 无）。 */
-let pendingApprove: PendingRequest | null = null;
-
 /** 电脑端收到设备接入请求：展示授权确认弹窗（首次人工确认，信任门控）。 */
 function onApproveRequest(req: PendingRequest): void {
   pendingApprove = req;
@@ -101,42 +98,13 @@ async function respondApprove(allow: boolean): Promise<void> {
   pendingApprove = null;
   if (allow && grant && grant.streamId) {
     // 电脑端自动监听该会话流：出现在 /api/streams 即原生接收
-    // （与「接收手机麦克风」一致；手机随后自动推流进入）
-    micRecv = { streamId: grant.streamId, checking: false, received: false };
-    void pollMicRecv();
+    // （与「接收手机麦克风」共用同一等待-订阅链路；手机随后自动推流进入）
+    beginAwaitMicStream(grant.streamId);
     $('approve-status').textContent = '已允许，等待手机接入…';
   } else {
     $('approve-status').textContent = allow ? '已允许并通知设备' : '已拒绝';
   }
   $('approve-modal').classList.add('hidden');
-}
-
-/** 防火墙自检：ufw 入站拦截 Stross 端口时显示「一键放行」横幅（仅 Linux 桌面）。 */
-async function checkFirewall(): Promise<void> {
-  if (IS_ANDROID) return;
-  try {
-    const st = (await call('firewall_status')) as FirewallStatus;
-    if (st.missing && st.missing.length > 0) {
-      $('fw-missing').textContent = st.missing.join('、');
-      $('fw-banner').classList.remove('hidden');
-    }
-  } catch (_) { /* 非 Linux / 未安装 ufw：静默忽略 */ }
-}
-
-/** 一键放行：polkit 弹一次系统授权，自动添加精确放行规则。 */
-async function allowFirewall(): Promise<void> {
-  const btn = $btn('fw-allow-btn');
-  btn.disabled = true;
-  try {
-    await call('firewall_allow');
-    $('fw-banner').classList.add('hidden');
-  } catch (e) {
-    const box = $('grid-error');
-    box.textContent = '防火墙放行失败：' + (e as Error).message;
-    box.classList.remove('hidden');
-  } finally {
-    btn.disabled = false;
-  }
 }
 
 // ---------------------------------------------------------------- 事件绑定

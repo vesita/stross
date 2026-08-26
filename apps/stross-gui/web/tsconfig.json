@@ -12,9 +12,11 @@
   "files": [
     "app/state.ts",
     "app/ui.ts",
-    "app/watch.ts",
-    "app/grid.ts",
-    "app/send.ts",
+    "app/discovery.ts",
+    "app/subscribe.ts",
+    "app/publish.ts",
+    "app/negotiate.ts",
+    "app/firewall.ts",
     "app/main.ts"
   ]
 }

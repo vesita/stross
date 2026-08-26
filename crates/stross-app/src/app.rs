@@ -53,16 +53,25 @@ impl Platform {
 pub struct StrossApp {
     platform: Platform,
     engine: Mutex<Option<RunningStream>>,
-    /// 常驻本机中继（连接阶段启动，观看与推流共用）。
-    relay: Mutex<Option<RelayHandle>>,
-    /// mDNS 广播句柄（本机中继启动时广播，便于局域网内设备扫描发现）。
-    discovery: Mutex<Option<Discovery>>,
+    /// 本机锚点：常驻受控中继 + mDNS 广播（免先连：一起启动、生命周期一致）。
+    anchor: Mutex<Option<LocalAnchor>>,
     /// 采集后端（平台相关，UI 层注入；`Arc` 使其可被引擎复用）。
     backend: Mutex<Option<Arc<dyn CaptureBackend>>>,
     /// 内核（控制面）：设备图 / 会话管理 / 路由（设计文档 §3）。
     kernel: Kernel,
     /// 接收播放（1e）：WS 收流 → SessionDataManager → PlaybackSink 解码。
     receiver: Mutex<Option<Arc<Receiver>>>,
+}
+
+/// 本机锚点（免先连：应用打开即自动建立；推流 / 观看 / 局域网发现共用）。
+struct LocalAnchor {
+    handle: RelayHandle,
+    /// mDNS 广播句柄（启动失败时为 `None`：中继仍可用，仅局域网不可发现）。
+    /// 仅用于持有：drop 即停止广播（RAII），无需读取。
+    #[allow(dead_code)]
+    discovery: Option<Discovery>,
+    /// 中继实际监听端口（绑定 0 自动分配时取实际值）。
+    port: u16,
 }
 
 /// 运行中的推流。
@@ -79,8 +88,7 @@ impl StrossApp {
         Self {
             platform,
             engine: Mutex::new(None),
-            relay: Mutex::new(None),
-            discovery: Mutex::new(None),
+            anchor: Mutex::new(None),
             backend: Mutex::new(None),
             kernel: Kernel::new(),
             receiver: Mutex::new(None),
@@ -136,9 +144,9 @@ impl StrossApp {
     /// 在指定端口启动中继（受内核控制的数据面）；被占用时回退随机端口。
     pub async fn start_relay_on(&self, port: u16) -> Result<RelayInfo> {
         {
-            let guard = self.relay.lock_poisoned();
-            if let Some(r) = guard.as_ref() {
-                return Ok(relay_info(r.port));
+            let guard = self.anchor.lock_poisoned();
+            if let Some(a) = guard.as_ref() {
+                return Ok(relay_info(a.port));
             }
         }
         // 优先指定端口；被占用时回退随机端口（本机中继"能用就行"，不因端口冲突失败）
@@ -153,14 +161,13 @@ impl StrossApp {
         // 中继接入内核（数据面后端）：订阅流事件、会话预授权
         self.kernel
             .attach_data_plane(Arc::new(RelayDataPlane::new(&handle)));
-        *self.relay.lock_poisoned() = Some(handle);
         // 把本机注册进内核设备图（含采集能力，供会话协商）
         self.register_local_node();
         // mDNS 广播本机中继，局域网内其它设备（如电脑端 Stross）可扫描发现。
         // 能力描述统一走 DiscoveryInfo 单 key JSON（F1.2 / 1d）。
         // 多网卡：广播全部局域网 IP（Discovery::start 内部处理空列表回退回环），
         // 避免只广播第一个 IP 导致其它网卡网段扫描不到本机
-        {
+        let discovery = {
             let instance = format!("sender-{port}");
             let info = DiscoveryInfo::relay_default(
                 "Stross 本机中继",
@@ -172,12 +179,18 @@ impl StrossApp {
                 ],
             );
             match Discovery::start(&instance, &local_ips(), port, &info) {
-                Ok(d) => {
-                    *self.discovery.lock_poisoned() = Some(d);
+                Ok(d) => Some(d),
+                Err(e) => {
+                    tracing::warn!("mDNS 广播失败: {e}");
+                    None
                 }
-                Err(e) => tracing::warn!("mDNS 广播失败: {e}"),
             }
-        }
+        };
+        *self.anchor.lock_poisoned() = Some(LocalAnchor {
+            handle,
+            discovery,
+            port,
+        });
         Ok(relay_info(port))
     }
 
@@ -259,8 +272,10 @@ impl StrossApp {
         let relay_url = match relay_url {
             Some(u) => Some(u),
             None => {
-                let guard = self.relay.lock_poisoned();
-                guard.as_ref().map(|r| r.auto_push_url(cfg.video.is_some()))
+                let guard = self.anchor.lock_poisoned();
+                guard
+                    .as_ref()
+                    .map(|a| a.handle.auto_push_url(cfg.video.is_some()))
             }
         };
         let engine =
@@ -268,7 +283,7 @@ impl StrossApp {
         // 有效中继端口：内嵌中继 > 常驻中继 > 默认端口
         let relay_port = engine
             .relay_port()
-            .or_else(|| self.relay.lock_poisoned().as_ref().map(|r| r.port))
+            .or_else(|| self.anchor.lock_poisoned().as_ref().map(|a| a.port))
             .unwrap_or(DEFAULT_PORT);
         let started_at = stross_proto::time::unix_secs();
         *self.engine.lock_poisoned() = Some(RunningStream {
@@ -371,7 +386,7 @@ impl StrossApp {
 
     /// 本机主中继端口（`start_relay` / `start_relay_on` 启动的那个）。
     pub fn relay_port(&self) -> Option<u16> {
-        self.relay.lock_poisoned().as_ref().map(|r| r.port)
+        self.anchor.lock_poisoned().as_ref().map(|a| a.port)
     }
 
     // -----------------------------------------------------------------------
@@ -432,9 +447,9 @@ impl StrossApp {
     /// 本机中继的代理能力（观看直连失败时级联兜底）；本机中继未启动时为 `None`。
     fn local_proxy(&self) -> Option<LocalProxy> {
         use stross_core::transport::RelayUrl;
-        self.relay.lock_poisoned().as_ref().map(|h| LocalProxy {
-            state: h.state(),
-            ws_base: RelayUrl::ws("127.0.0.1", h.port, None).to_string(),
+        self.anchor.lock_poisoned().as_ref().map(|a| LocalProxy {
+            state: a.handle.state(),
+            ws_base: RelayUrl::ws("127.0.0.1", a.port, None).to_string(),
         })
     }
 

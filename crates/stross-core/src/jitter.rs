@@ -442,6 +442,90 @@ mod tests {
     }
 
     #[test]
+    fn seq_lt_respects_u32_wraparound() {
+        // 直接验证序比较在回绕边界两侧的语义（半个序号空间内判断先后）
+        assert!(seq_lt(5, 6), "普通先后：5 落后于 6");
+        assert!(!seq_lt(6, 5), "普通先后：6 不落后于 5");
+        assert!(seq_lt(u32::MAX, 0), "回绕边界：u32::MAX 落后于 0");
+        assert!(!seq_lt(0, u32::MAX), "回绕边界：0 不落后于 u32::MAX");
+        assert!(seq_lt(1, 1 << 30), "半个空间内正常先后");
+        assert!(!seq_lt(1 << 30, 1), "半个空间内正常先后");
+    }
+
+    #[test]
+    fn emits_sequentially_across_wraparound() {
+        // 流在 u32::MAX 附近回绕：游标 wrapping_add 平滑越过边界，逐帧连续产出
+        let mut jb = JitterBuffer::new(JitterConfig::default());
+        let now = t0();
+        let start = u32::MAX - 3; // 覆盖 u32::MAX → 0 → 1 的回绕
+        jb.push(frame(start, true), now);
+        for i in 1..=6 {
+            jb.push(frame(start.wrapping_add(i), false), now);
+        }
+        let out = jb.poll(now);
+        let seqs: Vec<u32> = out.iter().map(|f| f.header.seq).collect();
+        assert_eq!(
+            seqs,
+            vec![u32::MAX - 3, u32::MAX - 2, u32::MAX - 1, u32::MAX, 0, 1, 2],
+            "跨回绕应连续产出"
+        );
+        assert_eq!(jb.stats.emitted, 7);
+    }
+
+    #[test]
+    fn late_frame_before_wrap_dropped_as_stale() {
+        // 游标已越过回绕点后，迟到的回绕前帧按过期丢弃（不得乱序插入）
+        let mut jb = JitterBuffer::new(JitterConfig::default());
+        let now = t0();
+        jb.push(frame(u32::MAX - 1, true), now);
+        jb.push(frame(u32::MAX, false), now);
+        jb.push(frame(0, false), now);
+        jb.push(frame(1, false), now);
+        assert_eq!(jb.poll(now).len(), 4, "回绕后连续输出，游标现为 2");
+        // 迟到的回绕前帧（应排在游标之前）→ 过期
+        jb.push(frame(u32::MAX - 2, false), now);
+        assert_eq!(jb.stats.dropped_stale, 1);
+        assert!(jb.poll(now).is_empty());
+    }
+
+    #[test]
+    fn stale_keyframe_before_wrap_does_not_resync() {
+        // 回绕边界之后的旧关键帧不得重置游标（防倒带回绕重对齐）
+        let mut jb = JitterBuffer::new(JitterConfig::default());
+        let now = t0();
+        jb.push(frame(u32::MAX - 1, true), now);
+        jb.push(frame(u32::MAX, false), now);
+        jb.push(frame(0, false), now);
+        jb.push(frame(1, false), now);
+        assert_eq!(jb.poll(now).len(), 4, "游标推进到 2");
+        jb.push(frame(u32::MAX - 2, true), now); // 迟到的回绕前关键帧
+        assert_eq!(jb.stats.dropped_stale, 1, "旧关键帧应丢弃而非重对齐");
+        assert_eq!(
+            jb.stats.emitted, 4,
+            "poll 已输出 4 帧，旧关键帧不得重置游标"
+        );
+        assert!(jb.poll(now).is_empty());
+    }
+
+    #[test]
+    fn hole_across_wraparound_times_out_and_resyncs() {
+        // 空洞恰好跨越回绕边界（u32::MAX 缺失）：视频轨超时跳洞后进入重对齐等待
+        let mut jb = JitterBuffer::new(JitterConfig::default());
+        let now = t0();
+        jb.push(frame(u32::MAX - 1, true), now);
+        jb.push(frame(0, false), now); // u32::MAX 缺失（空洞）
+        assert_eq!(jb.poll(now).len(), 1, "空洞未超时只出 u32::MAX-1");
+        let later = now + JitterConfig::default().max_wait + Duration::from_millis(10);
+        assert!(jb.poll(later).is_empty(), "跳洞后进入重对齐等待");
+        assert_eq!(jb.stats.dropped_out_of_window, 1);
+        // 关键帧（回绕后）到来 → 重对齐恢复
+        jb.push(frame(5, true), later);
+        let out = jb.poll(later);
+        let seqs: Vec<u32> = out.iter().map(|f| f.header.seq).collect();
+        assert_eq!(seqs, vec![5], "重对齐后从新关键帧恢复输出");
+    }
+
+    #[test]
     fn adaptive_window_gap_waited_then_emitted() {
         // 自适应窗口内的空洞应等待（不跳过），窗口外超时才跳
         let mut jb = JitterBuffer::new(JitterConfig {

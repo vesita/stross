@@ -81,12 +81,34 @@ impl Discovery {
             };
             match event {
                 Ok(ServiceEvent::ServiceResolved(info)) => {
-                    // mdns-sd 0.21：地址为 HashSet<ScopedIp>（带接口信息）
-                    let ip = info.get_addresses().iter().next().map(|s| s.to_ip_addr());
+                    // mdns-sd 0.21：地址为 HashSet<ScopedIp>（带接口信息）。
+                    // 选址策略（真机实测定稿）：
+                    // 1. link-local（fe80::/10、169.254/16）无 scope 不可达，
+                    //    且 `enable_addr_auto` 会把网卡全地址（含 fe80）带进广播，
+                    //    必须剔除——否则网格出现「点不开」的设备卡片；
+                    // 2. **优先 IPv4**：双栈 WiFi 上不同设备的 IPv6 前缀常不通
+                    //    （真机：PC 240e:3a8… 与手机 240e:579… 互不可达），
+                    //    IPv4 才是同网段的可靠路径；IPv6 全局地址仅作纯 IPv6
+                    //    局域网的后备。
+                    let reachable: Vec<IpAddr> = info
+                        .get_addresses()
+                        .iter()
+                        .map(|s| s.to_ip_addr())
+                        .filter(|i| match i {
+                            IpAddr::V4(v4) => !v4.is_link_local() && !v4.is_unspecified(),
+                            IpAddr::V6(v6) => {
+                                v6.segments()[0] & 0xffc0 != 0xfe80 && !v6.is_unspecified()
+                            }
+                        })
+                        .collect();
+                    let ip = reachable
+                        .iter()
+                        .find(|i| i.is_ipv4())
+                        .or_else(|| reachable.first());
                     if let Some(ip) = ip {
                         out.push(Discovered {
                             instance: info.get_fullname().to_string(),
-                            ip,
+                            ip: *ip,
                             port: info.get_port(),
                             txt: info
                                 .get_properties()
@@ -119,14 +141,30 @@ impl Drop for Discovery {
     }
 }
 
-/// 待广播的地址列表：多网卡全部保留；空列表回退回环地址。
+/// 待广播的地址列表：多网卡全部保留；**过滤 link-local**（fe80::/10 与
+/// 169.254/16）：无 scope 的链路本地地址对其它主机不可达，广播出去只会
+/// 制造「点不开」的设备卡片（真机实测发现）。空列表回退回环地址。
 ///
 /// 抽成纯函数便于单测（`ServiceInfo` 构造需要真实 mDNS socket，不在此测试）。
 fn broadcast_addrs(ips: &[IpAddr]) -> Vec<IpAddr> {
     if ips.is_empty() {
-        vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]
-    } else {
+        return vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)];
+    }
+    let filtered: Vec<IpAddr> = ips
+        .iter()
+        .copied()
+        .filter(|ip| match ip {
+            IpAddr::V4(v4) => !v4.is_link_local(),
+            // fe80::/10（前 10 位 1111111010）
+            IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 != 0xfe80,
+        })
+        .collect();
+    if filtered.is_empty() {
+        // 全是 link-local（如仅 fe80 的纯 IPv6 主机）：原样广播兜底，
+        // 否则本机将完全不可被发现；对端会自行判断可达性
         ips.to_vec()
+    } else {
+        filtered
     }
 }
 
@@ -157,5 +195,31 @@ mod tests {
             broadcast_addrs(&[]),
             vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]
         );
+    }
+
+    #[test]
+    fn broadcast_filters_link_local() {
+        // link-local（fe80::/10、169.254/16）不可达，必须过滤（真机实测：
+        // 手机扫描到 PC 的 fe80 条目 → 点卡片连不上）
+        let ips = vec![
+            IpAddr::V4("192.168.1.10".parse().unwrap()),
+            IpAddr::V4("169.254.3.4".parse().unwrap()), // APIPA
+            IpAddr::V6("fe80::835:6e70:4ba6:eb01".parse().unwrap()),
+            IpAddr::V6("240e:3a8:4c9f:2401:abcd::1".parse().unwrap()),
+        ];
+        assert_eq!(
+            broadcast_addrs(&ips),
+            vec![
+                IpAddr::V4("192.168.1.10".parse().unwrap()),
+                IpAddr::V6("240e:3a8:4c9f:2401:abcd::1".parse().unwrap()),
+            ]
+        );
+    }
+
+    #[test]
+    fn broadcast_all_fe80_falls_back_to_original() {
+        // 极端场景：全是 link-local（纯 IPv6 链路）→ 原样广播兜底，避免不可发现
+        let ips = vec![IpAddr::V6("fe80::1".parse().unwrap())];
+        assert_eq!(broadcast_addrs(&ips), ips);
     }
 }

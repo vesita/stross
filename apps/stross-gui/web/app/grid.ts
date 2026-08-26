@@ -7,6 +7,11 @@ function normAddr(addr: string): string | null {
   return a.replace(/\/+$/, '');
 }
 
+/** link-local 地址（fe80::/10、169.254/16）：无 scope 不可达，剔除出设备列表。 */
+function isLinkLocalIp(ip: string): boolean {
+  return /^fe80:/i.test(ip) || /^169\.254\./.test(ip);
+}
+
 /** 免先连核心：自动锚定本机（`start_relay` 幂等，启动受控中继 + mDNS 广播）。 */
 async function ensureAnchor(): Promise<void> {
   const box = $('anchor-box');
@@ -204,8 +209,8 @@ async function scanRelays(): Promise<void> {
   box.innerHTML = '<p class="hint">扫描中…</p>';
   try {
     const relays = (await call('scan_relays')) as RelayInfo[];
-    // 剔除本机（本机锚点单独展示）
-    const others = relays.filter((r) => !r.ip || MY_IPS.indexOf(r.ip) === -1);
+    // 剔除本机 + link-local（本机锚点单独展示；fe80 无 scope 不可达）
+    const others = relays.filter((r) => !r.ip || (MY_IPS.indexOf(r.ip) === -1 && !isLinkLocalIp(r.ip)));
     const cards: DeviceCard[] = others.map((r) => ({
       base: deviceBase(r),
       name: r.name || 'Stross 设备',
@@ -290,7 +295,7 @@ async function scanRemoteStreams(force = false): Promise<void> {
     return;
   }
   try {
-    const others = relays.filter((r) => !r.ip || MY_IPS.indexOf(r.ip) === -1);
+    const others = relays.filter((r) => !r.ip || (MY_IPS.indexOf(r.ip) === -1 && !isLinkLocalIp(r.ip)));
     // 手动添加的设备并入聚合（无 mDNS 时也能看到其串流）
     manualRelays.forEach((addr) => {
       const base = addr.replace(/\/+$/, '');

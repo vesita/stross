@@ -26,7 +26,9 @@
 
 use clap::{Parser, Subcommand};
 
+mod adb;
 mod ctrl;
+mod devices;
 mod push;
 mod receive;
 mod relay;
@@ -47,6 +49,10 @@ enum Command {
     Serve(serve::ServeArgs),
     /// 接入运行中实例的控制面，异步下发控制命令（仅回环，D7）
     Ctrl(ctrl::CtrlArgs),
+    /// 扫描局域网设备（PC + 手机），展示能力与在线共享状态
+    Devices(devices::DevicesArgs),
+    /// 经 USB（adb）查看/操作已连接手机（局域网被隔离时的可靠通道）
+    Adb(adb::AdbArgs),
     /// 推流：内嵌中继，或推往外部中继
     Push(push::PushArgs),
     /// 接收：WS 收流 → SessionDataManager → PlaybackSink 原生解码
@@ -66,6 +72,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Relay(a) => relay::run(a).await,
         Command::Serve(a) => serve::run(a).await,
         Command::Ctrl(a) => ctrl::run(a).await,
+        Command::Devices(a) => devices::run(a).await,
+        Command::Adb(a) => adb::run(a).await,
         Command::Push(a) => push::run(a).await,
         Command::Receive(a) => receive::run(a).await,
     }

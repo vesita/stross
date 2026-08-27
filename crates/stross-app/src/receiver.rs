@@ -83,6 +83,9 @@ async fn watch_consume_loop<C, S>(
             return;
         }
     };
+    // 连接成功即置运行态（不能等首帧或 100ms sync：首帧早到时前端
+    // 可能已轮询到 running=false 而误判「流已结束」）
+    inner.stats.lock_poisoned().running = true;
     let mut mgr = SessionDataManager::default();
     // 通道按传输可靠性分流（B5）：SRT（Adaptive，ARQ 超时即丢/可能乱序）→
     // 有损路径进抖动缓冲；WS/QUIC（全序不丢）→ 直通。

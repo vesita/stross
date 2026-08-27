@@ -245,9 +245,20 @@ async fn handle_request(app: &StrossApp, text: &str) -> CtrlResponse {
         }
         CtrlRequest::Status => {
             let status = app.stream_status();
+            let (ws_port, srt_port, quic_port) =
+                app.relay_ports()
+                    .unwrap_or((app.stream_relay_port(), None, None));
             CtrlResponse::ok(json!({
-                "relayPort": app.relay_port().unwrap_or_else(|| app.stream_relay_port()),
+                "version": env!("CARGO_PKG_VERSION"),
+                "platform": app.platform_str(),
+                "uptimeSecs": app.uptime_secs(),
+                "relayPort": ws_port,
+                "srtPort": srt_port,
+                "quicPort": quic_port,
                 "streaming": status.running,
+                "streamId": status.stream_id,
+                "streamTitle": status.title,
+                "streamStartedAt": status.started_at,
                 "sessions": app.kernel().sessions().len(),
             }))
         }

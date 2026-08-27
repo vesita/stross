@@ -147,8 +147,61 @@ GStreamer 流水线。
 >    mdns-sd 接口指定/网络场景复测；
 > 2. **电脑 ufw 需放行局域网**（`sudo ufw allow from 192.168.11.0/24`）——
 >    **已自动化为「固定端口 + 自检 + polkit 一键放行」**，见「阶段 B 附」；
-> 3. QUIC 硬断连（force-stop）中继无感知、流残留——断连检测/keepalive
->    归阶段 C。
+> 3. **QUIC 硬断连（force-stop）流残留——已修复（2026-08-27）**：
+>    根因 quinn 默认 idle 30s 且无 keepalive，对端 force-stop 后流残留约半分钟；
+>    修复=服务端 idle 15s + 客户端 keepalive 10s（crates/stross-transport
+>    quic.rs，静默观看连接由 keepalive 续命、死连接 15s 判死）；
+>    回归=`scripts/quic-stale-stream-test.sh`（SIGKILL 推流端 → 流 16s 内从
+>    /api/streams 移除）+ `hard_disconnect_released_by_idle_timeout` 单测。
+
+## 阶段 B 附 2：CLI 状态命令（2026-08-27，调试工具链）
+
+> 对齐：F5.3（运行状态）/ 无头调试需要。方向"CLI 优化——更好地获取 PC 与手机
+> 运行状态"的三条命令，互补覆盖两种通道：
+
+- [x] `stross devices` —— **局域网设备状态**（mDNS 扫描，无需 serve 常驻）：
+      设备名 / 角色 / 可共享媒体 / 传输 / SRT·QUIC 端口 / 在线共享（含 watchers）；
+      本机去重（按 mDNS 实例名，A/AAAA 各一次 resolved 只留 IPv4）+ 本机回环
+      探测；`--json` 脚本化；0 台时提示 `stross adb status`
+- [x] `stross ctrl status` —— **本机实例状态**：`CtrlRequest::Status` 响应扩容
+      （version / platform / uptimeSecs / srtPort / quicPort / streamId+Title+
+      StartedAt），人类可读表格输出（`--json` 保留原始 JSON）
+- [x] `stross adb {status,screenshot,ui-status,tap,swipe,type,key}` —— **经 USB 的
+      手机状态与无头交互驱动**（局域网 AP 隔离/mDNS 不可达时的可靠通道）：
+      a. `status`：型号 / Android 版本 / WiFi IP / 中继端口（`adb forward`
+         直通手机中继 `/api/info` + `/api/streams`，**不用 reverse**——本环境
+         adb reverse 注册但不生效，forward 稳定）；
+      b. `screenshot`：`adb exec-out screencap` 截屏到 PNG；
+      c. `ui-status`：截图 + `uiautomator dump` 视图树文本化（WebView 页面
+         文本在多数系统可见）——一行命令看手机 UI 在显示什么（调试用）；
+      d. **`tap [文本|--xy]` / `swipe` / `type` / `key`**：按视图树文本精确点按
+         （自动取元素中心）或直接坐标，配合 ui-status 形成「看状态→动手→
+         再看状态」的无头交互回路；真机验证：`stross adb tap "扫描"` 命中
+         (238,496)
+- [x] 真机实测（OPPO PLC110，新构建 0.1.0）：`stross adb status` 展示
+      192.168.2.24 手机中继 8777 + SRT 33462 + QUIC 33464；`ui-status` 识别出
+      「本机入口 → 读取中…」卡占位——暴露 **UI bug：设备列表重建清空 ip-list
+      后不重渲染**，已修复（renderDeviceList 统一重渲染 IP 列表）
+- [x] **跨设备 mDNS 发现故障检视（2026-08-27，未根治，证据已归档）**：
+      `stross devices` 扫不到手机但能扫到本机；`stross-core::discovery::browse`
+      已加 `accept_unsolicited(true)`（与 GUI 配置对齐；效果：ServiceFound 从
+      「完全不触发」变为「可触发」，但手机实例仍不 resolve）。关键证据：
+      a. 裸 python socket（SO_REUSEPORT + 加入 wlan0 组）能收到手机 PTR 响应，
+         说明手机广播/PC 收包链路可用；
+      b. fork trace：手机 PTR 记录被解析并准入缓存（无 not-for-us），但
+         ServiceFound 只对 self 实例触发；resolve 从不调度（`exec_command:
+         Resolve` 计数 0）；
+      c. TEMP-DIAG（service_daemon.rs process_packet，临时留档）：手机 mDNS
+         流量是**间歇性**的——应用重锚定后发一小段即静默（Android 组播被
+         挂起/vgate0 默认路由），且手机包表现为「1 问 + 1 答（自身 PTR 为
+         known-answer）的查询」，走 handle_query 时答案段被丢弃；
+      d. 环境干扰：PC 上有其它 5353 绑定者（systemd-resolved 等）与 Clash TUN
+         fake-IP（198.18.0.1），可能分摊组播。
+      结论：跨设备 mDNS 在现网（手机间歇静默 + 组播路径受默认路由/系统
+      服务干扰）不可靠，需在**纯净网络（手机热点）**下用带临时诊断日志的
+      fork 复测定位；此问题与「隐患 #1（Android 组播/默认路由）」同源。
+- [ ] （后续）`stross adb` 窗口坐标上报 + 自动重试，做无头交互驱动的完整
+      真机回归脚本
 
 ### B3 电脑端音频输出 Sink（PlaybackSink）
 

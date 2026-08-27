@@ -79,8 +79,12 @@ pub enum CtrlCommand {
     StopStream,
     /// 列出会话
     ListSessions,
-    /// 实例状态（中继端口 / 是否推流 / 会话数）
-    Status,
+    /// 实例状态（版本/uptime/中继端口/推流/会话数）
+    Status {
+        /// 输出原始 JSON（脚本化用）
+        #[arg(long)]
+        json: bool,
+    },
     /// 订阅并打印内核事件（异步感知）
     Events {
         #[arg(long, default_value_t = 5)]
@@ -168,10 +172,14 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
             let payload = request(&args.connect, req).await?;
             tracing::info!("会话: {payload}");
         }
-        CtrlCommand::Status => {
+        CtrlCommand::Status { json } => {
             let req = CtrlRequest::Status;
             let payload = request(&args.connect, req).await?;
-            tracing::info!("状态: {payload}");
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+            print_status(&payload);
         }
         CtrlCommand::Events { secs } => events(&args.connect, secs).await?,
     }
@@ -226,4 +234,56 @@ async fn events(connect: &str, secs: u64) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// 人类可读的实例状态输出（`stross ctrl status`）。
+fn print_status(p: &serde_json::Value) {
+    let get = |k: &str| p.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    println!("Stross 实例状态");
+    println!(
+        "  版本      v{} ({})",
+        get("version").as_str().unwrap_or("?"),
+        get("platform").as_str().unwrap_or("?")
+    );
+    println!(
+        "  运行时长  {}",
+        fmt_dur(get("uptimeSecs").as_u64().unwrap_or(0))
+    );
+    let relay = get("relayPort").as_u64().unwrap_or(0);
+    let transports = match (get("srtPort").as_u64(), get("quicPort").as_u64()) {
+        (Some(s), Some(q)) => format!("（SRT {s} · QUIC {q}）"),
+        (Some(s), None) => format!("（SRT {s}）"),
+        (None, Some(q)) => format!("（QUIC {q}）"),
+        (None, None) => String::new(),
+    };
+    println!("  中继      ws://127.0.0.1:{relay}{transports}");
+    if get("streaming").as_bool().unwrap_or(false) {
+        let sid = get("streamId").as_str().unwrap_or("?").to_string();
+        let title = get("streamTitle")
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("未命名")
+            .to_string();
+        let since = get("streamStartedAt").as_u64().unwrap_or(0);
+        let now = stross_proto::time::unix_secs();
+        println!(
+            "  推流      运行中 {sid}「{title}」已推 {}",
+            fmt_dur(now.saturating_sub(since))
+        );
+    } else {
+        println!("  推流      未运行");
+    }
+    println!("  会话数    {}", get("sessions").as_u64().unwrap_or(0));
+}
+
+/// 秒数 → "X 分 Y 秒" / "Y 秒"。
+fn fmt_dur(total_secs: u64) -> String {
+    let m = total_secs / 60;
+    let s = total_secs % 60;
+    let mut out = String::new();
+    if m > 0 {
+        out.push_str(&format!("{m} 分 "));
+    }
+    out.push_str(&format!("{s} 秒"));
+    out
 }

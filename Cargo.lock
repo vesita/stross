@@ -4853,6 +4853,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hostname",
+ "serde",
  "serde_json",
  "stross-app",
  "stross-core",

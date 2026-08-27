@@ -79,6 +79,8 @@ pub struct StrossApp {
     /// 本机持久化身份（UI 层 `load_or_create_identity` 注入；用于 mDNS
     /// 实例名唯一化——多设备同端口广播不再同名串扰）。
     identity: Mutex<Option<crate::negotiator::DeviceIdentity>>,
+    /// 实例启动时刻（控制面 Status 的 uptime 统计源）。
+    started: std::time::Instant,
 }
 
 /// 本机锚点（免先连：应用打开即自动建立；推流 / 观看 / 局域网发现共用）。
@@ -111,6 +113,7 @@ impl StrossApp {
             kernel: Kernel::new(),
             receiver: Mutex::new(None),
             identity: Mutex::new(None),
+            started: std::time::Instant::now(),
         }
     }
 
@@ -141,6 +144,11 @@ impl StrossApp {
             ffmpeg: ffmpeg_available(),
             ips: local_ips().into_iter().map(|ip| ip.to_string()).collect(),
         }
+    }
+
+    /// 运行平台字符串（"desktop" / "android"；控制面 Status 展示）。
+    pub fn platform_str(&self) -> &'static str {
+        self.platform.as_str()
     }
 
     /// 摄像头 / 麦克风 / 系统声音设备列表。
@@ -453,6 +461,11 @@ impl StrossApp {
             .lock_poisoned()
             .as_ref()
             .map(|a| (a.port, a.handle.srt_port, a.handle.quic_port))
+    }
+
+    /// 实例已运行秒数（控制面 Status 展示 uptime）。
+    pub fn uptime_secs(&self) -> u64 {
+        self.started.elapsed().as_secs()
     }
 
     // -----------------------------------------------------------------------

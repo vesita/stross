@@ -15,6 +15,7 @@
 pub mod app;
 pub mod bootstrap;
 pub mod control;
+pub mod devices;
 pub mod endpoint_driver;
 pub mod engine;
 pub mod error;
@@ -22,12 +23,14 @@ pub mod file_xfer;
 pub mod kernel;
 mod lock;
 pub mod negotiator;
+pub mod negotiator_client;
 pub mod paths;
 pub mod receiver;
 pub mod subscriber;
 
 pub use app::{CaptureStatusView, Platform, StrossApp};
 pub use control::{CtrlRequest, CtrlResponse, CtrlServer, DEFAULT_CTRL_PORT};
+pub use devices::{ScannedDevice, StreamView, scan, to_views};
 pub use endpoint_driver::install_endpoint_driver;
 pub use engine::SenderEngine;
 pub use error::{Error, Result};
@@ -41,6 +44,7 @@ pub use negotiator::{
     CliUi, DEFAULT_NEGOTIATOR_PORT, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest,
     RelayAddr, ShareGrant, ShareNegotiator, ShareRequest, TrustStore, load_or_create_identity,
 };
+pub use negotiator_client::request_grant;
 pub use receiver::{ReceiveStats, Receiver};
 pub use subscriber::{SubscribeOutcome, fetch_directory, subscribe_file};
 

@@ -8,24 +8,24 @@
 //! * [`subscribe_file`]：订阅一个文件端点并落盘（pull：连公开方中继 watch；
 //!   push：本机建会话 + 自签凭证 + 锚定中继，等公开方出站推入后 watch 本机）。
 //!
-//! 握手超时盖过 Confirm 挂起窗（60s）：首见 Confirm 端点要求人工确认，
-//! 读超时必须比挂起窗长，否则首见订阅会被误报失败。
+//! 握手原语在 [`crate::negotiator_client::request_grant`]（本模块复用；GUI
+//! 命令「申请凭证 / 目录 / 订阅」同源调它）。
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use serde::Serialize;
 use stross_core::net;
 use stross_core::relay::client as relay_http;
-use stross_proto::message::{Delivery, EndpointDir, MediaKind, ShareGrant, ShareRequest};
+use stross_proto::message::{Delivery, EndpointDir, MediaKind, ShareRequest};
 
 use crate::app::StrossApp;
 use crate::bootstrap;
 use crate::file_xfer::{ReceivedFile, receive_file};
+use crate::negotiator_client;
 
-/// 订阅握手 / 目录拉取的协商端点超时（必须盖过 Confirm 挂起窗 60s）。
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(70);
 /// 「流尚未出现」重试窗口：订阅方 watch 与公开方泵建流存在竞态
 /// （授予响应先于流注册到达；pump 侧同样在等观看者，docs §5），
 /// 写满该窗口内的重试即稳定收敛。
@@ -43,8 +43,9 @@ pub async fn fetch_directory(host: &str, port: u16) -> anyhow::Result<EndpointDi
     .context("拉取目录失败（对端 serve 的 --negotiator-port 是否一致？）")
 }
 
-/// 订阅结果。
-#[derive(Debug)]
+/// 订阅结果（GUI 命令 / CLI 展示共用；JSON 序列化供前端消费）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubscribeOutcome {
     /// 公开方拍板后的方向（pull = 连公开方中继；push = 公开方推入本机）。
     pub delivery: Delivery,
@@ -85,9 +86,8 @@ pub async fn subscribe_file(
         media: vec![],
     };
     // 订阅握手（Public / Confirm+信任 自动签发；Confirm 首见需对端人工确认，
-    // 超时 70s 盖过挂起窗）
-    let url = format!("http://{host}:{port}/api/negotiator/request");
-    let grant: ShareGrant = relay_http::post_json(&url, &req, HANDSHAKE_TIMEOUT)
+    // 超时由 negotiator_client 盖过挂起窗）
+    let grant = negotiator_client::request_grant(host, port, &req)
         .await
         .context(format!(
             "订阅握手失败（端点 {endpoint_id}；Confirm 端点需对端 stross ctrl negotiator-list 确认）"

@@ -20,7 +20,7 @@ use stross_core::relay::client as relay_http;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::devices::{StreamView, to_views};
+use stross_app::devices::StreamView;
 
 #[derive(Args, Debug)]
 pub struct AdbArgs {
@@ -372,7 +372,7 @@ async fn phone_status(ports_arg: &str) -> anyhow::Result<PhoneStatus> {
                 status.quic_port = info.quic_port;
                 // /api/streams（同一 forward 会话）
                 if let Ok(list) = relay_http::streams("127.0.0.1", local_port, probe).await {
-                    status.streams = to_views(list);
+                    status.streams = stross_app::devices::to_views(list);
                 }
             }
             Err(_) => {
@@ -387,7 +387,7 @@ async fn phone_status(ports_arg: &str) -> anyhow::Result<PhoneStatus> {
     Ok(status)
 }
 
-// 流信息 → 展示视图投影收在 `crate::devices::to_views`（探测契约在
+// 流信息 → 展示视图投影收在 `stross_app::devices::to_views`（探测契约在
 // stross_core::relay::client；docs/layering-architecture.md）。
 
 fn print_status(s: &PhoneStatus) {

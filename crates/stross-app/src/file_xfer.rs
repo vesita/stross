@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
+use serde::Serialize;
 use stross_core::relay::client as relay_http;
 use stross_core::sender::RelayClient;
 use stross_core::transport::SessionPacket;
@@ -159,8 +160,9 @@ async fn watchers_of(streams_url: &str, stream_id: &str) -> Option<u32> {
         .map(|s| s.watchers)
 }
 
-/// 接收结果。
-#[derive(Debug)]
+/// 接收结果（GUI 命令 / CLI 展示共用；JSON 序列化供前端消费）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReceivedFile {
     /// 落盘文件名（已净化，只取 basename）。
     pub name: String,

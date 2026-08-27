@@ -5,21 +5,23 @@
 //! 本层只做两件事：
 //!
 //! 1. 把 [`stross_app::StrossApp`]（核心封装模块）注入 Tauri 托管状态
-//! 2. 把前端 `invoke` 的每个命令转发给 `StrossApp`（薄命令层）
+//! 2. 把前端 `invoke` 的每个命令转发给 `StrossApp`（薄命令层，见 [`commands`]）
 //!
 //! 平台差异（ffmpeg 桌面采集 vs Android 原生采集）被隔离在采集后端里：
 //! 桌面用 [`stross_media::capture::FfmpegBackend`]，Android 用 `mobile::AndroidCapture`。
+//!
+//! 模块划分（docs/layering-architecture.md：命令层只做参数转译 + 展示粘合）：
+//! * [`commands`]：命令面（含桥接命令：扫描 / 目录 / 订阅 / 凭证申请）
+//! * [`receive`]：接收播放域命令（帧缩放 / base64 / 事件转发）
+//! * [`firewall`]：防火墙自动放行（仅 Linux 桌面）
+//! * [`mobile`]：Android 平台适配（采集 / 播放 / JNI）
 
 use std::sync::Arc;
 
-// 桌面接收路径 emit base64 帧载荷需要（Android 走 mobile_jni，不经此模块）。
-#[cfg(not(target_os = "android"))]
-use base64::Engine as _;
-use stross_app::{CaptureStatusView, Platform, StrossApp};
+use stross_app::{Platform, StrossApp};
 #[cfg(not(mobile))]
 use stross_media::capture::FfmpegBackend;
-use stross_media::pipeline::StreamConfig;
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Manager};
 
 #[cfg(mobile)]
 mod mobile;
@@ -29,292 +31,17 @@ mod mobile_jni;
 // 防火墙自动放行（权限自动化）：仅 Linux 桌面（ufw + polkit）。
 #[cfg(all(not(mobile), target_os = "linux"))]
 mod firewall;
-// ---------------------------------------------------------------------------
-// 命令面（桌面与 Android 完全一致）
-// ---------------------------------------------------------------------------
 
-#[tauri::command]
-fn app_info(state: State<'_, Arc<StrossApp>>) -> stross_app::app::AppInfo {
-    state.app_info()
-}
+mod commands;
+mod receive;
 
-#[tauri::command]
-fn list_devices(state: State<'_, Arc<StrossApp>>) -> stross_app::app::DeviceList {
-    state.list_devices()
-}
-
-#[tauri::command]
-async fn start_relay(
-    state: State<'_, Arc<StrossApp>>,
-) -> Result<stross_app::app::RelayInfo, String> {
-    // 固定端口（含 SRT/QUIC）：防火墙只放行已知端口（权限自动化）
-    state
-        .start_relay_fixed(
-            stross_core::relay::DEFAULT_PORT,
-            stross_app::DEFAULT_SRT_PORT,
-            stross_app::DEFAULT_QUIC_PORT,
-        )
-        .await
-        .map_err(|e| e.to_user_string())
-}
-
-#[tauri::command]
-async fn scan_relays(
-    state: State<'_, Arc<StrossApp>>,
-) -> Result<Vec<stross_app::app::RelayInfo>, String> {
-    state.scan_relays().await.map_err(|e| e.to_user_string())
-}
-
-#[tauri::command]
-async fn start_stream(
-    state: State<'_, Arc<StrossApp>>,
-    cfg: StreamConfig,
-    relay_url: Option<String>,
-) -> Result<stross_app::app::StartResult, String> {
-    state
-        .start_stream(cfg, relay_url)
-        .await
-        .map_err(|e| e.to_user_string())
-}
-
-#[tauri::command]
-async fn stop_stream(state: State<'_, Arc<StrossApp>>) -> Result<(), String> {
-    state.stop_stream().await.map_err(|e| e.to_user_string())
-}
-
-#[tauri::command]
-fn stream_status(state: State<'_, Arc<StrossApp>>) -> stross_app::app::StreamStatus {
-    state.stream_status()
-}
-
-#[tauri::command]
-fn capture_status(state: State<'_, Arc<StrossApp>>) -> CaptureStatusView {
-    state.capture_status()
-}
-
-// ---------------------------------------------------------------------------
-// 内核命令（控制面：设备图 / 会话 / 路由，设计文档 §3）
-// ---------------------------------------------------------------------------
-
-/// 设备图快照（本机能力 + 发现结果）。
-#[tauri::command]
-fn kernel_nodes(state: State<'_, Arc<StrossApp>>) -> Vec<stross_app::kernel::NodeInfo> {
-    state.kernel().nodes()
-}
-
-/// 会话列表快照。
-#[tauri::command]
-fn kernel_sessions(state: State<'_, Arc<StrossApp>>) -> Vec<stross_app::kernel::Session> {
-    state.kernel().sessions()
-}
-
-/// 创建会话（「从 `src` 推送到 `sinks`」）。
-///
-/// `access_code` 可选：设置后该会话启用访问码（PIN），控制操作
-/// （route / teardown）需先 `authorize_session`（设计文档 §7）。
-#[tauri::command]
-fn create_session(
-    state: State<'_, Arc<StrossApp>>,
-    src: String,
-    sinks: Vec<String>,
-    access_code: Option<String>,
-) -> Result<stross_app::kernel::Session, String> {
-    let prefs = stross_app::SessionPrefs {
-        profile: stross_proto::message::ReliabilityProfile::Lossy,
-        preferred_transport: None,
-        access_code,
-        title: String::new(),
-    };
-    state
-        .kernel()
-        .create_session(&src, &sinks, &prefs)
-        .map_err(|e| e.to_user_string())
-}
-
-/// 签发「接收手机麦克风」接入凭证（B2）：建会话 + 签发一次性 ShareToken。
-///
-/// 电脑端点击「接收手机麦克风」时调用：内核建本机会话并签发凭证，返回
-/// 凭证字符串（含 stream_id / PIN / 时效）供前端展示，手机出示即可推入
-/// 本机受控中继（B0 凭证式接入：零远程控制面暴露）。
-#[tauri::command]
-fn issue_share_token(
-    state: State<'_, Arc<StrossApp>>,
-    ttl_secs: Option<u64>,
-) -> Result<stross_app::app::ShareTokenView, String> {
-    state
-        .issue_share_token(ttl_secs)
-        .map_err(|e| e.to_user_string())
-}
-
-/// 会话鉴权：校验访问码（PIN）；成功后该会话的控制操作放行。
-#[tauri::command]
-fn authorize_session(
-    state: State<'_, Arc<StrossApp>>,
-    session_id: String,
-    access_code: Option<String>,
-) -> Result<(), String> {
-    state
-        .kernel()
-        .authorize(&session_id, access_code.as_deref())
-        .map_err(|e| e.to_user_string())
-}
-
-/// 控制传输方向（会话存续期间动态改道）。
-#[tauri::command]
-fn route_session(
-    state: State<'_, Arc<StrossApp>>,
-    session_id: String,
-    path: stross_proto::message::RoutePath,
-) -> Result<(), String> {
-    state
-        .kernel()
-        .route(&session_id, path)
-        .map_err(|e| e.to_user_string())
-}
-
-/// 拆除会话。
-#[tauri::command]
-fn teardown_session(state: State<'_, Arc<StrossApp>>, session_id: String) -> Result<(), String> {
-    state
-        .kernel()
-        .teardown(&session_id)
-        .map_err(|e| e.to_user_string())
-}
-
-// ---------------------------------------------------------------------------
-// 防火墙自动放行（权限自动化：仅 Linux 桌面，ufw + polkit）
-// ---------------------------------------------------------------------------
-
-#[cfg(all(not(mobile), target_os = "linux"))]
-fn required_firewall_ports(state: &StrossApp) -> (Vec<String>, Vec<String>) {
-    // 实际端口（回退默认）：中继 WS + 凭证协商 TCP；SRT/QUIC UDP
-    let (ws, srt, quic) = state.relay_ports().unwrap_or((
-        stross_core::relay::DEFAULT_PORT,
-        Some(stross_app::DEFAULT_SRT_PORT),
-        Some(stross_app::DEFAULT_QUIC_PORT),
-    ));
-    let tcp = vec![
-        format!("{ws}/tcp"),
-        format!("{}/tcp", stross_app::DEFAULT_NEGOTIATOR_PORT),
-    ];
-    let mut udp = Vec::new();
-    if let Some(p) = srt {
-        udp.push(format!("{p}/udp"));
-    }
-    if let Some(p) = quic {
-        udp.push(format!("{p}/udp"));
-    }
-    (tcp, udp)
-}
-
-/// 防火墙自检：只读执行 `ufw status verbose`，返回缺失放行端口。
-///
-/// ufw 未启用 / 入站默认允许 → 无需任何规则（跨设备共享不受阻）。
-#[cfg(all(not(mobile), target_os = "linux"))]
-#[tauri::command]
-async fn firewall_status(
-    state: State<'_, Arc<StrossApp>>,
-) -> Result<firewall::FirewallStatus, String> {
-    let out = tokio::process::Command::new("ufw")
-        .args(["status", "verbose"])
-        .output()
-        .await
-        .map_err(|e| format!("无法执行 ufw: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "ufw status 失败: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let ips = stross_core::net::local_ips();
-    let subnet = firewall::lan_subnet(&ips);
-    let mut status = firewall::parse_ufw_verbose(&text);
-    let (tcp, udp) = required_firewall_ports(&state);
-    let required: Vec<&str> = tcp.iter().chain(udp.iter()).map(|s| s.as_str()).collect();
-    status.missing = match subnet {
-        Some(sub) => firewall::missing_rules(
-            &required,
-            &status.rules,
-            &sub,
-            status.ufw_active,
-            status.default_deny_incoming,
-        ),
-        None => {
-            // 无局域网 IPv4（纯回环 / 未联网）：不提示放行
-            Vec::new()
-        }
-    };
-    Ok(status)
-}
-
-/// 一键放行：经 polkit（`pkexec`）弹一次系统授权，把缺失的 Stross 端口
-/// 按本机局域网子网加入 ufw（精确收窄，不放行整个网段）。
-#[cfg(all(not(mobile), target_os = "linux"))]
-#[tauri::command]
-async fn firewall_allow(state: State<'_, Arc<StrossApp>>) -> Result<(), String> {
-    let ips = stross_core::net::local_ips();
-    let subnet = firewall::lan_subnet(&ips)
-        .ok_or_else(|| "未找到局域网 IPv4 地址，无法生成放行规则（请先连接网络）".to_string())?;
-    // 只放行当前确实缺失的端口
-    let status = match firewall_status(state.clone()).await {
-        Ok(s) => s,
-        Err(e) => return Err(e),
-    };
-    if status.missing.is_empty() {
-        return Ok(()); // 已就绪
-    }
-    let (_, _) = required_firewall_ports(&state);
-    // missing 形如 "18777/tcp" / "33462/udp"，按协议分组
-    let tcp: Vec<String> = status
-        .missing
-        .iter()
-        .filter(|m| m.ends_with("/tcp"))
-        .map(|m| m.trim_end_matches("/tcp").to_string())
-        .collect();
-    let udp: Vec<String> = status
-        .missing
-        .iter()
-        .filter(|m| m.ends_with("/udp"))
-        .map(|m| m.trim_end_matches("/udp").to_string())
-        .collect();
-
-    run_pkexec_ufw(&subnet, &tcp, "tcp").await?;
-    run_pkexec_ufw(&subnet, &udp, "udp").await?;
-    tracing::info!("防火墙放行完成: {subnet} tcp={tcp:?} udp={udp:?}");
-    Ok(())
-}
-
-/// 经 `pkexec` 执行 `ufw allow from <subnet> to any port <ports> proto <proto>`。
-#[cfg(all(not(mobile), target_os = "linux"))]
-async fn run_pkexec_ufw(subnet: &str, ports: &[String], proto: &str) -> Result<(), String> {
-    if ports.is_empty() {
-        return Ok(());
-    }
-    // 一条规则可带多个端口（ufw 支持逗号分隔）
-    let port_list = ports.join(",");
-    let out = tokio::process::Command::new("pkexec")
-        .args([
-            "ufw", "allow", "from", subnet, "to", "any", "port", &port_list, "proto", proto,
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("无法执行 pkexec/ufw: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "防火墙放行被拒绝或失败（{proto}: {port_list}）: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// 凭证自动协商（权限自动化）：/api/negotiator/request + 信任记忆
-// ---------------------------------------------------------------------------
+use crate::commands::*;
+use crate::receive::*;
 
 /// 协商服务运行句柄（桌面启动后持有；Android 为空——仅作协商客户端）。
-struct NegotiatorHandle(Arc<std::sync::Mutex<Option<Arc<stross_app::ShareNegotiator>>>>);
+pub(crate) struct NegotiatorHandle(
+    pub(crate) Arc<std::sync::Mutex<Option<Arc<stross_app::ShareNegotiator>>>>,
+);
 
 /// 协商事件 → Tauri 事件桥（电脑端 GUI 弹授权确认）。
 #[cfg(not(mobile))]
@@ -329,134 +56,6 @@ impl stross_app::NegotiatorUi for NegotiatorUiBridge {
     }
 }
 
-/// 本机持久化身份（device_id / device_name；首次运行生成，之后稳定）。
-///
-/// 桌面与 Android 共用：设备作为**协商申请方**时向目标设备出示本身份，
-/// 目标设备据此做首次人工确认 / 信任记忆。
-#[tauri::command]
-fn device_identity(app: tauri::AppHandle) -> stross_app::DeviceIdentity {
-    let base = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let name = hostname::get()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "Stross 设备".into());
-    stross_app::load_or_create_identity(&base, &name)
-}
-
-/// 应答凭证协商请求（电脑端授权确认弹窗操作后调用）。
-///
-/// 允许时返回签发的凭证（前端据此启动自动接收监听——与「接收手机麦克风」
-/// 一致：轮询本机 /api/streams 出现该流即原生接收）。
-#[tauri::command]
-fn negotiator_respond(
-    state: State<'_, NegotiatorHandle>,
-    req_id: String,
-    allow: bool,
-    remember: bool,
-) -> Result<Option<stross_app::ShareGrant>, String> {
-    match state
-        .0
-        .lock()
-        .map_err(|_| "协商状态锁不可用".to_string())?
-        .as_ref()
-    {
-        Some(neg) => neg.respond(&req_id, allow, remember),
-        None => Err("凭证协商服务未启动".into()),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 接收播放（1e）：WS 收流 → SessionDataManager → PlaybackSink → 前端 canvas
-// ---------------------------------------------------------------------------
-
-/// 开始接收 `relay` 上的 `stream`，解码帧缩放后经 `receive-frame` 事件推到前端。
-/// `audio` 决定音频去向：`device` 扬声器播放 / `discard` 静音。
-///
-/// 平台差异（1f-3）：桌面用 ffmpeg 子进程解码（PlaybackSink）；Android 无
-/// ffmpeg，走编码帧转发 → Kotlin MediaCodec 解码（`mobile::spawn_android_playback`），
-/// 前端事件与绘制完全一致。
-#[tauri::command]
-async fn start_receive(
-    app: tauri::AppHandle,
-    state: State<'_, Arc<StrossApp>>,
-    relay: String,
-    stream: String,
-    audio: stross_media::playback::AudioOut,
-) -> Result<(), String> {
-    #[cfg(target_os = "android")]
-    {
-        state
-            .start_receive_raw(relay.clone(), stream.clone())
-            .await
-            .map_err(|e| e.to_user_string())?;
-        let frames = match state.take_receive_raw_frames() {
-            Some(r) => r,
-            None => return Err("接收会话已启动但没有编码帧通道".into()),
-        };
-        crate::mobile::spawn_android_playback(&app, frames, audio);
-        Ok(())
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        state
-            .start_receive(relay, stream, audio)
-            .await
-            .map_err(|e| e.to_user_string())?;
-        let mut frames = match state.take_receive_frames() {
-            Some(r) => r,
-            None => return Err("接收会话已启动但没有帧通道".into()),
-        };
-        // 帧转发：RGBA 最近邻缩放到宽度 ≤ 480 → 事件（显示可跳帧，不反压）。
-        // 载荷统一为 base64 字符串（桌面/Android 同格式）：serde 直序列化
-        // Vec<u8> 会输出每字节一个数字的 JSON 数组（480×270×4 ≈ 51.8 万元素，
-        // ~2.5MB/帧），base64 字符串 ~4 倍紧凑且前端 atob 原生解码。
-        tokio::spawn(async move {
-            while let Some(f) = frames.recv().await {
-                let (w, h, data) = scale_rgba(&f.rgba, f.width, f.height, 480);
-                let data = base64::engine::general_purpose::STANDARD.encode(data);
-                let _ = app.emit(
-                    "receive-frame",
-                    serde_json::json!({ "pts": f.pts_ms, "width": w, "height": h, "data": data }),
-                );
-            }
-        });
-        Ok(())
-    }
-}
-
-/// 停止接收。
-#[tauri::command]
-fn stop_receive(state: State<'_, Arc<StrossApp>>) {
-    state.stop_receive();
-}
-
-/// 接收统计（帧数 / 解码 / 音频块）。
-#[tauri::command]
-fn receive_status(state: State<'_, Arc<StrossApp>>) -> stross_app::ReceiveStats {
-    state.receive_status()
-}
-
-/// RGBA 最近邻缩放（显示用；保持宽高比，宽度 ≤ `max_w`）。
-#[cfg(not(target_os = "android"))]
-fn scale_rgba(src: &[u8], w: u32, h: u32, max_w: u32) -> (u32, u32, Vec<u8>) {
-    let tw = w.min(max_w);
-    let th = (h * tw / w).max(1);
-    let mut out = Vec::with_capacity((tw * th * 4) as usize);
-    for y in 0..th {
-        let sy = (y * h / th) as usize;
-        for x in 0..tw {
-            let sx = (x * w / tw) as usize;
-            let si = (sy * w as usize + sx) * 4;
-            out.extend_from_slice(&src[si..si + 4]);
-        }
-    }
-    (tw, th, out)
-}
-
-// ---------------------------------------------------------------------------
-
 fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     // generate_handler! 支持在命令上携带属性（展开到 match arm），
     // 防火墙命令仅 Linux 桌面编译注册
@@ -465,6 +64,11 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         list_devices,
         start_relay,
         scan_relays,
+        scan_devices,
+        probe_relay,
+        endpoint_ls,
+        endpoint_subscribe,
+        request_share_token,
         start_stream,
         stop_stream,
         stream_status,
@@ -577,6 +181,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(invoke_handler());
+
     #[cfg(mobile)]
     let builder = builder
         .plugin(mobile::init_capture())
@@ -627,26 +232,4 @@ pub fn run_relay_only(args: &[String]) {
             tracing::error!("中继启动失败: {e}");
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::scale_rgba;
-
-    #[test]
-    fn scale_rgba_keeps_aspect_and_size() {
-        // 1280x720 → 宽度上限 480 → 480x270
-        let src = vec![0u8; 1280 * 720 * 4];
-        let (w, h, out) = scale_rgba(&src, 1280, 720, 480);
-        assert_eq!((w, h), (480, 270));
-        assert_eq!(out.len(), 480 * 270 * 4);
-        // 不超过上限时原样
-        let (w2, h2, out2) = scale_rgba(&src, 320, 240, 480);
-        assert_eq!((w2, h2), (320, 240));
-        assert_eq!(out2.len(), 320 * 240 * 4);
-        // 像素值按最近邻拷贝（抽查四角）
-        let tiny = vec![0u8; 2 * 2 * 4];
-        let (_, _, out3) = scale_rgba(&tiny, 2, 2, 4);
-        assert_eq!(out3, tiny);
-    }
 }

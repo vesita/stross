@@ -93,6 +93,13 @@ impl Discovery {
 
     /// 在 `timeout` 内浏览局域网内的 Stross 服务。
     pub async fn browse(timeout: Duration) -> anyhow::Result<Vec<Discovered>> {
+        // 与 GUI 已知可用配置对齐：接受 unsolicited 响应。否则对端周期公告
+        // （非查询应答的 PTR/SRV）会被 handle_response 的 is_for_us 过滤丢弃，
+        // 「只浏览不注册」的进程（CLI devices / 纯扫描）将收不到任何局域网
+        // 设备（真机实测：手机广播到达本机但 browse 零结果）。
+        daemon()
+            .accept_unsolicited(true)
+            .map_err(|e| anyhow::anyhow!("accept_unsolicited: {e}"))?;
         let receiver = daemon().browse(SERVICE_TYPE)?;
         let deadline = tokio::time::Instant::now() + timeout;
         let mut out = Vec::new();

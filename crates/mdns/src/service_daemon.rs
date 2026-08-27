@@ -2705,6 +2705,14 @@ impl Zeroconf {
 
         match DnsIncoming::new(buf, my_intf.into()) {
             Ok(msg) => {
+                // TEMP-DIAG: 诊断跨设备发现（手机包 1问+1答 的路由）
+                debug!(
+                    "TEMP-DIAG process_packet: is_query={} is_response={} questions={} answers={} from={pktinfo:?}",
+                    msg.is_query(),
+                    msg.is_response(),
+                    msg.questions().len(),
+                    msg.answers().len(),
+                );
                 if msg.is_query() {
                     let querier_addr = pktinfo.addr_src;
                     self.handle_query(msg, pkt_if_index, querier_addr);

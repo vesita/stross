@@ -77,7 +77,6 @@ npx tsc -p apps/stross-gui/web/tsconfig.json
   ```
 - Rust 目标：`rustup target add aarch64-linux-android`（SDK 在 /opt/android-sdk，
   NDK /opt/android-ndk，均已配置）。
-- 禁跑 `cargo fmt --all`（会污染大量无关文件）；确需格式化只对本次改动文件跑 rustfmt。
 
 ## 4. 测试工作流（真机）
 

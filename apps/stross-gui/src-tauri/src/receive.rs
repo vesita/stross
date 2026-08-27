@@ -5,11 +5,12 @@
 use std::sync::Arc;
 
 use stross_app::StrossApp;
-use tauri::{Emitter, State};
-
+use tauri::State;
 // 桌面接收路径 emit base64 帧载荷需要（Android 走 mobile_jni，不经此模块）。
 #[cfg(not(target_os = "android"))]
 use base64::Engine as _;
+#[cfg(not(target_os = "android"))]
+use tauri::Emitter;
 
 /// 开始接收 `relay` 上的 `stream`，解码帧缩放后经 `receive-frame` 事件推到前端。
 /// `audio` 决定音频去向：`device` 扬声器播放 / `discard` 静音。

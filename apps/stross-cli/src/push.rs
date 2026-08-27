@@ -8,7 +8,7 @@ use std::time::Duration;
 use clap::Args;
 use stross_app::SenderEngine;
 use stross_media::capture::FfmpegBackend;
-use stross_media::pipeline::{Quality, StreamConfig};
+use stross_media::pipeline::{AudioSourceConfig, Quality, StreamConfig, VideoSource};
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum QualityArg {
@@ -35,6 +35,9 @@ pub struct PushArgs {
     /// 加正弦波音频（无麦克风环境）
     #[arg(long)]
     pub audio: bool,
+    /// 推真实屏幕（x11grab/gdigrab）而非合成画面（testsrc2）
+    #[arg(long)]
+    pub screen: bool,
     /// 内嵌中继端口（0 = 随机；设了 --relay 时忽略）
     #[arg(long, default_value_t = 0)]
     pub port: u16,
@@ -62,14 +65,31 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
     let stream_id = args
         .stream_id
         .unwrap_or_else(|| format!("demo-{}", std::process::id()));
-    let mut cfg = StreamConfig::cli_synthetic(
-        stream_id.clone(),
-        "CLI 推流".into(),
-        args.quality.quality(),
-        args.secs as u32,
-        args.audio,
-        args.share_token.clone(),
-    );
+    let mut cfg = if args.screen {
+        let mut c = StreamConfig {
+            stream_id: stream_id.clone(),
+            title: "CLI 屏幕推流".into(),
+            video: Some(VideoSource::Screen),
+            quality: args.quality.quality(),
+            audio: None,
+            duration_secs: Some(args.secs as u32),
+            share_token: args.share_token.clone(),
+        };
+        if args.audio {
+            // 真实屏幕共享 + 麦克风：用系统默认输入（非合成 sine）
+            c.audio = Some(AudioSourceConfig::default());
+        }
+        c
+    } else {
+        StreamConfig::cli_synthetic(
+            stream_id.clone(),
+            "CLI 推流".into(),
+            args.quality.quality(),
+            args.secs as u32,
+            args.audio,
+            args.share_token.clone(),
+        )
+    };
 
     let engine = match SenderEngine::start(
         cfg.clone(),

@@ -30,8 +30,9 @@ pub struct DiscoveryInfo {
     /// 支持的编解码。
     pub codecs: Vec<CodecId>,
     /// 设备清单摘要（v2，见 [`DeviceSummary`]）：只带 id/kind/name/是否已公开，
-    /// 协议/可见性/状态等详情走 L2 `/api/endpoints` 拉取（TXT 体积受限）。
-    #[serde(default)]
+    /// 协议/可见性/状态等详情走 L2 `/api/endpoints` 拉取（TXT 体积受限；
+    /// 多 key 广播时设备摘要走 `dev.<n>` key，base 里恒为空 → 序列化省略）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<DeviceSummary>,
 }
 
@@ -69,18 +70,57 @@ impl DiscoveryInfo {
         self
     }
 
-    /// 编码为 mDNS TXT 条目（单 key）。
+    /// 编码为 mDNS TXT 条目（**多 key，方案 b，docs/endpoint-model.md §3.4**）。
+    ///
+    /// mDNS TXT 每条 character-string ≤ 255B（RFC 1035 §3.3，mdns-sd 强校验；
+    /// 实测整包 JSON（base + 3 台设备摘要）达 449B 直接广播失败）。
+    /// 拆分：基础能力走 `stross` key（≈200B）；每台设备各占 `dev.<n>` key。
+    /// v1 端只读 `stross` key（忽略未知 key），新端合并两处——双向兼容。
     pub fn to_txt(&self) -> Vec<(String, String)> {
-        vec![(
-            TXT_KEY_DISCOVERY.to_string(),
-            serde_json::to_string(self).expect("DiscoveryInfo 序列化不应失败"),
-        )]
+        let mut out = Vec::with_capacity(1 + self.devices.len());
+        let mut base = self.clone();
+        base.devices = Vec::new();
+        let base_json = serde_json::to_string(&base).expect("DiscoveryInfo 序列化不应失败");
+        debug_assert!(
+            base_json.len() <= 255,
+            "base TXT 超 255B（{len}B）：{base_json}",
+            len = base_json.len()
+        );
+        out.push((TXT_KEY_DISCOVERY.to_string(), base_json));
+        for (i, d) in self.devices.iter().enumerate() {
+            let dev_json = serde_json::to_string(d).expect("设备摘要序列化不应失败");
+            debug_assert!(
+                dev_json.len() <= 255,
+                "设备 TXT 超 255B（{len}B）: {dev_json}",
+                len = dev_json.len()
+            );
+            out.push((format!("dev.{i}"), dev_json));
+        }
+        out
     }
 
-    /// 从 mDNS TXT 条目解码；缺失 / 非法返回 `None`（调用方回退默认值）。
+    /// 从 mDNS TXT 条目解码（多 key 合并 + 单 key 兼容）；缺失 / 非法返回 `None`
+    /// （调用方回退默认值）。
     pub fn from_txt(txt: &[(String, String)]) -> Option<Self> {
-        let json = txt.iter().find(|(k, _)| k == TXT_KEY_DISCOVERY)?.1.as_str();
-        serde_json::from_str(json).ok()
+        let mut info: DiscoveryInfo =
+            serde_json::from_str(txt.iter().find(|(k, _)| k == TXT_KEY_DISCOVERY)?.1.as_str())
+                .ok()?;
+        // 多 key 形态：`dev.<n>` → 按序号合并进 devices（单 key 旧广播无此键，
+        // devices 保持 base 内嵌值）
+        let mut devs: Vec<(usize, DeviceSummary)> = Vec::new();
+        for (k, v) in txt {
+            if let Some(idx) = k.strip_prefix("dev.")
+                && let Ok(d) = serde_json::from_str::<DeviceSummary>(v)
+                && let Ok(n) = idx.parse::<usize>()
+            {
+                devs.push((n, d));
+            }
+        }
+        devs.sort_by_key(|(n, _)| *n);
+        if !devs.is_empty() {
+            info.devices = devs.into_iter().map(|(_, d)| d).collect();
+        }
+        Some(info)
     }
 }
 
@@ -105,8 +145,10 @@ mod tests {
             }],
         };
         let txt = info.to_txt();
-        assert_eq!(txt.len(), 1, "单 key 承载全部能力");
+        // 多 key（§3.4 方案 b）：base + 每设备一个 key，均 ≤255B
+        assert_eq!(txt.len(), 2, "base + 设备各占一个 key");
         assert_eq!(txt[0].0, TXT_KEY_DISCOVERY);
+        assert!(txt[0].1.len() <= 255, "base TXT 应在 255B 内");
         assert!(
             txt[0]
                 .1
@@ -114,9 +156,57 @@ mod tests {
             "wire: {}",
             txt[0].1
         );
-        assert!(txt[0].1.contains("\"devices\""), "v2 携带设备摘要");
+        assert!(!txt[0].1.contains("\"devices\""), "设备摘要移出 base key");
+        assert_eq!(txt[1].0, "dev.0");
+        assert!(txt[1].1.len() <= 255, "设备 TXT 应在 255B 内");
+        assert!(txt[1].1.contains("\"deviceId\":\"mic:builtin\""));
         let back = DiscoveryInfo::from_txt(&txt).expect("roundtrip 解码");
         assert_eq!(info, back);
+    }
+
+    #[test]
+    fn txt_multi_key_fits_255_per_platform_summary() {
+        // 实测回归（§3.4/§11.1）：整包 449B 超限广播失败；多 key 后每 key 必须
+        // ≤255B。用桌面三台设备的真实摘要验证。
+        let devices = vec![
+            DeviceSummary {
+                device_id: "screen:0".into(),
+                kind: MediaKind::Screen,
+                name: "屏幕".into(),
+                published: true,
+            },
+            DeviceSummary {
+                device_id: "mic:builtin".into(),
+                kind: MediaKind::Mic,
+                name: "麦克风".into(),
+                published: false,
+            },
+            DeviceSummary {
+                device_id: "sysaudio:builtin".into(),
+                kind: MediaKind::SystemAudio,
+                name: "系统声音".into(),
+                published: false,
+            },
+        ];
+        let info = DiscoveryInfo::relay_default(
+            "Stross 本机中继",
+            vec![
+                MediaKind::Screen,
+                MediaKind::Camera,
+                MediaKind::Mic,
+                MediaKind::SystemAudio,
+            ],
+        )
+        .with_devices(devices);
+        let txt = info.to_txt();
+        for (k, v) in &txt {
+            assert!(v.len() <= 255, "{k} 超 255B（{}B）: {v}", v.len());
+        }
+        let back = DiscoveryInfo::from_txt(&txt).expect("多 key roundtrip");
+        assert_eq!(back.devices.len(), 3, "设备按序合并回");
+        assert_eq!(back.devices[0].device_id, "screen:0");
+        assert_eq!(back.devices[1].kind, MediaKind::Mic);
+        assert!(back.devices[0].published);
     }
 
     #[test]

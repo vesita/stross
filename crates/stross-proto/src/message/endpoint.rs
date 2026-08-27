@@ -115,6 +115,33 @@ pub struct EndpointManifest {
     pub updated_at: u64,
 }
 
+/// 文件端点元数据（docs/endpoint-model.md §3.6）：作为文件流**首帧**（FLAG_CONFIG）
+/// 的 JSON 载荷下发给接收方。路径只存在于公开方本地（`EndpointRegistry.file_sources`），
+/// **绝不进入本结构 / 目录 / mDNS 摘要**。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileMeta {
+    /// 接收方落盘用的文件名（仅文件名，不含路径）。
+    pub name: String,
+    /// 文件字节数（接收方校验完整性）。
+    pub size: u64,
+    /// SHA-256 十六进制（可选；P1 未计算，恒为 `None`，仅大小校验）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+impl FileMeta {
+    /// 编码为首帧载荷。
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("FileMeta 序列化不应失败")
+    }
+
+    /// 从首帧载荷解析；非法返回 `None`（接收方拒绝该文件流）。
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        serde_json::from_slice(buf).ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +185,24 @@ mod tests {
             .unwrap(),
             r#"{"private":{"nodes":["dev-a"]}}"#
         );
+    }
+
+    #[test]
+    fn file_meta_roundtrip() {
+        let m = FileMeta {
+            name: "notes.txt".into(),
+            size: 42,
+            sha256: None,
+        };
+        let back = FileMeta::from_bytes(&m.to_bytes()).unwrap();
+        assert_eq!(m, back);
+        // 载荷不带 sha256（未计算时字段省略）；wire 为 camelCase
+        let text = String::from_utf8(m.to_bytes()).unwrap();
+        assert!(text.contains("\"name\":\"notes.txt\""), "wire: {text}");
+        assert!(text.contains("\"size\":42"), "wire: {text}");
+        assert!(!text.contains("sha256"), "wire: {text}");
+        // 非法载荷 → None
+        assert!(FileMeta::from_bytes(b"{oops").is_none());
     }
 
     #[test]

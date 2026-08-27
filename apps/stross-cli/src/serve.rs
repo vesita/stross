@@ -3,10 +3,11 @@
 //! 模型（D7）：Stross 正常运行，CLI 通过 `stross ctrl` 接入控制面异步控制。
 //! 控制面**仅绑定回环**（信任边界 = 本机用户，LAN 零暴露）。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
-use stross_app::{CtrlServer, Platform, StrossApp, bootstrap};
+use stross_app::{CtrlServer, Platform, StrossApp, bootstrap, install_endpoint_driver};
 use stross_media::capture::FfmpegBackend;
 
 #[derive(Args, Debug)]
@@ -23,22 +24,40 @@ pub struct ServeArgs {
     /// QUIC 传输端口（0 = 随机；固定便于防火墙放行）
     #[arg(long, default_value_t = stross_app::DEFAULT_QUIC_PORT)]
     pub quic_port: u16,
+    /// 目录/订阅握手端点端口（0 = 18779；本地双端测试用自定义端口避免冲突）
+    #[arg(long, default_value_t = 18779)]
+    pub negotiator_port: u16,
+    /// 身份/信任清单数据目录（默认 ~/.local/share/stross；本地双端测试需
+    /// 两个节点用不同目录 → 不同 device_id）
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
+}
+
+/// 数据目录（identity.json / trusted_devices.json 所在）：`--data-dir` 优先，
+/// 否则 XDG_DATA_HOME 或 ~/.local/share/stross（与 GUI 共用同一身份）。
+fn base_dir(data_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(d) = data_dir {
+        return d;
+    }
+    std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| std::path::Path::new(&h).join(".local/share/stross"))
+                .unwrap_or_else(|_| PathBuf::from("stross-data"))
+        })
 }
 
 pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     let app = Arc::new(StrossApp::new(Platform::Desktop));
     // 桌面采集后端（ffmpeg），供 ctrl start-stream 使用
     app.set_backend(Arc::new(FfmpegBackend::new()));
+    // 端点订阅驱动：订阅达成自动开推（文件泵 / 媒体推流），docs/endpoint-model.md §5
+    install_endpoint_driver(&app);
     // 引导层（docs/endpoint-model.md §0）：身份注入 → 锚定受控中继并广播
-    // mDNS L1 摘要（节点 → 设备清单）→ 目录/订阅握手端点（18779）。
+    // mDNS L1 摘要（节点 → 设备清单）→ 目录/订阅握手端点。
     // 与 GUI 桌面共用同一套启动原语。
-    let base = std::env::var("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| std::path::Path::new(&h).join(".local/share/stross"))
-                .unwrap_or_else(|_| std::path::PathBuf::from("stross-data"))
-        });
+    let base = base_dir(args.data_dir.clone());
     bootstrap::ensure_identity(&app, &base);
     let bootstrap_handle = bootstrap::start(
         app.clone(),
@@ -47,6 +66,7 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
         args.port,
         args.srt_port,
         args.quic_port,
+        args.negotiator_port,
     )
     .await?;
     tracing::info!(

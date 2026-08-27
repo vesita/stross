@@ -20,6 +20,7 @@ use axum::routing::get;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stross_media::pipeline::StreamConfig;
+use stross_proto::message::{Delivery, TransportPreference, Visibility};
 
 use crate::SessionPrefs;
 use crate::app::StrossApp;
@@ -75,6 +76,26 @@ pub enum CtrlRequest {
         #[serde(default)]
         remember: bool,
     },
+    /// 公开设备为端点（端点框架，docs/endpoint-model.md §6；P1 1:1）。
+    EndpointPublish {
+        device_id: String,
+        visibility: Visibility,
+        delivery: Delivery,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transports: Option<Vec<TransportPreference>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codecs: Option<Vec<stross_proto::message::CodecId>>,
+    },
+    /// 公开本地文件为文件端点（动态设备 `file:<名>`）。
+    EndpointPublishFile {
+        path: String,
+        visibility: Visibility,
+        delivery: Delivery,
+    },
+    /// 取消公开端点。
+    EndpointUnpublish { endpoint_id: String },
+    /// 目录快照（本节点设备 + 已公开端点）。
+    EndpointList,
 }
 
 /// 控制响应。`rsp` 标签与 [`crate::kernel::KernelEvent`] 的 `type` 标签区分开，
@@ -226,6 +247,87 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
                 Ok(None) => CtrlResponse::ok(json!({ "denied": true })),
                 Err(e) => CtrlResponse::err(e),
             }
+        }
+        CtrlRequest::EndpointPublish {
+            device_id,
+            visibility,
+            delivery,
+            transports,
+            codecs,
+        } => match app.publish_endpoint(&device_id, visibility, delivery, transports, codecs) {
+            Ok(m) => CtrlResponse::ok(json!({
+                "endpointId": m.endpoint_id,
+                "deviceName": m.device.name,
+                "delivery": serde_json::to_string(&m.delivery).unwrap_or_default(),
+            })),
+            Err(e) => CtrlResponse::err(e.to_user_string()),
+        },
+        CtrlRequest::EndpointPublishFile {
+            path,
+            visibility,
+            delivery,
+        } => match app.publish_file_endpoint(std::path::Path::new(&path), visibility, delivery) {
+            Ok(m) => CtrlResponse::ok(json!({
+                "endpointId": m.endpoint_id,
+                "deviceName": m.device.name,
+                "size": app.file_source(&m.endpoint_id).map(|s| s.size).unwrap_or(0),
+                "delivery": serde_json::to_string(&m.delivery).unwrap_or_default(),
+            })),
+            Err(e) => CtrlResponse::err(e.to_user_string()),
+        },
+        CtrlRequest::EndpointUnpublish { endpoint_id } => {
+            match app.unpublish_endpoint(&endpoint_id) {
+                Ok(()) => {
+                    CtrlResponse::ok(json!({ "endpointId": endpoint_id, "unpublished": true }))
+                }
+                Err(e) => CtrlResponse::err(e.to_user_string()),
+            }
+        }
+        CtrlRequest::EndpointList => {
+            let (devices, endpoints) = app.endpoint_catalog();
+            let devices: Vec<serde_json::Value> = devices
+                .iter()
+                .map(|d| {
+                    json!({
+                        "deviceId": d.device_id,
+                        "kind": serde_json::to_string(&d.kind).unwrap_or_default(),
+                        "name": d.name,
+                        "builtin": d.builtin,
+                    })
+                })
+                .collect();
+            let endpoints: Vec<serde_json::Value> = endpoints
+                .iter()
+                .map(|e| {
+                    json!({
+                        "endpointId": e.endpoint_id,
+                        "deviceId": e.device.device_id,
+                        "kind": serde_json::to_string(&e.device.kind).unwrap_or_default(),
+                        "name": e.device.name,
+                        "visibility": serde_json::to_string(&e.visibility).unwrap_or_default(),
+                        "delivery": serde_json::to_string(&e.delivery).unwrap_or_default(),
+                        "state": serde_json::to_string(&e.state).unwrap_or_default(),
+                        "subscribers": e.subscribers,
+                        "transports": e.transports.iter().map(|t| {
+                            json!({ "transport": serde_json::to_string(&t.transport).unwrap_or_default(), "priority": t.priority })
+                        }).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            // 已公开端点 id 集合（供设备行标注「已公开」）——设备表按注册顺序输出
+            let published: std::collections::HashSet<&str> = endpoints
+                .iter()
+                .filter_map(|e| e.get("endpointId").and_then(|x| x.as_str()))
+                .collect();
+            let devices: Vec<serde_json::Value> = devices
+                .into_iter()
+                .map(|mut d| {
+                    let id = d["deviceId"].as_str().unwrap_or("").to_string();
+                    d["published"] = serde_json::json!(published.contains(id.as_str()));
+                    d
+                })
+                .collect();
+            CtrlResponse::ok(json!({ "devices": devices, "endpoints": endpoints }))
         }
         CtrlRequest::CreateSession { title, sinks } => {
             // 源节点固定为本机（register_local_node 注册的 "local"）；

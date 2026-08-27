@@ -142,7 +142,15 @@ async fn client_loop(
                 }
             }
             _ = shutdown.changed() => {
-                // 主动停止：优雅 Bye
+                // 主动停止：先把帧通道里已排队的帧发完再优雅 Bye——文件传输
+                // （TRACK_FILE）依赖该 Graceful 语义：末块在 stop 前已入队，
+                // 若直接 Bye 会被 select 抢跑丢弃（实测空/小文件丢末帧）。
+                // 媒体路径无副作用：后端已停发，队列里至多是最后几帧。
+                while let Ok(f) = rx.try_recv() {
+                    if session.send(SessionPacket::Media(f)).await.is_err() {
+                        break;
+                    }
+                }
                 let _ = session
                     .send(SessionPacket::Control(ControlMessage::Bye))
                     .await;

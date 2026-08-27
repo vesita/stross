@@ -1,13 +1,17 @@
-//! 端点注册表（P1）：节点上的 **设备表** + **已公开端点表**（一设备一端点 1:1）。
+//! 端点注册表：节点上的 **设备表** + **已公开端点表**（一设备一端点 1:1）。
 //!
 //! 设计规格：docs/endpoint-model.md §6。
 //!
-//! * 设备：持久能力实体（`platform_devices` 静态枚举注入）；
+//! * 设备：持久能力实体（`platform_devices` 静态枚举注入 + 文件端点动态设备）；
 //! * 端点：设备被公开后的订阅入口（`publish` 实例化，`unpublish` 撤销）；
 //! * P1 为 1:1（`endpoint_id == device_id`），重复公开报错；
-//! * `on_subscribed` 只挂不接（P1）：后续步骤接线"自动建会话 + 推流"联动。
+//! * 文件端点：`publish_file` 登记本地文件源（路径不落 wire），订阅达成后
+//!   由上层驱动（docs/endpoint-model.md §5 联动）推流；
+//! * `on_subscribed` 携带 [`SubscribeCtx`]（定稿 delivery / 数据面流 id /
+//!   push 模式的订阅方中继与凭证），上层据此开推。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use stross_proto::message::{
@@ -18,14 +22,41 @@ use stross_proto::time::unix_secs;
 
 use crate::error::{Error, Result};
 
-/// 订阅事件回调（P1 只挂不接；后续接"自动建会话+推流"联动，pull 模式）。
-pub type SubscribeHook = dyn Fn(&str) + Send + Sync;
+/// 订阅事件载荷：上层驱动（文件泵 / 媒体推流）开推的依据。
+///
+/// 由协商层在**授予成功**后构造（docs/endpoint-model.md §5 联动）。
+#[derive(Debug, Clone)]
+pub struct SubscribeCtx {
+    /// 订阅方节点 device_id。
+    pub subscriber: String,
+    /// 公开方定稿后的数据面方向。
+    pub delivery: Delivery,
+    /// 数据面流 id：pull = 公开方本机会话（内核预授权）；push = 订阅方自签会话。
+    pub stream_id: String,
+    /// push 模式：订阅方中继 HTTP 基址（`ws://ip:port`；公开方出站 push 目标）。
+    pub relay_addr: Option<String>,
+    /// push 模式：订阅方自签的一次性接入凭证（推流 Hello 出示）。
+    pub share_token: Option<String>,
+}
+
+/// 文件端点本地文件源（路径只存本地，绝不进 wire / 目录 / 摘要）。
+#[derive(Debug, Clone)]
+pub struct FileSource {
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
+}
+
+/// 订阅事件回调（上层注册；CLI serve 安装端点驱动，GUI 暂不接线）。
+pub type SubscribeHook = dyn Fn(&str, &SubscribeCtx) + Send + Sync;
 
 /// 端点注册表。
 #[derive(Default)]
 pub struct EndpointRegistry {
     devices: HashMap<String, DeviceInfo>,
     endpoints: HashMap<String, EndpointManifest>,
+    /// 文件端点：endpoint_id → 本地文件源。
+    file_sources: HashMap<String, FileSource>,
     /// 订阅达成回调。
     on_subscribed: Option<Arc<SubscribeHook>>,
 }
@@ -104,12 +135,73 @@ impl EndpointRegistry {
         Ok(manifest)
     }
 
-    /// 取消公开；已订阅会话由上层决定宽限期（P1 直接移除）。
+    /// 取消公开；文件端点顺带移除本地文件源（动态设备保留在设备表：
+    /// 设备 = 持久能力实体，文档 §1）。
     pub fn unpublish(&mut self, endpoint_id: &str) -> Result<()> {
         if self.endpoints.remove(endpoint_id).is_none() {
             return Err(Error::Message(format!("端点不存在: {endpoint_id}")));
         }
+        self.file_sources.remove(endpoint_id);
         Ok(())
+    }
+
+    /// 公开一个本地文件为文件端点（动态设备 `file:<名>`，重名自动加序号）。
+    ///
+    /// 返回的清单里 `device.kind == File`；本地路径登记进 `file_sources`
+    /// （绝不出现在摘录 / 目录 / wire）。
+    pub fn publish_file(
+        &mut self,
+        path: &std::path::Path,
+        visibility: Visibility,
+        delivery: Delivery,
+    ) -> Result<EndpointManifest> {
+        let meta = std::fs::metadata(path)
+            .map_err(|e| Error::Message(format!("文件不可读 {}: {e}", path.display())))?;
+        if !meta.is_file() {
+            return Err(Error::Message(format!("不是普通文件: {}", path.display())));
+        }
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "未命名".into());
+        // 动态设备 id 唯一：首用 `file:<名>`，冲突加 `-2` / `-3` …
+        let mut device_id = format!("file:{name}");
+        let mut n = 2;
+        while self.devices.contains_key(&device_id) {
+            device_id = format!("file:{name}-{n}");
+            n += 1;
+        }
+        self.devices.insert(
+            device_id.clone(),
+            DeviceInfo {
+                device_id: device_id.clone(),
+                kind: MediaKind::File,
+                name: name.clone(),
+                builtin: false, // 动态设备（随公开产生，非平台常驻）
+            },
+        );
+        let size = meta.len();
+        let manifest = self.publish(
+            &device_id,
+            visibility,
+            delivery,
+            Self::default_transports(MediaKind::File),
+            vec![], // 文件无编解码
+        )?;
+        self.file_sources.insert(
+            device_id.clone(),
+            FileSource {
+                path: path.to_path_buf(),
+                name,
+                size,
+            },
+        );
+        Ok(manifest)
+    }
+
+    /// 文件端点的本地文件源（驱动开推用；非文件端点返回 `None`）。
+    pub fn file_source(&self, endpoint_id: &str) -> Option<&FileSource> {
+        self.file_sources.get(endpoint_id)
     }
 
     /// 端点清单（订阅握手 / 目录 API 用）。
@@ -133,15 +225,22 @@ impl EndpointRegistry {
         true
     }
 
-    /// 接线订阅事件回调（P1 只挂不接，见模块注释）。
+    /// 接线订阅事件回调（通常由上层启动时安装一次）。
     pub fn set_subscribe_hook(&mut self, hook: Option<Arc<SubscribeHook>>) {
         self.on_subscribed = hook;
     }
 
-    /// 订阅达成事件（pull 模式：公开方收到订阅 → 触发上层"建会话 + 推流"）。
-    pub fn on_subscribed(&self, endpoint_id: &str) {
+    /// 取订阅回调（克隆出锁再调用——hook 内部会再查注册表，持锁调用会死锁）。
+    pub fn subscribed_hook(&self) -> Option<Arc<SubscribeHook>> {
+        self.on_subscribed.clone()
+    }
+
+    /// 订阅达成事件（协商层授予成功后触发；携带开推所需上下文）。
+    ///
+    /// 注意：调用方切勿持有本注册表锁（hook 内部会再次访问注册表）。
+    pub fn on_subscribed(&self, endpoint_id: &str, ctx: &SubscribeCtx) {
         if let Some(hook) = &self.on_subscribed {
-            hook(endpoint_id);
+            hook(endpoint_id, ctx);
         }
     }
 
@@ -284,14 +383,62 @@ mod tests {
         .unwrap();
         let fired = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
-        r.set_subscribe_hook(Some(Arc::new(move |eid| {
+        let ctx = SubscribeCtx {
+            subscriber: "dev-phone".into(),
+            delivery: Delivery::Push,
+            stream_id: "sess-1".into(),
+            relay_addr: Some("ws://192.168.1.5:9000".into()),
+            share_token: Some("tok".into()),
+        };
+        r.set_subscribe_hook(Some(Arc::new(move |eid, c| {
             assert_eq!(eid, "mic:builtin");
+            assert_eq!(c.subscriber, "dev-phone");
+            assert_eq!(c.relay_addr.as_deref(), Some("ws://192.168.1.5:9000"));
             f.fetch_add(1, Ordering::SeqCst);
         })));
-        r.on_subscribed("mic:builtin");
+        r.on_subscribed("mic:builtin", &ctx);
         assert_eq!(fired.load(Ordering::SeqCst), 1);
         // 未接线时不触发也不 panic
         r.set_subscribe_hook(None);
-        r.on_subscribed("mic:builtin");
+        r.on_subscribed("mic:builtin", &ctx);
+    }
+
+    #[test]
+    fn publish_file_registers_source_and_unpublish_clears() {
+        let dir = std::env::temp_dir().join(format!("stross-reg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("备注.txt");
+        std::fs::write(&path, b"hello stross").unwrap();
+        let mut r = EndpointRegistry::new();
+        let m = r
+            .publish_file(&path, Visibility::Public, Delivery::Pull)
+            .expect("公开文件端点");
+        assert_eq!(m.device.kind, MediaKind::File);
+        assert!(
+            m.endpoint_id.starts_with("file:备注.txt"),
+            "{}",
+            m.endpoint_id
+        );
+        assert!(!m.device.builtin, "文件设备是动态设备");
+        assert_eq!(m.endpoint_id, m.device.device_id, "P1 1:1");
+        assert_eq!(m.transports.len(), 2, "文件 Lossless 默认 QUIC>WS");
+        assert_eq!(m.transports[0].transport, TransportId::Quic);
+        // 文件源可查（本地路径不落 wire：清单里没有 path 字段）
+        let src = r.file_source(&m.endpoint_id).expect("文件源已登记");
+        assert_eq!(src.name, "备注.txt");
+        assert_eq!(src.size, b"hello stross".len() as u64);
+        // 重名自动加序号
+        let m2 = r
+            .publish_file(&path, Visibility::Public, Delivery::Pull)
+            .unwrap();
+        assert_ne!(m.endpoint_id, m2.endpoint_id);
+        // 摘要含动态设备
+        assert!(r.summaries().iter().any(|d| d.kind == MediaKind::File));
+        // 取消公开 → 文件源移除、端点消失（动态设备保留）
+        r.unpublish(&m.endpoint_id).unwrap();
+        assert!(r.file_source(&m.endpoint_id).is_none());
+        assert!(r.manifest(&m.endpoint_id).is_none());
+        assert!(r.unpublish(&m2.endpoint_id).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

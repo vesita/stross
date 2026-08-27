@@ -40,10 +40,16 @@ pub const HEADER_LEN: usize = 24;
 // ---- track ----
 pub const TRACK_VIDEO: u8 = 0;
 pub const TRACK_AUDIO: u8 = 1;
+/// 文件传输轨（端点框架文件端点，docs/endpoint-model.md §3.6；Lossless 路径）。
+/// 中继对非视频轨不做关键帧门控/补发，逐帧直通——文件轨必须等观看者接入
+/// 才开始推（公开方按 `/api/streams` 观看数驱动）。
+pub const TRACK_FILE: u8 = 2;
 
 // ---- codec ----
 pub const CODEC_H264: u8 = 1;
 pub const CODEC_AAC: u8 = 2;
+/// 文件轨编解码占位（无编解码语义；`TRACK_FILE` 帧专用）。
+pub const CODEC_FILE: u8 = 3;
 
 // ---- flags ----
 pub const FLAG_KEYFRAME: u8 = 0x01;

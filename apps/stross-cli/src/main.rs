@@ -29,6 +29,7 @@ use clap::{Parser, Subcommand};
 mod adb;
 mod ctrl;
 mod devices;
+mod endpoint;
 mod push;
 mod receive;
 mod relay;
@@ -57,6 +58,8 @@ enum Command {
     Push(push::PushArgs),
     /// 接收：WS 收流 → SessionDataManager → PlaybackSink 原生解码
     Receive(receive::ReceiveArgs),
+    /// 端点框架订阅方交互：目录拉取（ls）/ 订阅并接收（subscribe）
+    Endpoint(endpoint::EndpointArgs),
 }
 
 #[tokio::main]
@@ -76,5 +79,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Adb(a) => adb::run(a).await,
         Command::Push(a) => push::run(a).await,
         Command::Receive(a) => receive::run(a).await,
+        Command::Endpoint(a) => endpoint::run(a).await,
     }
 }

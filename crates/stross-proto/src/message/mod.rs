@@ -27,8 +27,8 @@ pub use capability::{CapabilityDescriptor, RoutePath, SessionEventKind, Transpor
 pub use control::ControlMessage;
 pub use discovery::{DiscoveryInfo, TXT_KEY_DISCOVERY};
 pub use endpoint::{
-    Delivery, DeviceInfo, DeviceSummary, EndpointManifest, EndpointState, TransportPreference,
-    Visibility,
+    Delivery, DeviceInfo, DeviceSummary, EndpointManifest, EndpointState, FileMeta,
+    TransportPreference, Visibility,
 };
 pub use ids::{CapabilityKind, CodecId, MediaKind, ReliabilityProfile, RoleId, TransportId};
 pub use stream::{StreamInfo, TrackInfo};

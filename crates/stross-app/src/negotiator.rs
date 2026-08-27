@@ -34,11 +34,14 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use stross_proto::message::{Delivery, EndpointManifest, MediaKind, TransportId, Visibility};
+use stross_proto::message::{
+    Delivery, EndpointManifest, MediaKind, ShareToken, TransportId, Visibility,
+};
 use stross_proto::time::unix_secs;
 use tokio::sync::oneshot;
 
 use crate::app::{ShareTokenView, StrossApp};
+use crate::kernel::SubscribeCtx;
 use crate::lock::MutexExt;
 
 /// 协商端点默认端口（LAN 可达；防火墙需放行该 TCP 端口）。
@@ -196,7 +199,7 @@ pub struct RelayAddr {
 ///
 /// 端点语义（`endpoint_id` 非空 = 订阅某端点）：`media` 可为空，由端点推断；
 /// 旧语义（`endpoint_id` 为空 = 接收方签发）与现状逐字节兼容。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareRequest {
     pub device_id: String,
@@ -207,15 +210,20 @@ pub struct ShareRequest {
     /// 订阅方期望的 delivery（端点声明 `Both` 时生效；其余以端点声明为准）。
     #[serde(default)]
     pub delivery_mode: Option<Delivery>,
-    /// push 模式下订阅方自己的中继地址（公开方凭凭证出站推送的目标）。
+    /// push 模式下订阅方自己的中继 HTTP 基址（`ws://ip:port`；公开方凭凭证
+    /// 出站推送的目标）。
     #[serde(default)]
     pub relay_addr: Option<String>,
+    /// push 模式下订阅方**自签**的一次性接入凭证（docs/endpoint-model.md §5：
+    /// 凭证校验器挂在订阅方内核，公开方签发的凭证在订阅方中继校验不过）。
+    #[serde(default)]
+    pub share_token: Option<String>,
     /// 本次申请的媒体（有限集合；端点语义下可为空 = 由端点推断）。
     pub media: Vec<MediaKind>,
 }
 
 /// 签发结果（成功返回给申请方）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareGrant {
     #[serde(flatten)]
@@ -293,6 +301,9 @@ struct PendingEntry {
     endpoint_id: Option<String>,
     /// 订阅方期望的 delivery。
     delivery_mode: Option<Delivery>,
+    /// push 模式：订阅方中继 HTTP 基址 + 自签凭证（授予成功后触发驱动）。
+    relay_addr: Option<String>,
+    share_token: Option<String>,
     tx: PendingSender,
 }
 
@@ -379,6 +390,14 @@ impl ShareNegotiator {
                 entry.endpoint_id.clone(),
                 entry.delivery_mode,
             )?;
+            // 订阅达成：触发上层驱动（文件泵 / 媒体自动推流），docs §5 联动
+            self.notify_subscribed(
+                entry.endpoint_id.as_deref(),
+                &grant,
+                &entry.device_id,
+                entry.relay_addr.as_deref(),
+                entry.share_token.as_deref(),
+            );
             let _ = entry.tx.send(Ok(grant.clone()));
             Ok(Some(grant))
         } else {
@@ -435,6 +454,30 @@ impl ShareNegotiator {
             media,
             title,
         )
+    }
+
+    /// 订阅达成事件：构造 [`SubscribeCtx`] 触发公开方驱动开推
+    /// （docs/endpoint-model.md §5 联动；只对端点语义生效）。
+    ///
+    /// * pull：数据面流 id = 公开方本机会话（`grant.view.stream_id`），
+    ///   推入自己的受控中继，无需凭证；
+    /// * push：流 id / 凭证取自**订阅方**自签 token（订阅方中继校验用）。
+    fn notify_subscribed(
+        &self,
+        endpoint_id: Option<&str>,
+        grant: &ShareGrant,
+        subscriber: &str,
+        relay_addr: Option<&str>,
+        share_token: Option<&str>,
+    ) {
+        notify_subscribed(
+            &self.app,
+            endpoint_id,
+            grant,
+            subscriber,
+            relay_addr,
+            share_token,
+        );
     }
 
     /// 停止协商服务。
@@ -501,10 +544,21 @@ async fn handle_request(
                 media,
                 title,
             ) {
-                Ok(grant) => (
-                    StatusCode::OK,
-                    Json(serde_json::to_value(grant).unwrap_or_default()),
-                ),
+                Ok(grant) => {
+                    // 订阅达成：触发上层驱动（docs §5 联动）
+                    notify_subscribed(
+                        &state.app,
+                        endpoint.as_ref().map(|m| m.endpoint_id.as_str()),
+                        &grant,
+                        &req.device_id,
+                        req.relay_addr.as_deref(),
+                        req.share_token.as_deref(),
+                    );
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::to_value(grant).unwrap_or_default()),
+                    )
+                }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({ "error": e })),
@@ -528,6 +582,8 @@ async fn handle_request(
                         device_name: req.device_name.clone(),
                         endpoint_id: req.endpoint_id.clone(),
                         delivery_mode: req.delivery_mode,
+                        relay_addr: req.relay_addr.clone(),
+                        share_token: req.share_token.clone(),
                         tx,
                     },
                 );
@@ -656,6 +712,51 @@ fn compose_grant(
         transports,
         relay,
     })
+}
+
+/// 订阅达成事件（自由函数版，`handle_request` / `respond` 共用）：构造
+/// [`SubscribeCtx`] 触发公开方驱动开推（docs/endpoint-model.md §5 联动；
+/// 只对端点语义生效）。
+///
+/// * pull：数据面流 id = 公开方本机会话（`grant.view.stream_id`），推入
+///   自己的受控中继，无需凭证；
+/// * push：流 id / 凭证取自**订阅方**自签 token（订阅方中继校验用）。
+fn notify_subscribed(
+    app: &StrossApp,
+    endpoint_id: Option<&str>,
+    grant: &ShareGrant,
+    subscriber: &str,
+    relay_addr: Option<&str>,
+    share_token: Option<&str>,
+) {
+    let Some(endpoint_id) = endpoint_id else {
+        return; // 旧语义（无端点）不触发联动
+    };
+    let Some(delivery) = grant.delivery else {
+        return;
+    };
+    let stream_id = match (delivery, share_token) {
+        (Delivery::Push, Some(tok)) => ShareToken::from_token_string(tok)
+            .map(|t| t.stream_id)
+            .unwrap_or_else(|| grant.view.stream_id.clone()),
+        _ => grant.view.stream_id.clone(),
+    };
+    let ctx = SubscribeCtx {
+        subscriber: subscriber.to_string(),
+        delivery,
+        stream_id,
+        relay_addr: if delivery == Delivery::Push {
+            relay_addr.map(str::to_string)
+        } else {
+            None
+        },
+        share_token: if delivery == Delivery::Push {
+            share_token.map(str::to_string)
+        } else {
+            None
+        },
+    };
+    app.fire_endpoint_subscribed(endpoint_id, &ctx);
 }
 
 /// 目录 API（L2）：本节点设备 + 已公开端点（Private 端点不对目录公开，§9）。
@@ -802,6 +903,8 @@ mod tests {
                 device_name: "手机A".into(),
                 endpoint_id: None,
                 delivery_mode: None,
+                relay_addr: None,
+                share_token: None,
                 tx: tx2,
             },
         );
@@ -855,6 +958,8 @@ mod tests {
                 device_name: "手机C".into(),
                 endpoint_id: None,
                 delivery_mode: None,
+                relay_addr: None,
+                share_token: None,
                 tx,
             },
         );
@@ -939,6 +1044,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(grant.delivery, Some(Delivery::Pull));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn push_subscription_fires_driver_ctx_with_subscriber_credentials() {
+        use std::sync::Mutex as StdMutex;
+        let dir = tmp_dir("hook");
+        // 订阅方自签凭证（文档 §5：push 数据面接入凭证挂在订阅方内核）
+        let sub_token = ShareToken {
+            v: ShareToken::VERSION,
+            stream_id: "sub-session-9".into(),
+            pin: "123456".into(),
+            expires_at: 1_900_000_000,
+            media: vec![MediaKind::File],
+        };
+        let app = Arc::new(StrossApp::new(Platform::Desktop));
+        // 公开方文件端点（公开方侧挂驱动）
+        let file = dir.join("hello.txt");
+        std::fs::write(&file, b"hi").unwrap();
+        let m = app
+            .publish_file_endpoint(&file, Visibility::Public, Delivery::Push)
+            .unwrap();
+        let fired: Arc<StdMutex<Vec<crate::kernel::SubscribeCtx>>> =
+            Arc::new(StdMutex::new(Vec::new()));
+        let f = fired.clone();
+        app.set_subscribe_hook(Some(Arc::new(move |_eid, ctx| {
+            f.lock().unwrap().push(ctx.clone());
+        })));
+
+        let neg = ShareNegotiator {
+            app: app.clone(),
+            store: Arc::new(TrustStore::load(&dir)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            task: tokio::spawn(async {}),
+            port: 0,
+        };
+        // 挂起条目携带订阅方中继 + 自签凭证；人工应答允许 → 触发驱动
+        let (tx, rx) = oneshot::channel();
+        neg.pending.lock_poisoned().insert(
+            "np1".into(),
+            PendingEntry {
+                device_id: "dev-sub".into(),
+                device_name: "订阅方".into(),
+                endpoint_id: Some(m.endpoint_id.clone()),
+                delivery_mode: Some(Delivery::Push),
+                relay_addr: Some("ws://192.168.1.9:9123".into()),
+                share_token: Some(sub_token.to_token_string()),
+                tx,
+            },
+        );
+        neg.respond("np1", true, false).unwrap();
+        rx.await.unwrap().expect("应签发 push 凭证");
+        let ctxs = fired.lock().unwrap();
+        assert_eq!(ctxs.len(), 1, "确认后应触发一次订阅事件");
+        let ctx = &ctxs[0];
+        assert_eq!(ctx.subscriber, "dev-sub");
+        assert_eq!(ctx.delivery, Delivery::Push);
+        assert_eq!(
+            ctx.stream_id, "sub-session-9",
+            "push 流 id 取自订阅方自签凭证"
+        );
+        assert_eq!(ctx.relay_addr.as_deref(), Some("ws://192.168.1.9:9123"));
+        assert!(ctx.share_token.is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

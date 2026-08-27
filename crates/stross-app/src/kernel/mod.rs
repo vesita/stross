@@ -19,7 +19,7 @@ mod session;
 
 pub use auth::{AuthError, AuthPolicy, PinAuthPolicy};
 pub use data_plane::{DataPlaneBackend, RelayDataPlane};
-pub use endpoint::EndpointRegistry;
+pub use endpoint::{EndpointRegistry, FileSource, SubscribeCtx, SubscribeHook};
 pub use graph::{NodeInfo, NodeRole, TransportAddr};
 pub use session::{Negotiated, Session, SessionPrefs};
 

@@ -17,6 +17,7 @@ use clap::{Args, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use stross_app::CtrlRequest;
 use stross_media::pipeline::StreamConfig;
+use stross_proto::message::{Delivery, Visibility};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -106,6 +107,51 @@ pub enum CtrlCommand {
         /// 记住该设备（下次自动签发，免确认）
         #[arg(long)]
         remember: bool,
+    },
+    /// 端点框架命令（公开 / 取消公开 / 目录；docs/endpoint-model.md）
+    Endpoint {
+        #[command(subcommand)]
+        cmd: EndpointCommand,
+    },
+}
+
+/// `stross ctrl endpoint` 子命令。
+#[derive(Subcommand, Debug)]
+pub enum EndpointCommand {
+    /// 公开设备为端点（端点框架 docs/endpoint-model.md；P1 一设备一端点）
+    Publish {
+        /// 设备 id（`stross ctrl endpoint list` 可查）
+        #[arg(long)]
+        device: String,
+        /// public | confirm | private
+        #[arg(long, default_value = "public")]
+        visibility: String,
+        /// private 白名单（节点 device_id，逗号分隔）
+        #[arg(long, value_delimiter = ',')]
+        nodes: Vec<String>,
+        /// pull | push | both（数据面连接方向由公开者声明）
+        #[arg(long, default_value = "pull")]
+        delivery: String,
+    },
+    /// 公开本地文件为文件端点（file:<名> 动态设备）
+    PublishFile {
+        /// 本地文件路径
+        #[arg(long)]
+        path: String,
+        #[arg(long, default_value = "public")]
+        visibility: String,
+        #[arg(long, value_delimiter = ',')]
+        nodes: Vec<String>,
+        #[arg(long, default_value = "pull")]
+        delivery: String,
+    },
+    /// 取消公开端点
+    Unpublish { endpoint_id: String },
+    /// 列出本节点设备 + 已公开端点
+    List {
+        /// 输出原始 JSON（脚本化用）
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -255,8 +301,118 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 );
             }
         }
+        CtrlCommand::Endpoint { cmd } => match cmd {
+            EndpointCommand::Publish {
+                device,
+                visibility,
+                nodes,
+                delivery,
+            } => {
+                let req = CtrlRequest::EndpointPublish {
+                    device_id: device.clone(),
+                    visibility: parse_visibility(&visibility, &nodes)?,
+                    delivery: parse_delivery(&delivery)?,
+                    transports: None,
+                    codecs: None,
+                };
+                let payload = request(&args.connect, req).await?;
+                println!(
+                    "已公开端点 {}（{}）delivery={}",
+                    payload["endpointId"].as_str().unwrap_or("?"),
+                    payload["deviceName"].as_str().unwrap_or("?"),
+                    payload["delivery"].as_str().unwrap_or("?"),
+                );
+            }
+            EndpointCommand::PublishFile {
+                path,
+                visibility,
+                nodes,
+                delivery,
+            } => {
+                let req = CtrlRequest::EndpointPublishFile {
+                    path: path.clone(),
+                    visibility: parse_visibility(&visibility, &nodes)?,
+                    delivery: parse_delivery(&delivery)?,
+                };
+                let payload = request(&args.connect, req).await?;
+                println!(
+                    "已公开文件端点 {}（{}，{} 字节）delivery={}",
+                    payload["endpointId"].as_str().unwrap_or("?"),
+                    payload["deviceName"].as_str().unwrap_or("?"),
+                    payload["size"].as_u64().unwrap_or(0),
+                    payload["delivery"].as_str().unwrap_or("?"),
+                );
+            }
+            EndpointCommand::Unpublish { endpoint_id } => {
+                let req = CtrlRequest::EndpointUnpublish {
+                    endpoint_id: endpoint_id.clone(),
+                };
+                let _ = request(&args.connect, req).await?;
+                println!("已取消公开端点: {endpoint_id}");
+            }
+            EndpointCommand::List { json } => {
+                let payload = request(&args.connect, CtrlRequest::EndpointList).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                    return Ok(());
+                }
+                let devices = payload["devices"].as_array().cloned().unwrap_or_default();
+                let endpoints = payload["endpoints"].as_array().cloned().unwrap_or_default();
+                println!("本节点设备（{} 台）：", devices.len());
+                for d in &devices {
+                    println!(
+                        "  {}「{}」（{}{}）",
+                        d["deviceId"].as_str().unwrap_or("?"),
+                        d["name"].as_str().unwrap_or("?"),
+                        d["kind"].as_str().unwrap_or("?"),
+                        if d["published"].as_bool().unwrap_or(false) {
+                            "，已公开"
+                        } else {
+                            ""
+                        },
+                    );
+                }
+                println!("已公开端点（{} 个）：", endpoints.len());
+                for e in &endpoints {
+                    println!(
+                        "  {}「{}」vis={} delivery={} state={} subscribers={}",
+                        e["endpointId"].as_str().unwrap_or("?"),
+                        e["name"].as_str().unwrap_or("?"),
+                        e["visibility"].as_str().unwrap_or("?"),
+                        e["delivery"].as_str().unwrap_or("?"),
+                        e["state"].as_str().unwrap_or("?"),
+                        e["subscribers"].as_u64().unwrap_or(0),
+                    );
+                }
+                println!(
+                    "公开: stross ctrl endpoint publish --device <id> --visibility ... --delivery ..."
+                );
+            }
+        },
     }
     Ok(())
+}
+
+/// 可见性参数解析（public | confirm | private + 白名单节点）。
+fn parse_visibility(s: &str, nodes: &[String]) -> anyhow::Result<Visibility> {
+    match s {
+        "public" => Ok(Visibility::Public),
+        "confirm" => Ok(Visibility::Confirm),
+        "private" => Ok(Visibility::Private {
+            nodes: nodes.to_vec(),
+        }),
+        other => bail!("--visibility 取值 public|confirm|private，收到 {other}"),
+    }
+}
+
+/// delivery 参数解析（pull | push | both）。
+fn parse_delivery(s: &str) -> anyhow::Result<Delivery> {
+    match s {
+        "pull" => Ok(Delivery::Pull),
+        "push" => Ok(Delivery::Push),
+        "both" => Ok(Delivery::Both),
+        other => bail!("--delivery 取值 pull|push|both，收到 {other}"),
+    }
 }
 
 /// 发一个请求并等待响应（忽略事件推送）。

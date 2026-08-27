@@ -70,17 +70,35 @@ pub async fn anchor(
         .map_err(|e| anyhow::anyhow!(e))
 }
 
-/// 第 3 步（目录 + 订阅握手）：启动协商端点 18779（LAN 可达，CORS 放行）。
+/// 第 3 步（目录 + 订阅握手）：启动协商端点（LAN 可达，CORS 放行）。
+///
+/// `port = 0` 理解为默认端口 [`DEFAULT_NEGOTIATOR_PORT`]（与本机中继端口
+/// 语义一致：0 = 常规部署端口）。本地双端测试用显式端口避免冲突。
+pub async fn start_handshake_on(
+    app: Arc<StrossApp>,
+    ui: Arc<dyn NegotiatorUi>,
+    base_dir: &Path,
+    port: u16,
+) -> anyhow::Result<Arc<ShareNegotiator>> {
+    let port = if port == 0 {
+        DEFAULT_NEGOTIATOR_PORT
+    } else {
+        port
+    };
+    Ok(Arc::new(
+        ShareNegotiator::start(app, ui, base_dir, port)
+            .await
+            .map_err(|e| anyhow::anyhow!("启动协商端点失败: {e}"))?,
+    ))
+}
+
+/// 默认端口版（GUI 桌面等固定 18779 的调用方用）。
 pub async fn start_handshake(
     app: Arc<StrossApp>,
     ui: Arc<dyn NegotiatorUi>,
     base_dir: &Path,
 ) -> anyhow::Result<Arc<ShareNegotiator>> {
-    Ok(Arc::new(
-        ShareNegotiator::start(app, ui, base_dir, DEFAULT_NEGOTIATOR_PORT)
-            .await
-            .map_err(|e| anyhow::anyhow!("启动协商端点失败: {e}"))?,
-    ))
+    start_handshake_on(app, ui, base_dir, DEFAULT_NEGOTIATOR_PORT).await
 }
 
 /// 完整引导（CLI serve 等常驻实例）：身份 → 锚定（含 L1 广播）→ 目录/握手端点。
@@ -91,8 +109,9 @@ pub async fn start(
     relay_port: u16,
     srt_port: u16,
     quic_port: u16,
+    negotiator_port: u16,
 ) -> anyhow::Result<Bootstrap> {
     let relay = anchor(app.clone(), relay_port, srt_port, quic_port).await?;
-    let negotiator = start_handshake(app, ui, base_dir).await?;
+    let negotiator = start_handshake_on(app, ui, base_dir, negotiator_port).await?;
     Ok(Bootstrap { relay, negotiator })
 }

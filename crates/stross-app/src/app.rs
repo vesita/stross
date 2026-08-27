@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use stross_core::discovery::Discovery;
 use stross_core::net::local_ips;
@@ -227,6 +227,44 @@ impl StrossApp {
     /// 取消公开端点（已订阅会话由上层决定宽限期，P1 直接移除）。
     pub fn unpublish_endpoint(&self, endpoint_id: &str) -> Result<()> {
         self.registry.lock_poisoned().unpublish(endpoint_id)
+    }
+
+    /// 公开本地文件为文件端点（动态设备 `file:<名>`；本地路径登记但不出现在
+    /// 目录 / 摘要 / wire，见 docs/endpoint-model.md §3.6）。
+    pub fn publish_file_endpoint(
+        &self,
+        path: &std::path::Path,
+        visibility: Visibility,
+        delivery: Delivery,
+    ) -> Result<EndpointManifest> {
+        self.registry
+            .lock_poisoned()
+            .publish_file(path, visibility, delivery)
+    }
+
+    /// 文件端点的本地文件源（订阅驱动开推用）。
+    pub fn file_source(&self, endpoint_id: &str) -> Option<crate::kernel::FileSource> {
+        self.registry
+            .lock_poisoned()
+            .file_source(endpoint_id)
+            .cloned()
+    }
+
+    /// 接线订阅事件回调（上层启动时安装一次；协商层授予成功后触发，
+    /// 见 docs/endpoint-model.md §5 联动）。
+    pub fn set_subscribe_hook(&self, hook: Option<Arc<crate::kernel::SubscribeHook>>) {
+        self.registry.lock_poisoned().set_subscribe_hook(hook);
+    }
+
+    /// 订阅达成事件（协商层授予成功后调用；触发上层驱动开推）。
+    ///
+    /// hook 在注册表锁**外**调用：驱动回调会再次访问注册表
+    /// （`endpoint_manifest` / `file_source`），持锁回调会死锁（实测挂死握手）。
+    pub fn fire_endpoint_subscribed(&self, endpoint_id: &str, ctx: &crate::kernel::SubscribeCtx) {
+        let hook = self.registry.lock_poisoned().subscribed_hook();
+        if let Some(hook) = hook {
+            hook(endpoint_id, ctx);
+        }
     }
 
     /// 端点清单查询（订阅握手 / 目录 API 用）。
@@ -762,7 +800,7 @@ pub struct CaptureStatusView {
 }
 
 /// 手机麦克风接入凭证视图（B2：电脑端签发后展示给手机）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareTokenView {
     /// ShareToken JSON 字符串（手机端原样粘贴到「共享麦克风」）。

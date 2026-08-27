@@ -15,8 +15,10 @@
 pub mod app;
 pub mod bootstrap;
 pub mod control;
+pub mod endpoint_driver;
 pub mod engine;
 pub mod error;
+pub mod file_xfer;
 pub mod kernel;
 mod lock;
 pub mod negotiator;
@@ -24,11 +26,14 @@ pub mod receiver;
 
 pub use app::{CaptureStatusView, Platform, StrossApp};
 pub use control::{CtrlRequest, CtrlResponse, CtrlServer, DEFAULT_CTRL_PORT};
+pub use endpoint_driver::install_endpoint_driver;
 pub use engine::SenderEngine;
 pub use error::{Error, Result};
+pub use file_xfer::{FilePushOptions, ReceivedFile, receive_file, receive_file_session};
 pub use kernel::{
-    AuthError, AuthPolicy, DataPlaneBackend, EndpointRegistry, Kernel, KernelEvent, NodeInfo,
-    NodeRole, PinAuthPolicy, RelayDataPlane, Session, SessionPrefs, TransportAddr,
+    AuthError, AuthPolicy, DataPlaneBackend, EndpointRegistry, FileSource, Kernel, KernelEvent,
+    NodeInfo, NodeRole, PinAuthPolicy, RelayDataPlane, Session, SessionPrefs, SubscribeCtx,
+    SubscribeHook, TransportAddr,
 };
 pub use negotiator::{
     CliUi, DEFAULT_NEGOTIATOR_PORT, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest,

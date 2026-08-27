@@ -49,7 +49,23 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
     tracing::info!("中继已启动: ws://127.0.0.1:{}/ws/push", relay.port);
 
-    let ctrl = CtrlServer::start(app.clone(), args.ctrl_port).await?;
+    // 凭证协商端点（18779）：手机 GUI「共享麦克风到 TA」自动协商即可接入
+    // （免手动粘贴凭证）。未知设备挂起等人工确认——CLI 经
+    // `stross ctrl negotiator-list / negotiator-respond` 审批；已信任设备自动签发。
+    let negotiator = stross_app::ShareNegotiator::start(
+        app.clone(),
+        Arc::new(stross_app::CliUi),
+        &base,
+        stross_app::DEFAULT_NEGOTIATOR_PORT,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("启动协商端点失败: {e}"))?;
+    tracing::info!(
+        "凭证协商: 手机端「共享麦克风到 TA」自动接入，审批: stross ctrl negotiator-list"
+    );
+
+    let ctrl =
+        CtrlServer::start(app.clone(), args.ctrl_port, Some(Arc::new(negotiator))).await?;
     tracing::info!(
         "接入控制: stross ctrl --connect ws://127.0.0.1:{}/ws/ctrl",
         ctrl.port

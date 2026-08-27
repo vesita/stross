@@ -30,8 +30,8 @@ pub use kernel::{
     PinAuthPolicy, RelayDataPlane, Session, SessionPrefs,
 };
 pub use negotiator::{
-    DEFAULT_NEGOTIATOR_PORT, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest, ShareGrant,
-    ShareNegotiator, ShareRequest, TrustStore, load_or_create_identity,
+    DEFAULT_NEGOTIATOR_PORT, CliUi, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest,
+    ShareGrant, ShareNegotiator, ShareRequest, TrustStore, load_or_create_identity,
 };
 pub use receiver::{ReceiveStats, Receiver};
 

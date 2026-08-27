@@ -23,6 +23,7 @@ use stross_media::pipeline::StreamConfig;
 
 use crate::SessionPrefs;
 use crate::app::StrossApp;
+use crate::negotiator::ShareNegotiator;
 
 /// 控制面默认端口（回环）。
 pub const DEFAULT_CTRL_PORT: u16 = 18778;
@@ -65,6 +66,15 @@ pub enum CtrlRequest {
     ListSessions,
     /// 实例状态（中继端口 / 是否推流 / 会话数）。
     Status,
+    /// 列出待人工确认的凭证协商请求（serve 启用协商端点时可用）。
+    NegotiatorPending,
+    /// 应答协商请求（`allow = true` 签发凭证；`remember` 顺带记住该设备）。
+    NegotiatorRespond {
+        req_id: String,
+        allow: bool,
+        #[serde(default)]
+        remember: bool,
+    },
 }
 
 /// 控制响应。`rsp` 标签与 [`crate::kernel::KernelEvent`] 的 `type` 标签区分开，
@@ -90,6 +100,8 @@ impl CtrlResponse {
 /// 控制面共享状态。
 struct CtrlState {
     app: Arc<StrossApp>,
+    /// 凭证协商服务句柄（serve 启动时注入；None = 未启用）。
+    negotiator: Option<Arc<ShareNegotiator>>,
 }
 
 /// 控制面服务器（仅回环，D7）。
@@ -101,8 +113,15 @@ pub struct CtrlServer {
 
 impl CtrlServer {
     /// 在回环地址上启动控制面。`port = 0` = 随机端口。
-    pub async fn start(app: Arc<StrossApp>, port: u16) -> anyhow::Result<Self> {
-        let state = Arc::new(CtrlState { app });
+    ///
+    /// `negotiator`：可选的凭证协商服务句柄——提供则控制面暴露
+    /// `NegotiatorPending` / `NegotiatorRespond` 命令（CLI 审批接入请求）。
+    pub async fn start(
+        app: Arc<StrossApp>,
+        port: u16,
+        negotiator: Option<Arc<ShareNegotiator>>,
+    ) -> anyhow::Result<Self> {
+        let state = Arc::new(CtrlState { app, negotiator });
         let router = Router::new()
             .route("/ws/ctrl", get(ws_ctrl))
             .with_state(state);
@@ -137,7 +156,7 @@ async fn handle_client(mut ws: WebSocket, state: Arc<CtrlState>) {
         tokio::select! {
             msg = ws.recv() => match msg {
                 Some(Ok(Message::Text(text))) => {
-                    let resp = handle_request(&state.app, &text).await;
+                    let resp = handle_request(&state, &text).await;
                     let json = serde_json::to_string(&resp).unwrap_or_else(|_| {
                         r#"{"rsp":"error","message":"响应序列化失败"}"#.into()
                     });
@@ -163,12 +182,49 @@ async fn handle_client(mut ws: WebSocket, state: Arc<CtrlState>) {
     }
 }
 
-async fn handle_request(app: &StrossApp, text: &str) -> CtrlResponse {
+async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
+    let app = &state.app;
     let req: CtrlRequest = match serde_json::from_str(text) {
         Ok(r) => r,
         Err(e) => return CtrlResponse::err(format!("非法请求: {e}")),
     };
     match req {
+        CtrlRequest::NegotiatorPending => {
+            let Some(neg) = &state.negotiator else {
+                return CtrlResponse::err("凭证协商服务未启动（serve 未启用协商端点）");
+            };
+            let pending: Vec<serde_json::Value> = neg
+                .pending_requests()
+                .iter()
+                .map(|r| json!({
+                    "id": r.id,
+                    "deviceId": r.device_id,
+                    "deviceName": r.device_name,
+                    "media": r.media,
+                    "createdAt": r.created_at,
+                }))
+                .collect();
+            CtrlResponse::ok(json!({ "pending": pending }))
+        }
+        CtrlRequest::NegotiatorRespond {
+            req_id,
+            allow,
+            remember,
+        } => {
+            let Some(neg) = &state.negotiator else {
+                return CtrlResponse::err("凭证协商服务未启动（serve 未启用协商端点）");
+            };
+            match neg.respond(&req_id, allow, remember) {
+                Ok(Some(grant)) => CtrlResponse::ok(json!({
+                    "streamId": grant.view.stream_id,
+                    "pin": grant.view.pin,
+                    "expiresAt": grant.view.expires_at,
+                    "trusted": grant.trusted,
+                })),
+                Ok(None) => CtrlResponse::ok(json!({ "denied": true })),
+                Err(e) => CtrlResponse::err(e),
+            }
+        }
         CtrlRequest::CreateSession { title, sinks } => {
             // 源节点固定为本机（register_local_node 注册的 "local"）；
             // title 随会话存储（UI 展示），不再是死字段

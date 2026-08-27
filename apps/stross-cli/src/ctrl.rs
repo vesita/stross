@@ -90,6 +90,23 @@ pub enum CtrlCommand {
         #[arg(long, default_value_t = 5)]
         secs: u64,
     },
+    /// 列出待人工确认的凭证协商请求（serve 启用协商端点时可用）
+    NegotiatorList {
+        /// 输出原始 JSON（脚本化用）
+        #[arg(long)]
+        json: bool,
+    },
+    /// 应答凭证协商请求（允许=签发接入凭证并通知申请方）
+    NegotiatorRespond {
+        /// 挂起请求 id（negotiator-list 返回）
+        req_id: String,
+        /// 拒绝（缺省为允许）
+        #[arg(long)]
+        deny: bool,
+        /// 记住该设备（下次自动签发，免确认）
+        #[arg(long)]
+        remember: bool,
+    },
 }
 
 pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
@@ -182,6 +199,53 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
             print_status(&payload);
         }
         CtrlCommand::Events { secs } => events(&args.connect, secs).await?,
+        CtrlCommand::NegotiatorList { json } => {
+            let payload = request(&args.connect, CtrlRequest::NegotiatorPending).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+            let pending = payload["pending"].as_array().cloned().unwrap_or_default();
+            if pending.is_empty() {
+                println!("无待确认的协商请求");
+                return Ok(());
+            }
+            println!("待确认的凭证协商请求：");
+            for p in &pending {
+                println!(
+                    "  {}  {}（{}）media={}",
+                    p["id"].as_str().unwrap_or("?"),
+                    p["deviceName"].as_str().unwrap_or("?"),
+                    p["deviceId"].as_str().unwrap_or("?"),
+                    p["media"].as_array().map(|m| m.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")).unwrap_or_default(),
+                );
+            }
+            println!("批准: stross ctrl negotiator-respond <id>（--deny 拒绝，--remember 记住设备）");
+        }
+        CtrlCommand::NegotiatorRespond {
+            req_id,
+            deny,
+            remember,
+        } => {
+            let payload = request(
+                &args.connect,
+                CtrlRequest::NegotiatorRespond {
+                    req_id: req_id.clone(),
+                    allow: !deny,
+                    remember,
+                },
+            )
+            .await?;
+            if deny {
+                println!("已拒绝请求 {req_id}");
+            } else {
+                println!(
+                    "已允许 {req_id} → streamId={} pin={}",
+                    payload["streamId"].as_str().unwrap_or("?"),
+                    payload["pin"].as_str().unwrap_or("?")
+                );
+            }
+        }
     }
     Ok(())
 }

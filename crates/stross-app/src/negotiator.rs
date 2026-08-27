@@ -226,6 +226,24 @@ impl NegotiatorUi for NoopUi {
     fn request_pending(&self, _req: &PendingRequest) {}
 }
 
+/// CLI 实现：把挂起请求打到日志，用户经 `stross ctrl negotiator-respond` 应答。
+///
+/// 无弹窗，但语义与 GUI 一致：请求挂起 60s，应答窗口内由控制面命令决定
+/// 允许/拒绝；已信任设备仍自动签发（不受 UI 影响）。
+pub struct CliUi;
+
+impl NegotiatorUi for CliUi {
+    fn request_pending(&self, req: &PendingRequest) {
+        tracing::warn!(
+            "设备 {}（{}）请求接入（{}），等待确认：stross ctrl negotiator-list / negotiator-respond {} --allow",
+            req.device_name,
+            req.device_id,
+            req.media.join(","),
+            req.id,
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 服务器
 // ---------------------------------------------------------------------------
@@ -319,6 +337,21 @@ impl ShareNegotiator {
     /// 绝对不可达的请求计数（诊断用）。
     pub fn pending_len(&self) -> usize {
         self.pending.lock_poisoned().len()
+    }
+
+    /// 挂起请求只读视图（CLI 控制面「列挂起」用；应答通道不可见）。
+    pub fn pending_requests(&self) -> Vec<PendingRequest> {
+        self.pending
+            .lock_poisoned()
+            .iter()
+            .map(|(id, (device_id, device_name, _))| PendingRequest {
+                id: id.clone(),
+                device_id: device_id.clone(),
+                device_name: device_name.clone(),
+                media: vec!["mic".into()], // 当前协商协议仅支持 mic
+                created_at: 0,             // 挂起表未记录创建时刻，置 0 表示未知
+            })
+            .collect()
     }
 
     fn grant(&self, device_id: String, device_name: String) -> Result<ShareGrant, String> {

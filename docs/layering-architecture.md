@@ -1,7 +1,8 @@
 # 分层架构（Layering）
 
-> 状态：**已拍板并落实（第四轮收敛，2026-08 起）**。本文件是分层的**决策依据与
-> 判据**——新增/迁移功能前先对照此表，避免再发生「核心逻辑外溢到壳层」。
+> 状态：**已拍板并落实（第四轮协议/契约收敛 + 第五轮壳层去方言，2026-08 起）**。
+> 本文件是分层的**决策依据与判据**——新增/迁移功能前先对照此表，避免再发生
+> 「核心逻辑外溢到壳层」或「各平台各写一份连接流程」。
 
 ## 1. 总原则
 
@@ -52,26 +53,33 @@ ffmpeg/cpal 后端）。
 5. **前端直接当协议客户端**：`discovery.ts`（670 行）含探测/聚合/过滤，
    `negotiate.ts`/`subscribe.ts` 直接 POST 18779。
 
-## 3. 收敛落点（第四轮完成）
+## 3. 收敛落点（第四轮 + 第五轮完成）
 
 | 收敛项 | 落点 |
 |---|---|
 | 协商线协议类型（ShareRequest/ShareGrant/RelayAddr/ShareTokenView）+ L2 目录（EndpointNode/EndpointDir） | `stross-proto::message::negotiator`（wire 逐字节兼容，单测锁定） |
 | 中继 HTTP 客户端（info/streams/stream_watchers/post_json） | `stross-core::relay::client`（raw TCP 零新依赖） |
 | 广告 IP / fake-IP 判定 | `stross-transport::net::{advertise_ip, is_fake_or_link_local}` |
-| 订阅方编排（fetch_directory / subscribe_file / 重试 / 本地接收准备） | `stross-app::subscriber` |
+| 订阅方编排（fetch_directory / subscribe_file / 重试 / 本地接收准备） | `stross-app::subscriber`；握手原语 `negotiator_client::request_grant`（CLI 与 GUI 命令同源） |
 | 数据目录解析 | `stross-app::paths::data_dir` |
-| 订阅驱动默认安装 | `bootstrap::start`（幂等，壳层无需接线） |
-| CLI serve/devices/adb/endpoint | 全部改为调库接口，删本地实现 |
+| 订阅驱动默认安装 | `bootstrap::start_handshake_on`（幂等；CLI serve 与 GUI 桌面行为一致） |
+| 设备扫描聚合（mDNS + 探测 + 视图） | `stross-app::devices::{scan, probe_base, ScannedDevice}`（CLI devices / GUI scan_devices / adb 状态同源） |
+| GUI 命令面（桥） | `apps/stross-gui/src-tauri/src/commands.rs`：scan_devices / probe_relay / anchor_streams / endpoint_ls / endpoint_subscribe / request_share_token |
+| 前端 JS | **已去协议客户端化**：`discovery.ts`/`negotiate.ts`/`subscribe.ts` 不再 `fetch('/api/*')`，探测/握手/目录/等待流接入全部走 Rust 命令（手机 / 桌面 GUI / CLI 同库同命令） |
+| CLI serve/devices/adb/endpoint | 全部改为调库接口，删本地实现；adb（660 行）拆 `adb/{mod,device,status,ui}` 子模块 |
 
 ## 4. 规则（改动前必读）
 
-- **新增协议客户端一律进库层**：解析 `/api/*`（中继或协商端点）的 Rust 代码
-  只允许出现在 `stross-core::relay::client`（core 拥有服务端的 API）与
-  `stross-app::subscriber` / `negotiator`（app 拥有协商端点的 API）。
+- **新增协议客户端一律进库层**：解析 `/api/*`（中继或协商端点）的代码只允许
+  出现在 `stross-core::relay::client`（core 拥有服务端的 API）、
+  `stross-app::subscriber` / `negotiator_client` / `negotiator`（app 拥有协商
+  端点的 API），以及**把这些库函数暴露成 Tauri 命令的 commands.rs**。前端 JS
+  禁止再出现 `fetch('/api/*')` 或手拼线协议 JSON。
 - **新增线协议类型一律进 stross-proto**：壳层不得定义 wire 结构体
   （展示视图可以，如 `StreamView`）。
-- **流程不写进 CLI 命令**：`stross endpoint subscribe` 这类多步编排应是对
-  app 库接口的一次调用 + 格式化。GUI 前端同理（JS 只渲染，流程走 Rust 命令）。
+- **流程不写进 CLI 命令 / 前端 JS**：`stross endpoint subscribe` 这类多步编排
+  应是对 app 库接口的一次调用 + 格式化；GUI 前端只渲染，流程经 Tauri 命令
+  走同一个库函数。
 - **平台无关红线**：core 出现路径/OS/平台分支即视为违规；app 出现平台分支
-  必须说明（如防火墙自检仅限桌面）。
+  必须说明（如防火墙自检仅限桌面）。壳层之间不产生"方言"：同一连接流程
+  （握手 / 订阅 / 探测 / 等待接入）在所有平台只有一份实现。

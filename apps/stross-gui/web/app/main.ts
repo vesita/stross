@@ -55,7 +55,13 @@ async function init(): Promise<void> {
 /** 状态轮询：应用打开期间常驻（本机状态，无需连接前提）。 */
 function startStatusPolling(): void {
   if (statusTimer !== null) return;
-  statusTimer = window.setInterval(() => void pollStatus(), 2000);
+  statusTimer = window.setInterval(() => {
+    void pollStatus();
+    // 设备「在线共享」周期刷新（scanRemoteStreams 自带 5s TTL + in-flight
+    // 守卫：实际每 ~5s 拉一轮各设备 /api/streams）。此前只在初始化/手动
+    // 添加/本机推流时聚合——远程设备中途启动的新流永远不出现，直到重启。
+    void scanRemoteStreams();
+  }, 2000);
 }
 
 // ---------------------------------------------------------------- 设备能力

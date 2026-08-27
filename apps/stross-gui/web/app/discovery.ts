@@ -20,6 +20,17 @@ function isLinkLocalIp(ip: string): boolean {
   );
 }
 
+/** 局域网设备探测超时（ms）：不可达设备快速失败，避免拖慢整轮聚合。 */
+const PROBE_TIMEOUT_MS = 2000;
+
+/** 带超时的 fetch：设备不可达时按超时失败而不是挂起（浏览器默认 TCP
+ *  超时可长达 30s+，串行探测会被一台离线设备拖死整轮扫描）。 */
+function fetchWithTimeout(url: string, ms: number): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { cache: 'no-store', signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
 /** 免先连核心：自动锚定本机（`start_relay` 幂等，启动受控中继 + mDNS 广播）。 */
 async function ensureAnchor(): Promise<void> {
   setAnchorBadge('anchoring');
@@ -52,11 +63,12 @@ async function ensureAnchor(): Promise<void> {
 async function refreshAnchorPorts(): Promise<void> {
   if (!anchor) return;
   try {
-    const resp = await fetch(`http://127.0.0.1:${anchor.port}/api/info`, { cache: 'no-store' });
+    const resp = await fetchWithTimeout(`http://127.0.0.1:${anchor.port}/api/info`, 2000);
     if (!resp.ok) return;
     const info = (await resp.json()) as { srtPort?: number; quicPort?: number };
     if (info.srtPort) anchor.srtUrl = `srt://127.0.0.1:${info.srtPort}`;
     if (info.quicPort) anchor.quicUrl = `quic://127.0.0.1:${info.quicPort}`;
+    renderLocalCard(); // 刷新锚点状态行（含传输就绪信息）
   } catch (_) { /* 中继可能不支持 /api/info：保持 null，走 WS */ }
 }
 
@@ -72,7 +84,7 @@ async function addManualRelay(): Promise<void> {
   saveRecent(addr);
   // 探测中继是否可达（/api/streams 是受控/普通中继都提供的只读端点）
   try {
-    const resp = await fetch(addr + '/api/streams', { cache: 'no-store' });
+    const resp = await fetchWithTimeout(addr + '/api/streams', 3000);
     if (!resp.ok) throw new Error('中继返回 HTTP ' + resp.status);
     await resp.json();
   } catch (e) {
@@ -223,6 +235,9 @@ function renderDeviceList(): void {
   const box = $('device-list');
   box.innerHTML = '';
   box.appendChild(localDeviceCard());
+  // 本机卡片重建会重置 ip-list 为「读取中…」占位——重渲染 IP 列表
+  // （scanRelays/scanRemoteStreams 每次重建设备列表都会走到这里）
+  renderIps(MY_IPS);
   if (!deviceViews.length) {
     box.appendChild(emptyState('radio', '未发现局域网内其它设备（mDNS）。可手动输入地址添加。'));
     return;
@@ -508,37 +523,47 @@ async function scanRemoteStreams(force = false): Promise<void> {
 
   // 设备 key → 在线共享列表（保留既有流缓存，避免每次全量重建丢失流信息）
   const perDevice: Record<string, RemoteStream[]> = {};
-  for (const r of others) {
-    const base = deviceBase(r);
-    if (!base) continue;
-    let info: { srtPort?: number; quicPort?: number } | null = null;
-    try {
-      const iresp = await fetch(base + '/api/info', { cache: 'no-store' });
-      if (iresp.ok) info = (await iresp.json()) as { srtPort?: number; quicPort?: number };
-    } catch (_) { /* 该设备 /api/info 不可用 → SRT/QUIC null */ }
-    try {
-      const sresp = await fetch(base + '/api/streams', { cache: 'no-store' });
-      if (!sresp.ok) continue;
-      const data = (await sresp.json()) as { streams?: RemoteStream[] } | RemoteStream[];
-      const list = Array.isArray(data) ? data : (data.streams || []);
+  // 并行探测所有设备（每设备独立超时），一台离线设备不再拖慢整轮聚合
+  const probes = await Promise.allSettled(
+    others.map(async (r) => {
+      const base = deviceBase(r);
+      if (!base) return null;
+      let info: { srtPort?: number; quicPort?: number } | null = null;
+      try {
+        const iresp = await fetchWithTimeout(base + '/api/info', PROBE_TIMEOUT_MS);
+        if (iresp.ok) info = (await iresp.json()) as { srtPort?: number; quicPort?: number };
+      } catch (_) { /* 该设备 /api/info 不可用 → SRT/QUIC null */ }
+      let list: RemoteStream[] = [];
+      try {
+        const sresp = await fetchWithTimeout(base + '/api/streams', PROBE_TIMEOUT_MS);
+        if (sresp.ok) {
+          const data = (await sresp.json()) as { streams?: RemoteStream[] } | RemoteStream[];
+          list = Array.isArray(data) ? data : (data.streams || []);
+        }
+      } catch (_) { /* 该设备不可达，跳过 */ }
+      return { base, info, list };
+    }),
+  );
+  for (const r of probes) {
+    if (r.status !== 'fulfilled' || !r.value) continue;
+    const { base, info, list } = r.value;
+    list.forEach((st) => {
+      if (!remoteStreams.has(st.streamId)) remoteStreams.set(st.streamId, st);
+    });
+    perDevice[base] = list;
+    // 同步 SRT/QUIC 拨号地址到设备视图
+    const dev = deviceViews.find((d) => d.base === base);
+    if (dev) {
       const hostOnly = base.replace(/^https?:\/\//, '').replace(/:\d+$/, '');
-      list.forEach((st) => {
-        if (!remoteStreams.has(st.streamId)) remoteStreams.set(st.streamId, st);
-      });
-      perDevice[base] = list;
-      // 同步 SRT/QUIC 拨号地址到设备视图
-      const dev = deviceViews.find((d) => d.base === base);
-      if (dev) {
-        dev.srtUrl = info && info.srtPort ? `srt://${hostOnly}:${info.srtPort}` : null;
-        dev.quicUrl = info && info.quicPort ? `quic://${hostOnly}:${info.quicPort}` : null;
-        dev.streams = list;
-      }
-    } catch (_) { /* 该设备不可达，跳过 */ }
+      dev.srtUrl = info && info.srtPort ? `srt://${hostOnly}:${info.srtPort}` : null;
+      dev.quicUrl = info && info.quicPort ? `quic://${hostOnly}:${info.quicPort}` : null;
+      dev.streams = list;
+    }
   }
   // 拉取本机在线共享（本机卡片流区）
   if (anchor) {
     try {
-      const resp = await fetch(`http://127.0.0.1:${anchor.port}/api/streams`, { cache: 'no-store' });
+      const resp = await fetchWithTimeout(`http://127.0.0.1:${anchor.port}/api/streams`, PROBE_TIMEOUT_MS);
       if (resp.ok) {
         const data = (await resp.json()) as { streams?: RemoteStream[] } | RemoteStream[];
         const list = Array.isArray(data) ? data : (data.streams || []);
@@ -630,12 +655,16 @@ function renderIps(ips: string[]): void {
   if (!ips.length) ul.innerHTML = '<li class="hint">未获取到局域网 IP</li>';
 }
 
-/** 刷新本机卡片锚点状态行（锚定成功后调用）。 */
+/** 刷新本机卡片锚点状态行（锚定成功后调用；SRT/QUIC 就绪状态在
+ *  `refreshAnchorPorts` 拉取后二次刷新）。 */
 function renderLocalCard(): void {
   const meta = $('anchor-box');
   if (meta) {
+    const transports = anchor && (anchor.srtUrl || anchor.quicUrl)
+      ? (anchor.srtUrl ? ' · SRT' : '') + (anchor.quicUrl ? ' · QUIC' : '')
+      : '';
     meta.textContent = anchor
-      ? `已锚定 · 中继端口 ${anchor.port} · mDNS 广播中`
+      ? `已锚定 · 中继端口 ${anchor.port} · mDNS 广播中${transports}`
       : '未锚定';
   }
 }

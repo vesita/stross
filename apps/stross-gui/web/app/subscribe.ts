@@ -114,7 +114,16 @@ async function pollReceiveStatus(): Promise<void> {
     recvAudioBlocks = s.audioBlocks;
     if (s.error) recvError = s.error;
     const status = $('recv-status');
-    if (recvFrameCount > 0) {
+    if (s.error) {
+      // 连接失败 / 流不存在等：明确错误态
+      status.textContent = '错误';
+      $('recv-dot').className = 'dot err';
+      $('recv-meta').textContent = '错误：' + s.error;
+    } else if (!s.running && s.received > 0) {
+      // 流已自然结束（对方停止 / 中继回收 / 断流，非错误）：清理接收会话
+      void endReceiveStatus();
+      return;
+    } else if (recvFrameCount > 0) {
       status.textContent = '接收中';
       $('recv-dot').className = 'dot live';
     } else if (s.audioBlocks > 0) {
@@ -122,7 +131,7 @@ async function pollReceiveStatus(): Promise<void> {
       status.textContent = '音频播放中';
       $('recv-dot').className = 'dot live';
       updateRecvOverlay();
-    } else if (!s.running && !s.error) {
+    } else {
       status.textContent = '等待流数据…';
       $('recv-dot').className = 'dot starting';
     }
@@ -133,6 +142,27 @@ async function pollReceiveStatus(): Promise<void> {
     void renderShares();
   } catch (_) { /* ignore */ }
   if (receiving) setTimeout(() => void pollReceiveStatus(), 1000);
+}
+
+/** 流已结束（非错误）的收尾：停止接收会话并回到空闲态。
+ *  修复：此前只要绘制过帧就永远显示「进行中」，断流后 UI 卡死。 */
+async function endReceiveStatus(): Promise<void> {
+  if (!receiving) return;
+  receiving = false;
+  recvStreamId = null;
+  recvFrameCount = 0;
+  recvAudioBlocks = 0;
+  if (recvUnlisten) {
+    recvUnlisten();
+    recvUnlisten = null;
+  }
+  try {
+    await call('stop_receive');
+  } catch (_) { /* ignore */ }
+  // 复用统一清理：status-line / dot / meta / 画布容器隐藏 / 面板刷新
+  setReceiving(false);
+  const ctx = canvasCtx();
+  if (ctx) ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 }
 
 // ---------------------------------------------------------------------------

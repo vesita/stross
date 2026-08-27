@@ -46,6 +46,7 @@ Object.defineProperty(window.navigator, 'clipboard', {
 const calls = [];
 let sharedTokenJson = null; // B2 签发结果的回放
 let streamRunning = false; // 与 start_stream/stop_stream 联动（真实行为）
+let mockRecvEnded = false; // B6 测试：流结束 → receive_status 返回 running=false 且已收帧
 let fwMissing = ['18779/tcp', '33464/udp']; // 防火墙自检回放（缺 SRT? 实际缺两个）
 const invoke = async (cmd, args) => {
   calls.push({ cmd, args: JSON.parse(JSON.stringify(args || {})) });
@@ -92,7 +93,9 @@ const invoke = async (cmd, args) => {
     case 'start_receive':
       return undefined;
     case 'receive_status':
-      return { running: true, received: 0, decodedVideo: 0, audioBlocks: 0, dropped: 0, error: null };
+      return mockRecvEnded
+        ? { running: false, received: 30, decodedVideo: 30, audioBlocks: 0, dropped: 0, error: null }
+        : { running: true, received: 0, decodedVideo: 0, audioBlocks: 0, dropped: 0, error: null };
     case 'stop_receive':
       return undefined;
     default:
@@ -189,6 +192,28 @@ check('纯音频 → QUIC 优先（quic://192.168.1.51:9002）', rc[0] && rc[0].
 check('音频输出 device（扬声器播放）', rc[0] && rc[0].args.audio === 'device');
 check('共享面板出现入站条目（接收 麦克风 ← …）', $('share-list').textContent.includes('接收 麦克风'));
 check('共享面板有「停止」按钮（B6 雏形：运行中可停止）', !!$('share-list').querySelector('.share-item .share-stop'));
+
+console.log('\n[3b] 断流自愈（B6）：流结束后接收 UI 自动回到空闲态');
+{
+  await window.__TAURI__.core.invoke('stop_receive', {});
+  const devs = document.querySelectorAll('#device-list .dev-card');
+  const phoneC = Array.from(devs).find((c) => c.textContent.includes('手机A'));
+  if (phoneC && !phoneC.classList.contains('expanded')) phoneC.querySelector('.dev-head').click();
+  await sleep(200);
+  const items2 = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'))?.querySelectorAll('.dev-stream-item') || [];
+  items2[0]?.click();
+  await sleep(400);
+  check('B6: 重新开始接收', calls.filter((c) => c.cmd === 'start_receive').length >= 2);
+  check('B6: 接收态显示（接收中/等待）', !$('recv-status-line').classList.contains('hidden'));
+  // 流结束：mock 返回 running=false 且已收帧 → 前端应自动 stop 并清空
+  mockRecvEnded = true;
+  await sleep(2500); // 轮询间隔 1s，等 2 轮
+  check('B6: 断流后自动调用 stop_receive', calls.filter((c) => c.cmd === 'stop_receive').length >= 1, `stop 次数 ${calls.filter((c) => c.cmd === 'stop_receive').length}`);
+  check('B6: 共享面板不再有「进行中」入站条目', !$('share-list').textContent.includes('进行中'));
+  check('B6: 接收状态行隐藏（回到未接收）', $('recv-status-line').classList.contains('hidden'));
+  check('B6: 等待浮层隐藏', $('recv-overlay').classList.contains('hidden'));
+  mockRecvEnded = false;
+}
 
 console.log('\n[4] 本机广播共享（弹窗：共享屏幕）');
 document.querySelector('#device-list .dev-card.local [data-act="broadcast-screen"]').click();

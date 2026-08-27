@@ -6,7 +6,7 @@
 //! 能力引导（F1.2）：TXT 单 key（`stross`）承载整个 [`DiscoveryInfo`]（JSON），
 //! 见 [`stross_proto::message::DiscoveryInfo`]——注册侧传结构体，浏览侧解码结构体。
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -102,7 +102,14 @@ impl Discovery {
             .map_err(|e| anyhow::anyhow!("accept_unsolicited: {e}"))?;
         let receiver = daemon().browse(SERVICE_TYPE)?;
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut out = Vec::new();
+        // 按实例名聚合：mdns 增量 resolve 会多次触发 ServiceResolved（每次
+        // 地址集合逐步补全 A/AAAA）。若对每个事件立即选址，调用方会拿到
+        // 地址不全的首个事件（真机：手机首次事件仅 rndis0 的 10.159.157.104，
+        // 二次才补 wlan0 的 192.168.2.6——旧逻辑据此选中不可达的虚拟接口）。
+        // 这里把每次可达地址并入集合（去重），浏览结束时对**最全**集合选址；
+        // ServiceRemoved 同步移除条目。
+        let mut agg: std::collections::HashMap<String, (Vec<IpAddr>, u16, std::collections::HashMap<String, String>)> =
+            std::collections::HashMap::new();
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
@@ -113,59 +120,57 @@ impl Discovery {
             };
             match event {
                 Ok(ServiceEvent::ServiceResolved(info)) => {
-                    // mdns-sd 0.21：地址为 HashSet<ScopedIp>（带接口信息）。
-                    // 选址策略（真机实测定稿）：
-                    // 1. link-local（fe80::/10、169.254/16）无 scope 不可达，
-                    //    且 `enable_addr_auto` 会把网卡全地址（含 fe80）带进广播，
-                    //    必须剔除——否则网格出现「点不开」的设备卡片；
-                    // 2. **优先 IPv4**：双栈 WiFi 上不同设备的 IPv6 前缀常不通
-                    //    （真机：PC 240e:3a8… 与手机 240e:579… 互不可达），
-                    //    IPv4 才是同网段的可靠路径；IPv6 全局地址仅作纯 IPv6
-                    //    局域网的后备。
-                    let reachable: Vec<IpAddr> = info
-                        .get_addresses()
+                    // 1. link-local（fe80::/10、169.254/16）无 scope 不可达，剔除；
+                    // 2. 其余全收进聚合集合（IPv4/IPv6 都留，最终选址再挑）。
+                    let fullname = info.get_fullname().to_string();
+                    let entry = agg
+                        .entry(fullname.clone())
+                        .or_insert_with(|| (Vec::new(), info.get_port(), Default::default()));
+                    entry.1 = info.get_port();
+                    // TXT 以最新事件为准（能力描述只在注册时变化）
+                    entry.2 = info
+                        .get_properties()
                         .iter()
-                        .map(|s| s.to_ip_addr())
-                        .filter(|i| match i {
+                        .map(|p| (p.key().to_string(), p.val_str().to_string()))
+                        .collect();
+                    for addr in info.get_addresses() {
+                        let ip = addr.to_ip_addr();
+                        let keep = match ip {
                             IpAddr::V4(v4) => !v4.is_link_local() && !v4.is_unspecified(),
                             IpAddr::V6(v6) => {
                                 v6.segments()[0] & 0xffc0 != 0xfe80 && !v6.is_unspecified()
                             }
-                        })
-                        .collect();
-                    tracing::debug!(
-                        "mDNS 解析到服务 {}，地址 {:?}",
-                        info.get_fullname(),
-                        info.get_addresses()
-                            .iter()
-                            .map(|s| s.to_ip_addr().to_string())
-                            .collect::<Vec<_>>(),
-                    );
-                    let ip = reachable
-                        .iter()
-                        .find(|i| i.is_ipv4())
-                        .or_else(|| reachable.first());
-                    if let Some(ip) = ip {
-                        out.push(Discovered {
-                            instance: info.get_fullname().to_string(),
-                            ip: *ip,
-                            port: info.get_port(),
-                            txt: info
-                                .get_properties()
-                                .iter()
-                                .map(|p| (p.key().to_string(), p.val_str().to_string()))
-                                .collect(),
-                        });
+                        };
+                        if keep && !entry.0.contains(&ip) {
+                            entry.0.push(ip);
+                        }
                     }
+                    tracing::debug!(
+                        "mDNS 解析到服务 {fullname}，聚合地址 {:?}",
+                        entry.0.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+                    );
                 }
-                Ok(ServiceEvent::ServiceRemoved(_, _)) => {}
+                Ok(ServiceEvent::ServiceRemoved(fullname, _)) => {
+                    agg.remove(&fullname);
+                }
                 Ok(_) => {}
                 Err(_) => break,
             }
         }
         // 停止本次 browse（全局 daemon 持续存活，仅停止浏览，不 shutdown）
         let _ = daemon().stop_browse(SERVICE_TYPE);
-        Ok(out)
+        Ok(agg
+            .into_iter()
+            .filter_map(|(instance, (addrs, port, txt))| {
+                let txt_vec: Vec<(String, String)> = txt.into_iter().collect();
+                select_reachable_ip(&addrs).map(|ip| Discovered {
+                    instance,
+                    ip: *ip,
+                    port,
+                    txt: txt_vec,
+                })
+            })
+            .collect())
     }
 
     /// 停止广播（反注册本句柄注册的服务；全局 daemon 持续存活）。
@@ -207,6 +212,40 @@ fn broadcast_addrs(ips: &[IpAddr]) -> Vec<IpAddr> {
     } else {
         filtered
     }
+}
+
+/// 从解析到的候选地址里选**可拨号**的一个。
+///
+/// 对端多网卡（手机 wlan0/rndis0/vgate0、PC 多网卡 + TUN）会广播多个 IPv4，
+/// mdns-sd 的地址集合无序（HashSet）——此前直接取第一个 IPv4，真机实测
+/// 会随机挑中不可达的虚拟接口地址（PC 扫到手机 rndis0 的 10.159.157.104、
+/// 手机扫到 PC USB 网卡的 192.168.10.111，均点不开卡片）。
+///
+/// 选址（与广播端 `broadcast_addrs` 对称的启发式）：
+/// 1. 优先「与本机任一 IPv4 同 /24 网段」的地址——同网段才可能在同一
+///    局域网内直连（无线电广播来的地址几乎总是同网段）；
+/// 2. 其次任选一个 IPv4（比 IPv6 可靠：双栈 WiFi 上前缀常互不可达）；
+/// 3. 最后任意地址（纯 IPv6 局域网后备）。
+fn select_reachable_ip(reachable: &[IpAddr]) -> Option<&IpAddr> {
+    let self_ips = crate::net::local_ips();
+    reachable
+        .iter()
+        .find(|i| {
+            let IpAddr::V4(v4) = i else { return false };
+            self_ips.iter().any(|s| {
+                let IpAddr::V4(sv4) = s else { return false };
+                ipv4_same_subnet(*sv4, *v4)
+            })
+        })
+        .or_else(|| reachable.iter().find(|i| i.is_ipv4()))
+        .or_else(|| reachable.first())
+}
+
+/// 两个 IPv4 是否同 /24 网段。
+fn ipv4_same_subnet(a: Ipv4Addr, b: Ipv4Addr) -> bool {
+    let a = u32::from_be_bytes(a.octets());
+    let b = u32::from_be_bytes(b.octets());
+    a & 0xffff_ff00 == b & 0xffff_ff00
 }
 
 #[cfg(test)]
@@ -262,5 +301,57 @@ mod tests {
         // 极端场景：全是 link-local（纯 IPv6 链路）→ 原样广播兜底，避免不可发现
         let ips = vec![IpAddr::V6("fe80::1".parse().unwrap())];
         assert_eq!(broadcast_addrs(&ips), ips);
+    }
+
+    #[test]
+    fn same_subnet_matches_third_octet() {
+        assert!(ipv4_same_subnet(
+            "192.168.2.32".parse().unwrap(),
+            "192.168.2.6".parse().unwrap(),
+        ));
+        assert!(!ipv4_same_subnet(
+            "192.168.2.32".parse().unwrap(),
+            "10.159.157.104".parse().unwrap(),
+        ));
+        assert!(!ipv4_same_subnet(
+            "192.168.2.32".parse().unwrap(),
+            "192.168.3.1".parse().unwrap(),
+        ));
+    }
+
+    #[test]
+    fn select_prefers_same_subnet_over_other_v4() {
+        // 本机 192.168.2.x：候选含同网段 wlan0 与异网段 rndis0/vgate0
+        // 时，必须选中 wlan0（此前随机 HashSet 顺序会挑错，真机 bug）
+        let candidates = vec![
+            IpAddr::V4("10.159.157.104".parse().unwrap()), // rndis0
+            IpAddr::V4("172.30.242.158".parse().unwrap()), // vgate0
+            IpAddr::V4("192.168.2.6".parse().unwrap()),    // wlan0（同网段）
+        ];
+        assert_eq!(
+            select_reachable_ip(&candidates),
+            Some(&IpAddr::V4("192.168.2.6".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn select_falls_back_to_first_v4_when_no_same_subnet() {
+        let candidates = vec![
+            IpAddr::V4("10.0.0.5".parse().unwrap()),
+            IpAddr::V6("fe80::1".parse().unwrap()),
+        ];
+        assert_eq!(
+            select_reachable_ip(&candidates),
+            Some(&IpAddr::V4("10.0.0.5".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn select_accepts_v6_only_fallback() {
+        let candidates = vec![IpAddr::V6("fd00::1".parse().unwrap())];
+        assert_eq!(
+            select_reachable_ip(&candidates),
+            Some(&IpAddr::V6("fd00::1".parse().unwrap()))
+        );
     }
 }

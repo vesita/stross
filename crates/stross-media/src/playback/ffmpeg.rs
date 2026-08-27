@@ -232,12 +232,16 @@ fn video_reader_gen(mut stdout: ChildStdout, shared: Arc<VideoShared>) {
             Ok(0) => break, // 子进程结束
             Ok(n) => {
                 acc.extend_from_slice(&buf[..n]);
-                // 分辨率变化 → 丢弃未对齐的残留字节
+                // 分辨率变化 → 丢弃未对齐的残留字节（关键帧重建时子进程
+                // 重启，尺寸可能变；注意首次 None→Some 初始化**不允许**清空：
+                // 写线程在 spawn 解码器前已解析 SPS 设置 size，reader 首块
+                // 数据就是首帧——误清会让整个流帧边界错位（花屏回归，见
+                // decoded_pixels_match_native_ffmpeg）
                 let size = *shared.size.lock().unwrap();
-                if size != last_size {
+                if last_size.is_some() && size != last_size {
                     acc.clear();
-                    last_size = size;
                 }
+                last_size = size;
                 let Some((w, h)) = size else {
                     if acc.len() > MAX_FRAME_BYTES {
                         acc.clear();
@@ -532,6 +536,152 @@ mod tests {
         }
         drop(session); // 释放内部 tx，读循环彻底收尾
         frames
+    }
+
+    /// 把协议帧拼成 Annex-B ES（与接收侧写入解码器 stdin 的字节完全一致）。
+    fn frames_to_es(frames: &[Frame]) -> Vec<u8> {
+        frames
+            .iter()
+            .filter(|f| f.header.track == TRACK_VIDEO)
+            .flat_map(|f| f.payload.iter().copied())
+            .collect()
+    }
+
+    /// 原生 ffmpeg 解码整段 ES → RGBA 帧列表（对照基准）。
+    fn decode_es_native(es: &[u8], w: u32, h: u32) -> Vec<Vec<u8>> {
+        use std::io::Read;
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(ffmpeg_bin())
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "h264",
+                "-i",
+                "pipe:0",
+                "-an",
+                "-sn",
+                "-pix_fmt",
+                "rgba",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn ffmpeg");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(es)
+            .expect("写 ES");
+        let mut raw = Vec::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_end(&mut raw)
+            .expect("读解码输出");
+        child.wait().expect("ffmpeg 退出");
+        let need = (w as usize) * (h as usize) * 4;
+        assert!(
+            raw.len() % need == 0,
+            "原生解码输出应正好切成整帧（{} 字节 % {}）",
+            raw.len(),
+            need
+        );
+        raw.chunks_exact(need).map(|c| c.to_vec()).collect()
+    }
+
+    /// 像素级对照：我们的管线（按帧喂入 → ffmpeg 子进程）+ 原生 ffmpeg 解码
+    /// 同一段 ES，逐帧逐字节一致 ⇒ 解码管线不引入帧错位/花屏（D 批回归
+    /// 防「帧大小/pts 对齐 bug」）。
+    #[tokio::test]
+    async fn decoded_pixels_match_native_ffmpeg() {
+        if !ffmpeg_available() {
+            eprintln!("跳过：未找到 ffmpeg");
+            return;
+        }
+        // 合成源 2 秒（跨两个 GOP：关键帧对齐 + P 帧连续），LOW = 640x360@24
+        let cfg = StreamConfig {
+            stream_id: "t".into(),
+            title: "t".into(),
+            video: Some(VideoSource::Synthetic {
+                pattern: "testsrc2".into(),
+            }),
+            quality: Quality::LOW,
+            audio: None,
+            duration_secs: Some(2),
+            share_token: None,
+        };
+        let frames = capture_frames(cfg).await;
+        assert!(frames.iter().any(|f| f.header.is_keyframe()));
+        let es = frames_to_es(&frames);
+        assert!(!es.is_empty());
+
+        // 1) 原生解码：同输入 ES 的像素基准
+        let native = decode_es_native(&es, 640, 360);
+        assert!(native.len() >= 20, "原生应解出至少 20 帧，实际 {}", native.len());
+
+        // 2) 我们的管线：裸 ES 直接喂给解码进程（绕过采集端，只测解码消费侧）
+        let session = FfmpegPlaybackSink
+            .open(PlaybackConfig {
+                video: Some(VideoOut { display: None }),
+                audio: None,
+            })
+            .unwrap();
+        let mut out_rx = session.take_video_frames().unwrap();
+        // 按 AccessUnit 切回协议帧喂入（与接收端 push 相同）。
+        // 注意：真实链路帧间隔 ~40ms（24fps 采集 -re 限速），瞬间塞满会触发
+        // 不同的解码器行为，这里以真实节奏喂入（与端到端延迟测试口径一致）。
+        for f in &frames {
+            if f.header.track == TRACK_VIDEO {
+                session.push(f.clone()).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(41)).await;
+        }
+        let mut ours = Vec::new();
+        // 收集窗口：推入耗时 ~2s（41ms/帧 × 48），解码输出随其后到达；
+        // 收尾前必须留足时间等子进程吐完所有帧
+        while let Ok(Some(f)) =
+            tokio::time::timeout(Duration::from_millis(3000), out_rx.recv()).await
+        {
+            ours.push(f);
+        }
+        session.stop();
+        let s = session.stats();
+        // 准确性：全部协议帧应写入解码器（无丢帧/无失步重建）
+        assert_eq!(
+            s.video_frames_in as usize,
+            frames.iter().filter(|f| f.header.track == TRACK_VIDEO).count(),
+            "解码器应收到全部视频帧（video_frames_in={}）",
+            s.video_frames_in
+        );
+        assert_eq!(s.dropped_push, 0, "按真实节奏喂入不应丢帧");
+        assert_eq!(s.video_resyncs, 1, "只应初始 spawn 一次解码器，无失步重建");
+
+        // 数量级（兼容子进程尾帧滞留）：至少解出一半
+        assert!(
+            ours.len() >= native.len() / 2,
+            "我们的管线应解出与原生同量级的帧（ours {} / native {}）",
+            ours.len(),
+            native.len()
+        );
+        let n = ours.len().min(native.len());
+        assert!(n > 0);
+        // 帧序一致（zerolatency 无 B 帧，输出序=输入序）；逐字节比对像素
+        for (i, (o, nf)) in ours[..n].iter().zip(native[..n].iter()).enumerate() {
+            assert_eq!(
+                o.rgba, *nf,
+                "第 {i} 帧像素与原生解码不一致（解码管线帧错位/花屏回归）"
+            );
+        }
     }
 
     #[test]

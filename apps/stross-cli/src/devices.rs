@@ -12,7 +12,7 @@ use clap::Args;
 use serde::{Deserialize, Serialize};
 use stross_core::discovery::{BROWSE_TIMEOUT, Discovery};
 use stross_core::net::local_ips;
-use stross_proto::message::{DiscoveryInfo, MediaKind, RoleId};
+use stross_proto::message::{DeviceSummary, DiscoveryInfo, MediaKind, RoleId};
 
 #[derive(Args, Debug)]
 pub struct DevicesArgs {
@@ -53,6 +53,8 @@ struct DeviceStatus {
     media: Vec<String>,
     /// 支持的传输（WS / SRT / QUIC …）。
     transports: Vec<String>,
+    /// 端点框架 L1：该节点公开的设备清单摘要（id/kind/name/是否已公开）。
+    devices: Vec<DeviceSummary>,
     /// `/api/info` 可达（HTTP 探测成功）才为 true。
     online: bool,
     srt_port: Option<u16>,
@@ -135,6 +137,7 @@ pub async fn run(args: DevicesArgs) -> anyhow::Result<()> {
                         .collect()
                 })
                 .unwrap_or_default(),
+            devices: info.as_ref().map(|i| i.devices.clone()).unwrap_or_default(),
             online: false,
             srt_port: None,
             quic_port: None,
@@ -223,6 +226,14 @@ fn print_device(dev: &DeviceStatus) {
     .collect();
     if !caps.is_empty() {
         println!("      {}", caps.join(" · "));
+    }
+    if !dev.devices.is_empty() {
+        let list: Vec<String> = dev
+            .devices
+            .iter()
+            .map(|d| format!("{}{}", d.name, if d.published { "（已公开）" } else { "" }))
+            .collect();
+        println!("      设备: {}", list.join(" / "));
     }
     if let Some(srt) = dev.srt_port {
         println!("      SRT {srt}");

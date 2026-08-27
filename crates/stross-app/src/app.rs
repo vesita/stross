@@ -26,8 +26,8 @@ use tokio::sync::mpsc;
 use crate::receiver::{LocalProxy, ReceiveStats, Receiver};
 use stross_proto::frame::Frame;
 use stross_proto::message::{
-    CodecId, Delivery, DeviceInfo, DiscoveryInfo, EndpointManifest, MediaKind, RoleId, TransportId,
-    TransportPreference, Visibility,
+    CodecId, Delivery, DeviceInfo, DeviceSummary, DiscoveryInfo, EndpointManifest, MediaKind,
+    RoleId, TransportId, TransportPreference, Visibility,
 };
 
 use crate::engine::SenderEngine;
@@ -276,7 +276,10 @@ impl StrossApp {
         {
             let guard = self.anchor.lock_poisoned();
             if let Some(a) = guard.as_ref() {
-                return Ok(relay_info(a.port));
+                return Ok(relay_info(
+                    a.port,
+                    self.registry.lock_poisoned().summaries(),
+                ));
             }
         }
         // 优先指定端口；被占用时回退随机端口（本机中继"能用就行"，不因端口冲突失败）
@@ -332,7 +335,7 @@ impl StrossApp {
             discovery,
             port,
         });
-        Ok(relay_info(port))
+        Ok(relay_info(port, self.registry.lock_poisoned().summaries()))
     }
 
     /// 把本机节点（含采集能力）注册进内核设备图。
@@ -376,6 +379,7 @@ impl StrossApp {
                         .map(|i| i.transports.clone())
                         .unwrap_or_default(),
                     ip: Some(d.ip.to_string()),
+                    devices: info.as_ref().map(|i| i.devices.clone()).unwrap_or_default(),
                 }
             })
             .collect())
@@ -724,6 +728,10 @@ pub struct RelayInfo {
     pub transports: Vec<TransportId>,
     /// 中继 IP（本机中继时为 `None`，用 urls 展示）。
     pub ip: Option<String>,
+    /// 端点框架 L1：该节点公开的设备清单摘要（id/kind/name/是否已公开；
+    /// 本机 = 注册表快照，对端 = mDNS `DiscoveryInfo v2.devices` 解码）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceSummary>,
 }
 
 #[derive(Serialize)]
@@ -767,7 +775,7 @@ pub struct ShareTokenView {
     pub expires_at: u64,
 }
 
-fn relay_info(port: u16) -> RelayInfo {
+fn relay_info(port: u16, devices: Vec<DeviceSummary>) -> RelayInfo {
     // 多网卡：列出全部局域网 IP 入口（无局域网 IP 时回退回环）
     let urls = stross_core::transport::RelayUrl::http_entries(port);
     RelayInfo {
@@ -783,6 +791,7 @@ fn relay_info(port: u16) -> RelayInfo {
             TransportId::Quic,
         ],
         ip: None,
+        devices,
     }
 }
 
@@ -797,7 +806,7 @@ fn watch_urls(relay_url: Option<&str>, relay_port: u16) -> Vec<String> {
             return vec![url.base_http()];
         }
     }
-    relay_info(relay_port).urls
+    stross_core::transport::RelayUrl::http_entries(relay_port)
 }
 
 #[cfg(test)]

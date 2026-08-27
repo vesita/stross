@@ -546,17 +546,14 @@ pub fn run() {
                         app: app_handle.clone(),
                     };
                     let app_state = app_handle.state::<Arc<StrossApp>>().inner().clone();
-                    match stross_app::ShareNegotiator::start(
-                        app_state,
-                        Arc::new(ui),
-                        &base,
-                        stross_app::DEFAULT_NEGOTIATOR_PORT,
-                    )
-                    .await
+                    // 引导层（docs/endpoint-model.md §0）：目录（L2）与订阅握手端点
+                    // （锚定由前端触发；Android 不起协商端点、仅作客户端）
+                    match stross_app::bootstrap::start_handshake(app_state, Arc::new(ui), &base)
+                        .await
                     {
                         Ok(neg) => {
                             tracing::info!("凭证协商端点已启动: 0.0.0.0:{}", neg.port);
-                            *handle_arc.lock().unwrap() = Some(Arc::new(neg));
+                            *handle_arc.lock().unwrap() = Some(neg);
                         }
                         Err(e) => tracing::error!("凭证协商端点启动失败: {e}"),
                     }

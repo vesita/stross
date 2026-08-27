@@ -217,10 +217,19 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                     p["id"].as_str().unwrap_or("?"),
                     p["deviceName"].as_str().unwrap_or("?"),
                     p["deviceId"].as_str().unwrap_or("?"),
-                    p["media"].as_array().map(|m| m.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")).unwrap_or_default(),
+                    p["media"]
+                        .as_array()
+                        .map(|m| m
+                            .iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join(","))
+                        .unwrap_or_default(),
                 );
             }
-            println!("批准: stross ctrl negotiator-respond <id>（--deny 拒绝，--remember 记住设备）");
+            println!(
+                "批准: stross ctrl negotiator-respond <id>（--deny 拒绝，--remember 记住设备）"
+            );
         }
         CtrlCommand::NegotiatorRespond {
             req_id,

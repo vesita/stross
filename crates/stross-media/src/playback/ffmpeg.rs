@@ -575,12 +575,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn ffmpeg");
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(es)
-            .expect("写 ES");
+        child.stdin.take().unwrap().write_all(es).expect("写 ES");
         let mut raw = Vec::new();
         child
             .stdout
@@ -627,7 +622,11 @@ mod tests {
 
         // 1) 原生解码：同输入 ES 的像素基准
         let native = decode_es_native(&es, 640, 360);
-        assert!(native.len() >= 20, "原生应解出至少 20 帧，实际 {}", native.len());
+        assert!(
+            native.len() >= 20,
+            "原生应解出至少 20 帧，实际 {}",
+            native.len()
+        );
 
         // 2) 我们的管线：裸 ES 直接喂给解码进程（绕过采集端，只测解码消费侧）
         let session = FfmpegPlaybackSink
@@ -659,7 +658,10 @@ mod tests {
         // 准确性：全部协议帧应写入解码器（无丢帧/无失步重建）
         assert_eq!(
             s.video_frames_in as usize,
-            frames.iter().filter(|f| f.header.track == TRACK_VIDEO).count(),
+            frames
+                .iter()
+                .filter(|f| f.header.track == TRACK_VIDEO)
+                .count(),
             "解码器应收到全部视频帧（video_frames_in={}）",
             s.video_frames_in
         );

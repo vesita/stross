@@ -1,8 +1,9 @@
 # 端点框架 · 设计规格（节点 → 设备 → 端点）
 
-> 状态：**讨论定稿；P1 核心已实现（未提交）**：stross-proto v2 类型 + EndpointRegistry +
-> `/api/endpoints` + 协商扩展。待办（下一轮）：GUI/CLI 接线、订阅→推流联动、真机验证、
-> 目录互斥锁。
+> 状态：**讨论定稿；P1 已提交（2f22f21）**。第二轮（未提交）：引导层 `bootstrap`
+> 编排门面（CLI serve / GUI 桌面均接入）、浏览侧 L1 设备摘要消费
+> （`scan_relays` / `stross devices` 输出）、选址测试改为注入式纯函数。
+> 待办：CtrlServer 命令、订阅→推流联动、真机验证、目录互斥锁。
 > 对齐 `iteration-plan.md` 阶段 A/B；P1 范围：媒体类端点、一设备一端点（1:1）、
 > 双向 delivery、主程序代持目录。
 > 本文件是协议与实现的唯一规格源；术语定稿见 §1，任何讨论改动须先改这里。
@@ -282,7 +283,9 @@ P1 后扩展点：一设备多端点（endpoint_id 与 device_id 解耦）、文
 
 ---
 
-## 12. P1 实现记录（未提交）
+## 12. 实现记录
+
+### P1（已提交 2f22f21）
 
 | 落点 | 内容 |
 |---|---|
@@ -295,7 +298,16 @@ P1 后扩展点：一设备多端点（endpoint_id 与 device_id 解耦）、文
 | `crates/stross-app/src/negotiator.rs` | ShareRequest/ShareGrant/PendingRequest 扩展、`policy_decision`、`compose_grant`、`GET /api/endpoints` |
 | `crates/stross-app/src/lib.rs` | 导出 EndpointRegistry / RelayAddr / TransportAddr |
 
-未做（后续步骤）：CtrlServer 命令（endpoint publish/unpublish）、Tauri/GUI 接线、
+### 第二轮：引导层 + L1 浏览闭环（未提交）
+
+| 落点 | 内容 |
+|---|---|
+| `crates/stross-app/src/bootstrap.rs` | 引导层编排门面：`ensure_identity` / `anchor`（中继锚定 + mDNS L1）/ `start_handshake`（18779 目录+握手）/ `start` 完整组合；CLI serve 与 GUI 桌面启动均接入 |
+| `crates/stross-app/src/app.rs` | `RelayInfo.devices`（L1 设备摘要：本机 = 注册表快照，对端 = mDNS 解码）；`scan_relays` 透传 |
+| `apps/stross-cli/src/devices.rs` | `stross devices` 输出每节点设备清单（含「已公开」标记） |
+| `crates/stross-core/src/discovery.rs` | 选址改纯函数 `select_reachable_ip_from(self_ips, reachable)`——测试显式注入本机网段，与环境解耦（原硬编码"本机在某网段"，网段迁移后必挂）；`BrowseAgg` 类型别称修 clippy type-complexity |
+
+未做（后续步骤）：CtrlServer 命令（endpoint publish/unpublish）、GUI 前端渲染设备清单、
 订阅达成自动建会话推流（`set_subscribe_hook` 已留口）、目录互斥锁、设备重命名、
 `/api/endpoints` 的 Private 白名单动态过滤（当前一律不下发 Private 端点）。
 

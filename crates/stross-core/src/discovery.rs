@@ -25,6 +25,12 @@ pub const SERVICE_TYPE: &str = "_stross._tcp.local.";
 /// 为浏览窗口：足够 3 次 resolve 尝试落网，同时兼顾首扫冷发现。
 pub const BROWSE_TIMEOUT: Duration = Duration::from_secs(4);
 
+/// 浏览聚合条目：实例名 →（可达地址集, 端口, TXT 键值）。
+type BrowseAgg = std::collections::HashMap<
+    String,
+    (Vec<IpAddr>, u16, std::collections::HashMap<String, String>),
+>;
+
 /// 一个被发现的服务实例。
 #[derive(Debug, Clone)]
 pub struct Discovered {
@@ -108,8 +114,7 @@ impl Discovery {
         // 二次才补 wlan0 的 192.168.2.6——旧逻辑据此选中不可达的虚拟接口）。
         // 这里把每次可达地址并入集合（去重），浏览结束时对**最全**集合选址；
         // ServiceRemoved 同步移除条目。
-        let mut agg: std::collections::HashMap<String, (Vec<IpAddr>, u16, std::collections::HashMap<String, String>)> =
-            std::collections::HashMap::new();
+        let mut agg: BrowseAgg = std::collections::HashMap::new();
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
@@ -221,24 +226,38 @@ fn broadcast_addrs(ips: &[IpAddr]) -> Vec<IpAddr> {
 /// 会随机挑中不可达的虚拟接口地址（PC 扫到手机 rndis0 的 10.159.157.104、
 /// 手机扫到 PC USB 网卡的 192.168.10.111，均点不开卡片）。
 ///
-/// 选址（与广播端 `broadcast_addrs` 对称的启发式）：
+/// 选址（与广播端 `broadcast_addrs` 对称的启发式），**纯函数**：
 /// 1. 优先「与本机任一 IPv4 同 /24 网段」的地址——同网段才可能在同一
 ///    局域网内直连（无线电广播来的地址几乎总是同网段）；
 /// 2. 其次任选一个 IPv4（比 IPv6 可靠：双栈 WiFi 上前缀常互不可达）；
 /// 3. 最后任意地址（纯 IPv6 局域网后备）。
-fn select_reachable_ip(reachable: &[IpAddr]) -> Option<&IpAddr> {
-    let self_ips = crate::net::local_ips();
+///
+/// `self_ips` 显式传入（运行时 = `local_ips()`，测试 = 固定网段），
+/// 选址结果与运行环境解耦（本机网卡变化不再影响单测确定性）。
+fn select_reachable_ip_from<'a>(
+    self_ips: &[IpAddr],
+    reachable: &'a [IpAddr],
+) -> Option<&'a IpAddr> {
     reachable
         .iter()
         .find(|i| {
-            let IpAddr::V4(v4) = i else { return false };
+            let IpAddr::V4(v4) = i else {
+                return false;
+            };
             self_ips.iter().any(|s| {
-                let IpAddr::V4(sv4) = s else { return false };
+                let IpAddr::V4(sv4) = s else {
+                    return false;
+                };
                 ipv4_same_subnet(*sv4, *v4)
             })
         })
         .or_else(|| reachable.iter().find(|i| i.is_ipv4()))
         .or_else(|| reachable.first())
+}
+
+/// 运行时入口：以本机实际局域网地址做同网段偏好。
+fn select_reachable_ip(reachable: &[IpAddr]) -> Option<&IpAddr> {
+    select_reachable_ip_from(&crate::net::local_ips(), reachable)
 }
 
 /// 两个 IPv4 是否同 /24 网段。
@@ -319,38 +338,65 @@ mod tests {
         ));
     }
 
+    // 注：选址测试一律走纯函数 `select_reachable_ip_from`，显式注入本机网段，
+    // 不再依赖跑测试机器的实时网卡（旧测试硬编码"本机在某网段"，网段迁移
+    // 后必挂——实测复现于机器从 192.168.2.x 迁到 192.168.11.x）。
+    fn self_ips(cidrs: &[&str]) -> Vec<IpAddr> {
+        cidrs.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
     #[test]
     fn select_prefers_same_subnet_over_other_v4() {
         // 本机 192.168.2.x：候选含同网段 wlan0 与异网段 rndis0/vgate0
         // 时，必须选中 wlan0（此前随机 HashSet 顺序会挑错，真机 bug）
+        let self_ips = self_ips(&["192.168.2.32"]);
         let candidates = vec![
             IpAddr::V4("10.159.157.104".parse().unwrap()), // rndis0
             IpAddr::V4("172.30.242.158".parse().unwrap()), // vgate0
             IpAddr::V4("192.168.2.6".parse().unwrap()),    // wlan0（同网段）
         ];
         assert_eq!(
-            select_reachable_ip(&candidates),
+            select_reachable_ip_from(&self_ips, &candidates),
+            Some(&IpAddr::V4("192.168.2.6".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn select_multihomed_prefers_first_subnet_match() {
+        // 本机多网卡（WiFi + USB）：候选按出现顺序，首个与任一本地网段
+        // 重合的地址胜出——启发式只保证"同网段优先"，具体哪个由候选序决定
+        let self_ips = self_ips(&["192.168.2.32", "10.159.157.104"]);
+        let candidates = vec![
+            IpAddr::V4("192.168.2.6".parse().unwrap()),
+            IpAddr::V4("10.159.157.104".parse().unwrap()),
+        ];
+        assert_eq!(
+            select_reachable_ip_from(&self_ips, &candidates),
             Some(&IpAddr::V4("192.168.2.6".parse().unwrap()))
         );
     }
 
     #[test]
     fn select_falls_back_to_first_v4_when_no_same_subnet() {
+        // 本机网段与全部候选都不重合 → 回退第一个 IPv4
+        let self_ips = self_ips(&["10.0.0.99"]);
         let candidates = vec![
             IpAddr::V4("10.0.0.5".parse().unwrap()),
             IpAddr::V6("fe80::1".parse().unwrap()),
         ];
         assert_eq!(
-            select_reachable_ip(&candidates),
+            select_reachable_ip_from(&self_ips, &candidates),
             Some(&IpAddr::V4("10.0.0.5".parse().unwrap()))
         );
     }
 
     #[test]
     fn select_accepts_v6_only_fallback() {
+        // 只有 IPv6 候选（纯 IPv6 局域网），即使本机是 IPv4-only 也兜底返回
+        let self_ips = self_ips(&["192.168.1.1"]);
         let candidates = vec![IpAddr::V6("fd00::1".parse().unwrap())];
         assert_eq!(
-            select_reachable_ip(&candidates),
+            select_reachable_ip_from(&self_ips, &candidates),
             Some(&IpAddr::V6("fd00::1".parse().unwrap()))
         );
     }

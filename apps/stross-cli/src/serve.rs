@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use clap::Args;
-use stross_app::{CtrlServer, Platform, StrossApp};
+use stross_app::{CtrlServer, Platform, StrossApp, bootstrap};
 use stross_media::capture::FfmpegBackend;
 
 #[derive(Args, Debug)]
@@ -29,8 +29,9 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     let app = Arc::new(StrossApp::new(Platform::Desktop));
     // 桌面采集后端（ffmpeg），供 ctrl start-stream 使用
     app.set_backend(Arc::new(FfmpegBackend::new()));
-    // 注入本机持久化身份：mDNS 实例名携带 device_id 前缀（与 GUI 同源，
-    // ~/.local/share/stross/identity.json），多 serve/gui 同端口不碰撞。
+    // 引导层（docs/endpoint-model.md §0）：身份注入 → 锚定受控中继并广播
+    // mDNS L1 摘要（节点 → 设备清单）→ 目录/订阅握手端点（18779）。
+    // 与 GUI 桌面共用同一套启动原语。
     let base = std::env::var("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -38,34 +39,30 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
                 .map(|h| std::path::Path::new(&h).join(".local/share/stross"))
                 .unwrap_or_else(|_| std::path::PathBuf::from("stross-data"))
         });
-    let name = hostname::get()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "Stross 设备".into());
-    app.set_identity(stross_app::load_or_create_identity(&base, &name));
-
-    let relay = app
-        .start_relay_fixed(args.port, args.srt_port, args.quic_port)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-    tracing::info!("中继已启动: ws://127.0.0.1:{}/ws/push", relay.port);
-
-    // 凭证协商端点（18779）：手机 GUI「共享麦克风到 TA」自动协商即可接入
-    // （免手动粘贴凭证）。未知设备挂起等人工确认——CLI 经
-    // `stross ctrl negotiator-list / negotiator-respond` 审批；已信任设备自动签发。
-    let negotiator = stross_app::ShareNegotiator::start(
+    bootstrap::ensure_identity(&app, &base);
+    let bootstrap_handle = bootstrap::start(
         app.clone(),
         Arc::new(stross_app::CliUi),
         &base,
-        stross_app::DEFAULT_NEGOTIATOR_PORT,
+        args.port,
+        args.srt_port,
+        args.quic_port,
     )
-    .await
-    .map_err(|e| anyhow::anyhow!("启动协商端点失败: {e}"))?;
+    .await?;
+    tracing::info!(
+        "中继已启动: ws://127.0.0.1:{}/ws/push",
+        bootstrap_handle.relay.port
+    );
     tracing::info!(
         "凭证协商: 手机端「共享麦克风到 TA」自动接入，审批: stross ctrl negotiator-list"
     );
 
-    let ctrl =
-        CtrlServer::start(app.clone(), args.ctrl_port, Some(Arc::new(negotiator))).await?;
+    let ctrl = CtrlServer::start(
+        app.clone(),
+        args.ctrl_port,
+        Some(bootstrap_handle.negotiator()),
+    )
+    .await?;
     tracing::info!(
         "接入控制: stross ctrl --connect ws://127.0.0.1:{}/ws/ctrl",
         ctrl.port

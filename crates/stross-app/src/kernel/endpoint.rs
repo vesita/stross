@@ -18,13 +18,16 @@ use stross_proto::time::unix_secs;
 
 use crate::error::{Error, Result};
 
+/// 订阅事件回调（P1 只挂不接；后续接"自动建会话+推流"联动，pull 模式）。
+pub type SubscribeHook = dyn Fn(&str) + Send + Sync;
+
 /// 端点注册表。
 #[derive(Default)]
 pub struct EndpointRegistry {
     devices: HashMap<String, DeviceInfo>,
     endpoints: HashMap<String, EndpointManifest>,
-    /// 订阅达成回调（P1 只挂不接；后续接"自动建会话+推流"，pull 模式）。
-    on_subscribed: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// 订阅达成回调。
+    on_subscribed: Option<Arc<SubscribeHook>>,
 }
 
 impl EndpointRegistry {
@@ -131,7 +134,7 @@ impl EndpointRegistry {
     }
 
     /// 接线订阅事件回调（P1 只挂不接，见模块注释）。
-    pub fn set_subscribe_hook(&mut self, hook: Option<Arc<dyn Fn(&str) + Send + Sync>>) {
+    pub fn set_subscribe_hook(&mut self, hook: Option<Arc<SubscribeHook>>) {
         self.on_subscribed = hook;
     }
 

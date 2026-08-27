@@ -13,6 +13,7 @@
 //! 本模块不依赖任何 UI 框架，可独立单元测试。
 
 pub mod app;
+pub mod bootstrap;
 pub mod control;
 pub mod engine;
 pub mod error;

@@ -101,7 +101,8 @@ pub async fn start_handshake(
     start_handshake_on(app, ui, base_dir, DEFAULT_NEGOTIATOR_PORT).await
 }
 
-/// 完整引导（CLI serve 等常驻实例）：身份 → 锚定（含 L1 广播）→ 目录/握手端点。
+/// 完整引导（CLI serve 等常驻实例）：订阅驱动默认安装 → 身份 → 锚定
+/// （含 L1 广播）→ 目录/握手端点。
 pub async fn start(
     app: Arc<StrossApp>,
     ui: Arc<dyn NegotiatorUi>,
@@ -111,6 +112,11 @@ pub async fn start(
     quic_port: u16,
     negotiator_port: u16,
 ) -> anyhow::Result<Bootstrap> {
+    // 订阅达成 → 自动开推（文件泵 / 媒体推流），docs/endpoint-model.md §5。
+    // 收敛为引导默认行为（幂等），壳层无需再手动接线——此前 lib 的
+    // install_endpoint_driver 由 serve.rs 自觉调用，GUI 桌面漏装＝订阅了不推。
+    // GUI 桌面待前端订阅交互落地时同样在 setup 里调一次即可。
+    crate::endpoint_driver::install_endpoint_driver(&app);
     let relay = anchor(app.clone(), relay_port, srt_port, quic_port).await?;
     let negotiator = start_handshake_on(app, ui, base_dir, negotiator_port).await?;
     Ok(Bootstrap { relay, negotiator })

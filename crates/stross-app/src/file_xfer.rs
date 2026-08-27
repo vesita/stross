@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
+use stross_core::relay::client as relay_http;
 use stross_core::sender::RelayClient;
 use stross_core::transport::SessionPacket;
 use stross_core::watch::connect_watch;
@@ -145,60 +146,17 @@ async fn wait_for_watcher(base: &str, stream_id: &str) -> anyhow::Result<()> {
 }
 
 /// 拉取中继 `/api/streams`，返回指定流的观看者数（探测失败 = 0）。
+///
+/// 走 core 官方客户端（`stross_core::relay::client`，与 server 同契约；
+/// docs/layering-architecture.md——壳层/应用层禁止再手写 HTTP 客户端）。
 async fn watchers_of(streams_url: &str, stream_id: &str) -> Option<u32> {
-    let body = http_get(streams_url).await.ok()?;
-    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let list = match v {
-        serde_json::Value::Array(list) => list,
-        serde_json::Value::Object(ref o) => o.get("streams")?.as_array()?.clone(),
-        _ => return None,
-    };
-    for s in list {
-        if s.get("streamId").and_then(|x| x.as_str()) == Some(stream_id) {
-            return s.get("watchers").and_then(|x| x.as_u64()).map(|n| n as u32);
-        }
-    }
-    Some(0)
-}
-
-/// 极简 HTTP GET（raw TCP，无新依赖；不可达返回 Err）：公开方/订阅方轮询
-/// 各自中继的观看数用。
-async fn http_get(url: &str) -> anyhow::Result<String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let rest = url
-        .strip_prefix("ws://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| anyhow::anyhow!("非法 HTTP 基址: {url}"))?;
-    let (host_port, path) = match rest.split_once('/') {
-        Some((hp, p)) => (hp, format!("/{p}")),
-        None => (rest, "/".into()),
-    };
-    let (host, port) = match host_port.rsplit_once(':') {
-        Some((h, p)) => (
-            h.to_string(),
-            p.parse::<u16>().map_err(|_| anyhow::anyhow!("端口非法"))?,
-        ),
-        None => (host_port.to_string(), 80),
-    };
-    let timeout = Duration::from_secs(2);
-    let mut stream = tokio::time::timeout(
-        timeout,
-        tokio::net::TcpStream::connect((host.as_str(), port)),
-    )
-    .await
-    .context("连接失败")??;
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: */*\r\n\r\n"
-    );
-    tokio::time::timeout(timeout, stream.write_all(req.as_bytes()))
+    let resp: relay_http::StreamsResp = relay_http::get_json(streams_url, Duration::from_secs(2))
         .await
-        .context("发送请求失败")??;
-    let mut buf = Vec::new();
-    tokio::time::timeout(timeout, stream.read_to_end(&mut buf))
-        .await
-        .context("读取响应失败")??;
-    let body = String::from_utf8_lossy(&buf);
-    Ok(body.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+        .ok()?;
+    resp.list()
+        .into_iter()
+        .find(|s| s.stream_id == stream_id)
+        .map(|s| s.watchers)
 }
 
 /// 接收结果。
@@ -410,17 +368,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn http_get_parses_host_port_path() {
-        // 不真的联网只验证 URL 拆解逻辑会 panic 与否——拆解在 http_get 内联，
-        // 这里直接验证 streams JSON 的两种形态解析（复用 watchers_of）。
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let url = "ws://127.0.0.1:9/api/streams"; // 端口 9 不可达 → Err，不 panic
-            assert!(http_get(url).await.is_err());
-        });
-    }
+    // 注：核心 HTTP 客户端的 URL 拆解 / 双形态解析 / 不可达健壮性测试
+    // 在 stross-core relay/client.rs（契约单一真源），此处不再重复。
 }

@@ -352,7 +352,7 @@ P1 后扩展点：一设备多端点（endpoint_id 与 device_id 解耦）、文
 | `crates/stross-app/src/negotiator.rs` | ShareRequest/ShareGrant/PendingRequest 扩展、`policy_decision`、`compose_grant`、`GET /api/endpoints` |
 | `crates/stross-app/src/lib.rs` | 导出 EndpointRegistry / RelayAddr / TransportAddr |
 
-### 第二轮：引导层 + L1 浏览闭环（未提交）
+### 第二轮：引导层 + L1 浏览闭环（已提交 ab5dd9b）
 
 | 落点 | 内容 |
 |---|---|
@@ -365,7 +365,7 @@ P1 后扩展点：一设备多端点（endpoint_id 与 device_id 解耦）、文
 设备重命名、`/api/endpoints` 的 Private 白名单动态过滤（当前一律不下发
 Private 端点）、mDNS L1 摘要在 publish/unpublish 时重广播（当前仅锚定时刻）。
 
-### 第三轮：文件端点 + 订阅联动 + 端点命令（已完成待提交）
+### 第三轮：文件端点 + 订阅联动 + 端点命令（已提交 2182bc0）
 
 | 落点 | 内容 |
 |---|---|
@@ -381,6 +381,25 @@ Private 端点）、mDNS L1 摘要在 publish/unpublish 时重广播（当前仅
 `stross devices` 同时发现两节点（L1 摘要闭环，0 次 TXT 超限）；
 `endpoint ls` 拉到动态文件设备与可订阅端点（L2）；`endpoint subscribe`
 404 边界（端点不存在 / 已取消公开）均正确拒绝。
+
+### 第四轮：分层收敛——核心逻辑收束出壳（docs/layering-architecture.md）
+
+问题：核心逻辑外溢到壳层——中继 HTTP 契约 4 处手写客户端（含分层反转：
+响应类型定义在 CLI 而非 core）、订阅流程整个塞在 `stross endpoint subscribe`、
+广告 IP / 数据目录各两份。本轮按「线协议→proto、HTTP 契约→core、订阅
+编排→app 库、壳层只调接口」收敛：
+
+| 落点 | 内容 |
+|---|---|
+| `stross-proto` | 新增 `message/negotiator.rs`：`ShareTokenView` / `RelayAddr` / `ShareRequest` / `ShareGrant` / `EndpointNode` / `EndpointDir`（线格式与旧实现**逐字节一致**，单测锁定 camelCase 字段）；目录 devices 为完整 `DeviceInfo`（对齐现有 `/api/endpoints` 序列化） |
+| `stross-core` | 新增 `relay/client.rs`：中继 HTTP API 官方客户端（`http_get` / `get_json` / `post_json` / `info` / `streams` / `stream_watchers`，raw TCP 零新依赖、平台无关）；`stross-transport::net` 新增 `advertise_ip` / `is_fake_or_link_local`（fake-IP 198.18/15 + 链路本地过滤单一真源） |
+| `stross-app` | `subscriber.rs`：订阅方编排库接口（`fetch_directory` / `subscribe_file`，含本地接收准备、握手超时 70s 盖过 Confirm 挂起窗、「流尚未出现」重试收敛）；`paths.rs`：`data_dir` 单一真源；`file_xfer.rs` 换用 core 客户端（删本地 raw TCP）；`bootstrap::start` **默认安装订阅驱动**（幂等；serve 不再手动接线，修复 GUI 类壳层漏装=订阅了不推）；协商线协议类型改重导出，目录处理器用类型化 `EndpointDir` |
+| `stross-cli` | `endpoint.rs` 变薄为纯参数解析+展示（~200 行删剩 170，删 advertise_ip/http_post_json/LocalReceiver/receive_file_retry/base_dir）；`devices.rs` / `adb.rs` 探测走 core 客户端（`InfoResp`/`StreamsResp` 契约移出壳层）；`serve.rs` 去本地 base_dir 与手动驱动接线 |
+| 验证 | proto wire 单测（请求/授予/目录 camelCase）；`subscribe_file` 进程内双节点 pull 闭环（文件逐字节一致）；全 crate 测试 + `scripts/check.sh` + `scripts/dual-node-file-test.sh` 3 链路回归 |
+
+遗留（下一轮）：Web 前端（`discovery.ts` / `negotiate.ts` 等）仍是协议客户端，
+待 GUI 前端订阅交互落地时改走 Rust 命令（复用 `fetch_directory` /
+`subscribe_file`），JS 只留渲染。
 
 ---
 

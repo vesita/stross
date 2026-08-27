@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use stross_core::discovery::Discovery;
 use stross_core::net::local_ips;
@@ -800,18 +800,10 @@ pub struct CaptureStatusView {
 }
 
 /// 手机麦克风接入凭证视图（B2：电脑端签发后展示给手机）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareTokenView {
-    /// ShareToken JSON 字符串（手机端原样粘贴到「共享麦克风」）。
-    pub token: String,
-    /// 接收端签发的会话 id（= 接收时的流 id）。
-    pub stream_id: String,
-    /// 一次性 PIN（展示用；服务端签发表为准）。
-    pub pin: String,
-    /// 过期时间（Unix 秒）。
-    pub expires_at: u64,
-}
+///
+/// 线协议类型已收敛至 stross-proto（docs/layering-architecture.md）：此处
+/// 重导出保持 `stross_app::app::ShareTokenView` 路径兼容（GUI 命令层在用）。
+pub use stross_proto::message::ShareTokenView;
 
 fn relay_info(port: u16, devices: Vec<DeviceSummary>) -> RelayInfo {
     // 多网卡：列出全部局域网 IP 入口（无局域网 IP 时回退回环）

@@ -4,15 +4,19 @@
 //! 1. mDNS 能力广播（F1.2）：`Discovery::browse` 拿设备名 / 角色 / 媒体 / 传输；
 //! 2. 每设备 HTTP 探测：`/api/info`（SRT/QUIC 端口）与 `/api/streams`（在线共享，
 //!    含观看者数）——与 GUI 设备卡片同源，命令行同样「打开即见 PC 与手机状态」。
+//!
+//! 分层（docs/layering-architecture.md）：`/api/info` / `/api/streams` 的响应
+//! 契约与双形态解析已收敛到 `stross_core::relay::client`（中继 HTTP 契约单一
+//! 真源）；本文件只保留**展示视图**（`StreamView`）与转换，不再自带 HTTP 客户端。
 
 use std::time::Duration;
 
-use anyhow::Context;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 use stross_core::discovery::{BROWSE_TIMEOUT, Discovery};
 use stross_core::net::local_ips;
-use stross_proto::message::{DeviceSummary, DiscoveryInfo, MediaKind, RoleId};
+use stross_core::relay::client as relay_http;
+use stross_proto::message::{DeviceSummary, DiscoveryInfo, MediaKind, RoleId, StreamInfo};
 
 #[derive(Args, Debug)]
 pub struct DevicesArgs {
@@ -27,7 +31,7 @@ pub struct DevicesArgs {
     pub json: bool,
 }
 
-/// 每个设备 `/api/streams` 单条流的视图（`stross adb status` 复用）。
+/// 每个设备 `/api/streams` 单条流的展示视图（`stross adb status` 复用）。
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StreamView {
@@ -61,36 +65,6 @@ struct DeviceStatus {
     quic_port: Option<u16>,
     /// 该设备当前在线共享（点流可在 GUI 接收）。
     streams: Vec<StreamView>,
-}
-
-/// `/api/info` 响应（camelCase，与 stross-core relay/http.rs 一致；`stross adb status` 复用）。
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct InfoResp {
-    pub(crate) srt_port: Option<u16>,
-    pub(crate) quic_port: Option<u16>,
-}
-
-/// `/api/streams` 响应：兼容裸数组（stross-core 中继实际形态）与
-/// `{ "streams": [...] }` 包裹形态（前端同样双形态兼容）。
-#[derive(Deserialize)]
-#[serde(untagged)]
-pub(crate) enum StreamsResp {
-    Array(Vec<StreamInfoResp>),
-    Object {
-        #[serde(default)]
-        streams: Vec<StreamInfoResp>,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct StreamInfoResp {
-    pub(crate) stream_id: String,
-    pub(crate) title: String,
-    pub(crate) video: Option<serde_json::Value>,
-    pub(crate) audio: Option<serde_json::Value>,
-    pub(crate) watchers: u32,
 }
 
 pub async fn run(args: DevicesArgs) -> anyhow::Result<()> {
@@ -150,26 +124,13 @@ pub async fn run(args: DevicesArgs) -> anyhow::Result<()> {
         } else {
             ip
         };
-        if let Ok(resp) = http_get::<InfoResp>(&probe_ip, d.port, "/api/info", probe).await {
+        if let Ok(resp) = relay_http::info(&probe_ip, d.port, probe).await {
             dev.online = true;
             dev.srt_port = resp.srt_port;
             dev.quic_port = resp.quic_port;
         }
-        if let Ok(resp) = http_get::<StreamsResp>(&probe_ip, d.port, "/api/streams", probe).await {
-            let list = match resp {
-                StreamsResp::Array(list) => list,
-                StreamsResp::Object { streams } => streams,
-            };
-            dev.streams = list
-                .into_iter()
-                .map(|s| StreamView {
-                    stream_id: s.stream_id,
-                    title: s.title,
-                    video: s.video.is_some(),
-                    audio: s.audio.is_some(),
-                    watchers: s.watchers,
-                })
-                .collect();
+        if let Ok(list) = relay_http::streams(&probe_ip, d.port, probe).await {
+            dev.streams = to_views(list);
         }
         devices.push(dev);
     }
@@ -268,34 +229,17 @@ fn print_device(dev: &DeviceStatus) {
     }
 }
 
-/// 最小 HTTP GET：raw TCP 一发一收（避免为 CLI 引入 HTTP 客户端依赖），
-/// 响应体按 JSON 解析。超时由调用方控制（不可达设备快速失败）。
-/// `stross adb status` 经 USB 通道复用同一探测器。
-pub(crate) async fn http_get<T: for<'de> Deserialize<'de>>(
-    ip: &str,
-    port: u16,
-    path: &str,
-    timeout: Duration,
-) -> anyhow::Result<T> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect((ip, port)))
-        .await
-        .context("连接失败")??;
-    stream.set_nodelay(true).ok();
-    let mut stream = stream;
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {ip}:{port}\r\nConnection: close\r\nAccept: */*\r\n\r\n"
-    );
-    tokio::time::timeout(timeout, stream.write_all(req.as_bytes()))
-        .await
-        .context("发送请求失败")??;
-    let mut buf = Vec::new();
-    tokio::time::timeout(timeout, stream.read_to_end(&mut buf))
-        .await
-        .context("读取响应失败")??;
-    let body = String::from_utf8_lossy(&buf);
-    let body = body.split("\r\n\r\n").nth(1).unwrap_or("");
-    serde_json::from_str(body).context("响应解析失败")
+/// 流信息列表 → 展示视图（探测走 `stross_core::relay::client`，此处纯转换）。
+pub(crate) fn to_views(list: Vec<StreamInfo>) -> Vec<StreamView> {
+    list.into_iter()
+        .map(|s| StreamView {
+            stream_id: s.stream_id,
+            title: s.title,
+            video: s.video.is_some(),
+            audio: s.audio.is_some(),
+            watchers: s.watchers,
+        })
+        .collect()
 }
 
 fn role_label(r: &RoleId) -> String {
@@ -332,36 +276,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_minimal_http_json_body() {
-        // http_get 需要真实 socket；此处仅验证响应切分逻辑的输入形态
-        // （body 切分在函数内，无法单测——保持集成脚本覆盖）。
-        let raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"port\":18777}";
-        let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
-        let v: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(v["port"], 18777);
-    }
-
-    #[test]
-    fn streams_resp_accepts_plain_array_and_object() {
-        // 对齐前端兼容逻辑：/api/streams 可能是裸数组或 { "streams": [...] }
-        let plain: StreamsResp = serde_json::from_str(
-            r#"[{"streamId":"s1","title":"t","video":null,"audio":null,"watchers":2}]"#,
-        )
-        .unwrap();
-        match plain {
-            StreamsResp::Array(list) => assert_eq!(list[0].watchers, 2),
-            _ => panic!("裸数组应解析为 Array 形态"),
-        }
-        let obj: StreamsResp = serde_json::from_str(
-            r#"{"streams":[{"streamId":"s1","title":"t","video":null,"audio":null,"watchers":2}]}"#,
-        )
-        .unwrap();
-        match obj {
-            StreamsResp::Object { streams } => {
-                assert_eq!(streams.len(), 1);
-                assert_eq!(streams[0].stream_id, "s1");
-            }
-            _ => panic!("包裹形态应解析为 Object 形态"),
-        }
+    fn stream_info_maps_to_view() {
+        // 流信息 → 展示视图的布尔投影（探测解析在 core 客户端，已覆盖）
+        let list = vec![StreamInfo {
+            stream_id: "s1".into(),
+            title: "t".into(),
+            video: None,
+            audio: None,
+            started_at: 1,
+            watchers: 2,
+        }];
+        let v = to_views(list);
+        assert_eq!(v[0].watchers, 2);
+        assert!(!v[0].video);
     }
 }

@@ -22,7 +22,9 @@ pub mod file_xfer;
 pub mod kernel;
 mod lock;
 pub mod negotiator;
+pub mod paths;
 pub mod receiver;
+pub mod subscriber;
 
 pub use app::{CaptureStatusView, Platform, StrossApp};
 pub use control::{CtrlRequest, CtrlResponse, CtrlServer, DEFAULT_CTRL_PORT};
@@ -40,6 +42,7 @@ pub use negotiator::{
     RelayAddr, ShareGrant, ShareNegotiator, ShareRequest, TrustStore, load_or_create_identity,
 };
 pub use receiver::{ReceiveStats, Receiver};
+pub use subscriber::{SubscribeOutcome, fetch_directory, subscribe_file};
 
 /// SRT/QUIC 固定传输端口（权限自动化：防火墙只放行已知端口）。
 pub const DEFAULT_SRT_PORT: u16 = 33462;

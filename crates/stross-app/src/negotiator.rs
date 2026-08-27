@@ -35,14 +35,21 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use stross_proto::message::{
-    Delivery, EndpointManifest, MediaKind, ShareToken, TransportId, Visibility,
+    Delivery, EndpointDir, EndpointManifest, EndpointNode, MediaKind, ShareToken, TransportId,
+    Visibility,
 };
 use stross_proto::time::unix_secs;
 use tokio::sync::oneshot;
 
-use crate::app::{ShareTokenView, StrossApp};
+use crate::app::StrossApp;
 use crate::kernel::SubscribeCtx;
 use crate::lock::MutexExt;
+
+// 协商线协议类型（ShareRequest / ShareGrant / RelayAddr / ShareTokenView）已
+// 收敛至 stross-proto::message::negotiator（docs/layering-architecture.md：
+// 线协议类型与协议同层）。此处重导出保持既有路径 `stross_app::ShareRequest`
+// 等兼容。
+pub use stross_proto::message::{RelayAddr, ShareGrant, ShareRequest, ShareTokenView};
 
 /// 协商端点默认端口（LAN 可达；防火墙需放行该 TCP 端口）。
 pub const DEFAULT_NEGOTIATOR_PORT: u16 = 18779;
@@ -181,65 +188,8 @@ fn new_device_id() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 协商协议
+// 待确认请求（UI 面，非线协议）
 // ---------------------------------------------------------------------------
-
-/// 中继地址（pull 模式：订阅方连公开方中继；ws 必填，srt/quic 可缺）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RelayAddr {
-    pub ws_port: u16,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub srt_port: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quic_port: Option<u16>,
-}
-
-/// 设备申请凭证的请求（订阅握手）。
-///
-/// 端点语义（`endpoint_id` 非空 = 订阅某端点）：`media` 可为空，由端点推断；
-/// 旧语义（`endpoint_id` 为空 = 接收方签发）与现状逐字节兼容。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareRequest {
-    pub device_id: String,
-    pub device_name: String,
-    /// 订阅目标端点（端点框架，docs/endpoint-model.md §5）。
-    #[serde(default)]
-    pub endpoint_id: Option<String>,
-    /// 订阅方期望的 delivery（端点声明 `Both` 时生效；其余以端点声明为准）。
-    #[serde(default)]
-    pub delivery_mode: Option<Delivery>,
-    /// push 模式下订阅方自己的中继 HTTP 基址（`ws://ip:port`；公开方凭凭证
-    /// 出站推送的目标）。
-    #[serde(default)]
-    pub relay_addr: Option<String>,
-    /// push 模式下订阅方**自签**的一次性接入凭证（docs/endpoint-model.md §5：
-    /// 凭证校验器挂在订阅方内核，公开方签发的凭证在订阅方中继校验不过）。
-    #[serde(default)]
-    pub share_token: Option<String>,
-    /// 本次申请的媒体（有限集合；端点语义下可为空 = 由端点推断）。
-    pub media: Vec<MediaKind>,
-}
-
-/// 签发结果（成功返回给申请方）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareGrant {
-    #[serde(flatten)]
-    pub view: ShareTokenView,
-    /// 是否因设备受信任而自动签发（未人工确认）。
-    pub trusted: bool,
-    /// 公开方拍板后的 delivery（端点语义；旧语义为 `None`）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delivery: Option<Delivery>,
-    /// 公开方接受的传输列表（按公开者声明的优先序；订阅方据此选择/降级）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transports: Option<Vec<TransportId>>,
-    /// pull 模式：公开方中继地址；push 模式为 `None`（公开方凭凭证出站）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay: Option<RelayAddr>,
-}
 
 /// 待人工确认的请求（推送给 UI 展示）。
 #[derive(Debug, Clone, Serialize)]
@@ -771,11 +721,17 @@ async fn handle_endpoints(State(state): State<Arc<ServerState>>) -> Json<serde_j
         .device_identity()
         .map(|i| (i.device_id, i.device_name))
         .unwrap_or_else(|| ("".into(), "本机".into()));
-    Json(serde_json::json!({
-        "node": { "deviceId": device_id, "deviceName": device_name },
-        "devices": devices,
-        "endpoints": endpoints,
-    }))
+    // 类型化构造（stross-proto EndpointDir）：序列化与旧 json! 逐字节一致
+    // （node/deviceId/deviceName、devices、endpoints，全 camelCase）
+    let dir = EndpointDir {
+        node: EndpointNode {
+            device_id,
+            device_name,
+        },
+        devices,
+        endpoints,
+    };
+    Json(serde_json::to_value(dir).unwrap_or_default())
 }
 
 fn new_pending_id() -> u64 {

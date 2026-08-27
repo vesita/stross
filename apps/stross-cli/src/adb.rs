@@ -16,10 +16,11 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 use serde::Serialize;
+use stross_core::relay::client as relay_http;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::devices::{InfoResp, StreamInfoResp, StreamView, StreamsResp, http_get};
+use crate::devices::{StreamView, to_views};
 
 #[derive(Args, Debug)]
 pub struct AdbArgs {
@@ -363,20 +364,14 @@ async fn phone_status(ports_arg: &str) -> anyhow::Result<PhoneStatus> {
             continue; // forward 失败，换下一个候选端口
         }
         let probe = Duration::from_millis(1500);
-        match http_get::<InfoResp>("127.0.0.1", local_port, "/api/info", probe).await {
+        match relay_http::info("127.0.0.1", local_port, probe).await {
             Ok(info) => {
                 status.online = true;
                 status.relay_port = Some(*relay_port);
                 status.srt_port = info.srt_port;
                 status.quic_port = info.quic_port;
                 // /api/streams（同一 forward 会话）
-                if let Ok(resp) =
-                    http_get::<StreamsResp>("127.0.0.1", local_port, "/api/streams", probe).await
-                {
-                    let list = match resp {
-                        StreamsResp::Array(list) => list,
-                        StreamsResp::Object { streams } => streams,
-                    };
+                if let Ok(list) = relay_http::streams("127.0.0.1", local_port, probe).await {
                     status.streams = to_views(list);
                 }
             }
@@ -392,17 +387,8 @@ async fn phone_status(ports_arg: &str) -> anyhow::Result<PhoneStatus> {
     Ok(status)
 }
 
-fn to_views(list: Vec<StreamInfoResp>) -> Vec<StreamView> {
-    list.into_iter()
-        .map(|s| StreamView {
-            stream_id: s.stream_id,
-            title: s.title,
-            video: s.video.is_some(),
-            audio: s.audio.is_some(),
-            watchers: s.watchers,
-        })
-        .collect()
-}
+// 流信息 → 展示视图投影收在 `crate::devices::to_views`（探测契约在
+// stross_core::relay::client；docs/layering-architecture.md）。
 
 fn print_status(s: &PhoneStatus) {
     println!("手机状态（经 USB/adb，serial={}）", s.serial);

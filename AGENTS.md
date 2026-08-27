@@ -8,24 +8,37 @@ WS 兜底），支持屏幕 / 摄像头 / 麦克风 / 系统声音共享。
 
 ---
 
-## 1. 仓库布局
+## 1. 仓库布局与分层
 
 ```
 crates/
-  stross-proto      协议消息（Hello/StreamInfo/ShareToken/DiscoveryInfo）、帧、时间
-  stross-transport  传输层：SRT / QUIC / WS / WebRTC、RelayUrl、local_ips
-  stross-core       中继（RelayServer + data_plane + peers）、mDNS Discovery、net
+  stross-proto      线协议类型（消息/帧/时间；含协商握手与 L2 目录：
+                    message/negotiator.rs）
+  stross-transport  传输层：SRT / QUIC / WS / WebRTC、RelayUrl、
+                    net（local_ips / advertise_ip / fake-IP 判定）
+  stross-core       数据共享：中继（server + data_plane + peers）、
+                    中继 HTTP 客户端（relay/client.rs，契约单一真源）、
+                    mDNS Discovery、sender/watch、jitter
   stross-media      采集（ffmpeg 后端）、播放（PlaybackSink/cpal）、流水线 StreamConfig
-  stross-app        应用级封装：StrossApp、控制面 CtrlServer（D7）、凭证协商
-                    ShareNegotiator、内核 Kernel（会话/路由）、接收 Receiver
+  stross-app        应用编排库：StrossApp、控制面 CtrlServer（D7）、凭证协商
+                    ShareNegotiator、内核 Kernel（会话/路由/端点注册表）、
+                    订阅方编排 subscriber（fetch_directory/subscribe_file）、
+                    文件传输 file_xfer、引导 bootstrap、数据目录 paths
   mdns              mdns-sd 0.21 的本地 fork（workspace crate；跨设备发现修复都在这里）
 apps/
   stross-cli        CLI：serve/ctrl/devices/adb/push/receive/relay/scan
+                    （只做参数解析+展示，流程全部调 stross-app 库接口）
   stross-gui        Tauri GUI（桌面 + Android 共用一套 web 前端）
   stross-relay      独立中继 CLI
 scripts/            构建 / 测试 / 真机回归脚本（见 §5）
-docs/               设计文档（iteration-plan.md 是阶段计划 + 已修复记录）
+docs/               设计文档（layering-architecture.md 是分层判据；endpoint-model.md
+                    是端点框架规格）
 ```
+
+**分层铁律（docs/layering-architecture.md）**：线协议类型 → proto；中继 HTTP
+契约（server+client）→ core；流程编排（引导/协商/订阅/文件传输）→ app 库；
+壳层只调接口。**核心功能必须平台无关**（core 零路径/OS/UI 依赖）。壳层禁止
+再写 HTTP 客户端、响应结构体或复制 IP 过滤规则。
 
 ## 2. 关键概念与端口约定
 

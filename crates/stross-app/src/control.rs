@@ -196,13 +196,15 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             let pending: Vec<serde_json::Value> = neg
                 .pending_requests()
                 .iter()
-                .map(|r| json!({
-                    "id": r.id,
-                    "deviceId": r.device_id,
-                    "deviceName": r.device_name,
-                    "media": r.media,
-                    "createdAt": r.created_at,
-                }))
+                .map(|r| {
+                    json!({
+                        "id": r.id,
+                        "deviceId": r.device_id,
+                        "deviceName": r.device_name,
+                        "media": r.media,
+                        "createdAt": r.created_at,
+                    })
+                })
                 .collect();
             CtrlResponse::ok(json!({ "pending": pending }))
         }

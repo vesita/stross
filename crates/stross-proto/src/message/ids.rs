@@ -64,6 +64,10 @@ pub enum MediaKind {
     SystemAudio,
     Input,
     Clipboard,
+    /// 文件互传（二期 E：ReliableChannel；Lossless 传输）。
+    File,
+    /// 程序服务端点（占位：schema 后置，暂不可订阅）。
+    Service,
 }
 
 /// 设备角色（发现广播 F1.2 用；有限集合）。

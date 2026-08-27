@@ -13,12 +13,14 @@
 
 mod auth;
 mod data_plane;
+mod endpoint;
 mod graph;
 mod session;
 
 pub use auth::{AuthError, AuthPolicy, PinAuthPolicy};
 pub use data_plane::{DataPlaneBackend, RelayDataPlane};
-pub use graph::{Endpoint, NodeInfo, NodeRole};
+pub use endpoint::EndpointRegistry;
+pub use graph::{NodeInfo, NodeRole, TransportAddr};
 pub use session::{Negotiated, Session, SessionPrefs};
 
 use std::collections::HashMap;
@@ -437,7 +439,7 @@ mod tests {
             name: id.into(),
             roles: vec![NodeRole::Sender],
             caps: vec![],
-            endpoints: vec![],
+            addrs: vec![],
         }
     }
 
@@ -541,7 +543,7 @@ mod tests {
                 max_height: Some(1080),
                 preferred_profile: ReliabilityProfile::Lossy,
             }],
-            endpoints: vec![],
+            addrs: vec![],
         });
         // 源只支持 ws → 协商出 ws + h264
         let s = k

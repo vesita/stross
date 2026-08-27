@@ -305,6 +305,8 @@ fn media_label(m: &MediaKind) -> String {
         MediaKind::SystemAudio => "系统声".into(),
         MediaKind::Input => "输入".into(),
         MediaKind::Clipboard => "剪贴板".into(),
+        MediaKind::File => "文件".into(),
+        MediaKind::Service => "服务".into(),
     }
 }
 

@@ -26,12 +26,12 @@ pub use control::{CtrlRequest, CtrlResponse, CtrlServer, DEFAULT_CTRL_PORT};
 pub use engine::SenderEngine;
 pub use error::{Error, Result};
 pub use kernel::{
-    AuthError, AuthPolicy, DataPlaneBackend, Kernel, KernelEvent, NodeInfo, NodeRole,
-    PinAuthPolicy, RelayDataPlane, Session, SessionPrefs,
+    AuthError, AuthPolicy, DataPlaneBackend, EndpointRegistry, Kernel, KernelEvent, NodeInfo,
+    NodeRole, PinAuthPolicy, RelayDataPlane, Session, SessionPrefs, TransportAddr,
 };
 pub use negotiator::{
-    DEFAULT_NEGOTIATOR_PORT, CliUi, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest,
-    ShareGrant, ShareNegotiator, ShareRequest, TrustStore, load_or_create_identity,
+    CliUi, DEFAULT_NEGOTIATOR_PORT, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest,
+    RelayAddr, ShareGrant, ShareNegotiator, ShareRequest, TrustStore, load_or_create_identity,
 };
 pub use receiver::{ReceiveStats, Receiver};
 

@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::endpoint::DeviceSummary;
 use super::ids::{CodecId, MediaKind, RoleId, TransportId};
 
 /// mDNS TXT 中承载 [`DiscoveryInfo`] 的固定 key。
@@ -28,11 +29,15 @@ pub struct DiscoveryInfo {
     pub transports: Vec<TransportId>,
     /// 支持的编解码。
     pub codecs: Vec<CodecId>,
+    /// 设备清单摘要（v2，见 [`DeviceSummary`]）：只带 id/kind/name/是否已公开，
+    /// 协议/可见性/状态等详情走 L2 `/api/endpoints` 拉取（TXT 体积受限）。
+    #[serde(default)]
+    pub devices: Vec<DeviceSummary>,
 }
 
 impl DiscoveryInfo {
-    /// 当前描述版本。
-    pub const VERSION: u8 = 1;
+    /// 当前描述版本（v2：新增 `devices` 设备清单摘要；v1 解析器忽略未知字段）。
+    pub const VERSION: u8 = 2;
 
     /// 中继 / 本机锚点广播的默认能力描述（roles = Relay/Sender/Viewer、
     /// transports = ws/webrtc/srt/quic、codecs = h264/aac 固定；
@@ -53,7 +58,15 @@ impl DiscoveryInfo {
                 TransportId::Quic,
             ],
             codecs: vec![CodecId::H264, CodecId::Aac],
+            devices: Vec::new(),
         }
+    }
+
+    /// 追加设备清单摘要（P1：锚定广播时快照当前 publish 状态；relay-only
+    /// 进程不调用，广播空清单）。
+    pub fn with_devices(mut self, devices: Vec<DeviceSummary>) -> Self {
+        self.devices = devices;
+        self
     }
 
     /// 编码为 mDNS TXT 条目（单 key）。
@@ -84,6 +97,12 @@ mod tests {
             media: vec![MediaKind::Screen, MediaKind::Mic],
             transports: vec![TransportId::Ws, TransportId::WebRtc],
             codecs: vec![CodecId::H264, CodecId::Aac],
+            devices: vec![DeviceSummary {
+                device_id: "mic:builtin".into(),
+                kind: MediaKind::Mic,
+                name: "麦克风".into(),
+                published: true,
+            }],
         };
         let txt = info.to_txt();
         assert_eq!(txt.len(), 1, "单 key 承载全部能力");
@@ -95,6 +114,7 @@ mod tests {
             "wire: {}",
             txt[0].1
         );
+        assert!(txt[0].1.contains("\"devices\""), "v2 携带设备摘要");
         let back = DiscoveryInfo::from_txt(&txt).expect("roundtrip 解码");
         assert_eq!(info, back);
     }
@@ -112,6 +132,11 @@ mod tests {
             DiscoveryInfo::from_txt(&[(TXT_KEY_DISCOVERY.into(), "{oops".into())]),
             None
         );
+        // v1 载荷（无 devices 字段）→ 兼容解析，devices 默认空
+        let v1 = r#"{"v":1,"name":"x","roles":["relay"],"media":[],"transports":[],"codecs":[]}"#;
+        let back =
+            DiscoveryInfo::from_txt(&[(TXT_KEY_DISCOVERY.into(), v1.into())]).expect("v1 兼容解析");
+        assert!(back.devices.is_empty());
         // 未知枚举值 → 解码失败（枚举穷尽，未知值拒绝）
         assert_eq!(
             DiscoveryInfo::from_txt(&[(

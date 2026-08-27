@@ -31,10 +31,10 @@ use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use stross_proto::message::MediaKind;
+use stross_proto::message::{Delivery, EndpointManifest, MediaKind, TransportId, Visibility};
 use stross_proto::time::unix_secs;
 use tokio::sync::oneshot;
 
@@ -181,13 +181,36 @@ fn new_device_id() -> String {
 // 协商协议
 // ---------------------------------------------------------------------------
 
-/// 设备申请凭证的请求。
+/// 中继地址（pull 模式：订阅方连公开方中继；ws 必填，srt/quic 可缺）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayAddr {
+    pub ws_port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_port: Option<u16>,
+}
+
+/// 设备申请凭证的请求（订阅握手）。
+///
+/// 端点语义（`endpoint_id` 非空 = 订阅某端点）：`media` 可为空，由端点推断；
+/// 旧语义（`endpoint_id` 为空 = 接收方签发）与现状逐字节兼容。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareRequest {
     pub device_id: String,
     pub device_name: String,
-    /// 本次申请的媒体（有限集合；空 = 非法请求）。
+    /// 订阅目标端点（端点框架，docs/endpoint-model.md §5）。
+    #[serde(default)]
+    pub endpoint_id: Option<String>,
+    /// 订阅方期望的 delivery（端点声明 `Both` 时生效；其余以端点声明为准）。
+    #[serde(default)]
+    pub delivery_mode: Option<Delivery>,
+    /// push 模式下订阅方自己的中继地址（公开方凭凭证出站推送的目标）。
+    #[serde(default)]
+    pub relay_addr: Option<String>,
+    /// 本次申请的媒体（有限集合；端点语义下可为空 = 由端点推断）。
     pub media: Vec<MediaKind>,
 }
 
@@ -199,6 +222,15 @@ pub struct ShareGrant {
     pub view: ShareTokenView,
     /// 是否因设备受信任而自动签发（未人工确认）。
     pub trusted: bool,
+    /// 公开方拍板后的 delivery（端点语义；旧语义为 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<Delivery>,
+    /// 公开方接受的传输列表（按公开者声明的优先序；订阅方据此选择/降级）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transports: Option<Vec<TransportId>>,
+    /// pull 模式：公开方中继地址；push 模式为 `None`（公开方凭凭证出站）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayAddr>,
 }
 
 /// 待人工确认的请求（推送给 UI 展示）。
@@ -211,6 +243,9 @@ pub struct PendingRequest {
     pub device_name: String,
     /// 序列化后的媒体名（`MediaKind` camelCase；前端展示用）。
     pub media: Vec<String>,
+    /// 订阅目标端点名（端点语义；旧语义为 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_name: Option<String>,
     pub created_at: u64,
 }
 
@@ -249,8 +284,20 @@ impl NegotiatorUi for CliUi {
 // ---------------------------------------------------------------------------
 
 type PendingSender = oneshot::Sender<Result<ShareGrant, String>>;
-/// 挂起请求表：req_id →（device_id, device_name, 应答通道）。
-type PendingMap = Arc<Mutex<HashMap<String, (String, String, PendingSender)>>>;
+
+/// 挂起请求条目（应答时按条目内容签发对应 grant）。
+struct PendingEntry {
+    device_id: String,
+    device_name: String,
+    /// 订阅目标端点（端点语义；旧语义为 `None`）。
+    endpoint_id: Option<String>,
+    /// 订阅方期望的 delivery。
+    delivery_mode: Option<Delivery>,
+    tx: PendingSender,
+}
+
+/// 挂起请求表：req_id → 条目。
+type PendingMap = Arc<Mutex<HashMap<String, PendingEntry>>>;
 
 /// 凭证协商服务器。
 pub struct ShareNegotiator {
@@ -280,6 +327,7 @@ impl ShareNegotiator {
         });
         let router = Router::new()
             .route("/api/negotiator/request", post(handle_request))
+            .route("/api/endpoints", get(handle_endpoints))
             .layer(axum::middleware::from_fn(cors_layer))
             .with_state(state.clone());
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -315,7 +363,7 @@ impl ShareNegotiator {
         allow: bool,
         remember: bool,
     ) -> Result<Option<ShareGrant>, String> {
-        let (device_id, device_name, tx) = self
+        let entry = self
             .pending
             .lock_poisoned()
             .remove(req_id)
@@ -323,13 +371,18 @@ impl ShareNegotiator {
         if allow {
             // 先写信任再签发：grant.trusted 反映"该设备本次已受信任"
             if remember {
-                self.store.remember(&device_id, &device_name);
+                self.store.remember(&entry.device_id, &entry.device_name);
             }
-            let grant = self.grant(device_id.clone(), device_name.clone())?;
-            let _ = tx.send(Ok(grant.clone()));
+            let grant = self.grant(
+                entry.device_id.clone(),
+                entry.device_name.clone(),
+                entry.endpoint_id.clone(),
+                entry.delivery_mode,
+            )?;
+            let _ = entry.tx.send(Ok(grant.clone()));
             Ok(Some(grant))
         } else {
-            let _ = tx.send(Err("用户拒绝".into()));
+            let _ = entry.tx.send(Err("用户拒绝".into()));
             Ok(None)
         }
     }
@@ -344,29 +397,44 @@ impl ShareNegotiator {
         self.pending
             .lock_poisoned()
             .iter()
-            .map(|(id, (device_id, device_name, _))| PendingRequest {
+            .map(|(id, e)| PendingRequest {
                 id: id.clone(),
-                device_id: device_id.clone(),
-                device_name: device_name.clone(),
-                media: vec!["mic".into()], // 当前协商协议仅支持 mic
-                created_at: 0,             // 挂起表未记录创建时刻，置 0 表示未知
+                device_id: e.device_id.clone(),
+                device_name: e.device_name.clone(),
+                media: vec!["mic".into()], // 旧语义固定 mic；端点语义走 endpoint_name
+                endpoint_name: e
+                    .endpoint_id
+                    .as_ref()
+                    .and_then(|eid| self.app.endpoint_manifest(eid))
+                    .map(|m| m.device.name.clone()),
+                created_at: 0, // 挂起表未记录创建时刻，置 0 表示未知
             })
             .collect()
     }
 
-    fn grant(&self, device_id: String, device_name: String) -> Result<ShareGrant, String> {
-        let view = self
-            .app
-            .issue_share_token_for(
-                format!("接收 {device_name} 共享"),
-                vec![MediaKind::Mic],
-                Some(DEFAULT_GRANT_TTL_SECS),
-            )
-            .map_err(|e| e.to_user_string())?;
-        Ok(ShareGrant {
-            view,
-            trusted: self.store.is_trusted(&device_id),
-        })
+    fn grant(
+        &self,
+        device_id: String,
+        device_name: String,
+        endpoint_id: Option<String>,
+        delivery_mode: Option<Delivery>,
+    ) -> Result<ShareGrant, String> {
+        let endpoint = endpoint_id
+            .as_ref()
+            .and_then(|eid| self.app.endpoint_manifest(eid));
+        let (title, media) = match &endpoint {
+            Some(m) => (format!("接收 {} 共享", m.device.name), vec![m.device.kind]),
+            None => (format!("接收 {device_name} 共享"), vec![MediaKind::Mic]),
+        };
+        compose_grant(
+            &self.app,
+            &self.store,
+            &device_id,
+            endpoint.as_ref(),
+            delivery_mode,
+            media,
+            title,
+        )
     }
 
     /// 停止协商服务。
@@ -387,7 +455,20 @@ async fn handle_request(
     State(state): State<Arc<ServerState>>,
     Json(req): Json<ShareRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if req.media.is_empty() {
+    // 端点语义：先校验端点存在（404）；旧语义校验 media 非空（400）
+    let endpoint = match &req.endpoint_id {
+        Some(eid) => match state.app.endpoint_manifest(eid) {
+            Some(m) => Some(m),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": "端点不存在或已取消公开" })),
+                );
+            }
+        },
+        None => None,
+    };
+    if endpoint.is_none() && req.media.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "media 不能为空" })),
@@ -404,71 +485,196 @@ async fn handle_request(
         })
         .collect();
 
-    // 已信任设备 → 自动签发，无需人工确认
-    if state.store.is_trusted(&req.device_id) {
-        let grant = state.app.issue_share_token_for(
-            format!("接收 {} 共享", req.device_name),
-            req.media.clone(),
-            Some(DEFAULT_GRANT_TTL_SECS),
-        );
-        return match grant {
-            Ok(view) => (
-                StatusCode::OK,
-                Json(
-                    serde_json::to_value(ShareGrant {
-                        view,
-                        trusted: true,
-                    })
-                    .unwrap_or_default(),
+    // 按可见性决策（端点语义）或旧信任语义（docs/endpoint-model.md §5）
+    match policy_decision(&state.store, endpoint.as_ref(), &req.device_id) {
+        Decision::Grant => {
+            let (title, media) = match &endpoint {
+                Some(m) => (format!("接收 {} 共享", m.device.name), vec![m.device.kind]),
+                None => (format!("接收 {} 共享", req.device_name), req.media.clone()),
+            };
+            match compose_grant(
+                &state.app,
+                &state.store,
+                &req.device_id,
+                endpoint.as_ref(),
+                req.delivery_mode,
+                media,
+                title,
+            ) {
+                Ok(grant) => (
+                    StatusCode::OK,
+                    Json(serde_json::to_value(grant).unwrap_or_default()),
                 ),
-            ),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_user_string() })),
-            ),
-        };
-    }
-
-    // 未知设备 → 挂起等待人工确认（60s 超时）
-    let id = format!("n{}", new_pending_id());
-    let (tx, rx) = oneshot::channel();
-    {
-        let mut pending = state.pending.lock_poisoned();
-        pending.insert(
-            id.clone(),
-            (req.device_id.clone(), req.device_name.clone(), tx),
-        );
-    }
-    state.ui.request_pending(&PendingRequest {
-        id: id.clone(),
-        device_id: req.device_id.clone(),
-        device_name: req.device_name.clone(),
-        media: media_names,
-        created_at: unix_secs(),
-    });
-
-    match tokio::time::timeout(Duration::from_secs(PENDING_TIMEOUT_SECS), rx).await {
-        Ok(Ok(Ok(grant))) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(grant).unwrap_or_default()),
-        ),
-        Ok(Ok(Err(e))) => (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": e })),
-        ),
-        // 超时：清除挂起（防止泄漏 oneshot / 阻止迟到应答）
-        Err(_) => {
-            let _ = state.pending.lock_poisoned().remove(&id);
-            (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(serde_json::json!({ "error": "等待用户确认超时" })),
-            )
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e })),
+                ),
+            }
         }
-        Ok(Err(_)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "内部错误" })),
+        Decision::Reject(msg) => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": msg })),
         ),
+        Decision::Pending => {
+            // 未知设备 / 首见 Confirm → 挂起等待人工确认（60s 超时）
+            let id = format!("n{}", new_pending_id());
+            let (tx, rx) = oneshot::channel();
+            {
+                let mut pending = state.pending.lock_poisoned();
+                pending.insert(
+                    id.clone(),
+                    PendingEntry {
+                        device_id: req.device_id.clone(),
+                        device_name: req.device_name.clone(),
+                        endpoint_id: req.endpoint_id.clone(),
+                        delivery_mode: req.delivery_mode,
+                        tx,
+                    },
+                );
+            }
+            state.ui.request_pending(&PendingRequest {
+                id: id.clone(),
+                device_id: req.device_id.clone(),
+                device_name: req.device_name.clone(),
+                media: media_names,
+                endpoint_name: endpoint.as_ref().map(|m| m.device.name.clone()),
+                created_at: unix_secs(),
+            });
+
+            match tokio::time::timeout(Duration::from_secs(PENDING_TIMEOUT_SECS), rx).await {
+                Ok(Ok(Ok(grant))) => (
+                    StatusCode::OK,
+                    Json(serde_json::to_value(grant).unwrap_or_default()),
+                ),
+                Ok(Ok(Err(e))) => (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": e })),
+                ),
+                // 超时：清除挂起（防止泄漏 oneshot / 阻止迟到应答）
+                Err(_) => {
+                    let _ = state.pending.lock_poisoned().remove(&id);
+                    (
+                        StatusCode::GATEWAY_TIMEOUT,
+                        Json(serde_json::json!({ "error": "等待用户确认超时" })),
+                    )
+                }
+                Ok(Err(_)) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "内部错误" })),
+                ),
+            }
+        }
     }
+}
+
+/// 端点订阅决策：按可见性与信任关系决定 自动签发 / 挂起人工确认 / 拒绝。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    Grant,
+    Pending,
+    Reject(&'static str),
+}
+
+/// 可见性决策表（docs/endpoint-model.md §5）：
+/// Public 免确认；Confirm 已信任自动、未信任挂起；Private 白名单自动、否则拒绝；
+/// 无端点（旧语义）= 信任自动、未信任挂起。
+fn policy_decision(
+    store: &TrustStore,
+    endpoint: Option<&EndpointManifest>,
+    requester: &str,
+) -> Decision {
+    match endpoint {
+        None => {
+            if store.is_trusted(requester) {
+                Decision::Grant
+            } else {
+                Decision::Pending
+            }
+        }
+        Some(m) => match &m.visibility {
+            Visibility::Public => Decision::Grant,
+            Visibility::Confirm => {
+                if store.is_trusted(requester) {
+                    Decision::Grant
+                } else {
+                    Decision::Pending
+                }
+            }
+            Visibility::Private { nodes } => {
+                if nodes.iter().any(|n| n == requester) {
+                    Decision::Grant
+                } else {
+                    Decision::Reject("请求方不在该端点的白名单内")
+                }
+            }
+        },
+    }
+}
+
+/// 统一签发 grant（旧语义与端点语义共用）。
+///
+/// 端点语义：公开方拍板 delivery（`Both` 时尊重订阅方期望、缺省 Pull），
+/// 传输列表按公开者声明的优先序透传，pull 模式附带本机中继地址。
+fn compose_grant(
+    app: &StrossApp,
+    store: &TrustStore,
+    device_id: &str,
+    endpoint: Option<&EndpointManifest>,
+    delivery_mode: Option<Delivery>,
+    media: Vec<MediaKind>,
+    title: String,
+) -> Result<ShareGrant, String> {
+    let view = app
+        .issue_share_token_for(title, media, Some(DEFAULT_GRANT_TTL_SECS))
+        .map_err(|e| e.to_user_string())?;
+    let (delivery, transports, relay) = match endpoint {
+        None => (None, None, None),
+        Some(m) => {
+            // 公开方拍板 delivery：Both 时尊重订阅方期望，缺省 Pull
+            let delivery = match (m.delivery, delivery_mode) {
+                (Delivery::Both, Some(want)) => want,
+                (Delivery::Both, None) => Delivery::Pull,
+                (d, _) => d,
+            };
+            let transports: Vec<TransportId> = m.transports.iter().map(|t| t.transport).collect();
+            let relay = if matches!(delivery, Delivery::Pull) {
+                app.relay_ports().map(|(ws, srt, quic)| RelayAddr {
+                    ws_port: ws,
+                    srt_port: srt,
+                    quic_port: quic,
+                })
+            } else {
+                None
+            };
+            (Some(delivery), Some(transports), relay)
+        }
+    };
+    Ok(ShareGrant {
+        view,
+        trusted: store.is_trusted(device_id),
+        delivery,
+        transports,
+        relay,
+    })
+}
+
+/// 目录 API（L2）：本节点设备 + 已公开端点（Private 端点不对目录公开，§9）。
+async fn handle_endpoints(State(state): State<Arc<ServerState>>) -> Json<serde_json::Value> {
+    let (devices, endpoints) = state.app.endpoint_catalog();
+    let endpoints: Vec<EndpointManifest> = endpoints
+        .into_iter()
+        .filter(|e| !matches!(e.visibility, Visibility::Private { .. }))
+        .collect();
+    let (device_id, device_name) = state
+        .app
+        .device_identity()
+        .map(|i| (i.device_id, i.device_name))
+        .unwrap_or_else(|| ("".into(), "本机".into()));
+    Json(serde_json::json!({
+        "node": { "deviceId": device_id, "deviceName": device_name },
+        "devices": devices,
+        "endpoints": endpoints,
+    }))
 }
 
 fn new_pending_id() -> u64 {
@@ -589,9 +795,16 @@ mod tests {
         };
         assert!(!neg.store.is_trusted("dev-phone-1"), "未知设备未信任");
         let (tx2, rx2) = oneshot::channel();
-        neg.pending
-            .lock_poisoned()
-            .insert("n1".into(), ("dev-phone-1".into(), "手机A".into(), tx2));
+        neg.pending.lock_poisoned().insert(
+            "n1".into(),
+            PendingEntry {
+                device_id: "dev-phone-1".into(),
+                device_name: "手机A".into(),
+                endpoint_id: None,
+                delivery_mode: None,
+                tx: tx2,
+            },
+        );
 
         // 2) 用户应答：允许 + 记住
         neg.respond("n1", true, true).unwrap();
@@ -617,7 +830,7 @@ mod tests {
             port: 0,
         };
         let grant = neg
-            .grant("dev-phone-2".into(), "手机B".into())
+            .grant("dev-phone-2".into(), "手机B".into(), None, None)
             .expect("信任设备应自动签发");
         assert!(grant.trusted);
         let _ = std::fs::remove_dir_all(&dir);
@@ -635,12 +848,170 @@ mod tests {
             port: 0,
         };
         let (tx, rx) = oneshot::channel();
-        neg.pending
-            .lock_poisoned()
-            .insert("n3".into(), ("dev-3".into(), "手机C".into(), tx));
+        neg.pending.lock_poisoned().insert(
+            "n3".into(),
+            PendingEntry {
+                device_id: "dev-3".into(),
+                device_name: "手机C".into(),
+                endpoint_id: None,
+                delivery_mode: None,
+                tx,
+            },
+        );
         neg.respond("n3", false, false).unwrap();
         let res = rx.await.unwrap();
         assert!(res.is_err(), "拒绝时应返回错误给申请方");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn endpoint_public_grant_carries_delivery_and_transports() {
+        let dir = tmp_dir("epub");
+        let app = Arc::new(StrossApp::new(Platform::Desktop));
+        app.publish_endpoint(
+            "mic:builtin",
+            Visibility::Public,
+            Delivery::Pull,
+            None,
+            None,
+        )
+        .expect("公开麦克风端点");
+        let neg = ShareNegotiator {
+            app: app.clone(),
+            store: Arc::new(TrustStore::load(&dir)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            task: tokio::spawn(async {}),
+            port: 0,
+        };
+        let grant = neg
+            .grant(
+                "dev-phone".into(),
+                "手机A".into(),
+                Some("mic:builtin".into()),
+                None,
+            )
+            .expect("Public 端点应自动签发");
+        assert_eq!(grant.delivery, Some(Delivery::Pull));
+        let transports = grant.transports.expect("应携带传输列表");
+        assert_eq!(transports[0], TransportId::Quic, "公开者默认协议 QUIC 优先");
+        // 本测试未启动中继 → pull 模式 relay 为 None（无地址可给）
+        assert!(grant.relay.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn endpoint_delivery_both_honors_subscriber_wish() {
+        let dir = tmp_dir("both");
+        let app = Arc::new(StrossApp::new(Platform::Desktop));
+        app.publish_endpoint(
+            "sysaudio:builtin",
+            Visibility::Public,
+            Delivery::Both,
+            None,
+            None,
+        )
+        .expect("公开系统声音端点");
+        let neg = ShareNegotiator {
+            app: app.clone(),
+            store: Arc::new(TrustStore::load(&dir)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            task: tokio::spawn(async {}),
+            port: 0,
+        };
+        // Both + 订阅方指明 Push → 尊重订阅方
+        let grant = neg
+            .grant(
+                "dev-phone".into(),
+                "手机A".into(),
+                Some("sysaudio:builtin".into()),
+                Some(Delivery::Push),
+            )
+            .unwrap();
+        assert_eq!(grant.delivery, Some(Delivery::Push));
+        assert!(grant.relay.is_none(), "push 模式不带公开方中继地址");
+        // Both + 未指明 → 缺省 Pull
+        let grant = neg
+            .grant(
+                "dev-phone".into(),
+                "手机A".into(),
+                Some("sysaudio:builtin".into()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(grant.delivery, Some(Delivery::Pull));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn policy_decision_respects_visibility() {
+        let dir = tmp_dir("pol");
+        let store = TrustStore::load(&dir);
+        let app = StrossApp::new(Platform::Desktop);
+
+        // Public：任何人免确认
+        app.publish_endpoint(
+            "mic:builtin",
+            Visibility::Public,
+            Delivery::Pull,
+            None,
+            None,
+        )
+        .unwrap();
+        let m = app.endpoint_manifest("mic:builtin").unwrap();
+        assert_eq!(
+            policy_decision(&store, Some(&m), "stranger"),
+            Decision::Grant
+        );
+
+        // Confirm：未信任挂起，信任后自动
+        app.publish_endpoint("screen:0", Visibility::Confirm, Delivery::Pull, None, None)
+            .unwrap();
+        let m = app.endpoint_manifest("screen:0").unwrap();
+        assert_eq!(
+            policy_decision(&store, Some(&m), "dev-trusted"),
+            Decision::Pending
+        );
+        store.remember("dev-trusted", "可信设备");
+        assert_eq!(
+            policy_decision(&store, Some(&m), "dev-trusted"),
+            Decision::Grant
+        );
+
+        // Private：白名单自动、非白名单拒绝
+        app.publish_endpoint(
+            "sysaudio:builtin",
+            Visibility::Private {
+                nodes: vec!["dev-ok".into()],
+            },
+            Delivery::Push,
+            None,
+            None,
+        )
+        .unwrap();
+        let m = app.endpoint_manifest("sysaudio:builtin").unwrap();
+        assert_eq!(policy_decision(&store, Some(&m), "dev-ok"), Decision::Grant);
+        assert_eq!(
+            policy_decision(&store, Some(&m), "dev-no"),
+            Decision::Reject("请求方不在该端点的白名单内")
+        );
+
+        // 旧语义（无端点）：信任自动、未信任挂起
+        assert_eq!(
+            policy_decision(&store, None, "dev-trusted"),
+            Decision::Grant
+        );
+        assert_eq!(policy_decision(&store, None, "stranger"), Decision::Pending);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn endpoint_unknown_and_private_directory_rules() {
+        let app = StrossApp::new(Platform::Desktop);
+        // 未知端点查不到
+        assert!(app.endpoint_manifest("nope").is_none());
+        // 目录快照含设备 + 端点；Private 由 /api/endpoints 层过滤（见 handle_endpoints）
+        let (devices, endpoints) = app.endpoint_catalog();
+        assert_eq!(devices.len(), 3, "桌面平台默认 3 台设备");
+        assert!(endpoints.is_empty(), "未公开时不应有端点");
     }
 }

@@ -25,12 +25,15 @@ use tokio::sync::mpsc;
 
 use crate::receiver::{LocalProxy, ReceiveStats, Receiver};
 use stross_proto::frame::Frame;
-use stross_proto::message::{DiscoveryInfo, MediaKind, RoleId, TransportId};
+use stross_proto::message::{
+    CodecId, Delivery, DeviceInfo, DiscoveryInfo, EndpointManifest, MediaKind, RoleId, TransportId,
+    TransportPreference, Visibility,
+};
 
 use crate::engine::SenderEngine;
 use crate::error::{Error, Result};
 
-use crate::kernel::{Kernel, NodeInfo, NodeRole, RelayDataPlane, SessionPrefs};
+use crate::kernel::{EndpointRegistry, Kernel, NodeInfo, NodeRole, RelayDataPlane, SessionPrefs};
 use crate::lock::MutexExt;
 
 /// 运行平台（UI 层注入）。
@@ -47,6 +50,38 @@ impl Platform {
             Platform::Android => "android",
         }
     }
+}
+
+/// P1 平台设备静态枚举（docs/endpoint-model.md §11：camera 按采集能力后置）。
+///
+/// 设备 = 持久能力实体（摄像头 / 麦克风 / 屏幕），与订阅与否无关；被公开后
+/// 才实例化为端点。Android P1 不默认公开屏幕（依赖前台服务权限，micOnly 路径
+/// 已验证，屏幕采集权限后置）。
+fn platform_devices(platform: Platform) -> Vec<DeviceInfo> {
+    let mut v = vec![
+        DeviceInfo {
+            device_id: "screen:0".into(),
+            kind: MediaKind::Screen,
+            name: "屏幕".into(),
+            builtin: true,
+        },
+        DeviceInfo {
+            device_id: "mic:builtin".into(),
+            kind: MediaKind::Mic,
+            name: "麦克风".into(),
+            builtin: true,
+        },
+        DeviceInfo {
+            device_id: "sysaudio:builtin".into(),
+            kind: MediaKind::SystemAudio,
+            name: "系统声音".into(),
+            builtin: true,
+        },
+    ];
+    if matches!(platform, Platform::Android) {
+        v.retain(|d| d.kind != MediaKind::Screen);
+    }
+    v
 }
 
 /// 本机中继的 mDNS 实例名：携带持久化 `device_id` 前 8 位 + 端口，保证
@@ -74,6 +109,8 @@ pub struct StrossApp {
     backend: Mutex<Option<Arc<dyn CaptureBackend>>>,
     /// 内核（控制面）：设备图 / 会话管理 / 路由（设计文档 §3）。
     kernel: Kernel,
+    /// 端点框架（docs/endpoint-model.md）：节点设备表 + 已公开端点表（P1 1:1）。
+    registry: Mutex<EndpointRegistry>,
     /// 接收播放（1e）：WS 收流 → SessionDataManager → PlaybackSink 解码。
     receiver: Mutex<Option<Arc<Receiver>>>,
     /// 本机持久化身份（UI 层 `load_or_create_identity` 注入；用于 mDNS
@@ -111,6 +148,7 @@ impl StrossApp {
             anchor: Mutex::new(None),
             backend: Mutex::new(None),
             kernel: Kernel::new(),
+            registry: Mutex::new(EndpointRegistry::with_devices(platform_devices(platform))),
             receiver: Mutex::new(None),
             identity: Mutex::new(None),
             started: std::time::Instant::now(),
@@ -158,6 +196,53 @@ impl StrossApp {
             audio_inputs: stross_media::devices::list_audio_inputs(),
             system_audio: stross_media::devices::list_system_audio(),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 端点框架（P1：节点 → 设备 → 端点，见 docs/endpoint-model.md）
+    // -----------------------------------------------------------------------
+
+    /// 公开设备为端点（P1 1:1：同一设备重复公开报错）。
+    ///
+    /// `transports` / `codecs` 缺省时按端点类型给默认（协议由公开者声明：
+    /// 媒体类 Lossy → QUIC>SRT>WS，其余 Lossless → QUIC>WS）。
+    pub fn publish_endpoint(
+        &self,
+        device_id: &str,
+        visibility: Visibility,
+        delivery: Delivery,
+        transports: Option<Vec<TransportPreference>>,
+        codecs: Option<Vec<CodecId>>,
+    ) -> Result<EndpointManifest> {
+        let mut reg = self.registry.lock_poisoned();
+        let kind = reg
+            .device(device_id)
+            .ok_or_else(|| Error::Message(format!("设备不存在: {device_id}")))?
+            .kind;
+        let transports = transports.unwrap_or_else(|| EndpointRegistry::default_transports(kind));
+        let codecs = codecs.unwrap_or_else(|| vec![CodecId::H264, CodecId::Aac]);
+        reg.publish(device_id, visibility, delivery, transports, codecs)
+    }
+
+    /// 取消公开端点（已订阅会话由上层决定宽限期，P1 直接移除）。
+    pub fn unpublish_endpoint(&self, endpoint_id: &str) -> Result<()> {
+        self.registry.lock_poisoned().unpublish(endpoint_id)
+    }
+
+    /// 端点清单查询（订阅握手 / 目录 API 用）。
+    pub fn endpoint_manifest(&self, endpoint_id: &str) -> Option<EndpointManifest> {
+        self.registry.lock_poisoned().manifest(endpoint_id).cloned()
+    }
+
+    /// 目录快照：全部设备 + 全部端点（Private 端点可见性过滤由调用方做）。
+    pub fn endpoint_catalog(&self) -> (Vec<DeviceInfo>, Vec<EndpointManifest>) {
+        let reg = self.registry.lock_poisoned();
+        (reg.devices(), reg.manifests())
+    }
+
+    /// 本机持久化身份（目录 API 的 node 信息源）。
+    pub fn device_identity(&self) -> Option<crate::negotiator::DeviceIdentity> {
+        self.identity.lock_poisoned().clone()
     }
 
     // -----------------------------------------------------------------------
@@ -232,7 +317,8 @@ impl StrossApp {
                     MediaKind::Mic,
                     MediaKind::SystemAudio,
                 ],
-            );
+            )
+            .with_devices(self.registry.lock_poisoned().summaries());
             match Discovery::start(&instance, &local_ips(), port, &info) {
                 Ok(d) => Some(d),
                 Err(e) => {
@@ -259,7 +345,7 @@ impl StrossApp {
                 .unwrap_or_else(|_| "本机".into()),
             roles: vec![NodeRole::Sender, NodeRole::Viewer, NodeRole::Relay],
             caps: vec![],
-            endpoints: vec![],
+            addrs: vec![],
         });
         if let Some(backend) = self.backend.lock_poisoned().as_ref() {
             kernel.register_capability("local", backend.descriptor());

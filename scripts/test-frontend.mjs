@@ -64,13 +64,39 @@ const invoke = async (cmd, args) => {
       return undefined;
     case 'negotiator_respond':
       return undefined;
+    case 'request_share_token':
+      // 协商端点回放：null = 设备不支持协商（404）→ 前端回退手动粘贴
+      if (!negGrant) throw new Error('协商端点不存在（HTTP 404）');
+      return negGrant;
     case 'start_relay':
       return { port: 8777, urls: ['http://192.168.1.50:8777/'], name: 'Stross 本机中继', kind: 'relay', roles: [], transports: [], ip: null };
-    case 'scan_relays':
+    // 扫描聚合在 Rust（scan_devices）；前端只消费 ScannedDevice[]（isSelf/探测已含）
+    case 'scan_devices':
       return [
-        { port: 9001, urls: ['http://192.168.1.51:9001/'], name: '手机A', kind: 'relay', roles: ['sender'], transports: [], ip: '192.168.1.51' },
-        { port: 9002, urls: ['http://192.168.1.52:9002/'], name: '电脑B', kind: 'relay', roles: ['relay'], transports: [], ip: '192.168.1.52' },
+        {
+          name: 'Stross 本机中继', ip: '192.168.1.50', port: 8777, isSelf: true, online: true,
+          roles: [], media: [], transports: [], devices: [], srtPort: 9001, quicPort: 9002,
+          streams: streamRunning
+            ? [{ streamId: 'sess-test', title: '我的屏幕', watchers: 0, video: true, audio: false }]
+            : [],
+        },
+        {
+          name: '手机A', ip: '192.168.1.51', port: 9001, isSelf: false, online: true,
+          roles: ['sender'], media: [], transports: [], devices: [], srtPort: null, quicPort: 9002,
+          streams: [{ streamId: 's1', title: '手机麦克风', watchers: 0, video: false, audio: true }],
+        },
+        {
+          name: '电脑B', ip: '192.168.1.52', port: 9002, isSelf: false, online: true,
+          roles: ['relay'], media: [], transports: [], devices: [], srtPort: null, quicPort: 9002,
+          streams: [{ streamId: 's2', title: '电脑屏幕', watchers: 1, video: true, audio: false }],
+        },
       ];
+    case 'probe_relay':
+      return true; // 手动添加地址可达
+    case 'anchor_streams':
+      return streamRunning
+        ? [{ streamId: 'sess-test', title: '我的屏幕', watchers: 0, video: true, audio: false }]
+        : [];
     case 'start_stream':
       streamRunning = true;
       return { relayPort: 8777, watchUrls: ['http://192.168.1.50:8777/'], streamId: 'sess-test' };
@@ -235,7 +261,7 @@ await sleep(200);
 const origInvoke = window.__TAURI__.core.invoke;
 window.__TAURI__.core.invoke = async (cmd, args) => {
   if (cmd === 'start_relay') return { port: 8777, urls: ['http://192.168.1.50:8777/'], name: 'x', kind: 'relay', roles: [], transports: [], ip: null };
-  if (cmd === 'scan_relays') return [];
+  if (cmd === 'scan_devices') return []; // 无 mDNS 设备；手动列表独立渲染
   if (cmd === 'stream_status') return { running: false, streamId: null, title: null, relayPort: null, startedAt: null };
   return origInvoke(cmd, args);
 };
@@ -244,7 +270,7 @@ $('manual-add-btn').click();
 await sleep(900);
 const devCards2 = document.querySelectorAll('#device-list .dev-card');
 check('手动设备卡片出现', Array.from(devCards2).some((c) => c.textContent.includes('192.168.1.77')));
-check('手动设备标记（手动）', Array.from(devCards2).some((c) => c.textContent.includes('（手动）')));
+check('手动设备标记（手动）', Array.from(devCards2).some((c) => c.textContent.includes('（手动')), '未标记（手动）');
 check('手动添加历史持久化', !$('recent-block').classList.contains('hidden') && $('recent-block').textContent.includes('192.168.1.77'));
 // 恢复原 mock 并点击「扫描」重建设备列表（含手机A/电脑B，供 [6][7] 使用）
 window.__TAURI__.core.invoke = origInvoke;
@@ -298,8 +324,9 @@ await sleep(200);
 const phoneExpanded2 = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
 phoneExpanded2.querySelector('[data-act="mic-to"]').click();
 await sleep(600);
-check('协商请求 POST 到设备 18779 端口', calls.some((c) => c.fetch && c.fetch.includes(':18779/api/negotiator/request')), '未发现协商请求');
-check('协商请求携带本机身份', calls.some((c) => c.body && c.body.includes('dev-pc-test')), '未携带 deviceId');
+const negCalls = calls.filter((c) => c.cmd === 'request_share_token');
+check('协商经 request_share_token 命令（host=手机A IP, port=18779）', negCalls.some((c) => c.args.host === '192.168.1.51' && c.args.port === 18779), '未发现凭证申请命令');
+check('协商请求携带身份与媒体（media=[mic]）', negCalls.some((c) => Array.isArray(c.args.media) && c.args.media[0] === 'mic'), JSON.stringify(negCalls[0]?.args));
 const sc3 = calls.filter((c) => c.cmd === 'start_stream' && c.args.cfg.shareToken && c.args.cfg.streamId === 'sess-auto');
 check('直接用协商签发的凭证推流（streamId=sess-auto）', sc3.length === 1, `实际 ${sc3.length}`);
 check('自动推流目标 = 手机A（quic://192.168.1.51:9002）', sc3[0] && sc3[0].args.relayUrl === 'quic://192.168.1.51:9002', JSON.stringify(sc3[0]?.args?.relayUrl));

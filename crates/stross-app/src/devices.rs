@@ -132,6 +132,43 @@ pub async fn scan(
     devices
 }
 
+/// 手动地址探测（无 mDNS 的设备）：解析 `http://host:port` 基址，探测
+/// 在线 / SRT/QUIC / 在线共享。返回 `None` = 地址非法（无法探测）。
+/// GUI「手动添加设备」与 CLI 可共用——不再各自实现探测客户端。
+pub async fn probe_base(base: &str, probe: Duration) -> Option<ScannedDevice> {
+    let rest = base
+        .strip_prefix("http://")
+        .or_else(|| base.strip_prefix("https://"))?;
+    let host_port = rest.split('/').next()?;
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().ok()?),
+        None => (host_port.to_string(), 80),
+    };
+    let mut dev = ScannedDevice {
+        name: host_port.to_string(),
+        ip: host.clone(),
+        port,
+        is_self: false,
+        roles: vec![],
+        media: vec![],
+        transports: vec![],
+        devices: vec![],
+        online: false,
+        srt_port: None,
+        quic_port: None,
+        streams: Vec::new(),
+    };
+    if let Ok(resp) = relay_http::info(&host, port, probe).await {
+        dev.online = true;
+        dev.srt_port = resp.srt_port;
+        dev.quic_port = resp.quic_port;
+    }
+    if let Ok(list) = relay_http::streams(&host, port, probe).await {
+        dev.streams = to_views(list);
+    }
+    Some(dev)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

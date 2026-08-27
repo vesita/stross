@@ -1,6 +1,10 @@
 // Stross 前端 —— 发现域（script 全局作用域）：
 // 本机锚定（start_relay + mDNS 广播）+ 局域网设备扫描 + 手动添加 +
-// 设备图渲染（本机卡片 + 设备卡片，含在线共享聚合 /api/streams）。
+// 设备图渲染（本机卡片 + 设备卡片）。
+//
+// 分层（docs/layering-architecture.md）：mDNS 浏览 + `/api/info` `/api/streams`
+// 探测 + 聚合全部收敛在 Rust（`scan_devices` 命令 → `stross_app::devices::scan`）；
+// 本文件只做**渲染与手动地址持久化**，不再自带 fetch 探测客户端。
 
 function normAddr(addr: string): string | null {
   let a = addr.trim();
@@ -20,16 +24,8 @@ function isLinkLocalIp(ip: string): boolean {
   );
 }
 
-/** 局域网设备探测超时（ms）：不可达设备快速失败，避免拖慢整轮聚合。 */
+/** 局域网设备探测超时（ms；Rust 侧聚合按此探测每台设备）。 */
 const PROBE_TIMEOUT_MS = 2000;
-
-/** 带超时的 fetch：设备不可达时按超时失败而不是挂起（浏览器默认 TCP
- *  超时可长达 30s+，串行探测会被一台离线设备拖死整轮扫描）。 */
-function fetchWithTimeout(url: string, ms: number): Promise<Response> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  return fetch(url, { cache: 'no-store', signal: ctrl.signal }).finally(() => clearTimeout(timer));
-}
 
 /** 免先连核心：自动锚定本机（`start_relay` 幂等，启动受控中继 + mDNS 广播）。 */
 async function ensureAnchor(): Promise<void> {
@@ -43,8 +39,8 @@ async function ensureAnchor(): Promise<void> {
       quicUrl: null,
     };
     setAnchorBadge('ok');
-    void refreshAnchorPorts();
-    renderLocalCard(); // 本机卡片状态更新
+    renderLocalCard(); // 本机卡片状态更新（SRT/QUIC 端口随下一轮扫描到位）
+    void refreshDevices(); // 锚点端口 + 本机/对端在线共享随扫描结果到位
   } catch (e) {
     anchor = null;
     setAnchorBadge('err');
@@ -59,20 +55,8 @@ async function ensureAnchor(): Promise<void> {
   }
 }
 
-/** 拉取本机锚点 `/api/info`，填充 SRT/QUIC 拨号地址（失败静默，退回 WS）。 */
-async function refreshAnchorPorts(): Promise<void> {
-  if (!anchor) return;
-  try {
-    const resp = await fetchWithTimeout(`http://127.0.0.1:${anchor.port}/api/info`, 2000);
-    if (!resp.ok) return;
-    const info = (await resp.json()) as { srtPort?: number; quicPort?: number };
-    if (info.srtPort) anchor.srtUrl = `srt://127.0.0.1:${info.srtPort}`;
-    if (info.quicPort) anchor.quicUrl = `quic://127.0.0.1:${info.quicPort}`;
-    renderLocalCard(); // 刷新锚点状态行（含传输就绪信息）
-  } catch (_) { /* 中继可能不支持 /api/info：保持 null，走 WS */ }
-}
-
-/** 手动添加设备地址（免 mDNS）：探测可达后进入设备列表。 */
+/** 手动添加设备地址（免 mDNS）：探测可达后进入设备列表。
+ *  探测走 `probe_relay` 命令（core 官方客户端），前端不再 fetch。 */
 async function addManualRelay(): Promise<void> {
   hideGridError();
   const addr = normAddr($input('manual-addr').value);
@@ -84,17 +68,15 @@ async function addManualRelay(): Promise<void> {
   saveRecent(addr);
   // 探测中继是否可达（/api/streams 是受控/普通中继都提供的只读端点）
   try {
-    const resp = await fetchWithTimeout(addr + '/api/streams', 3000);
-    if (!resp.ok) throw new Error('中继返回 HTTP ' + resp.status);
-    await resp.json();
+    const ok = (await call('probe_relay', { base: addr })) as boolean;
+    if (!ok) throw new Error('中继不可达（无 /api/streams）');
   } catch (e) {
     showGridError('无法访问 ' + addr + '：' + (e as Error).message);
     return;
   }
   manualRelays = [addr, ...manualRelays.filter((u) => u !== addr)];
   renderRecent();
-  void scanRelays(); // 设备列表出现该设备
-  void scanRemoteStreams(true); // 强制刷新其在线共享
+  void refreshDevices(true); // 设备列表出现该设备（含其在线共享）
 }
 
 /** 恢复上次的地址偏好，并渲染手动添加历史。（共享弹窗标题在打开时从 LS_TITLE 预填。） */
@@ -174,39 +156,61 @@ function renderRecent(): void {
 // 设备列表（左栏）：本机 + 局域网设备
 // ---------------------------------------------------------------------------
 
-/** 归一化设备基址：取 urls[0] 去掉尾部斜杠。 */
-function deviceBase(r: { urls: string[] }): string {
-  return (r.urls[0] || '').replace(/\/+$/, '');
+/** 扫描条目 → 设备卡片基址（http://ip:port）。 */
+function baseOf(d: ScannedDevice): string {
+  return `http://${d.ip}:${d.port}`;
 }
 
-/** 扫描局域网设备（mDNS + 手动添加），重建设备列表。 */
-async function scanRelays(): Promise<void> {
+/** 全量刷新设备列表 + 在线共享 + 锚点端口。
+ *
+ * mDNS 浏览 + `/api/info` `/api/streams` 探测 + 聚合全部在 Rust
+ * `scan_devices` 命令（`stross_app::devices::scan`）；前端只渲染结果，
+ * 手动地址通过 `extraBaseUrls` 一并探测并入。
+ */
+async function refreshDevices(force = false): Promise<void> {
   if (scanInFlight) return;
+  if (!force && discoverCacheAt && Date.now() - discoverCacheAt < DISCOVER_TTL_MS) return;
   scanInFlight = true;
   try {
-    const relays = (await call('scan_relays')) as RelayInfo[];
-    // 剔除本机 + link-local（本机单独展示；fe80 无 scope 不可达）
-    const others = relays.filter((r) => !r.ip || (MY_IPS.indexOf(r.ip) === -1 && !isLinkLocalIp(r.ip)));
-    const cards: DeviceView[] = others.map((r) => ({
-      key: deviceBase(r),
-      name: r.name || 'Stross 设备',
-      meta: r.ip ? r.ip + ':' + r.port : deviceBase(r),
-      isLocal: false,
-      roles: r.roles || [],
-      manual: false,
-      base: deviceBase(r),
-      srtUrl: null,
-      quicUrl: null,
-      streams: [],
-    }));
-    // 手动添加的设备（历史持久化）也进设备列表
+    const devs = (await call('scan_devices', {
+      probeMs: PROBE_TIMEOUT_MS,
+      extraBaseUrls: manualRelays.map((a) => a.replace(/\/+$/, '')),
+    })) as ScannedDevice[];
+    // 本机条目（isSelf，按回环探测）：同步锚点 SRT/QUIC 端口 + 本机在线共享
+    const local = devs.find((d) => d.isSelf) || null;
+    if (local && local.online) {
+      if (anchor) {
+        anchor.srtUrl = local.srtPort ? `srt://127.0.0.1:${local.srtPort}` : null;
+        anchor.quicUrl = local.quicPort ? `quic://127.0.0.1:${local.quicPort}` : null;
+      }
+      localStreams = local.streams;
+    } else {
+      localStreams = [];
+    }
+    // 远端设备卡片（探测已在 Rust 完成：含在线共享 / SRT / QUIC）
+    const cards: DeviceView[] = devs
+      .filter((d) => !d.isSelf)
+      .map((d) => ({
+        key: baseOf(d),
+        name: d.name || 'Stross 设备',
+        meta: d.ip + ':' + d.port,
+        isLocal: false,
+        roles: d.roles || [],
+        manual: manualRelays.some((a) => a.replace(/\/+$/, '') === baseOf(d)),
+        base: baseOf(d),
+        srtUrl: d.srtPort ? `srt://${d.ip}:${d.srtPort}` : null,
+        quicUrl: d.quicPort ? `quic://${d.ip}:${d.quicPort}` : null,
+        quicPort: d.quicPort,
+        streams: d.streams || [],
+      }));
+    // 手动添加但当前不可达的地址保留在列表（提示不可达而非消失）
     manualRelays.forEach((addr) => {
       const base = addr.replace(/\/+$/, '');
       if (!cards.some((c) => c.base === base)) {
-        const hostPort = addr.replace(/^https?:\/\//, '');
+        const hostPort = base.replace(/^https?:\/\//, '');
         cards.push({
           key: base,
-          name: hostPort + '（手动）',
+          name: hostPort + '（手动，不可达）',
           meta: hostPort,
           isLocal: false,
           roles: [],
@@ -214,20 +218,30 @@ async function scanRelays(): Promise<void> {
           base,
           srtUrl: null,
           quicUrl: null,
+          quicPort: null,
           streams: [],
         });
       }
     });
+    // 填充远端流缓存（按需接收时取流元数据）
+    cards.forEach((c) => c.streams.forEach((s) => remoteStreams.set(s.streamId, s)));
     // 保留已展开状态；本机卡片由渲染器恒置首位
     const keepExpanded = expandedDevice;
     deviceViews = cards;
     if (keepExpanded && !deviceViews.some((d) => d.key === keepExpanded)) expandedDevice = null;
     renderDeviceList();
+    renderLocalStreams();
   } catch (e) {
     showGridError('扫描失败：' + (e as Error).message);
   } finally {
     scanInFlight = false;
+    discoverCacheAt = Date.now();
   }
+}
+
+/** 兼容入口（初始化 / 强制刷新）。 */
+function scanRelays(): Promise<void> {
+  return refreshDevices(true);
 }
 
 /** 渲染左栏设备列表：本机卡片 + 各设备卡片（设备可展开）。 */
@@ -491,99 +505,11 @@ function streamItem(dev: DeviceView, s: RemoteStream): HTMLButtonElement {
   return b;
 }
 
-/** 拉取所有设备的在线共享列表，填入设备视图并刷新（按设备分流展示）。 */
-async function scanRemoteStreams(force = false): Promise<void> {
-  if (discoverInFlight) return;
-  if (!force && discoverCacheAt && Date.now() - discoverCacheAt < DISCOVER_TTL_MS) return;
-  discoverInFlight = true;
-  let relays: RelayInfo[];
-  try {
-    relays = (await call('scan_relays')) as RelayInfo[];
-  } catch (e) {
-    showGridError('扫描失败：' + (e as Error).message);
-    discoverInFlight = false;
-    return;
-  }
-  const others = relays.filter((r) => !r.ip || (MY_IPS.indexOf(r.ip) === -1 && !isLinkLocalIp(r.ip)));
-  // 手动添加的设备并入聚合（无 mDNS 时也能看到其共享）
-  manualRelays.forEach((addr) => {
-    const base = addr.replace(/\/+$/, '');
-    if (!others.some((r) => deviceBase(r) === base)) {
-      others.push({
-        port: 0,
-        urls: [base + '/'],
-        name: addr.replace(/^https?:\/\//, ''),
-        kind: null,
-        roles: [],
-        transports: [],
-        ip: null,
-      });
-    }
-  });
-
-  // 设备 key → 在线共享列表（保留既有流缓存，避免每次全量重建丢失流信息）
-  const perDevice: Record<string, RemoteStream[]> = {};
-  // 并行探测所有设备（每设备独立超时），一台离线设备不再拖慢整轮聚合
-  const probes = await Promise.allSettled(
-    others.map(async (r) => {
-      const base = deviceBase(r);
-      if (!base) return null;
-      let info: { srtPort?: number; quicPort?: number } | null = null;
-      try {
-        const iresp = await fetchWithTimeout(base + '/api/info', PROBE_TIMEOUT_MS);
-        if (iresp.ok) info = (await iresp.json()) as { srtPort?: number; quicPort?: number };
-      } catch (_) { /* 该设备 /api/info 不可用 → SRT/QUIC null */ }
-      let list: RemoteStream[] = [];
-      try {
-        const sresp = await fetchWithTimeout(base + '/api/streams', PROBE_TIMEOUT_MS);
-        if (sresp.ok) {
-          const data = (await sresp.json()) as { streams?: RemoteStream[] } | RemoteStream[];
-          list = Array.isArray(data) ? data : (data.streams || []);
-        }
-      } catch (_) { /* 该设备不可达，跳过 */ }
-      return { base, info, list };
-    }),
-  );
-  for (const r of probes) {
-    if (r.status !== 'fulfilled' || !r.value) continue;
-    const { base, info, list } = r.value;
-    list.forEach((st) => {
-      if (!remoteStreams.has(st.streamId)) remoteStreams.set(st.streamId, st);
-    });
-    perDevice[base] = list;
-    // 同步 SRT/QUIC 拨号地址到设备视图
-    const dev = deviceViews.find((d) => d.base === base);
-    if (dev) {
-      const hostOnly = base.replace(/^https?:\/\//, '').replace(/:\d+$/, '');
-      dev.srtUrl = info && info.srtPort ? `srt://${hostOnly}:${info.srtPort}` : null;
-      dev.quicUrl = info && info.quicPort ? `quic://${hostOnly}:${info.quicPort}` : null;
-      dev.streams = list;
-    }
-  }
-  // 拉取本机在线共享（本机卡片流区）
-  if (anchor) {
-    try {
-      const resp = await fetchWithTimeout(`http://127.0.0.1:${anchor.port}/api/streams`, PROBE_TIMEOUT_MS);
-      if (resp.ok) {
-        const data = (await resp.json()) as { streams?: RemoteStream[] } | RemoteStream[];
-        const list = Array.isArray(data) ? data : (data.streams || []);
-        list.forEach((st) => remoteStreams.set(st.streamId, st));
-        localStreams = list;
-      }
-    } catch (_) { /* ignore */ }
-  }
-  renderLocalStreams();
-  // 局部刷新展开设备的流区（避免整树重绘丢焦点）
-  for (const [key, list] of Object.entries(perDevice)) {
-    const dev = deviceViews.find((d) => d.base === key);
-    if (dev) dev.streams = list;
-  }
-  refreshNodeStreams();
-  discoverInFlight = false;
-  discoverCacheAt = Date.now();
+/** 兼容入口：周期刷新在线共享/设备列表（TTL 与 in-flight 守卫在
+ *  `refreshDevices` 内；探测已收敛到 Rust，不再按设备 fetch）。 */
+function scanRemoteStreams(force = false): Promise<void> {
+  return refreshDevices(force);
 }
-
-/** 本机在线共享缓存（供本机卡片流区渲染）。 */
 
 /** 渲染本机卡片流区（本机在线共享）。 */
 function renderLocalStreams(): void {
@@ -610,6 +536,7 @@ function renderLocalStreams(): void {
     base: null,
     srtUrl: anchor ? anchor.srtUrl : null,
     quicUrl: anchor ? anchor.quicUrl : null,
+    quicPort: null,
     streams: localStreams,
   };
   localStreams.forEach((s) => box.appendChild(streamItem(localDev, s)));

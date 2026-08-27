@@ -300,24 +300,21 @@ function fmtSecs(expiresAt: number): string {
   return `约 ${mins} 分钟`;
 }
 
-/** 轮询本机受控中继串流列表：凭证对应的流接入后自动开始原生接收。 */
+/** 轮询本机受控中继串流列表：凭证对应的流接入后自动开始原生接收。
+ *  列表走 `anchor_streams` 命令（core 官方客户端），不再直接 fetch。 */
 async function pollMicRecv(): Promise<void> {
   if (!micRecv || micRecv.checking || micRecv.received) return;
   micRecv.checking = true;
   try {
     if (anchor) {
-      const resp = await fetch(`http://127.0.0.1:${anchor.port}/api/streams`, { cache: 'no-store' });
-      if (resp.ok) {
-        const data = (await resp.json()) as { streams?: RemoteStream[] } | RemoteStream[];
-        const list = Array.isArray(data) ? data : (data.streams || []);
-        if (list.some((s) => s.streamId === micRecv!.streamId)) {
-          micRecv.received = true;
-          $('mic-recv-status').textContent = '手机已接入，正在通过电脑扬声器播放…';
-          $('mic-recv-status').style.color = 'var(--ok)';
-          // 自动原生接收（音频设备输出；纯音频流无画面属正常）
-          void startReceive(micRecv.streamId);
-          return;
-        }
+      const list = (await call('anchor_streams', { port: anchor.port })) as RemoteStream[];
+      if (list.some((s) => s.streamId === micRecv!.streamId)) {
+        micRecv.received = true;
+        $('mic-recv-status').textContent = '手机已接入，正在通过电脑扬声器播放…';
+        $('mic-recv-status').style.color = 'var(--ok)';
+        // 自动原生接收（音频设备输出；纯音频流无画面属正常）
+        void startReceive(micRecv.streamId);
+        return;
       }
     }
   } catch (_) { /* 中继短暂不可达，下一轮重试 */ }

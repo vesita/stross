@@ -41,8 +41,7 @@ async function init(): Promise<void> {
     renderIps(info.ips);
     await ensureAnchor();
     startStatusPolling();
-    void scanRelays();
-    void scanRemoteStreams(true);
+    void refreshDevices();
     void renderShares();
     // 权限自动化：防火墙自检（缺放行则提示一键放行）+ 协商授权事件桥
     void checkFirewall();
@@ -57,10 +56,9 @@ function startStatusPolling(): void {
   if (statusTimer !== null) return;
   statusTimer = window.setInterval(() => {
     void pollStatus();
-    // 设备「在线共享」周期刷新（scanRemoteStreams 自带 5s TTL + in-flight
-    // 守卫：实际每 ~5s 拉一轮各设备 /api/streams）。此前只在初始化/手动
-    // 添加/本机推流时聚合——远程设备中途启动的新流永远不出现，直到重启。
-    void scanRemoteStreams();
+    // 设备列表 + 在线共享周期刷新（refreshDevices 自带 5s TTL + in-flight
+    // 守卫：mDNS + 探测 + 聚合在 Rust `scan_devices` 内一次完成）。
+    void refreshDevices();
   }, 2000);
 }
 

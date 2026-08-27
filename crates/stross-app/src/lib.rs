@@ -30,7 +30,7 @@ pub mod subscriber;
 
 pub use app::{CaptureStatusView, Platform, StrossApp};
 pub use control::{CtrlRequest, CtrlResponse, CtrlServer, DEFAULT_CTRL_PORT};
-pub use devices::{ScannedDevice, StreamView, scan, to_views};
+pub use devices::{ScannedDevice, StreamView, probe_base, scan, to_views};
 pub use endpoint_driver::install_endpoint_driver;
 pub use engine::SenderEngine;
 pub use error::{Error, Result};

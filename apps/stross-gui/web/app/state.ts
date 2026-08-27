@@ -65,8 +65,35 @@ interface RemoteStream {
   streamId: string;
   title: string;
   watchers: number;
-  video: TrackInfo | null;
-  audio: TrackInfo | null;
+  /** 是否含视频/音频轨：布尔投影（Rust `StreamView`）；兼容历史 /api/streams
+   *  直读的 TrackInfo 对象（真值判断两者等价）。 */
+  video: boolean | TrackInfo | null;
+  audio: boolean | TrackInfo | null;
+}
+
+/** L1 设备摘要（Rust `DeviceSummary`，mDNS 摘要层）。 */
+interface L1DeviceSummary {
+  deviceId: string;
+  kind: string;
+  name: string;
+  published: boolean;
+}
+
+/** 扫描聚合视图（Rust `stross_app::devices::ScannedDevice`——mDNS + 探测
+ *  聚合全在库层，前端只消费结果不再自写 /api/* 探测）。 */
+interface ScannedDevice {
+  name: string;
+  ip: string;
+  port: number;
+  isSelf: boolean;
+  roles: string[];
+  media: string[];
+  transports: string[];
+  devices: L1DeviceSummary[];
+  online: boolean;
+  srtPort: number | null;
+  quicPort: number | null;
+  streams: RemoteStream[];
 }
 /** 一个可接收的中继（本机锚点 / 局域网设备）。 */
 interface TargetRelay {
@@ -155,9 +182,11 @@ interface DeviceView {
   manual: boolean;
   /** 非本机设备基址 http://host:port；本机为 null。 */
   base: string | null;
-  /** 设备 SRT/QUIC 拨号地址（/api/info 拉取；null = 不可用）。 */
+  /** 设备 SRT/QUIC 拨号地址（扫描聚合带出；null = 不可用）。 */
   srtUrl: string | null;
   quicUrl: string | null;
+  /** 设备 QUIC 端口（协商/推流域选传输用，来自扫描；null = 不可用）。 */
+  quicPort: number | null;
   /** 该设备在线共享流（点流即接收）。 */
   streams: RemoteStream[];
 }

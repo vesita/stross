@@ -168,10 +168,13 @@ pub fn teardown_session(
 /// 全量扫描局域网设备（mDNS + HTTP 探测聚合；与 CLI `stross devices` 同源
 /// `stross_app::devices::scan`）。返回含在线共享 / SRT / QUIC 的完整视图，
 /// 前端每轮刷新只需调它，不再自行 fetch `/api/info` `/api/streams`。
+///
+/// `extra_base_urls`：手动添加的地址（无 mDNS），一并探测并入结果。
 #[tauri::command]
 pub async fn scan_devices(
     probe_ms: u64,
     timeout_ms: Option<u64>,
+    extra_base_urls: Vec<String>,
 ) -> Result<Vec<stross_app::devices::ScannedDevice>, String> {
     let browse = std::time::Duration::from_millis(timeout_ms.unwrap_or(2000));
     let found = stross_core::discovery::Discovery::browse(browse)
@@ -182,7 +185,33 @@ pub async fn scan_devices(
         .map(|ip| ip.to_string())
         .collect();
     let probe = std::time::Duration::from_millis(probe_ms.max(100));
-    Ok(stross_app::devices::scan(found, &self_ips, probe).await)
+    let mut devices = stross_app::devices::scan(found, &self_ips, probe).await;
+    // 手动地址并入（无 mDNS）：去重后追加探测条目
+    let mut seen: std::collections::HashSet<String> = devices
+        .iter()
+        .map(|d| format!("{}:{}", d.ip, d.port))
+        .collect();
+    for base in extra_base_urls {
+        let base = base.trim_end_matches('/').to_string();
+        if let Some(d) = stross_app::devices::probe_base(&base, probe).await
+            && seen.insert(format!("{}:{}", d.ip, d.port))
+        {
+            devices.push(d);
+        }
+    }
+    Ok(devices)
+}
+
+/// 本机锚点中继（127.0.0.1）在线共享列表——「等待流接入」轮询用
+/// （`beginAwaitMicStream` 等），不再由前端直接 fetch `/api/streams`。
+#[tauri::command]
+pub async fn anchor_streams(port: u16) -> Vec<stross_app::devices::StreamView> {
+    use stross_core::relay::client as relay_http;
+    stross_app::devices::to_views(
+        relay_http::streams("127.0.0.1", port, std::time::Duration::from_millis(1500))
+            .await
+            .unwrap_or_default(),
+    )
 }
 
 /// 手动地址可达性探测（`/api/streams` 是受控/普通中继都提供的只读端点；

@@ -2,7 +2,7 @@
 // Stross 前端 —— 协商与定向推流域（script 全局作用域）：
 // B2 反向外设（手机麦克风 → 电脑）凭证式接入 + B2.5 凭证自动协商（免粘贴）。
 // 设备「共享麦克风到 TA」→ 优先自动申请凭证，失败回退手动粘贴。
-/** 由设备 http://host:port 基址构造推流拨号地址：QUIC 可用（/api/info）
+/** 由设备 http://host:port 基址构造推流拨号地址：QUIC 可用（扫描带的端口）
  *  优先（纯音频无损），否则回退 ws://host:port/ws/push。 */
 function pushUrlForDevice(base, quicPort) {
     const hostPort = base.replace(/^https?:\/\//, '').replace(/\/+$/, '');
@@ -12,81 +12,43 @@ function pushUrlForDevice(base, quicPort) {
         return `quic://${host}:${quicPort}`;
     return `ws://${hostPort}/ws/push`;
 }
-/** 设备协商端点基址（http://host:18779；与 Rust 协商端口一致）。 */
-function negotiatorBase(base) {
-    try {
-        const u = new URL(base);
-        u.port = String(NEGOTIATOR_PORT);
-        u.pathname = '/';
-        u.search = '';
-        u.hash = '';
-        return u.toString().replace(/\/+$/, '');
-    }
-    catch {
-        return null;
-    }
+/** 从设备基址拆出 host（http://192.168.1.5:18777 → 192.168.1.5）。 */
+function hostOf(base) {
+    const hostPort = base.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    const idx = hostPort.lastIndexOf(':');
+    return idx > 0 ? hostPort.slice(0, idx) : hostPort;
 }
-/** 向目标设备自动申请麦克风接入凭证（权限自动化：首次需对方人工允许，之后信任免问）。 */
+/** 向目标设备自动申请麦克风接入凭证（权限自动化：首次需对方人工允许，之后信任免问）。
+ *  握手在 Rust 命令 `request_share_token`（`stross_app::request_grant`）内完成——
+ *  前端不再手写 18779 HTTP 客户端（docs/layering-architecture.md）。 */
 async function autoNegotiateMic(dev) {
     if (!dev.base)
         return { ok: false, error: '设备基址不可用' };
-    const negBase = negotiatorBase(dev.base);
-    if (!negBase)
-        return { ok: false, error: '设备基址解析失败' };
-    let ident;
+    const host = hostOf(dev.base);
     try {
-        ident = (await call('device_identity'));
-    }
-    catch (e) {
-        return { ok: false, error: '无法读取本机身份：' + e.message };
-    }
-    // 客户端超时 15s（服务器侧挂起 60s 等人工确认；超过说明对方没响应/未就绪）
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 15000);
-    try {
-        const resp = await fetch(negBase + '/api/negotiator/request', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                deviceId: ident.deviceId,
-                deviceName: ident.deviceName,
-                media: ['mic'],
-            }),
-            signal: ctrl.signal,
-        });
-        if (!resp.ok) {
-            const err = (await resp.json().catch(() => null));
-            return { ok: false, error: (err && err.error) || `协商失败（HTTP ${resp.status}）` };
-        }
-        const grant = (await resp.json());
+        const grant = (await call('request_share_token', {
+            host,
+            port: NEGOTIATOR_PORT,
+            media: ['mic'],
+        }));
         if (!grant.token || !grant.streamId) {
             return { ok: false, error: '协商响应缺少凭证字段' };
         }
         return { ok: true, token: grant.token, streamId: grant.streamId };
     }
     catch (e) {
-        if (ctrl.signal.aborted)
-            return { ok: false, error: '等待对方确认超时（15s）' };
-        return { ok: false, error: '无法连接设备协商端点：' + e.message };
-    }
-    finally {
-        clearTimeout(timer);
+        return {
+            ok: false,
+            error: '等待对方确认超时或无法连接协商端点：' + e.message,
+        };
     }
 }
 /** 打开「共享麦克风」弹窗（手机/PC 端对目标设备）：优先自动协商免粘贴，失败回退手动。 */
 async function openMicShare(dev) {
     if (dev.base == null)
         return;
-    micShare = { base: dev.base, quicPort: null, active: false };
-    // 拉取对端 /api/info 的 QUIC 端口（旧版本中继无此端点 → 走 WS）
-    try {
-        const iresp = await fetch(dev.base.replace(/\/+$/, '') + '/api/info', { cache: 'no-store' });
-        if (iresp.ok) {
-            const info = (await iresp.json());
-            micShare.quicPort = info.quicPort || null;
-        }
-    }
-    catch (_) { /* QUIC 不可用 */ }
+    // QUIC 端口由扫描聚合带出（不再 fetch /api/info）
+    micShare = { base: dev.base, quicPort: dev.quicPort ?? null, active: false };
     $('mic-modal-device').textContent = `推送到 ${dev.name}（${dev.meta}）`;
     if (micShareLastBase === dev.base && publishing) {
         // 正是推往该设备的定向共享（重开弹窗）：恢复进行中状态，停止按钮可用

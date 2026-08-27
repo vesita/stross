@@ -72,6 +72,10 @@ pub async fn anchor(
 
 /// 第 3 步（目录 + 订阅握手）：启动协商端点（LAN 可达，CORS 放行）。
 ///
+/// **同时默认安装订阅驱动**（订阅达成 → 自动开推，docs/endpoint-model.md §5；
+/// 幂等）——任何拥有协商端点的实例（CLI serve / GUI 桌面）都必须行为一致，
+/// 否则"订阅了不推流"（GUI 曾漏装）。壳层无需再手动接线。
+///
 /// `port = 0` 理解为默认端口 [`DEFAULT_NEGOTIATOR_PORT`]（与本机中继端口
 /// 语义一致：0 = 常规部署端口）。本地双端测试用显式端口避免冲突。
 pub async fn start_handshake_on(
@@ -85,6 +89,7 @@ pub async fn start_handshake_on(
     } else {
         port
     };
+    crate::endpoint_driver::install_endpoint_driver(&app);
     Ok(Arc::new(
         ShareNegotiator::start(app, ui, base_dir, port)
             .await
@@ -101,8 +106,8 @@ pub async fn start_handshake(
     start_handshake_on(app, ui, base_dir, DEFAULT_NEGOTIATOR_PORT).await
 }
 
-/// 完整引导（CLI serve 等常驻实例）：订阅驱动默认安装 → 身份 → 锚定
-/// （含 L1 广播）→ 目录/握手端点。
+/// 完整引导（CLI serve 等常驻实例）：身份 → 锚定（含 L1 广播）→
+/// 目录/握手端点（订阅驱动在 `start_handshake_on` 内默认安装）。
 pub async fn start(
     app: Arc<StrossApp>,
     ui: Arc<dyn NegotiatorUi>,
@@ -112,11 +117,6 @@ pub async fn start(
     quic_port: u16,
     negotiator_port: u16,
 ) -> anyhow::Result<Bootstrap> {
-    // 订阅达成 → 自动开推（文件泵 / 媒体推流），docs/endpoint-model.md §5。
-    // 收敛为引导默认行为（幂等），壳层无需再手动接线——此前 lib 的
-    // install_endpoint_driver 由 serve.rs 自觉调用，GUI 桌面漏装＝订阅了不推。
-    // GUI 桌面待前端订阅交互落地时同样在 setup 里调一次即可。
-    crate::endpoint_driver::install_endpoint_driver(&app);
     let relay = anchor(app.clone(), relay_port, srt_port, quic_port).await?;
     let negotiator = start_handshake_on(app, ui, base_dir, negotiator_port).await?;
     Ok(Bootstrap { relay, negotiator })

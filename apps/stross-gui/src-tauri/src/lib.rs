@@ -66,6 +66,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         scan_relays,
         scan_devices,
         probe_relay,
+        anchor_streams,
         endpoint_ls,
         endpoint_subscribe,
         request_share_token,

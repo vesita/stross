@@ -347,26 +347,47 @@ fn map_read_err(e: quinn::ReadExactError) -> Result<bool, TransportError> {
 // TLS：进程内一次生成的自签名证书（rcgen）+ 服务端/客户端配置
 // ---------------------------------------------------------------------------
 
+/// 服务端连接空闲超时：对端硬断连（force-stop / 拔网线）后，中继在该时长内
+/// 收不到任何数据包即判定连接死亡，读循环返回并清理流（quinn 默认 30s 太慢，
+/// 真机实测 force-stop 后流残留近半分钟）。传媒流帧连续，正常推流不触发；
+/// 静默但存活的观看连接由客户端 keep-alive（10s < 15s）续命。
+const SERVER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// 客户端 keep-alive 间隔：保证静默观看连接不被服务端 idle 掐断，同时维持
+/// NAT 映射（Android 观看端长期挂后台场景）。
+const CLIENT_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 服务端 TLS/crypto 配置（不含传输参数；idle 超时由调用方设置）。
+fn server_crypto_config() -> Result<quinn::ServerConfig, String> {
+    let certified = rcgen::generate_simple_self_signed(vec!["stross.local".into()])
+        .map_err(|e| format!("自签名证书生成失败: {e}"))?;
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        certified.signing_key.serialize_der(),
+    ));
+    let cert = certified.cert.der().clone();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("TLS 协议版本配置失败: {e}"))?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key)
+        .map_err(|e| format!("TLS 证书装载失败: {e}"))?;
+    let quic = quinn::crypto::rustls::QuicServerConfig::try_from(config)
+        .map_err(|e| format!("QUIC 服务端配置失败: {e}"))?;
+    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic)))
+}
+
 fn server_config() -> Result<quinn::ServerConfig, TransportError> {
     static CONFIG: OnceLock<Result<quinn::ServerConfig, String>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {
-            let certified = rcgen::generate_simple_self_signed(vec!["stross.local".into()])
-                .map_err(|e| format!("自签名证书生成失败: {e}"))?;
-            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-                certified.signing_key.serialize_der(),
-            ));
-            let cert = certified.cert.der().clone();
-            let provider = Arc::new(rustls::crypto::ring::default_provider());
-            let config = rustls::ServerConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .map_err(|e| format!("TLS 协议版本配置失败: {e}"))?
-                .with_no_client_auth()
-                .with_single_cert(vec![cert], key)
-                .map_err(|e| format!("TLS 证书装载失败: {e}"))?;
-            let quic = quinn::crypto::rustls::QuicServerConfig::try_from(config)
-                .map_err(|e| format!("QUIC 服务端配置失败: {e}"))?;
-            Ok(quinn::ServerConfig::with_crypto(Arc::new(quic)))
+            let mut config = server_crypto_config()?;
+            let idle = SERVER_IDLE_TIMEOUT
+                .try_into()
+                .map_err(|e| format!("idle 超时配置失败: {e}"))?;
+            let mut transport = quinn::TransportConfig::default();
+            transport.max_idle_timeout(Some(idle));
+            config.transport_config(Arc::new(transport));
+            Ok(config)
         })
         .clone()
         .map_err(TransportError::Protocol)
@@ -386,7 +407,15 @@ fn client_config() -> Result<quinn::ClientConfig, TransportError> {
                 .with_no_client_auth();
             let quic = quinn::crypto::rustls::QuicClientConfig::try_from(config)
                 .map_err(|e| format!("QUIC 客户端配置失败: {e}"))?;
-            Ok(quinn::ClientConfig::new(Arc::new(quic)))
+            let mut client = quinn::ClientConfig::new(Arc::new(quic));
+            let idle = SERVER_IDLE_TIMEOUT
+                .try_into()
+                .map_err(|e| format!("idle 超时配置失败: {e}"))?;
+            let mut transport = quinn::TransportConfig::default();
+            transport.max_idle_timeout(Some(idle));
+            transport.keep_alive_interval(Some(CLIENT_KEEP_ALIVE));
+            client.transport_config(Arc::new(transport));
+            Ok(client)
         })
         .clone()
         .map_err(TransportError::Protocol)
@@ -525,5 +554,102 @@ mod tests {
     fn profile_is_lossless() {
         assert_eq!(QuicTransport::new().profile(), ReliabilityProfile::Lossless);
         assert_eq!(QuicTransport::new().id(), TransportId::Quic);
+    }
+
+    /// 测试用服务端配置：可指定 idle 超时（生产走进程级静态 15s；
+    /// 这里用 2s 让「硬断连检测」测试秒级完成）。
+    fn server_config_with_idle(
+        idle: std::time::Duration,
+    ) -> Result<quinn::ServerConfig, TransportError> {
+        let mut config = server_crypto_config().map_err(TransportError::Protocol)?;
+        let idle = idle
+            .try_into()
+            .map_err(|e| TransportError::Protocol(format!("idle 配置失败: {e}")))?;
+        let mut t = quinn::TransportConfig::default();
+        t.max_idle_timeout(Some(idle));
+        config.transport_config(Arc::new(t));
+        Ok(config)
+    }
+
+    /// 硬断连（对端被 force-stop，无任何再见包）检测：服务端在 idle 超时内
+    /// 判死连接，`recv` 返回（推流循环据此清理流，修复「中继无感知、流
+    /// 残留」——quinn 默认 idle 30s，人工等半分钟才清）。
+    #[tokio::test]
+    async fn hard_disconnect_released_by_idle_timeout() {
+        let endpoint = quinn::Endpoint::server(
+            server_config_with_idle(std::time::Duration::from_secs(2)).unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let server_addr = endpoint.local_addr().unwrap();
+        // 先起服务端 accept 任务（不 await——客户端要并发接入），再连客户端
+        let server_task = tokio::spawn(async move {
+            let conn = endpoint
+                .accept()
+                .await
+                .unwrap()
+                .accept()
+                .unwrap()
+                .await
+                .unwrap();
+            let (ctx, crx) = conn.accept_bi().await.unwrap();
+            let (mtx, mrx) = conn.accept_bi().await.unwrap();
+            QuicDataSession::new(
+                None,
+                conn,
+                ctx,
+                crx,
+                mtx,
+                mrx,
+                Arc::new(TransportStats::default()),
+            )
+        });
+
+        // 客户端：裸 quinn + 与 connect() 相同的握手（就绪信号再 Hello）
+        let client_ep = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+        let conn = client_ep
+            .connect_with(client_config().unwrap(), server_addr, "stross")
+            .unwrap()
+            .await
+            .unwrap();
+        let (mut ctx, crx) = conn.open_bi().await.unwrap();
+        ctx.write_all(&0u32.to_le_bytes()).await.unwrap();
+        let (mut mtx, mrx) = conn.open_bi().await.unwrap();
+        mtx.write_all(&0u32.to_le_bytes()).await.unwrap();
+        let client = QuicDataSession::new(
+            Some(client_ep),
+            conn,
+            ctx,
+            crx,
+            mtx,
+            mrx,
+            Arc::new(TransportStats::default()),
+        );
+        client
+            .send(SessionPacket::Control(ControlMessage::Hello {
+                stream_id: "hardkill".into(),
+                title: "t".into(),
+                video: None,
+                audio: None,
+                share_token: None,
+            }))
+            .await
+            .unwrap();
+
+        let server = server_task.await.unwrap();
+        let first = server.recv().await.unwrap().unwrap();
+        assert!(matches!(
+            first,
+            SessionPacket::Control(ControlMessage::Hello { .. })
+        ));
+
+        // 硬断连：直接 drop（无 close 帧，等同 force-stop / 拔线）
+        drop(client);
+
+        let r = tokio::time::timeout(std::time::Duration::from_secs(6), server.recv()).await;
+        match r {
+            Ok(Ok(None)) | Ok(Err(_)) => {} // 干净结束或判死错误都触发清理
+            other => panic!("硬断连后 recv 应在 idle 内返回，得到 {other:?}"),
+        }
     }
 }

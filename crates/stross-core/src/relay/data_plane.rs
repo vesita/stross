@@ -16,6 +16,8 @@
 //! 观看端接入时机：视频只在关键帧（IDR）后开始转发（ffmpeg 已在关键帧前重复
 //! SPS/PPS，因此等待关键帧即可）；音频 ADTS 自带配置，可直接转发。
 
+use std::time::Duration;
+
 use stross_proto::frame::TRACK_VIDEO;
 use stross_proto::message::{ControlMessage, StreamInfo};
 use tokio::sync::broadcast;
@@ -23,6 +25,14 @@ use tokio::sync::broadcast;
 use crate::transport::{DataSession, SessionPacket};
 
 use super::{RelayEvent, RelayState, StreamEntry};
+
+/// 推流端/代理上游静默超时：超过该时长未收到**任何**消息（媒体帧或控制），
+/// 判定对端已死亡（进程被 kill、网络黑洞、客户端僵尸化）并拆除流。
+///
+/// 传输层（rsrt 的 peer-idle、quinn 的 idle timeout）在应用层事件缺席时
+/// 不可靠（rsrt 对 SIGKILL 的 UDP 对端可能永远不触发），因此在数据面兜底：
+/// 无媒体即无价值，静默超时直接删流，观看端经广播 channel 关闭自愈。
+const PUSH_SILENCE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 观看端：等待 Ready，然后按关键帧对齐转发。
 pub(super) async fn handle_watch(
@@ -216,13 +226,20 @@ async fn handle_push_loop(
     loop {
         let pkt = match pending.take() {
             Some(pkt) => pkt,
-            None => match session.recv().await {
-                Ok(Some(pkt)) => pkt,
-                Ok(None) => {
+            None => match tokio::time::timeout(PUSH_SILENCE_TIMEOUT, session.recv()).await {
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        "推流端超过 {}s 无任何消息，判定失联（进程被 kill/断网），拆除流",
+                        PUSH_SILENCE_TIMEOUT.as_secs()
+                    );
+                    break;
+                }
+                Ok(Ok(Some(pkt))) => pkt,
+                Ok(Ok(None)) => {
                     tracing::warn!("推流端连接已断开（无更多消息）");
                     break;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!("推流端连接异常: {e}");
                     break;
                 }
@@ -333,14 +350,24 @@ pub(super) async fn proxy_uplink(state: RelayState, upstream: String, stream_id:
     };
     tracing::info!("代理已连接上游: {upstream} → {stream_id}");
     loop {
-        match session.recv().await {
-            Ok(Some(SessionPacket::Media(frame))) => state.forward(&stream_id, frame),
-            Ok(Some(SessionPacket::Control(_))) => continue,
-            Ok(None) => break,
-            Err(e) => {
+        let pkt = match tokio::time::timeout(PUSH_SILENCE_TIMEOUT, session.recv()).await {
+            Err(_elapsed) => {
+                tracing::warn!(
+                    "代理上游超过 {}s 无消息，判定失联，清理本地流: {stream_id}",
+                    PUSH_SILENCE_TIMEOUT.as_secs()
+                );
+                break;
+            }
+            Ok(Ok(Some(pkt))) => pkt,
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => {
                 tracing::warn!("代理上游接收异常: {e}");
                 break;
             }
+        };
+        match pkt {
+            SessionPacket::Media(frame) => state.forward(&stream_id, frame),
+            SessionPacket::Control(_) => continue,
         }
     }
     tracing::info!("代理上游断开，清理本地流: {stream_id}");

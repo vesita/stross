@@ -261,19 +261,12 @@ function cancelShareModal() {
     shareModalStarter = null;
     $('share-modal').classList.add('hidden');
 }
-/** 推流拨号地址（本机锚点；按媒体类型自动选传输：视频 SRT>QUIC>WS，纯音频 QUIC>WS）。 */
-function pushRelayUrl(cfg) {
+/** 推流拨号地址（本机锚点；统一无损优先：QUIC > WS。视频是帧粒度 H.264，
+ *  有损路径（SRT）丢一帧即撕裂 GOP → 花屏到下一关键帧；SRT 仅显式选择用）。 */
+function pushRelayUrl(_cfg) {
     if (!anchor)
         return '';
-    const hasVideo = !!cfg.video;
-    if (hasVideo) {
-        if (anchor.srtUrl)
-            return anchor.srtUrl;
-        if (anchor.quicUrl)
-            return anchor.quicUrl;
-    }
-    else if (anchor.quicUrl) {
+    if (anchor.quicUrl)
         return anchor.quicUrl;
-    }
     return `ws://127.0.0.1:${anchor.port}/ws/push`;
 }

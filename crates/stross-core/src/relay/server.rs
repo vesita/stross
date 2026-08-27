@@ -66,21 +66,17 @@ impl RelayHandle {
 
     /// 按媒体类型自动选择推流地址（与接收端 auto 模式同规则）：
     ///
-    /// * 含视频 → `srt://host:port`（Adaptive：丢包不阻塞、关键帧自愈）> QUIC > WS
-    /// * 纯音频 → `quic://host:port`（无损：音频不可丢）> WS
+    /// 视频/音频统一走**无损**（QUIC > WS）：视频是帧粒度 H.264，有损路径
+    /// （SRT too-late 丢包）丢一帧即撕裂整个 GOP → 花屏直到下一关键帧
+    /// （最长 2s）；QUIC/WS 只在真的丢包时重传，局域网丢包率≈0，无损的
+    /// 延迟代价≈0。SRT（Adaptive）不参与自动选择，需显式 `--relay srt://`
+    /// （跨 NAT / 弱网上行受限场景的主动选择）。
     ///
-    /// `has_video = false` 且无 QUIC 端口时回退 WS；端口缺失时逐级回退。
-    /// 返回的是可拨号 URL（WS 带 `/ws/push` 路径，UDP 无路径）。
-    pub fn auto_push_url(&self, has_video: bool) -> String {
+    /// 端口缺失时逐级回退（QUIC 不可用 → WS）。返回的是可拨号 URL
+    /// （WS 带 `/ws/push` 路径，UDP 无路径）。
+    pub fn auto_push_url(&self, _has_video: bool) -> String {
         use crate::transport::RelayUrl;
-        if has_video {
-            if let Some(p) = self.srt_port {
-                return RelayUrl::srt("127.0.0.1", p).to_string();
-            }
-            if let Some(p) = self.quic_port {
-                return RelayUrl::quic("127.0.0.1", p).to_string();
-            }
-        } else if let Some(p) = self.quic_port {
+        if let Some(p) = self.quic_port {
             return RelayUrl::quic("127.0.0.1", p).to_string();
         }
         RelayUrl::ws("127.0.0.1", self.port, Some("/ws/push")).to_string()
@@ -273,5 +269,34 @@ impl RelayServer {
         tracing::info!("正在停止…");
         handle.stop().await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 自动选路统一**无损优先**：视频/音频都选 QUIC（Lossless），
+    /// SRT（Adaptive，丢帧撕裂 GOP）不参与自动选择。
+    #[tokio::test]
+    async fn auto_push_url_prefers_lossless_quic() {
+        let h = RelayServer::start(0).await.unwrap();
+        // 视频（此前错误地 SRT 优先）：应选 QUIC
+        let url = h.auto_push_url(true);
+        assert!(
+            url.starts_with("quic://"),
+            "视频默认应走无损 QUIC，实际 {url}"
+        );
+        // 音频：维持 QUIC 优先
+        let url2 = h.auto_push_url(false);
+        assert!(
+            url2.starts_with("quic://"),
+            "音频默认应走无损 QUIC，实际 {url2}"
+        );
+        assert!(
+            !url2.starts_with("srt://") && !url.starts_with("srt://"),
+            "SRT 不参与自动选择（丢帧撕裂 GOP → 花屏），实际 {url} / {url2}"
+        );
+        h.stop().await;
     }
 }

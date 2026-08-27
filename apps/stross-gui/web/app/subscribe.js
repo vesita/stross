@@ -14,21 +14,15 @@ function currentRelay() {
         quicUrl: anchor.quicUrl,
     };
 }
-/** 按流媒体类型自动选传输：含视频 → SRT（Adaptive）> QUIC > WS；纯音频 → QUIC > WS。 */
+/** 按流媒体类型自动选传输：统一无损优先（QUIC > WS）。视频是帧粒度 H.264，
+ *  有损路径（SRT）丢一帧即撕裂整个 GOP → 花屏直到下一关键帧（最长 2s），
+ *  因此默认不走 SRT（SRT 仅显式 `--relay srt://` 场景用）。 */
 function autoRelayUrl(stream) {
     const r = currentRelay();
     if (!r)
         return '';
-    const hasVideo = !!(stream && stream.video);
-    if (hasVideo) {
-        if (r.srtUrl)
-            return r.srtUrl;
-        if (r.quicUrl)
-            return r.quicUrl;
-    }
-    else if (r.quicUrl) {
+    if (r.quicUrl)
         return r.quicUrl;
-    }
     return r.wsBase;
 }
 /** 开始接收流 `streamId`（调用方已设置目标中继/本机锚点）。

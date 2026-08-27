@@ -223,7 +223,7 @@ $('share-start-btn').click();
 await sleep(400);
 const sc = calls.filter((c) => c.cmd === 'start_stream');
 check('开始推流被触发（无需先连接）', sc.length === 1);
-check('推流 URL 锚定本机中继（srt://127.0.0.1:9001，video→SRT 优先）', sc[0] && sc[0].args.relayUrl === 'srt://127.0.0.1:9001', JSON.stringify(sc[0]?.args?.relayUrl));
+check('推流 URL 锚定本机中继（quic://127.0.0.1:9002，视频默认无损 QUIC 优先）', sc[0] && sc[0].args.relayUrl === 'quic://127.0.0.1:9002', JSON.stringify(sc[0]?.args?.relayUrl));
 check('cfg 含屏幕视频源', sc[0] && sc[0].args.cfg.video && sc[0].args.cfg.video.kind === 'screen');
 check('共享面板出现出站条目（共享 屏幕 → 局域网广播）', $('share-list').textContent.includes('共享 屏幕 → 局域网广播'));
 check('本机在线共享区出现新条目（点击即看自己）', document.querySelector('[data-role="local-streams"]')?.textContent.includes('sess-test') || false);

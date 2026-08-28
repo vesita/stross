@@ -915,3 +915,43 @@ button.sm { padding: 6px 12px; font-size: 12.5px; }
   color: var(--text-2);
 }
 .check-row input { accent-color: var(--accent); }
+
+/* 端点框架（节点 → 设备 → 端点）：设备树 / 端点行 / 目录 */
+.dev-dir { display: flex; flex-direction: column; gap: 6px; }
+.dev-dir h3 {
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.dev-list { display: flex; flex-direction: column; gap: 4px; }
+.ep-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.ep-ic { color: var(--text-2); flex-shrink: 0; }
+.ep-ic .ic { width: 15px; height: 15px; }
+.ep-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.ep-name { font-size: 13px; color: var(--text-1); }
+.ep-meta { font-size: 11.5px; color: var(--text-3); }
+.ep-badge { font-size: 11px; padding: 2px 8px; }
+.ep-act { flex-shrink: 0; }
+.dir-status { font-size: 12px; }
+fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 8px 12px 12px;
+  margin: 10px 0;
+}
+fieldset legend {
+  font-size: 12px;
+  color: var(--text-3);
+  padding: 0 6px;
+}

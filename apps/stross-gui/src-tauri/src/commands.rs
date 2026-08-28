@@ -42,7 +42,7 @@ pub async fn start_relay(
             relay_port,
             stross_kernel::DEFAULT_SRT_PORT,
             stross_kernel::DEFAULT_QUIC_PORT,
-            &stross_bridge::hostname_or("stross"),
+            &stross_bridge::device_name_or("Stross 设备"),
         )
         .await
         .map_err(|e| e.to_user_string())
@@ -206,14 +206,90 @@ pub async fn probe_relay(base: String) -> bool {
 }
 
 /// L2 目录（远端节点设备 + 可订阅端点；类型化 `EndpointDir`）。
+/// `port` 缺省 = 协议约定协商端口（`DEFAULT_NEGOTIATOR_PORT`）——前端不持有
+/// 端口常量（端口真源在库层）。
 #[tauri::command]
 pub async fn endpoint_ls(
     host: String,
-    port: u16,
+    port: Option<u16>,
 ) -> Result<stross_proto::message::EndpointDir, String> {
-    stross_kernel::fetch_directory(&host, port)
-        .await
-        .map_err(|e| format!("{e:#}"))
+    stross_kernel::fetch_directory(
+        &host,
+        port.unwrap_or(stross_kernel::DEFAULT_NEGOTIATOR_PORT),
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// 通告本机设备为端点（端点框架：可见性 / delivery 由公开者声明，P1 1:1）。
+#[tauri::command]
+pub fn endpoint_publish(
+    state: State<'_, Arc<Kernel>>,
+    device_id: String,
+    visibility: String,
+    delivery: String,
+) -> Result<stross_proto::message::EndpointManifest, String> {
+    use stross_proto::message::{Delivery, Visibility};
+    let visibility = match visibility.as_str() {
+        "confirm" => Visibility::Confirm,
+        _ => Visibility::Public,
+    };
+    let delivery = match delivery.as_str() {
+        "push" => Delivery::Push,
+        "both" => Delivery::Both,
+        _ => Delivery::Pull,
+    };
+    state
+        .publish_endpoint(&device_id, visibility, delivery, None, None)
+        .map_err(|e| e.to_user_string())
+}
+
+/// 取消通告端点（已订阅会话由上层决定宽限期，P1 直接移除）。
+#[tauri::command]
+pub fn endpoint_unpublish(
+    state: State<'_, Arc<Kernel>>,
+    endpoint_id: String,
+) -> Result<(), String> {
+    state
+        .unpublish_endpoint(&endpoint_id)
+        .map_err(|e| e.to_user_string())
+}
+
+/// 本机目录（设备 + 已公开端点；本机节点卡片设备树渲染用）。
+#[tauri::command]
+pub fn local_catalog(state: State<'_, Arc<Kernel>>) -> stross_kernel::LocalCatalog {
+    state.local_catalog()
+}
+
+/// 订阅远端媒体端点：握手返回观看入口（pull = 公开方中继；push = 本机中继），
+/// 前端随后走既有 `start_receive` 实际观看/播放。
+#[tauri::command]
+pub async fn endpoint_subscribe_media(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Kernel>>,
+    host: String,
+    port: Option<u16>,
+    endpoint_id: String,
+    delivery: Option<String>,
+) -> Result<stross_kernel::MediaSubscribeOutcome, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let delivery = delivery.as_deref().map(|s| match s {
+        "push" => stross_proto::message::Delivery::Push,
+        _ => stross_proto::message::Delivery::Pull,
+    });
+    stross_kernel::subscribe_media(
+        &state.inner().clone(),
+        &base,
+        &host,
+        port.unwrap_or(stross_kernel::DEFAULT_NEGOTIATOR_PORT),
+        &endpoint_id,
+        delivery,
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))
 }
 
 /// 订阅远端文件端点并落盘到 `out_dir`（pull/push 全流程在库接口
@@ -265,7 +341,7 @@ pub async fn request_share_token(
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir());
-    let name = stross_bridge::hostname_or("Stross 设备");
+    let name = stross_bridge::device_name_or("Stross 设备");
     let ident = stross_kernel::load_or_create_identity(&base, &name);
     let req = stross_proto::message::ShareRequest {
         device_id: ident.device_id,
@@ -296,7 +372,7 @@ pub fn device_identity(app: tauri::AppHandle) -> stross_kernel::DeviceIdentity {
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir());
-    let name = stross_bridge::hostname_or("Stross 设备");
+    let name = stross_bridge::device_name_or("Stross 设备");
     stross_kernel::load_or_create_identity(&base, &name)
 }
 

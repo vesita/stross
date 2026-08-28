@@ -14,6 +14,30 @@ const QUALITIES = {
 const LS_RELAY = 'stross.lastRelay';
 const LS_TITLE = 'stross.lastTitle';
 const LS_RECENT = 'stross.recentRelays';
+/** 可见性中文显示。 */
+const VISIBILITY_LABELS = {
+    public: '公开',
+    confirm: '需确认',
+    private: '私密',
+};
+/** delivery 中文显示。 */
+const DELIVERY_LABELS = {
+    pull: '拉取',
+    push: '推送',
+    both: '双向',
+};
+/** 设备类型中文显示。 */
+const DEVICE_KIND_LABELS = {
+    screen: '屏幕',
+    window: '窗口',
+    camera: '摄像头',
+    mic: '麦克风',
+    systemAudio: '系统声',
+    input: '输入',
+    clipboard: '剪贴板',
+    file: '文件',
+    service: '服务',
+};
 // ---------------------------------------------------------------------------
 // 单一状态源：全部运行时状态集中在此，各域文件显式读写；
 // 渲染是状态（state）的纯函数，消灭「散文件 let 全局变量 + 脆弱互斥拼真相」。
@@ -71,6 +95,19 @@ let targetRelay = null;
 // —— 协商 / 授权状态 ——
 /** 当前等待人工确认的协商请求（negotiator-request 事件送达；null = 无）。 */
 let pendingApprove = null;
+// —— 端点框架状态（节点 → 设备 → 端点） ——
+/** 本机目录（设备 + 已公开端点；local_catalog 填充，渲染本机设备树）。 */
+let localCatalog = { devices: [], endpoints: [] };
+/** 通告弹窗目标（null = 未打开）。 */
+let publishTarget = null;
+/** 订阅弹窗目标（远端端点；null = 未打开）。 */
+let subscribeTarget = null;
+/** 远端目录缓存（设备 base → RemoteDir；TTL 内命中直接渲染）。 */
+const remoteDirs = new Map();
+/** 远端目录缓存时间戳（TTL ~20s：对端新通告/取消通告及时可见）。 */
+const remoteDirAt = new Map();
+/** 远端目录拉取中（按设备 base；防重入）。 */
+const remoteDirLoading = new Set();
 /** 角色英文 → 中文显示（mDNS TXT `roles`）。 */
 const ROLE_LABELS = {
     sender: '共享',

@@ -189,7 +189,7 @@ mod tests {
             },
         ];
         let info = DiscoveryInfo::relay_default(
-            "Stross 本机中继",
+            "Stross 设备",
             vec![
                 MediaKind::Screen,
                 MediaKind::Camera,

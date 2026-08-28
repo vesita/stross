@@ -1,10 +1,9 @@
 "use strict";
 // Stross 前端 —— 初始化与事件绑定（script 全局作用域，按依赖序最后加载）。
 //
-// 界面模型：本机能力 → 发现对端 → 订阅对端推送的流（「设备 × 共享流」双栏）。
-//   左栏「设备」：本机 + 局域网设备卡片，点设备展开 → 发起共享（广播/定向）
-//             与该设备的在线共享（点条目即订阅接收）；B2 接收手机麦克风入口在本机卡片。
-//   右栏「共享流」：全部活动共享统一管理（方向 ↑↓ / 媒体 / 对端 / 状态 / 停止）。
+// 界面模型（节点 → 设备 → 端点：通告 + 订阅）：
+//   左栏「设备」：本机设备树（通告/取消通告）+ 局域网设备目录（订阅端点）；
+//   右栏「接收」：订阅进来的端点流在此播放/停止。
 //
 // 生成 app/ 下的 JS：`npx tsc -p apps/stross-gui/web/tsconfig.json`
 // （app/*.js 是构建产物，提交进仓库——Tauri 直接加载，Rust 构建不依赖 node）。
@@ -41,7 +40,6 @@ async function init() {
         await ensureAnchor();
         startStatusPolling();
         void refreshDevices();
-        void renderShares();
         // 权限自动化：防火墙自检（缺放行则提示一键放行）+ 协商授权事件桥
         void checkFirewall();
         void listen('negotiator-request', (req) => onApproveRequest(req));
@@ -55,10 +53,11 @@ function startStatusPolling() {
     if (statusTimer !== null)
         return;
     statusTimer = window.setInterval(() => {
-        void pollStatus();
-        // 设备列表 + 在线共享周期刷新（refreshDevices 自带 5s TTL + in-flight
-        // 守卫：mDNS + 探测 + 聚合在 Rust `scan_devices` 内一次完成）。
+        // 设备列表周期刷新（refreshDevices 自带 5s TTL + in-flight 守卫：
+        // mDNS + 探测 + 聚合在 Rust `scan_devices` 内一次完成；数据未变不重建）
         void refreshDevices();
+        // 本机目录（设备 + 已公开端点）周期刷新——通告状态徽标实时可见
+        void refreshLocalCatalog();
     }, 2000);
 }
 // ---------------------------------------------------------------- 设备能力
@@ -109,99 +108,53 @@ async function respondApprove(allow) {
     $('approve-modal').classList.add('hidden');
 }
 // ---------------------------------------------------------------- 事件绑定
-/** 复制「接收手机麦克风」凭证到剪贴板。 */
-async function copyMicToken() {
-    const v = $input('mic-recv-token').value;
-    if (!v)
-        return;
-    try {
-        await navigator.clipboard?.writeText(v);
-    }
-    catch (_) { /* 剪贴板不可用（HTTP/非安全上下文）时忽略 */ }
-    const b = $btn('mic-recv-copy-btn');
-    b.innerHTML = icon('check') + '<span>已复制</span>';
-    setTimeout(() => {
-        b.innerHTML = icon('copy') + '<span>复制凭证</span>';
-    }, 1500);
-}
-// 设备列表事件委托：操作按钮（data-act）+ 复制凭证（本机卡片内）
+// 设备列表事件委托：端点框架操作按钮（data-act：通告/取消通告/订阅）
 $('device-list').addEventListener('click', (e) => {
     const t = e.target;
-    if (t.closest('#mic-recv-copy-btn')) {
-        void copyMicToken();
-        return;
-    }
     const btn = t.closest('[data-act]');
     if (!btn)
         return;
     e.stopPropagation();
     switch (btn.dataset.act) {
-        case 'broadcast-screen':
-            openBroadcastScreen();
+        case 'publish-device': {
+            const deviceId = btn.dataset.device;
+            if (deviceId)
+                openPublishModal(deviceId);
             break;
-        case 'broadcast-mic':
-            openBroadcastMic();
+        }
+        case 'unpublish-endpoint': {
+            const endpointId = btn.dataset.endpoint;
+            if (endpointId)
+                void unpublishEndpoint(endpointId);
             break;
-        case 'recv-mic':
-            void startMicReceive();
-            break;
-        case 'mic-to': {
-            const card = btn.closest('.dev-card');
-            const dev = card && deviceViews.find((d) => d.key === card.dataset.key);
-            if (dev)
-                void openMicShare(dev);
+        }
+        case 'subscribe-endpoint': {
+            const host = btn.dataset.host;
+            const endpointId = btn.dataset.endpoint;
+            if (host && endpointId)
+                openSubscribeModal(host, endpointId);
             break;
         }
     }
 });
-// 共享弹窗（广播屏幕 / 广播麦克风）
-$btn('share-start-btn').onclick = () => void confirmShareModal();
-$btn('share-cancel-btn').onclick = () => {
-    // 停止共享：取消弹窗时若正在启动则停止（仅弹窗态）
-    cancelShareModal();
-};
-$('share-modal').addEventListener('click', (e) => {
-    if (e.target === $('share-modal'))
-        cancelShareModal();
-});
-// 共享麦克风凭证弹窗（B2 定向推流）
-$btn('mic-start-btn').onclick = () => void startMicShare();
-$btn('mic-stop-btn').onclick = () => void stopMicShare();
-$btn('mic-close-btn').onclick = () => $('mic-modal').classList.add('hidden');
-$('mic-modal').addEventListener('click', (e) => {
-    if (e.target === $('mic-modal'))
-        $('mic-modal').classList.add('hidden');
-});
-// 「自动获取凭证」重试（自动协商失败后手动重试，免粘贴）
-$btn('mic-auto-btn').onclick = async () => {
-    if (!micShare)
-        return;
-    const dev = deviceViews.find((d) => d.base === micShare.base);
-    if (!dev)
-        return;
-    $('mic-error').classList.add('hidden');
-    $('mic-status').textContent = '正在向设备申请凭证…';
-    const r = await autoNegotiateMic(dev);
-    if (r.ok && r.token && r.streamId && micShare) {
-        try {
-            await startMicShareWith({
-                token: r.token,
-                streamId: r.streamId,
-                base: micShare.base,
-                quicPort: micShare.quicPort,
-            });
-            $('mic-status').textContent = '已自动获取凭证，推流中…';
-            setMicRunning(true);
-        }
-        catch (_) { /* 错误已显示在弹窗 */ }
-    }
-    else {
-        $('mic-status').textContent = '自动协商未成功（' + (r.error || '未知原因') + '），请粘贴凭证';
-    }
-};
 // 设备接入授权确认（权限自动化：首次人工确认）
 $btn('approve-allow-btn').onclick = () => void respondApprove(true);
 $btn('approve-deny-btn').onclick = () => void respondApprove(false);
+// 端点框架弹窗（通告 / 订阅）
+$btn('pub-confirm-btn').onclick = () => void confirmPublish();
+$btn('pub-cancel-btn').onclick = () => $('pub-modal').classList.add('hidden');
+$('pub-modal').addEventListener('click', (e) => {
+    if (e.target === $('pub-modal'))
+        $('pub-modal').classList.add('hidden');
+});
+$btn('sub-confirm-btn').onclick = () => void confirmSubscribe();
+$btn('sub-cancel-btn').onclick = () => $('sub-modal').classList.add('hidden');
+$('sub-modal').addEventListener('click', (e) => {
+    if (e.target === $('sub-modal'))
+        $('sub-modal').classList.add('hidden');
+});
+// 接收面板：停止接收
+$btn('recv-stop-btn').onclick = () => void stopReceive();
 // 防火墙一键放行
 $btn('fw-allow-btn').onclick = () => void allowFirewall();
 $btn('fw-close-btn').onclick = () => $('fw-banner').classList.add('hidden');

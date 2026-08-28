@@ -158,6 +158,76 @@ interface PendingRequest {
   createdAt: number;
 }
 
+// —— 端点框架（节点 → 设备 → 端点；docs/endpoint-model.md） ——
+
+/** 节点上的持久能力实体（Rust `DeviceInfo`）。 */
+interface LocalDevice {
+  deviceId: string;
+  kind: string;
+  name: string;
+  builtin: boolean;
+}
+
+/** 端点清单（公开方协议 / 可见性 / delivery / 状态；Rust `EndpointManifest`）。 */
+interface EndpointManifest {
+  endpointId: string;
+  device: LocalDevice;
+  visibility: string;
+  delivery: string;
+  transports: { transport: string; priority: number }[];
+  codecs: string[];
+  state: string;
+  subscribers: number;
+  updatedAt: number;
+}
+
+/** 本机目录（Rust `local_catalog`：设备 + 已公开端点）。 */
+interface LocalCatalog {
+  devices: LocalDevice[];
+  endpoints: EndpointManifest[];
+}
+
+/** L2 目录（Rust `EndpointDir`：节点 + 设备 + 可订阅端点；服务端已滤 Private）。 */
+interface RemoteDir {
+  node: { deviceId: string; deviceName: string };
+  devices: LocalDevice[];
+  endpoints: EndpointManifest[];
+}
+
+/** 媒体端点订阅结果（Rust `MediaSubscribeOutcome`：watch 入口 + 流 id）。 */
+interface MediaSubscribeOutcome {
+  delivery: string;
+  relayUrl: string;
+  streamId: string;
+}
+
+/** 可见性中文显示。 */
+const VISIBILITY_LABELS: Record<string, string> = {
+  public: '公开',
+  confirm: '需确认',
+  private: '私密',
+};
+
+/** delivery 中文显示。 */
+const DELIVERY_LABELS: Record<string, string> = {
+  pull: '拉取',
+  push: '推送',
+  both: '双向',
+};
+
+/** 设备类型中文显示。 */
+const DEVICE_KIND_LABELS: Record<string, string> = {
+  screen: '屏幕',
+  window: '窗口',
+  camera: '摄像头',
+  mic: '麦克风',
+  systemAudio: '系统声',
+  input: '输入',
+  clipboard: '剪贴板',
+  file: '文件',
+  service: '服务',
+};
+
 /** 防火墙自检结果（Rust `firewall_status`，仅 Linux 桌面）。 */
 interface FirewallStatus {
   ufwActive: boolean;
@@ -273,6 +343,20 @@ let targetRelay: TargetRelay | null = null;
 // —— 协商 / 授权状态 ——
 /** 当前等待人工确认的协商请求（negotiator-request 事件送达；null = 无）。 */
 let pendingApprove: PendingRequest | null = null;
+
+// —— 端点框架状态（节点 → 设备 → 端点） ——
+/** 本机目录（设备 + 已公开端点；local_catalog 填充，渲染本机设备树）。 */
+let localCatalog: LocalCatalog = { devices: [], endpoints: [] };
+/** 通告弹窗目标（null = 未打开）。 */
+let publishTarget: { device: LocalDevice } | null = null;
+/** 订阅弹窗目标（远端端点；null = 未打开）。 */
+let subscribeTarget: { host: string; ep: EndpointManifest } | null = null;
+/** 远端目录缓存（设备 base → RemoteDir；TTL 内命中直接渲染）。 */
+const remoteDirs = new Map<string, RemoteDir>();
+/** 远端目录缓存时间戳（TTL ~20s：对端新通告/取消通告及时可见）。 */
+const remoteDirAt = new Map<string, number>();
+/** 远端目录拉取中（按设备 base；防重入）。 */
+const remoteDirLoading = new Set<string>();
 
 /** 角色英文 → 中文显示（mDNS TXT `roles`）。 */
 const ROLE_LABELS: Record<string, string> = {

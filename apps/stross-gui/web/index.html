@@ -156,10 +156,9 @@
   <main>
     <div id="error-box" class="error hidden"></div>
 
-    <!-- ============ 设备 × 共享流 组合管理 ============
-         组织方式：设备是实体（本机 + 局域网设备），共享流是设备之间的连接实例。
-         左栏「设备」：点设备卡片展开 → 对它发起的共享（广播/定向）与该设备的在线共享。
-         右栏「共享流」：本机全部活动共享统一管理（方向 / 媒体 / 对端 / 状态 / 停止）。 -->
+    <!-- ============ 设备（通告/订阅） × 接收 ============
+         组织方式：节点 → 设备 → 端点。左栏「设备」：本机设备树（通告为可订阅端点）
+         + 局域网设备目录（订阅对端端点）；右栏「接收」：订阅进来的流在此播放/停止。 -->
     <div class="dual">
       <!-- ── 左栏：设备 ── -->
       <section class="card" id="device-pane">
@@ -187,7 +186,7 @@
             <button id="fw-close-btn" class="sm" type="button">忽略</button>
           </div>
         </div>
-        <!-- 本机卡片 + 局域网设备卡片（每张卡片 = 一个设备实体） -->
+        <!-- 本机卡片（设备树：通告/取消通告）+ 局域网设备卡片（目录：订阅端点） -->
         <div id="device-list"></div>
         <div id="recent-block" class="hidden">
           <h2>手动添加历史</h2>
@@ -195,14 +194,14 @@
         </div>
       </section>
 
-      <!-- ── 右栏：共享流管理 ── -->
-      <section class="card" id="share-pane">
+      <!-- ── 右栏：接收（订阅的端点流）── -->
+      <section class="card" id="recv-pane">
         <div class="pane-head">
-          <h2>共享流</h2>
-          <span class="hint">本机全部活动共享：↑ 共享出去（广播/定向）· ↓ 接收进来</span>
-        </div>
-        <div id="share-list">
-          <div class="empty hint">暂无活动共享。点左侧设备卡片发起共享，或点设备的在线共享条目接收。</div>
+          <h2>接收</h2>
+          <span class="hint">订阅的端点流在此播放</span>
+          <button id="recv-stop-btn" class="sm hidden" type="button">
+            <svg class="ic"><use href="#i-stop" /></svg><span>停止接收</span>
+          </button>
         </div>
         <div id="recv-error" class="error hidden"></div>
         <!-- 接收画面：有视频帧时显示，纯音频隐藏 -->
@@ -222,48 +221,51 @@
     </div>
   </main>
 
-  <!-- 共享弹窗（发起共享：广播屏幕 / 定向麦克风等） -->
-  <div id="share-modal" class="modal hidden">
+  <!-- 通告弹窗（本机设备 → 端点：可见性 / delivery 由公开者声明） -->
+  <div id="pub-modal" class="modal hidden">
     <div class="modal-box">
-      <h2 id="share-modal-title">共享</h2>
-      <p class="hint" id="share-modal-sub"></p>
-      <div id="share-modal-opts"></div>
+      <h2 id="pub-modal-title">通告设备</h2>
+      <p class="hint" id="pub-modal-sub"></p>
+      <fieldset>
+        <legend>可见性（谁可订阅）</legend>
+        <label class="row check-row"><input type="radio" name="pub-vis" value="public" /><span>公开（任何人免确认）</span></label>
+        <label class="row check-row"><input type="radio" name="pub-vis" value="confirm" checked /><span>需确认（首见人工允许，信任后自动）</span></label>
+      </fieldset>
+      <fieldset>
+        <legend>数据面方向（公开者声明）</legend>
+        <label class="row check-row"><input type="radio" name="pub-delivery" value="pull" checked /><span>拉取（订阅方连本机中继观看）</span></label>
+        <label class="row check-row"><input type="radio" name="pub-delivery" value="push" /><span>推送（本机凭凭证推入订阅方中继）</span></label>
+        <label class="row check-row"><input type="radio" name="pub-delivery" value="both" /><span>双向（订阅方可选）</span></label>
+      </fieldset>
       <div class="row">
-        <button id="share-start-btn" class="primary" type="button">
-          <svg class="ic"><use href="#i-play" /></svg><span>开始</span>
+        <button id="pub-confirm-btn" class="primary" type="button">
+          <svg class="ic"><use href="#i-radio" /></svg><span>通告</span>
         </button>
-        <button id="share-cancel-btn" type="button">
+        <button id="pub-cancel-btn" type="button">
           <svg class="ic"><use href="#i-x" /></svg><span>取消</span>
         </button>
       </div>
-      <div id="share-status" class="meta"></div>
-      <div id="share-error" class="error hidden"></div>
+      <div id="pub-error" class="error hidden"></div>
     </div>
   </div>
 
-  <!-- 共享麦克风凭证弹窗（手机端：出示电脑端凭证反向推流） -->
-  <div id="mic-modal" class="modal hidden">
+  <!-- 订阅弹窗（对端端点 → 本机接收：握手后走既有 start_receive） -->
+  <div id="sub-modal" class="modal hidden">
     <div class="modal-box">
-      <h2>共享麦克风</h2>
-      <p class="hint" id="mic-modal-device"></p>
-      <textarea id="mic-token-input" class="mono" rows="4"
-        placeholder="粘贴电脑端展示的接入凭证"></textarea>
+      <h2 id="sub-modal-title">订阅端点</h2>
+      <p class="hint" id="sub-modal-sub"></p>
       <div class="row">
-        <button id="mic-auto-btn" type="button">
-          <svg class="ic"><use href="#i-zap" /></svg><span>自动获取凭证</span>
+        <select id="sub-delivery"></select>
+      </div>
+      <div class="row">
+        <button id="sub-confirm-btn" class="primary" type="button">
+          <svg class="ic"><use href="#i-download" /></svg><span>订阅并接收</span>
         </button>
-        <button id="mic-start-btn" class="primary" type="button">
-          <svg class="ic"><use href="#i-play" /></svg><span>开始推流</span>
-        </button>
-        <button id="mic-stop-btn" type="button" disabled>
-          <svg class="ic"><use href="#i-stop" /></svg><span>停止</span>
-        </button>
-        <button id="mic-close-btn" type="button">
-          <svg class="ic"><use href="#i-x" /></svg><span>关闭</span>
+        <button id="sub-cancel-btn" type="button">
+          <svg class="ic"><use href="#i-x" /></svg><span>取消</span>
         </button>
       </div>
-      <div id="mic-status" class="meta"></div>
-      <div id="mic-error" class="error hidden"></div>
+      <div id="sub-error" class="error hidden"></div>
     </div>
   </div>
 
@@ -294,9 +296,8 @@
   <script src="app/state.js"></script>
   <script src="app/ui.js"></script>
   <script src="app/discovery.js"></script>
+  <script src="app/endpoints.js"></script>
   <script src="app/subscribe.js"></script>
-  <script src="app/publish.js"></script>
-  <script src="app/negotiate.js"></script>
   <script src="app/firewall.js"></script>
   <script src="app/main.js"></script>
 </body>

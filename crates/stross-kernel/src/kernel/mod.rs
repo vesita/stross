@@ -112,8 +112,8 @@ pub struct Kernel {
     // -- 运行态：平台标签 / 推流 / 接收 / 端点 / 身份 --
     /// 平台标签（纯值；设备能力枚举等平台知识在 stross-bridge）。
     platform: Platform,
-    /// 运行中推流。
-    engine: Mutex<Option<RunningStream>>,
+    /// 运行中推流（`Arc` 供数据面事件转发任务共享：流结束时清理引擎状态）。
+    engine: Arc<Mutex<Option<RunningStream>>>,
     /// 本机锚点：常驻受控中继 + mDNS 广播（免先连：一起启动、生命周期一致）。
     anchor: Mutex<Option<LocalAnchor>>,
     /// 采集后端（平台相关，UI 层注入；`Arc` 使其可被引擎复用）。
@@ -173,7 +173,7 @@ impl Kernel {
             data_plane_task: Mutex::new(None),
             share_tokens: Arc::new(Mutex::new(HashMap::new())),
             platform,
-            engine: Mutex::new(None),
+            engine: Arc::new(Mutex::new(None)),
             anchor: Mutex::new(None),
             backend: Mutex::new(None),
             registry: Mutex::new(EndpointRegistry::new()),
@@ -323,6 +323,12 @@ impl Kernel {
         (reg.devices(), reg.manifests())
     }
 
+    /// 本机目录视图（设备 + 已公开端点；节点卡片设备树渲染用）。
+    pub fn local_catalog(&self) -> crate::view::LocalCatalog {
+        let (devices, endpoints) = self.endpoint_catalog();
+        crate::view::LocalCatalog { devices, endpoints }
+    }
+
     // -----------------------------------------------------------------------
     // 数据面接线
     // -----------------------------------------------------------------------
@@ -336,6 +342,7 @@ impl Kernel {
         backend.set_share_token_validator(self.token_validator());
         let mut rx = backend.events();
         let events = self.events.clone();
+        let engine = Arc::clone(&self.engine);
         let task = tokio::spawn(async move {
             while let Ok(ev) = rx.recv().await {
                 let kernel_ev = match ev {
@@ -343,9 +350,28 @@ impl Kernel {
                         session_id: stream_id,
                         info,
                     },
-                    RelayEvent::StreamEnded { stream_id } => KernelEvent::StreamEnded {
-                        session_id: stream_id,
-                    },
+                    RelayEvent::StreamEnded { stream_id } => {
+                        // 数据面流结束 → 若正是当前推流，清理引擎状态
+                        // （防采集进程中途退出后「已经在推流中」卡死后续端点自动推流）
+                        let dead = {
+                            let mut g = engine.lock_poisoned();
+                            if let Some(s) = g.as_ref()
+                                && s.stream_id == stream_id
+                            {
+                                g.take()
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(st) = dead {
+                            tokio::spawn(async move {
+                                st.engine.stop().await;
+                            });
+                        }
+                        KernelEvent::StreamEnded {
+                            session_id: stream_id,
+                        }
+                    }
                     RelayEvent::WatchersChanged {
                         stream_id,
                         watchers,
@@ -634,6 +660,7 @@ impl Kernel {
             if let Some(a) = guard.as_ref() {
                 return Ok(view::relay_info(
                     a.port,
+                    hostname,
                     self.registry.lock_poisoned().summaries(),
                 ));
             }
@@ -667,8 +694,11 @@ impl Kernel {
                     .map(|id| id.device_id.as_str()),
                 port,
             );
+            // 设备名 = 注入的主机名（壳层经 `bridge::device_name_or` 取值：
+            // 真实主机名，Android 回退品牌名）——对端看到的设备标识即设备自身
+            // 名字，避免「本机中继」式歧义。
             let info = DiscoveryInfo::relay_default(
-                "Stross 本机中继",
+                hostname,
                 vec![
                     MediaKind::Screen,
                     MediaKind::Camera,
@@ -698,6 +728,7 @@ impl Kernel {
         });
         Ok(view::relay_info(
             port,
+            hostname,
             self.registry.lock_poisoned().summaries(),
         ))
     }

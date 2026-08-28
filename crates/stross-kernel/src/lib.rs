@@ -78,9 +78,12 @@ pub use platform::Platform;
 pub use receiver::{ReceiveStats, Receiver};
 pub use relay::{DEFAULT_PORT, GUI_PORT, RelayHandle, RelayServer};
 pub use sender::RelayClient;
-pub use subscriber::{SubscribeOutcome, fetch_directory, subscribe_file};
+pub use subscriber::{
+    MediaSubscribeOutcome, SubscribeOutcome, fetch_directory, subscribe_file, subscribe_media,
+};
 pub use view::{
-    AppInfo, CaptureStatusView, DeviceList, RelayInfo, ShareTokenView, StartResult, StreamStatus,
+    AppInfo, CaptureStatusView, DeviceList, LocalCatalog, RelayInfo, ShareTokenView, StartResult,
+    StreamStatus,
 };
 
 /// SRT/QUIC 固定传输端口（权限自动化：防火墙只放行已知端口）。

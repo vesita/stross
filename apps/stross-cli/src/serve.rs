@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
-use stross_bridge::{hostname_or, seed_platform_devices};
+use stross_bridge::{device_name_or, seed_platform_devices};
 use stross_kernel::{CtrlServer, Kernel, Platform, bootstrap};
 use stross_media::capture::FfmpegBackend;
 
@@ -52,7 +52,7 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     // mDNS L1 摘要（节点 → 设备清单）→ 目录/订阅握手端点；
     // 与 GUI 桌面共用同一套启动原语（主机名经桥接层注入，内核零 OS 调用）。
     let base = base_dir(args.data_dir.clone());
-    bootstrap::ensure_identity(&app, &base, &hostname_or("Stross 设备"));
+    bootstrap::ensure_identity(&app, &base, &device_name_or("Stross 设备"));
     let bootstrap_handle = bootstrap::start(
         app.clone(),
         Arc::new(stross_kernel::CliUi),
@@ -61,7 +61,7 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
         args.srt_port,
         args.quic_port,
         args.negotiator_port,
-        &hostname_or("stross"),
+        &device_name_or("Stross 设备"),
     )
     .await?;
     tracing::info!(

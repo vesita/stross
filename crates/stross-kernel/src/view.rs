@@ -83,12 +83,13 @@ pub struct CaptureStatusView {
 /// 本机中继入口视图（含多网卡全部局域网 IP）。
 ///
 /// 多网卡：列出全部局域网 IP 入口（无局域网 IP 时回退回环）。
-pub fn relay_info(port: u16, devices: Vec<DeviceSummary>) -> RelayInfo {
+/// `name`：本机设备名（与 mDNS 广播名一致，壳层注入）。
+pub fn relay_info(port: u16, name: &str, devices: Vec<DeviceSummary>) -> RelayInfo {
     let urls = crate::transport::RelayUrl::http_entries(port);
     RelayInfo {
         port,
         urls,
-        name: Some("Stross 本机中继".into()),
+        name: Some(name.into()),
         kind: Some("relay".into()),
         roles: vec![RoleId::Sender, RoleId::Viewer, RoleId::Relay],
         transports: vec![
@@ -114,6 +115,14 @@ pub fn watch_urls(relay_url: Option<&str>, relay_port: u16) -> Vec<String> {
         }
     }
     crate::transport::RelayUrl::http_entries(relay_port)
+}
+
+/// 本机目录（设备 + 已公开端点；节点卡片设备树渲染用）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalCatalog {
+    pub devices: Vec<stross_proto::message::DeviceInfo>,
+    pub endpoints: Vec<stross_proto::message::EndpointManifest>,
 }
 
 /// 手机麦克风接入凭证视图（B2：电脑端签发后展示给手机）。

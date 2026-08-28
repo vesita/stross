@@ -153,7 +153,7 @@ function renderRecent() {
 function baseOf(d) {
     return `http://${d.ip}:${d.port}`;
 }
-/** 全量刷新设备列表 + 在线共享 + 锚点端口。
+/** 全量刷新设备列表 + 锚点端口。
  *
  * mDNS 浏览 + `/api/info` `/api/streams` 探测 + 聚合全部在 Rust
  * `scan_devices` 命令（`stross_app::devices::scan`）；前端只渲染结果，
@@ -170,17 +170,11 @@ async function refreshDevices(force = false) {
             probeMs: PROBE_TIMEOUT_MS,
             extraBaseUrls: manualRelays.map((a) => a.replace(/\/+$/, '')),
         }));
-        // 本机条目（isSelf，按回环探测）：同步锚点 SRT/QUIC 端口 + 本机在线共享
+        // 本机条目（isSelf，按回环探测）：同步锚点 SRT/QUIC 端口
         const local = devs.find((d) => d.isSelf) || null;
-        if (local && local.online) {
-            if (anchor) {
-                anchor.srtUrl = local.srtPort ? `srt://127.0.0.1:${local.srtPort}` : null;
-                anchor.quicUrl = local.quicPort ? `quic://127.0.0.1:${local.quicPort}` : null;
-            }
-            localStreams = local.streams;
-        }
-        else {
-            localStreams = [];
+        if (local && local.online && anchor) {
+            anchor.srtUrl = local.srtPort ? `srt://127.0.0.1:${local.srtPort}` : null;
+            anchor.quicUrl = local.quicPort ? `quic://127.0.0.1:${local.quicPort}` : null;
         }
         // 远端设备卡片（探测已在 Rust 完成：含在线共享 / SRT / QUIC）
         const cards = devs
@@ -218,15 +212,18 @@ async function refreshDevices(force = false) {
                 });
             }
         });
-        // 填充远端流缓存（按需接收时取流元数据）
+        // 填充流类型缓存（订阅握手后的 start_receive 按 video/audio 选传输）
         cards.forEach((c) => c.streams.forEach((s) => remoteStreams.set(s.streamId, s)));
         // 保留已展开状态；本机卡片由渲染器恒置首位
         const keepExpanded = expandedDevice;
+        const before = deviceListSignature();
         deviceViews = cards;
         if (keepExpanded && !deviceViews.some((d) => d.key === keepExpanded))
             expandedDevice = null;
-        renderDeviceList();
-        renderLocalStreams();
+        // 数据未变则跳过重建——5s 轮询扫描结果相同时整树重绘会导致卡片闪烁
+        if (deviceListSignature() !== before) {
+            renderDeviceList();
+        }
     }
     catch (e) {
         showGridError('扫描失败：' + e.message);
@@ -235,6 +232,14 @@ async function refreshDevices(force = false) {
         scanInFlight = false;
         discoverCacheAt = Date.now();
     }
+}
+/** 设备列表渲染签名：设备视图 + 锚点端口（数据未变 → 跳过重建，消灭闪烁）。 */
+function deviceListSignature() {
+    return (deviceViews
+        .map((d) => `${d.key}|${d.name}|${d.meta}|${d.roles.join(',')}|${d.srtUrl ?? ''}|${d.quicUrl ?? ''}`)
+        .join(';') +
+        '#' +
+        `${anchor?.port ?? ''}|${anchor?.srtUrl ?? ''}|${anchor?.quicUrl ?? ''}`);
 }
 /** 兼容入口（初始化 / 强制刷新）。 */
 function scanRelays() {
@@ -245,6 +250,8 @@ function renderDeviceList() {
     const box = $('device-list');
     box.innerHTML = '';
     box.appendChild(localDeviceCard());
+    // 本机卡片已插入 DOM，设备树此刻渲染（构造期容器未入文档，查不到会空渲）
+    renderLocalDevices();
     if (!deviceViews.length) {
         box.appendChild(emptyState('radio', '未发现局域网内其它设备（mDNS）。可手动输入地址添加。'));
         return;
@@ -253,7 +260,7 @@ function renderDeviceList() {
         box.appendChild(deviceCard(dev));
     }
 }
-/** 本机卡片：广播共享入口 + 接收手机麦克风 + 本机入口地址。恒展开。 */
+/** 本机卡片：节点 → 设备 → 端点（通告为可订阅端点）。恒展开。 */
 function localDeviceCard() {
     const card = document.createElement('div');
     card.className = 'dev-card local expanded';
@@ -279,59 +286,22 @@ function localDeviceCard() {
     card.appendChild(head);
     const detail = document.createElement('div');
     detail.className = 'dev-detail';
-    // 出站共享（广播）：屏幕 / 麦克风（本机能力共享给局域网任意接收方）
-    const ops = document.createElement('div');
-    ops.className = 'dev-ops';
-    ops.appendChild(opButton('broadcast-screen', 'monitor', '共享屏幕（广播）'));
-    ops.appendChild(opButton('broadcast-mic', 'mic', '共享麦克风（广播）'));
-    const recvBtn = opButton('recv-mic', 'phone', '接收手机麦克风');
-    recvBtn.id = 'mic-recv-btn'; // setBtnLoading 需要引用
-    ops.appendChild(recvBtn);
-    detail.appendChild(ops);
-    // 接收手机麦克风凭证面板（B2：电脑端签发，手机出示后自动接收播放）
-    const recvPanel = document.createElement('div');
-    recvPanel.className = 'mic-recv-panel hidden';
-    recvPanel.id = 'mic-recv-panel';
-    const hint = document.createElement('p');
-    hint.className = 'hint';
-    hint.textContent = '在手机上打开 Stross → 找到本机 → 共享麦克风 → 粘贴下方凭证；接入后自动通过扬声器播放。';
-    const row = document.createElement('div');
-    row.className = 'row';
-    const pin = document.createElement('span');
-    pin.className = 'pin mono';
-    pin.id = 'mic-recv-pin';
-    const copyBtn = document.createElement('button');
-    copyBtn.type = 'button';
-    copyBtn.id = 'mic-recv-copy-btn';
-    copyBtn.innerHTML = icon('copy') + '<span>复制凭证</span>';
-    row.appendChild(pin);
-    row.appendChild(copyBtn);
-    const token = document.createElement('textarea');
-    token.className = 'mono';
-    token.id = 'mic-recv-token';
-    token.readOnly = true;
-    token.rows = 3;
-    const status = document.createElement('div');
-    status.className = 'meta';
-    status.id = 'mic-recv-status';
-    recvPanel.appendChild(hint);
-    recvPanel.appendChild(row);
-    recvPanel.appendChild(token);
-    recvPanel.appendChild(status);
-    detail.appendChild(recvPanel);
-    // 本机在线共享（点条目即接收；不展开设备级操作）
-    const localStreamsBox = document.createElement('div');
-    localStreamsBox.className = 'dev-streams';
-    localStreamsBox.dataset.role = 'local-streams';
-    const lsTitle = document.createElement('h3');
-    lsTitle.textContent = '本机在线共享';
-    localStreamsBox.appendChild(lsTitle);
-    localStreamsBox.appendChild(streamListPlaceholder());
-    detail.appendChild(localStreamsBox);
+    // 本机设备树（节点 → 设备 → 端点）：通告状态 + 通告/取消通告
+    const devBox = document.createElement('div');
+    devBox.className = 'dev-dir';
+    devBox.dataset.role = 'local-devices';
+    const devTitle = document.createElement('h3');
+    devTitle.textContent = '本机设备（通告为端点）';
+    devBox.appendChild(devTitle);
+    const devList = document.createElement('div');
+    devList.className = 'dev-list';
+    devBox.appendChild(devList);
+    detail.appendChild(devBox);
+    // 设备树由 renderDeviceList 在卡片入 DOM 后统一渲染（见 renderDeviceList）
     card.appendChild(detail);
     return card;
 }
-/** 局域网设备卡片：点击头部展开 → 共享麦克风到 TA + TA 的在线共享（点流接收）。 */
+/** 局域网设备卡片：点击头部展开 → 对端目录（可订阅端点）+ TA 的在线共享（点流接收）。 */
 function deviceCard(dev) {
     const card = document.createElement('div');
     card.className = 'dev-card' + (expandedDevice === dev.key ? ' expanded' : '');
@@ -361,10 +331,6 @@ function deviceCard(dev) {
     body.appendChild(metaLine);
     head.appendChild(ic);
     head.appendChild(body);
-    const badge = document.createElement('span');
-    badge.className = 'badge-streams';
-    badge.textContent = dev.streams.length ? dev.streams.length + ' 条共享' : '';
-    head.appendChild(badge);
     const toggle = () => {
         expandedDevice = expandedDevice === dev.key ? null : dev.key;
         renderDeviceList();
@@ -382,150 +348,26 @@ function deviceCard(dev) {
     card.appendChild(head);
     const detail = document.createElement('div');
     detail.className = 'dev-detail' + (expandedDevice === dev.key ? '' : ' hidden');
-    const ops = document.createElement('div');
-    ops.className = 'dev-ops';
-    ops.appendChild(opButton('mic-to', 'mic', '共享麦克风到 TA'));
-    detail.appendChild(ops);
-    const streamsBox = document.createElement('div');
-    streamsBox.className = 'dev-streams';
-    streamsBox.dataset.role = 'node-streams';
-    streamsBox.dataset.key = dev.key;
-    const stTitle = document.createElement('h3');
-    stTitle.textContent = 'TA 的在线共享（点条目接收）';
-    streamsBox.appendChild(stTitle);
-    streamsBox.appendChild(devStreamsOf(dev));
-    detail.appendChild(streamsBox);
+    // 对端目录（L2：设备 + 可订阅端点；展开时经 endpoint_ls 拉取渲染）
+    const dirBox = document.createElement('div');
+    dirBox.className = 'dev-dir';
+    dirBox.dataset.role = 'remote-dir';
+    dirBox.dataset.key = dev.key;
+    const dirTitle = document.createElement('h3');
+    dirTitle.textContent = '目录（可订阅端点）';
+    const dirStatus = document.createElement('div');
+    dirStatus.className = 'dir-status hint';
+    dirStatus.textContent = '未展开';
+    dirBox.appendChild(dirTitle);
+    dirBox.appendChild(dirStatus);
+    detail.appendChild(dirBox);
+    if (expandedDevice === dev.key) {
+        // 展开即拉取对端目录（幂等：缓存命中直接渲染）。
+        // 延后一帧：卡片此刻尚未插入 DOM，立即渲染查不到容器。
+        setTimeout(() => loadRemoteDir(dev), 0);
+    }
     card.appendChild(detail);
     return card;
-}
-function opButton(act, icName, label) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.dataset.act = act;
-    b.innerHTML = icon(icName) + '<span>' + label + '</span>';
-    return b;
-}
-/** 设备（或本机）的在线共享条目区；空态提示。 */
-function devStreamsOf(dev) {
-    const box = document.createElement('div');
-    if (!dev.streams.length) {
-        const empty = document.createElement('p');
-        empty.className = 'hint';
-        empty.textContent = dev.isLocal ? '本机暂未有共享广播' : '该设备暂未有在线共享（或不可达）';
-        box.appendChild(empty);
-        return box;
-    }
-    dev.streams.forEach((s) => box.appendChild(streamItem(dev, s)));
-    return box;
-}
-function streamListPlaceholder() {
-    const box = document.createElement('div');
-    const empty = document.createElement('p');
-    empty.className = 'hint';
-    empty.textContent = '本机暂未有共享广播';
-    box.appendChild(empty);
-    return box;
-}
-/** 单个共享流条目（点流即看：按需直连该设备锚点接收）。 */
-function streamItem(dev, s) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'dev-stream-item';
-    b.dataset.stream = s.streamId;
-    const ic = document.createElement('span');
-    ic.className = 'card-ic';
-    ic.innerHTML = icon(s.video ? 'video' : s.audio ? 'music' : 'radio');
-    const body = document.createElement('span');
-    body.className = 'card-body';
-    const name = document.createElement('span');
-    name.className = 'scan-name';
-    name.textContent = s.title || s.streamId;
-    const meta = document.createElement('span');
-    meta.className = 'scan-meta';
-    meta.appendChild(document.createTextNode(s.streamId + ' · ' + dev.name));
-    const chips = document.createElement('span');
-    chips.className = 'chips';
-    if (s.video)
-        chips.appendChild(chipEl('video', '视频'));
-    if (s.audio)
-        chips.appendChild(chipEl('audio', '音频'));
-    meta.appendChild(chips);
-    body.appendChild(name);
-    body.appendChild(meta);
-    b.appendChild(ic);
-    b.appendChild(body);
-    b.title = '点击接收 ' + s.streamId;
-    b.onclick = () => {
-        // 按需建立：目标切到该设备锚点（本机共享流 → 回本机锚点）；
-        // 直连失败自动经本机级联代理
-        if (dev.base) {
-            targetRelay = {
-                wsBase: dev.base.replace(/^http/, 'ws'),
-                srtUrl: dev.srtUrl,
-                quicUrl: dev.quicUrl,
-            };
-        }
-        else {
-            targetRelay = null;
-        }
-        remoteStreams.set(s.streamId, s);
-        void startReceive(s.streamId);
-    };
-    return b;
-}
-/** 兼容入口：周期刷新在线共享/设备列表（TTL 与 in-flight 守卫在
- *  `refreshDevices` 内；探测已收敛到 Rust，不再按设备 fetch）。 */
-function scanRemoteStreams(force = false) {
-    return refreshDevices(force);
-}
-/** 渲染本机卡片流区（本机在线共享）。 */
-function renderLocalStreams() {
-    const box = document.querySelector('[data-role="local-streams"]');
-    if (!box)
-        return;
-    box.innerHTML = '';
-    const title = document.createElement('h3');
-    title.textContent = '本机在线共享';
-    box.appendChild(title);
-    if (!localStreams.length) {
-        const empty = document.createElement('p');
-        empty.className = 'hint';
-        empty.textContent = '本机暂未有共享广播';
-        box.appendChild(empty);
-        return;
-    }
-    const localDev = {
-        key: 'local',
-        name: '本机（我）',
-        meta: '',
-        isLocal: true,
-        roles: [],
-        manual: false,
-        base: null,
-        srtUrl: anchor ? anchor.srtUrl : null,
-        quicUrl: anchor ? anchor.quicUrl : null,
-        quicPort: null,
-        streams: localStreams,
-    };
-    localStreams.forEach((s) => box.appendChild(streamItem(localDev, s)));
-}
-/** 局部刷新所有设备卡片的流区（保持展开/收起状态，不整树重绘）。 */
-function refreshNodeStreams() {
-    document.querySelectorAll('.dev-card[data-key]:not(.local)').forEach((card) => {
-        const key = card.dataset.key;
-        const dev = deviceViews.find((d) => d.key === key);
-        const box = card.querySelector('[data-role="node-streams"]');
-        if (!dev || !box)
-            return;
-        box.innerHTML = '';
-        const title = document.createElement('h3');
-        title.textContent = 'TA 的在线共享（点条目接收）';
-        box.appendChild(title);
-        box.appendChild(devStreamsOf(dev));
-        const badge = card.querySelector('.badge-streams');
-        if (badge)
-            badge.textContent = dev.streams.length ? dev.streams.length + ' 条共享' : '';
-    });
 }
 /** 刷新本机卡片锚点状态行（锚定成功后调用；SRT/QUIC 就绪状态在
  *  `refreshAnchorPorts` 拉取后二次刷新）。 */

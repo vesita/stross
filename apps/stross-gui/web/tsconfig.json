@@ -13,9 +13,8 @@
     "app/state.ts",
     "app/ui.ts",
     "app/discovery.ts",
+    "app/endpoints.ts",
     "app/subscribe.ts",
-    "app/publish.ts",
-    "app/negotiate.ts",
     "app/firewall.ts",
     "app/main.ts"
   ]

@@ -16,5 +16,5 @@ pub mod hostname;
 pub mod paths;
 
 pub use devices::{platform_devices, seed_platform_devices};
-pub use hostname::hostname_or;
+pub use hostname::{device_name_or, hostname_or};
 pub use paths::data_dir;

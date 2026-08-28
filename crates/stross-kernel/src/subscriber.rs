@@ -19,7 +19,7 @@ use crate::net;
 use crate::relay::client as relay_http;
 use anyhow::Context;
 use serde::Serialize;
-use stross_proto::message::{Delivery, EndpointDir, MediaKind, ShareRequest};
+use stross_proto::message::{Delivery, EndpointDir, MediaKind, ShareGrant, ShareRequest};
 
 use crate::Kernel;
 use crate::bootstrap;
@@ -55,16 +55,79 @@ pub struct SubscribeOutcome {
     pub received: ReceivedFile,
 }
 
-/// 订阅远端文件端点并接收落盘（P1 文件端点完整闭环）。
-pub async fn subscribe_file(
+/// 媒体端点订阅结果（GUI 命令 / 未来 CLI 共用）：握手后交给既有接收链路
+/// `start_receive(relay_url, stream_id)` 实际观看 / 播放。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaSubscribeOutcome {
+    /// 公开方拍板后的方向（pull = 连公开方中继；push = 公开方推入本机）。
+    pub delivery: Delivery,
+    /// watch 入口（ws://host:port；pull = 公开方中继，push = 本机中继）。
+    pub relay_url: String,
+    /// 观看流 id（pull = 公开方会话；push = 本机自签会话）。
+    pub stream_id: String,
+}
+
+/// 订阅远端媒体端点并返回观看入口（pull：公开方中继；push：本机中继 +
+/// 自签凭证，公开方凭凭证出站推入）。订阅达成后公开方经端点驱动自动开推
+/// （docs/endpoint-model.md §5：媒体端点 pull 推本机中继、push 凭凭证出站）。
+pub async fn subscribe_media(
     app: &Arc<Kernel>,
     base: &Path,
     host: &str,
     port: u16,
     endpoint_id: &str,
     delivery_wish: Option<Delivery>,
-    out: &Path,
-) -> anyhow::Result<SubscribeOutcome> {
+) -> anyhow::Result<MediaSubscribeOutcome> {
+    let EndpointGrant { grant, local } =
+        request_endpoint_grant(app, base, host, port, endpoint_id, delivery_wish).await?;
+    let delivery = grant.delivery.unwrap_or(Delivery::Pull);
+    let (relay_url, stream_id) = match delivery {
+        Delivery::Pull => {
+            let relay = grant.relay.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("pull 授予缺少公开方中继地址（公开方未锚定中继）")
+            })?;
+            (
+                format!("ws://{host}:{}", relay.ws_port),
+                grant.view.stream_id.clone(),
+            )
+        }
+        Delivery::Push => {
+            let l = local
+                .ok_or_else(|| anyhow::anyhow!("push 授予但本机未准备接收（自签凭证缺失）"))?;
+            (
+                format!("ws://127.0.0.1:{}", l.relay_port),
+                l.stream_id.clone(),
+            )
+        }
+        Delivery::Both => unreachable!("公开方已定稿，授予不含 Both"),
+    };
+    Ok(MediaSubscribeOutcome {
+        delivery,
+        relay_url,
+        stream_id,
+    })
+}
+
+/// 订阅握手结果（[`request_endpoint_grant`] 的公共形态）：
+/// 授予 + push 模式的本机接收准备（公开方凭凭证出站推入的落点）。
+struct EndpointGrant {
+    grant: ShareGrant,
+    local: Option<LocalReceiver>,
+}
+
+/// 订阅握手：身份 →（push 意向先本机准备）→ POST 对端协商端点。
+///
+/// `subscribe_file`（文件端点）与 `subscribe_media`（媒体端点）共用；
+/// 握手原语 [`negotiator_client::request_grant`]。
+async fn request_endpoint_grant(
+    app: &Arc<Kernel>,
+    base: &Path,
+    host: &str,
+    port: u16,
+    endpoint_id: &str,
+    delivery_wish: Option<Delivery>,
+) -> anyhow::Result<EndpointGrant> {
     bootstrap::ensure_identity(app, base, crate::bootstrap::DEFAULT_NODE_NAME);
     let identity = app
         .device_identity()
@@ -92,6 +155,21 @@ pub async fn subscribe_file(
         .context(format!(
             "订阅握手失败（端点 {endpoint_id}；Confirm 端点需对端 stross ctrl negotiator-list 确认）"
         ))?;
+    Ok(EndpointGrant { grant, local })
+}
+
+/// 订阅远端文件端点并接收落盘（P1 文件端点完整闭环）。
+pub async fn subscribe_file(
+    app: &Arc<Kernel>,
+    base: &Path,
+    host: &str,
+    port: u16,
+    endpoint_id: &str,
+    delivery_wish: Option<Delivery>,
+    out: &Path,
+) -> anyhow::Result<SubscribeOutcome> {
+    let EndpointGrant { grant, local } =
+        request_endpoint_grant(app, base, host, port, endpoint_id, delivery_wish).await?;
     let delivery = grant.delivery.unwrap_or(Delivery::Pull);
 
     let received = match delivery {
@@ -226,5 +304,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// 进程内双节点：公开方通告麦克风端点（Public/Pull）+ 订阅方
+    /// [`subscribe_media`] 握手 → 返回公开方中继 watch 入口与流 id。
+    /// 覆盖：媒体端点订阅握手全路径（身份 → 握手 → 授予解析）。
+    #[tokio::test]
+    async fn subscribe_media_handshake_pull() {
+        let dir_a = tmp_dir("ma");
+        let dir_b = tmp_dir("mb");
+        let app_a = Arc::new(Kernel::new(Platform::Desktop));
+        app_a.seed_device(stross_proto::message::DeviceInfo {
+            device_id: "mic:builtin".into(),
+            kind: stross_proto::message::MediaKind::Mic,
+            name: "麦克风".into(),
+            builtin: true,
+        });
+        bootstrap::ensure_identity(&app_a, &dir_a, "stross");
+        let relay = app_a.start_relay_on(0, "stross").await.unwrap();
+        let neg = ShareNegotiator::start(app_a.clone(), Arc::new(NoopUi), &dir_a, 0)
+            .await
+            .unwrap();
+        let m = app_a
+            .publish_endpoint(
+                "mic:builtin",
+                stross_proto::message::Visibility::Public,
+                Delivery::Pull,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let app_b = Arc::new(Kernel::new(Platform::Desktop));
+        let outcome = subscribe_media(
+            &app_b,
+            &dir_b,
+            "127.0.0.1",
+            neg.port,
+            &m.endpoint_id,
+            None, // 按端点声明（Pull）
+        )
+        .await
+        .expect("订阅媒体端点应成功");
+        assert_eq!(outcome.delivery, Delivery::Pull);
+        assert!(
+            !outcome.stream_id.is_empty(),
+            "pull 流 id = 公开方签发的会话（非空即可）"
+        );
+        assert!(
+            outcome.relay_url.contains(&relay.port.to_string()),
+            "pull watch 入口指向公开方中继: {}",
+            outcome.relay_url
+        );
+
+        neg.stop().await;
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 }

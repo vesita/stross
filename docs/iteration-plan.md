@@ -417,3 +417,28 @@ GStreamer 流水线。
 - `share-token-test.sh` ✅（164 帧 / 277 音频块）；`latency-stability-test.sh 60 ws` ✅（1726/1800 帧、2724/2820 音频块、p99−min≈12.7ms）；
 - 真机（OPPO PLC110，adb + CDP）：Android APK 构建安装成功；**互相发现**（PC 18777 ↔ 手机 8777 GUI_PORT）；**自动协商**（手机请求 → PC `negotiator-respond` 签发 grant → 手机 QUIC 推流进 PC 中继，Hello 接受、流启动）；
 - 遗留（非本轮回归，属手机侧/前端既有问题，待 UI 阶段）：手机麦克风推流 10s 内无媒体帧到达（采集/QUIC 推送链，与重构无关——PC↔PC 全链路回归通过）；协商应答曾有一次挂起（瞬时锁竞争，重试即通）；设备列表 5s 轮询重建会清空「接收手机麦克风」凭证展示框；Android `hostname` 恒为 localhost（设备名显示为 localhost）。
+
+---
+
+## 第八轮（UI 收敛到「通告 + 订阅」+ 内核推流状态修复，2026-08-28）
+
+**目标**：按用户意见把 UI 收敛为「本机设备通告 + 对端设备通告订阅」两极，
+删除旧广播/凭证/共享流模型 UI；修复数据面流结束后引擎状态滞留导致的
+「已经在推流中」卡死；消除设备名「Stross 本机中继」歧义；真机闭环验证。
+
+**变更**：
+| 项 | 落点 |
+|---|---|
+| 内核推流状态修复 | `Kernel.engine` 改 `Arc<Mutex<Option<RunningStream>>>`（kernel/mod.rs）；`attach_data_plane` 转发任务捕获 Arc，`RelayEvent::StreamEnded` 时若正是当前推流则 `take()` 并 `spawn(stop())` —— 采集进程中途退出后不再卡死后续端点自动推流 |
+| 端点订阅闭环（上一轮续） | `subscriber::subscribe_media` 握手 → 订阅达成 → `endpoint_driver` 自动开推（真机验证：手机订阅 PC `screen:0` → PC 自动推流 sess-1 → 手机收到 102 帧） |
+| UI 收敛（按用户指示） | 删除本机卡片「共享屏幕/麦克风（广播）」「接收手机麦克风」+ 凭证面板、对端卡片「共享麦克风到 TA」；删除右栏「共享流」面板 → 改为「接收」面板（订阅流播放/停止）；删除 publish.ts / negotiate.ts 两个死文件（tsconfig/index.html/测试同步）；「任何可共享设备都是节点端点，统一走通告/订阅」 |
+| 前端渲染签名门控 | `refreshDevices` 设备列表签名 + `refreshLocalCatalog` 目录签名：数据未变跳过重建——**消灭 2s/5s 轮询整树重绘导致的本机设备闪烁**；`renderDeviceList` 在卡片入 DOM 后渲染设备树（修构造期容器未入文档导致的空渲） |
+| 对端目录 TTL | `remoteDirs` 缓存 20s TTL（`remoteDirAt` 时间戳）：对端新通告/取消通告及时可见 |
+| 设备命名 | 内核广播名从硬编码「Stross 本机中继」改为**注入的主机名**（`DiscoveryInfo::relay_default(hostname, …)`）；`bridge::device_name_or` 过滤空/localhost/android 占位主机名（Android 恒 localhost）→ 回退「Stross 设备」；GUI/CLI 壳层注入点全部切换；`view::relay_info` 增 hostname 参数保持本机视图名一致 |
+
+**验证**：
+- 内核 `cargo test -p stross-kernel` 19 项 ✅；bridge 6 项 ✅（新增占位主机名过滤测试）；workspace 全量 ✅；clippy 0 告警；fmt 干净；
+- 前端 tsc ✅；jsdom 56 项断言全过（重写为通告/订阅流程：目录拉取 → 订阅握手 → 接收面板 → 断流自愈 → 遗留 UI 移除断言 → 通告/取消通告闭环 → 授权 → 防火墙）；
+- 真机（OPPO PLC110，adb + CDP，**一次性干净流程**，不再乱点）：冷启动 → 新 UI（本机设备树+通告按钮、对端目录、右栏「接收」）→ 展开 PC → 目录拉到「屏幕/麦克风 公开·拉取」→ 订阅屏幕 → PC 日志 `端点 screen:0 已自动推流（Screen）: stream=sess-1 订阅方 09ac…` → 手机「接收中 · 收到 102 帧 · 已绘制 49 帧」→ 停止接收回「未接收」✅（内核修复生效：无「已经在推流中」卡死）；
+- 命名验证：手机端 PC 卡片显示真实主机名 **noxy**（原「Stross 本机中继」）✅；
+- 遗留：Android 设备树仅有 麦克风/系统声音（平台设备枚举无屏幕项——Android 屏幕共享走采集授权路径，非端点设备，待后续）；PC 无麦克风硬件（媒体闭环用屏幕端点验证）。

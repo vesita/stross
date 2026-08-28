@@ -442,3 +442,30 @@ GStreamer 流水线。
 - 真机（OPPO PLC110，adb + CDP，**一次性干净流程**，不再乱点）：冷启动 → 新 UI（本机设备树+通告按钮、对端目录、右栏「接收」）→ 展开 PC → 目录拉到「屏幕/麦克风 公开·拉取」→ 订阅屏幕 → PC 日志 `端点 screen:0 已自动推流（Screen）: stream=sess-1 订阅方 09ac…` → 手机「接收中 · 收到 102 帧 · 已绘制 49 帧」→ 停止接收回「未接收」✅（内核修复生效：无「已经在推流中」卡死）；
 - 命名验证：手机端 PC 卡片显示真实主机名 **noxy**（原「Stross 本机中继」）✅；
 - 遗留：Android 设备树仅有 麦克风/系统声音（平台设备枚举无屏幕项——Android 屏幕共享走采集授权路径，非端点设备，待后续）；PC 无麦克风硬件（媒体闭环用屏幕端点验证）。
+
+---
+
+## 第九轮（端点插件区 + Wayland 屏幕采集，2026-08-29）
+
+**目标**：修复 PC 端（Wayland 桌面）无法获取屏幕的 bug；按「端点插件区」愿景落地
+`stross-endpoint` 取代 `stross-media`，内核收敛为纯管理调度。
+
+**变更**：
+| 项 | 落点 |
+|---|---|
+| Wayland 屏幕采集 | `stross-endpoint/src/screen/wayland.rs`：XDG Desktop Portal（ashpd 0.13 `select_sources` + lamco-portal 会话）→ pipewire **SHM/CPU 路径**（`dmabuf=false`，合成器无关，规避 AMD linear dmabuf mmap 全零）→ BGRA 缩放转 yuv420p → 按目标帧率节流喂 ffmpeg rawvideo stdin 编码 H.264 |
+| 静止画面保活 | KWin portal 流是 damage 驱动，桌面静止即无新帧；空闲时按目标帧率**重发上一帧**：中继 `PUSH_SILENCE_TIMEOUT` 不再拆流，GOP 正常（关键帧 2s 一次，新观看端可随时接入） |
+| 采集错误上抛 | 采集进程异常 / portal 错误经 `CaptureStatus.error` 上报，不再静默黑屏 |
+| 端点插件区 crate | `stross-endpoint` 吸收并取代 `stross-media`：`Endpoint` 契约（端点化 + 数据还原，`EndpointApp`/`EndpointSeeder` 注入，不依赖内核）；端点 screen/（linux wayland+x11、windows、macos）、audio/、file/；采集与还原机制（capture/pipeline/playback/devices）+ codec/(nal,adts) convert/(yuv) 数据处理辅助；新增数据源 = 加目录实现契约即挂载 |
+| 内核收敛 | 内核只做管理调度（端点注册表 + `impl EndpointApp`/`EndpointSeeder`），零媒体数据面细节；`Platform` 枚举移入 `stross-proto`（kernel ← endpoint 无环）；`stross_kernel::ScreenEndpoint` 等路径重导出保持壳层兼容 |
+| 依赖统一 | 新增 ashpd 0.13 / lamco-pipewire 0.6.10 / lamco-portal 0.4.4，全部进根 `[workspace.dependencies]` |
+
+**验证**：
+- `cargo build --workspace`（default 与 `--no-default-features`）零警告；clippy `-D warnings`、fmt ✅；前端 tsc + jsdom ✅；
+- 全量单测 ✅（endpoint 47 项含真实 ffmpeg 链路；kernel/bridge/proto/types/transport 全部通过）；
+- 实机 Wayland e2e（KDE Plasma + AMD）：`stross push --screen` + `stross receive` 录制 **212 帧 1280×720、185 个色值分布的真实桌面内容**，流全程存活（保活修复生效）✅；
+- 提交 `43b8661`（63 文件，+2323/−918）。
+
+**遗留 / 待定**：
+- [ ] **PTS 驱动的播放调度层（待用户拍板）**：播放侧当前无调度层——帧进即解即出，延迟随缘。方案：抖动缓冲 + 目标延迟 ~150-200ms + 本地播放时钟按 `pts` 相对间距调度；过水位视频丢帧追平到实时（复用 `try_send` 丢帧语义，改按 pts 判定）、欠水位补帧/插静音、大 PTS 跳变重置缓冲。视频不采用倍速追平（WebRTC 同款结论）；倍速仅留给音频 NetEq 式时间伸缩（LAN 场景暂不需要）。
+- [ ] flake 修复备注：`decoded_pixels_match_native_ffmpeg` 根因是测试「先推完再读」= 推流期零消费，32 槽有界通道被解码瞬时超前顶满 → 修复为推流期并发排空（等价真实渲染循环）；产品侧丢帧语义不变（第九轮提交后单独修复，待提交）。

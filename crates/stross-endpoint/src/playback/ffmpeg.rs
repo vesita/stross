@@ -636,6 +636,19 @@ mod tests {
             })
             .unwrap();
         let mut out_rx = session.take_video_frames().unwrap();
+        // 真实消费方（GUI 渲染循环）在推流期间持续排空解码输出通道；测试若
+        // 「先推完再读」，32 槽有界通道会在 push 阶段积满，解码线程瞬时
+        // 超前（解码延迟 + 管道缓冲）即触发 try_send 丢帧 → dropped_push
+        // 非 0（该计数本就是「消费者跟不上」的兜底，不消费必然丢帧的
+        // 偶发回归）。这里起一个排空任务等价于真实消费者，断言才成立。
+        let (drain_tx, mut drain_rx) = mpsc::channel::<RenderedFrame>(256);
+        let drain_task = tokio::spawn(async move {
+            while let Some(f) = out_rx.recv().await {
+                if drain_tx.send(f).await.is_err() {
+                    break;
+                }
+            }
+        });
         // 按 AccessUnit 切回协议帧喂入（与接收端 push 相同）。
         // 注意：真实链路帧间隔 ~40ms（24fps 采集 -re 限速），瞬间塞满会触发
         // 不同的解码器行为，这里以真实节奏喂入（与端到端延迟测试口径一致）。
@@ -649,11 +662,13 @@ mod tests {
         // 收集窗口：推入耗时 ~2s（41ms/帧 × 48），解码输出随其后到达；
         // 收尾前必须留足时间等子进程吐完所有帧
         while let Ok(Some(f)) =
-            tokio::time::timeout(Duration::from_millis(3000), out_rx.recv()).await
+            tokio::time::timeout(Duration::from_millis(3000), drain_rx.recv()).await
         {
             ours.push(f);
         }
         session.stop();
+        // 排空任务随 out_tx 关闭（writer 线程收尾 drop shared）自然结束
+        let _ = drain_task.await;
         let s = session.stats();
         // 准确性：全部协议帧应写入解码器（无丢帧/无失步重建）
         assert_eq!(

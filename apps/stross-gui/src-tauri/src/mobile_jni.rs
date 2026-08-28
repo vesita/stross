@@ -14,7 +14,7 @@
 //! )
 //! ```
 //!
-//! Rust 侧完成：`stross_media::yuv::yuv420_to_rgba_scaled` 转换缩放 →
+//! Rust 侧完成：`stross_endpoint::yuv::yuv420_to_rgba_scaled` 转换缩放 →
 //! base64 编码 → `receive-frame` 事件（与桌面接收路径同一前端事件）→
 //! 解码统计回写（`Kernel::note_android_decoded_frame`）。
 
@@ -26,7 +26,7 @@ use jni::objects::{JByteArray, JObject};
 use jni::sys::{jint, jlong};
 use tauri::{Emitter, Manager};
 
-use stross_media::yuv::{Yuv420Layout, yuv420_to_rgba_scaled};
+use stross_endpoint::convert::yuv::{Yuv420Layout, yuv420_to_rgba_scaled};
 
 /// `spawn_android_playback` 启动时注入的 AppHandle（JNI 线程 emit 事件用）。
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();

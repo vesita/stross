@@ -24,7 +24,7 @@ pub async fn start_receive(
     state: State<'_, Arc<Kernel>>,
     relay: String,
     stream: String,
-    audio: stross_media::playback::AudioOut,
+    audio: stross_endpoint::playback::AudioOut,
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {

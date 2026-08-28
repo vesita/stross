@@ -1060,7 +1060,11 @@ mod tests {
                 self.base.available = true;
                 Ok(())
             }
-            fn share(&self, _app: std::sync::Arc<Kernel>, ctx: crate::kernel::SubscribeCtx) {
+            fn share(
+                &self,
+                _app: std::sync::Arc<dyn stross_endpoint::contract::EndpointApp>,
+                ctx: stross_endpoint::SubscribeCtx,
+            ) {
                 self.fired.lock().unwrap().push(ctx);
             }
         }

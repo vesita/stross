@@ -6,15 +6,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use stross_endpoint::capture::FfmpegBackend;
+use stross_endpoint::pipeline::{Quality, StreamConfig, VideoSource};
 use stross_kernel::SenderEngine;
-use stross_media::capture::FfmpegBackend;
-use stross_media::pipeline::{Quality, StreamConfig, VideoSource};
 use stross_proto::frame::{Frame, TRACK_VIDEO};
 use stross_proto::message::ControlMessage;
 use tokio_tungstenite::tungstenite::Message;
 
 fn has_ffmpeg() -> bool {
-    stross_media::pipeline::ffmpeg_available()
+    stross_endpoint::pipeline::ffmpeg_available()
 }
 
 #[tokio::test]

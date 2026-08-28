@@ -26,25 +26,30 @@ pub mod session;
 
 pub use auth::{AuthError, AuthPolicy, PinAuthPolicy};
 pub use data_plane::{DataPlaneBackend, RelayDataPlane};
-pub use endpoint::{
-    Endpoint, EndpointBase, EndpointEntry, EndpointRegistry, FileEndpoint, FileSource, MicEndpoint,
-    Probe, ScreenEndpoint, SubscribeCtx, SystemAudioEndpoint, TargetKind,
-};
+// 端点契约与端点实现（插件区 stross-endpoint）：本模块只保留注册表
+// （EndpointRegistry / EndpointEntry / FileSource），路径经 stross_kernel 根部重导出。
+pub use endpoint::{EndpointEntry, EndpointRegistry, FileSource};
 pub use graph::{NodeInfo, NodeRole, TransportAddr};
 pub use session::{Negotiated, Session, SessionPrefs};
+pub use stross_endpoint::{
+    Endpoint, EndpointBase, FileEndpoint, MicEndpoint, Probe, ScreenEndpoint, SubscribeCtx,
+    SystemAudioEndpoint, TargetKind,
+};
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use stross_media::capture::CaptureBackend;
-use stross_media::pipeline::StreamConfig;
+use stross_endpoint::capture::CaptureBackend;
+use stross_endpoint::contract::EndpointApp;
+use stross_endpoint::file::FilePushOptions;
+use stross_endpoint::pipeline::StreamConfig;
 #[cfg(not(target_os = "android"))]
-use stross_media::playback::AudioOut;
-use stross_media::playback::RenderedFrame;
+use stross_endpoint::playback::AudioOut;
+use stross_endpoint::playback::RenderedFrame;
 use stross_proto::frame::Frame;
 use stross_proto::message::{
     CapabilityDescriptor, CodecId, Delivery, DiscoveryInfo, EndpointManifest, MediaKind, RoutePath,
@@ -57,10 +62,10 @@ use crate::engine::SenderEngine;
 use crate::error::{Error, Result};
 use crate::lock::MutexExt;
 use crate::negotiator::DeviceIdentity;
-use crate::platform::Platform;
 use crate::receiver::{LocalProxy, Receiver};
 use crate::relay::{DEFAULT_PORT, RelayEvent, RelayHandle, RelayServer};
 use crate::view;
+use stross_proto::message::Platform;
 use stross_types::{AppInfo, CaptureStatusView, DeviceList, RelayInfo, StartResult, StreamStatus};
 
 use self::graph::DeviceGraph;
@@ -232,7 +237,7 @@ impl Kernel {
         AppInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             platform: self.platform.as_str().to_string(),
-            ffmpeg: stross_media::pipeline::ffmpeg_available(),
+            ffmpeg: stross_endpoint::pipeline::ffmpeg_available(),
             ips: crate::net::local_ips()
                 .into_iter()
                 .map(|ip| ip.to_string())
@@ -243,9 +248,9 @@ impl Kernel {
     /// 摄像头 / 麦克风 / 系统声音设备列表。
     pub fn list_devices(&self) -> DeviceList {
         DeviceList {
-            cameras: stross_media::devices::list_cameras(),
-            audio_inputs: stross_media::devices::list_audio_inputs(),
-            system_audio: stross_media::devices::list_system_audio(),
+            cameras: stross_endpoint::devices::list_cameras(),
+            audio_inputs: stross_endpoint::devices::list_audio_inputs(),
+            system_audio: stross_endpoint::devices::list_system_audio(),
         }
     }
 
@@ -1084,6 +1089,40 @@ impl Kernel {
     }
 }
 
+/// 端点注入目标（stross-endpoint 端点装配用）：登记 + 平台查询。
+impl stross_endpoint::factory::EndpointSeeder for Kernel {
+    fn seed_endpoint(&self, ep: Box<dyn Endpoint>) -> bool {
+        self.seed_endpoint(ep);
+        true
+    }
+    fn platform(&self) -> Platform {
+        Kernel::platform(self)
+    }
+}
+
+/// 端点层可见的内核调度能力（端点契约实现）：
+/// 推流 / 中继端口 / 文件泵——内核 = 纯管理调度，数据面执行在端点层。
+#[async_trait::async_trait]
+impl EndpointApp for Kernel {
+    async fn start_stream(
+        &self,
+        cfg: StreamConfig,
+        relay_url: Option<String>,
+    ) -> anyhow::Result<stross_types::StartResult> {
+        Kernel::start_stream(self, cfg, relay_url)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn relay_port(&self) -> Option<u16> {
+        Kernel::relay_port(self)
+    }
+
+    async fn push_file(&self, path: PathBuf, opts: FilePushOptions) -> anyhow::Result<u64> {
+        crate::file_xfer::push_file(&path, &opts).await
+    }
+}
+
 /// 数据面接入凭证校验器：读内核签发表，校验"存在 + 未过期 + 逐字一致"。
 struct KernelTokenValidator {
     tokens: Arc<Mutex<HashMap<String, ShareToken>>>,
@@ -1163,8 +1202,8 @@ mod tests {
         fn stop(&self) {
             self.0.store(false, std::sync::atomic::Ordering::SeqCst);
         }
-        fn status(&self) -> stross_media::capture::CaptureStatus {
-            stross_media::capture::CaptureStatus {
+        fn status(&self) -> stross_endpoint::capture::CaptureStatus {
+            stross_endpoint::capture::CaptureStatus {
                 started: self.0.load(std::sync::atomic::Ordering::SeqCst),
                 error: None,
             }

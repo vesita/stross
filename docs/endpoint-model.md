@@ -312,7 +312,7 @@ P1 后扩展点：运行期重探测（权限授予后 reload）、一设备多�
 |---|---|
 | `stross-proto` | `DeviceInfo`/`DeviceSummary` 删除；`EndpointManifest` 平铺（kind/name/available/lastError/published）；新增 `EndpointSummary`（available/published）；`DiscoveryInfo v3.endpoints`（TXT key `ep.<n>`）；`EndpointDir` 去 devices |
 | `stross-kernel` | `kernel/endpoint.rs`：`Endpoint` trait（load/share 契约 + `TargetKind`）+ `ScreenEndpoint`/`MicEndpoint`/`SystemAudioEndpoint`/`FileEndpoint` + 注册表单表化（`seed` 即 load，不可挂载保留表内）；`endpoint_driver.rs` **删除**（端点自驱动，协商层直接调 share）；`default_transports` 改按 `TargetKind`；Kernel：`seed_device→seed_endpoint`、`on_endpoint_subscribed(app, ...)`、`endpoint_catalog→Vec<EndpointManifest>`；negotiator：目录只出已通告端点、不可挂载握手 404+原因；view/control/devices 摘要同步 |
-| `stross-bridge` | `platform_endpoints` + `seed_platform_endpoints`：构造端点 + **load 探测闭包注入**（`screen_probe`：ffmpeg + DISPLAY/WAYLAND——屏幕获取失败前置化；音频探测：ffmpeg）；依赖新增 `stross-media` |
+| `stross-endpoint` | `factory::platform_endpoints` + `seed_platform_endpoints`：构造端点 + **load 探测闭包注入**（`screen_probe`：ffmpeg + DISPLAY/WAYLAND——屏幕获取失败前置化；音频探测：ffmpeg）；bridge 委托（`stross_bridge::seed_platform_endpoints` 保持壳层入口） |
 | `stross-cli` | `endpoint ls` 输出端点清单（可用/不可用+原因）；`ctrl endpoint list` 单表输出（available/lastError/published）；`devices` 端点摘要含不可用标记 |
 | 顺带修复 | 控制面客户端 `request` 匹配 `rsp:"error"` 而 serde 实际序列化 `"err"`（变体名小写）——错误响应被当事件忽略导致客户端无限等待（**既有 bug**，首个常用错误响应路径暴露） |
 | `stross-gui` | 前端端点树（available 灰显 + lastError；对端目录不可订阅灰显）；`state.ts`/`endpoints.ts`/`discovery.ts` 单层类型 |

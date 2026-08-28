@@ -13,7 +13,7 @@
 ## 1. 背景与目标
 
 Stross 现有分层架构（proto → transport → kernel → bridge → UI）已经是一个「内核」：
-`stross-proto` 是传输无关的线上契约，`stross-media::capture::CaptureBackend` 已经是第一个插件接口，
+`stross-proto` 是传输无关的线上契约，`stross-endpoint::capture::CaptureBackend` 已经是第一个插件接口，
 `stross-kernel::relay` 是数据面。设计之初它还缺三件事：
 
 1. **控制面（内核）与数据面耦合**：会话、路由、方向控制没有独立抽象，`RelayServer` 的 Router 同时干两件事；
@@ -136,7 +136,7 @@ impl Kernel {
 |---|---|
 | `stross-kernel::relay`（Router 兼控制面+数据面） | 控制面在 `kernel` 门面（会话/路由/鉴权/凭证）；数据面转发下沉为「Transport 之上的转发器」，关键帧对齐逻辑原样保留 |
 | `stross-kernel::Kernel`（内核门面） | **第七轮落地**：原 `StrossApp` 状态机与原 `kernel::Kernel` 骨架合并为单一 `Kernel`；命令面（`app_info` / `list_devices` / `start_relay` / `scan_relays` / `start_stream` / `stop_stream` / `stream_status` / `capture_status` / `start_receive` / `stop_receive` / `receive_status`）保持兼容 |
-| `stross-media::capture::CaptureBackend` | 演进为 `Source` 能力：增加 `descriptor()`（media kind / codecs / 分辨率上限），`start/stop/status` 语义不变 |
+| `stross-endpoint::capture::CaptureBackend` | 演进为 `Source` 能力：增加 `descriptor()`（media kind / codecs / 分辨率上限），`start/stop/status` 语义不变 |
 | `discovery.rs`（mDNS + TXT） | TXT 承载能力广播：`role=`、`transports=`、`codecs=`、控制端口 |
 | `stross-proto`（v1 帧 + 控制消息） | v2 帧头（seq/分片）+ 协商/路由控制消息（见 §5） |
 
@@ -340,7 +340,7 @@ pub trait Sink: Send + Sync {
 | v2 帧头（seq/frag/reserved）+ 协商/路由控制消息 | `stross-proto/src/frame.rs`、`message.rs` |
 | `Transport` trait + `transport-ws` 实现（把现有 `/ws/push`、`/ws/watch` handler 包成 Transport；axum 路由保留 HTTP 部分） | `stross-kernel/src/relay/` |
 | relay 数据面转发改为消费 `Transport` trait（单一 ws 实现，行为不变） | `stross-kernel/src/relay/` |
-| `CaptureBackend` 增加 `descriptor()` | `stross-media/src/capture.rs`、`mobile.rs` |
+| `CaptureBackend` 增加 `descriptor()` | `stross-endpoint/src/capture.rs`、`mobile.rs` |
 | Kernel 骨架：`DeviceGraph` + `SessionManager` + `Router`（先支持 Direct / ViaRelay 两种 path）+ `route()` 命令 | `stross-kernel/src/kernel/` |
 | Tauri 命令面加 `route_session` / 内核事件（`KernelEvent` 订阅替代/补充 `stream_status` 轮询） | `apps/stross-gui/src-tauri/src/lib.rs` |
 | 测试：`transport-memory` 假实现 + Transport 层单测 | `stross-kernel/tests/` |

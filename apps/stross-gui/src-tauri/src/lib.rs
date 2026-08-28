@@ -8,7 +8,7 @@
 //! 2. 把前端 `invoke` 的每个命令转发给 `Kernel`（薄命令层，见 [`commands`]）
 //!
 //! 平台差异（ffmpeg 桌面采集 vs Android 原生采集）被隔离在采集后端里：
-//! 桌面用 [`stross_media::capture::FfmpegBackend`]，Android 用 `mobile::AndroidCapture`。
+//! 桌面用 [`stross_endpoint::capture::FfmpegBackend`]，Android 用 `mobile::AndroidCapture`。
 //!
 //! 模块划分（docs/layering-architecture.md：命令层只做参数转译 + 展示粘合）：
 //! * [`commands`]：命令面（含桥接命令：扫描 / 目录 / 订阅 / 凭证申请）
@@ -18,9 +18,9 @@
 
 use std::sync::Arc;
 
-use stross_kernel::Kernel;
 #[cfg(not(mobile))]
-use stross_media::capture::FfmpegBackend;
+use stross_endpoint::capture::FfmpegBackend;
+use stross_kernel::Kernel;
 use tauri::{Emitter, Manager};
 
 #[cfg(mobile)]

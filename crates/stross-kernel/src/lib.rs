@@ -43,7 +43,6 @@ pub mod kernel;
 mod lock;
 pub mod negotiator;
 pub mod negotiator_client;
-pub mod platform;
 pub mod receiver;
 pub mod relay;
 pub mod sender;
@@ -62,22 +61,32 @@ pub use control::{CtrlRequest, CtrlResponse, CtrlServer, DEFAULT_CTRL_PORT};
 pub use devices::{ScannedDevice, StreamView, probe_base, scan, scan_lan, to_views};
 pub use engine::SenderEngine;
 pub use error::{Error, RelayOpError, Result, WatchError};
-pub use file_xfer::{FilePushOptions, ReceivedFile, receive_file, receive_file_session};
+pub use file_xfer::{ReceivedFile, receive_file, receive_file_session};
 pub use kernel::{
-    AuthError, AuthPolicy, DataPlaneBackend, Endpoint, EndpointBase, EndpointEntry,
-    EndpointRegistry, FileEndpoint, FileSource, Kernel, KernelEvent, MicEndpoint, NodeInfo,
-    NodeRole, PinAuthPolicy, Probe, RelayDataPlane, ScreenEndpoint, Session, SessionPrefs,
-    SubscribeCtx, SystemAudioEndpoint, TargetKind, TransportAddr,
+    AuthError, AuthPolicy, DataPlaneBackend, EndpointEntry, EndpointRegistry, FileSource, Kernel,
+    KernelEvent, NodeInfo, NodeRole, PinAuthPolicy, RelayDataPlane, Session, SessionPrefs,
+    TransportAddr,
 };
 pub use negotiator::{
     CliUi, DEFAULT_NEGOTIATOR_PORT, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest,
     RelayAddr, ShareGrant, ShareNegotiator, ShareRequest, TrustStore, load_or_create_identity,
 };
 pub use negotiator_client::request_grant;
-pub use platform::Platform;
 pub use receiver::{ReceiveStats, Receiver};
 pub use relay::{DEFAULT_PORT, GUI_PORT, RelayHandle, RelayServer};
 pub use sender::RelayClient;
+pub use stross_endpoint::contract::{
+    resolve_file_url, resolve_media_url, resolve_watcher_base, spawn_media_share,
+};
+pub use stross_endpoint::file::FilePushOptions;
+/// 端点层（插件区）契约与端点实现重导出：保持 `stross_kernel::Xxx` 路径兼容
+/// （定义单一真源在 stross-endpoint crate；内核 = 管理调度，消费其契约）。
+pub use stross_endpoint::{
+    Endpoint, EndpointApp, EndpointBase, FileEndpoint, MicEndpoint, Probe, ScreenEndpoint,
+    SubscribeCtx, SystemAudioEndpoint, TargetKind,
+};
+pub use stross_proto::message::Platform;
+
 /// 应用契约层（壳层只读；展示视图 + 控制面载荷，定义单一真源在
 /// stross-types crate，此处重导出保持 `stross_kernel::*` 路径兼容）。
 pub use stross_types::{

@@ -13,8 +13,8 @@ use anyhow::Result;
 
 use crate::relay::{RelayHandle, RelayServer};
 use crate::sender::RelayClient;
-use stross_media::capture::{CaptureBackend, CaptureStatus};
-use stross_media::pipeline::StreamConfig;
+use stross_endpoint::capture::{CaptureBackend, CaptureStatus};
+use stross_endpoint::pipeline::StreamConfig;
 
 /// 完整的推流引擎。
 pub struct SenderEngine {

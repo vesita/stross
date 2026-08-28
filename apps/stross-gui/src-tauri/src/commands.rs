@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
+use stross_endpoint::pipeline::StreamConfig;
 use stross_kernel::{CaptureStatusView, Kernel};
-use stross_media::pipeline::StreamConfig;
 use tauri::{Manager, State};
 
 use crate::NegotiatorHandle;

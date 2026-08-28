@@ -3,29 +3,29 @@
 //!
 //! 职责划分（解码跟不上接收的根治方向）：
 //!
-//! * **Rust**（本文件 + [`mobile_jni`]）：Annex-B/SPS 解析（[`stross_media::nal`]）、
+//! * **Rust**（本文件 + [`mobile_jni`]）：Annex-B/SPS 解析（[`stross_endpoint::nal`]）、
 //!   csd（SPS/PPS）与尺寸提取、积压跳帧、YUV→RGBA 转换缩放
-//!   （[`stross_media::yuv`]）、base64 事件规整、解码统计回写。
+//!   （[`stross_endpoint::yuv`]）、base64 事件规整、解码统计回写。
 //! * **Kotlin**（`PlaybackPlugin.kt`）：只剩 MediaCodec 生命周期与编解码 buffer
 //!   搬运（系统 API 薄壳），不再做任何位级解析 / 像素转换。
 //!
 //! 帧消息格式（Rust → Kotlin，JSON）：
 //! `{"d": "<base64>", "k": bool, "c": bool, "p": pts_ms, "csd": "<base64 SPS+PPS>", "w": int, "h": int}`
-//! * `csd` 仅在关键帧/配置帧下发（Rust 用 [`stross_media::nal::extract_avc_csd`]
+//! * `csd` 仅在关键帧/配置帧下发（Rust 用 [`stross_endpoint::codec::nal::extract_avc_csd`]
 //!   解析），Kotlin 用它 + `w/h` 创建解码器，无需自行解析 SPS。
 
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use serde_json::Value;
-use stross_media::nal;
+use stross_endpoint::codec::nal;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::plugin::PluginHandle;
 use tauri::{AppHandle, Manager, Wry};
 
-use stross_media::capture::{CaptureBackend, CaptureStatus};
-use stross_media::pipeline::StreamConfig;
-use stross_media::playback::AudioOut;
+use stross_endpoint::capture::{CaptureBackend, CaptureStatus};
+use stross_endpoint::pipeline::StreamConfig;
+use stross_endpoint::playback::AudioOut;
 use stross_proto::frame::{
     CODEC_AAC, CODEC_H264, FLAG_CONFIG, FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO,
 };

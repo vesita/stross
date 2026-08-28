@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use clap::Args;
 use stross_bridge::{device_name_or, seed_platform_endpoints};
+use stross_endpoint::capture::FfmpegBackend;
 use stross_kernel::{CtrlServer, Kernel, Platform, bootstrap};
-use stross_media::capture::FfmpegBackend;
 
 #[derive(Args, Debug)]
 pub struct ServeArgs {

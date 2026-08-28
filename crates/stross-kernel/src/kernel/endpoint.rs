@@ -1,491 +1,30 @@
-//! 端点框架：**单层端点模型** + 端点 ↔ 内核行为契约。
+//! 端点注册表：**单层端点表**（原「设备表 + 端点表」合并）+ 通告参数管理。
 //!
 //! 设计规格：docs/endpoint-model.md。
 //!
-//! * **端点** = 节点上可共享的能力实体（屏幕 / 麦克风 / 摄像头 / 系统声音 /
-//!   文件……）：自维护「可挂载性」（`available`，load 探测结果）、失败原因
-//!   （`last_error`）与通告状态（`published`）；
-//! * **行为契约**（与内核的约定，非语言特性）：每个端点实现两个约定行为——
-//!   `load`（探测自身可用性，能否被挂载成节点）与 `share`（订阅达成后启动
-//!   共享推流，类型自决）——内核不做类型分派；
-//! * **目标类型**（[`TargetKind`]）：端点分两类——确定目标（文件等，内容
-//!   预先确定，一次推送、有完成态、Lossless）与实时目标（相机等，内容持续
-//!   产生，持续推流、Lossy）；两类的共性即本文件的契约，差异经目标类型
-//!   维度 + 各端点实现表达。
+//! * 端点 = 节点上可共享的能力实体；**契约（[`Endpoint`] / [`SubscribeCtx`] /
+//!   [`Probe`] 等）与具体端点实现（屏幕 / 麦克风 / 系统声音 / 文件）在
+//!   [`stross_endpoint`] 插件区**，本模块只做身份登记、通告参数管理与订阅联动
+//!   （内核 = 纯管理调度，不做媒体数据面）；
+//! * 端点自维护「可挂载性」（`available`，load 探测结果）与失败原因
+//!   （`last_error`）；注册表只做身份登记与通告参数管理；
+//! * **订阅联动**：`on_subscribed` 出锁克隆端点对象后调用其 `share`
+//!   （端点自驱动，内核不做类型分派）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use stross_media::pipeline::{AudioSourceConfig, Quality, StreamConfig, VideoSource};
+use stross_endpoint::contract::{Endpoint, SubscribeCtx, TargetKind};
+use stross_endpoint::file::FileEndpoint;
 use stross_proto::message::{
-    CodecId, Delivery, EndpointManifest, EndpointState, EndpointSummary, MediaKind, TransportId,
+    CodecId, Delivery, EndpointManifest, EndpointState, EndpointSummary, TransportId,
     TransportPreference, Visibility,
 };
 use stross_proto::time::unix_secs;
 
 use crate::Kernel;
 use crate::error::{Error, Result};
-use crate::file_xfer::{FilePushOptions, push_file};
-use std::result::Result as StdResult;
-
-/// 目标类型：端点分两类的维度（docs/endpoint-model.md §1）。
-///
-/// 决定默认传输（Lossless / Lossy）与共享生命周期（一次推送 / 持续推流）；
-/// **不进 wire**（`MediaKind` 已足够标识，避免冗余字段）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetKind {
-    /// 确定目标：内容在共享前已定（文件 / 剪贴板），一次推送、有完成态。
-    Determined,
-    /// 实时目标：内容持续产生（屏幕 / 相机 / 麦克风 / 系统声音），持续推流。
-    Live,
-}
-
-/// load 探测函数：平台适应层注入（查环境 / 设备 / 权限），内核零 OS 调用。
-pub type Probe = Arc<dyn Fn() -> StdResult<(), String> + Send + Sync>;
-
-/// 端点公共身份 + 挂载状态（各具体端点的共有字段）。
-#[derive(Debug)]
-pub struct EndpointBase {
-    pub id: String,
-    pub kind: MediaKind,
-    pub name: String,
-    /// 能否被挂载成节点（load 探测结果；false = 不可通告、不可订阅）。
-    pub available: bool,
-    /// load/share 失败原因（UI / 目录展示）。
-    pub last_error: Option<String>,
-}
-
-impl EndpointBase {
-    /// 标记不可挂载并记录原因（load / share 失败时）。
-    fn mark_failed(&mut self, e: String) {
-        self.available = false;
-        self.last_error = Some(e);
-    }
-}
-
-/// 端点 ↔ 内核行为契约。
-///
-/// 每个端点必须实现两个约定行为（不是语言特性，是与内核的约定）：
-/// * `load`：探测自身可用性（能否被挂载成节点），维护 `available` / `last_error`；
-/// * `share`：订阅达成后启动共享（推流），类型自决，内核不做分派。
-///
-/// 端点自维护「可挂载性」：`available() == false` 时不可通告、不可订阅。
-pub trait Endpoint: Send + Sync {
-    /// 节点内稳定 id（"screen:0" / "mic:builtin" / "file:notes.txt"）。
-    fn id(&self) -> &str;
-    fn kind(&self) -> MediaKind;
-    /// 用户可见名。
-    fn name(&self) -> &str;
-    /// 目标类型（确定目标 / 实时目标）：决定默认传输与共享生命周期。
-    fn target(&self) -> TargetKind;
-    /// 能否被挂载成节点（load 探测结果）。
-    fn available(&self) -> bool;
-    /// load/share 失败原因。
-    fn last_error(&self) -> Option<&str>;
-    /// load：探测自身可用性；失败 → `available=false` + 记录 `last_error`。
-    fn load(&mut self) -> StdResult<(), String>;
-    /// share：订阅达成后启动共享（内部自行 spawn 异步推流）。
-    fn share(&self, app: Arc<Kernel>, ctx: SubscribeCtx);
-}
-
-// ---------------------------------------------------------------------------
-// 具体端点：实时目标（媒体类）
-// ---------------------------------------------------------------------------
-
-/// 屏幕端点（实时目标）：load 探测采集可用性（bridge 注入探测闭包——
-/// 无图形会话 / ffmpeg 缺失时标记不可挂载，屏幕获取失败前置化）。
-pub struct ScreenEndpoint {
-    base: EndpointBase,
-    probe: Probe,
-}
-
-impl ScreenEndpoint {
-    /// `probe`：平台适应层注入的屏幕采集可用性探测。
-    pub fn new(name: impl Into<String>, probe: Probe) -> Self {
-        Self {
-            base: EndpointBase {
-                id: "screen:0".into(),
-                kind: MediaKind::Screen,
-                name: name.into(),
-                available: false,
-                last_error: None,
-            },
-            probe,
-        }
-    }
-}
-
-impl Endpoint for ScreenEndpoint {
-    fn id(&self) -> &str {
-        &self.base.id
-    }
-    fn kind(&self) -> MediaKind {
-        self.base.kind
-    }
-    fn name(&self) -> &str {
-        &self.base.name
-    }
-    fn target(&self) -> TargetKind {
-        TargetKind::Live
-    }
-    fn available(&self) -> bool {
-        self.base.available
-    }
-    fn last_error(&self) -> Option<&str> {
-        self.base.last_error.as_deref()
-    }
-    fn load(&mut self) -> StdResult<(), String> {
-        match (self.probe)() {
-            Ok(()) => {
-                self.base.available = true;
-                self.base.last_error = None;
-                Ok(())
-            }
-            Err(e) => {
-                self.base.mark_failed(e.clone());
-                Err(e)
-            }
-        }
-    }
-    fn share(&self, app: Arc<Kernel>, ctx: SubscribeCtx) {
-        spawn_media_share(
-            app,
-            ctx,
-            self.name().to_string(),
-            Some(VideoSource::Screen),
-            None,
-        );
-    }
-}
-
-/// 麦克风端点（实时目标）：load 探测音频采集可用性。
-pub struct MicEndpoint {
-    base: EndpointBase,
-    probe: Probe,
-}
-
-impl MicEndpoint {
-    pub fn new(name: impl Into<String>, probe: Probe) -> Self {
-        Self {
-            base: EndpointBase {
-                id: "mic:builtin".into(),
-                kind: MediaKind::Mic,
-                name: name.into(),
-                available: false,
-                last_error: None,
-            },
-            probe,
-        }
-    }
-}
-
-impl Endpoint for MicEndpoint {
-    fn id(&self) -> &str {
-        &self.base.id
-    }
-    fn kind(&self) -> MediaKind {
-        self.base.kind
-    }
-    fn name(&self) -> &str {
-        &self.base.name
-    }
-    fn target(&self) -> TargetKind {
-        TargetKind::Live
-    }
-    fn available(&self) -> bool {
-        self.base.available
-    }
-    fn last_error(&self) -> Option<&str> {
-        self.base.last_error.as_deref()
-    }
-    fn load(&mut self) -> StdResult<(), String> {
-        match (self.probe)() {
-            Ok(()) => {
-                self.base.available = true;
-                self.base.last_error = None;
-                Ok(())
-            }
-            Err(e) => {
-                self.base.mark_failed(e.clone());
-                Err(e)
-            }
-        }
-    }
-    fn share(&self, app: Arc<Kernel>, ctx: SubscribeCtx) {
-        spawn_media_share(
-            app,
-            ctx,
-            self.name().to_string(),
-            None,
-            Some(AudioSourceConfig::default()),
-        );
-    }
-}
-
-/// 系统声音端点（实时目标）：load 探测系统声音采集可用性。
-pub struct SystemAudioEndpoint {
-    base: EndpointBase,
-    probe: Probe,
-}
-
-impl SystemAudioEndpoint {
-    pub fn new(name: impl Into<String>, probe: Probe) -> Self {
-        Self {
-            base: EndpointBase {
-                id: "sysaudio:builtin".into(),
-                kind: MediaKind::SystemAudio,
-                name: name.into(),
-                available: false,
-                last_error: None,
-            },
-            probe,
-        }
-    }
-}
-
-impl Endpoint for SystemAudioEndpoint {
-    fn id(&self) -> &str {
-        &self.base.id
-    }
-    fn kind(&self) -> MediaKind {
-        self.base.kind
-    }
-    fn name(&self) -> &str {
-        &self.base.name
-    }
-    fn target(&self) -> TargetKind {
-        TargetKind::Live
-    }
-    fn available(&self) -> bool {
-        self.base.available
-    }
-    fn last_error(&self) -> Option<&str> {
-        self.base.last_error.as_deref()
-    }
-    fn load(&mut self) -> StdResult<(), String> {
-        match (self.probe)() {
-            Ok(()) => {
-                self.base.available = true;
-                self.base.last_error = None;
-                Ok(())
-            }
-            Err(e) => {
-                self.base.mark_failed(e.clone());
-                Err(e)
-            }
-        }
-    }
-    fn share(&self, app: Arc<Kernel>, ctx: SubscribeCtx) {
-        let device = stross_media::devices::list_system_audio()
-            .into_iter()
-            .next();
-        let audio = Some(AudioSourceConfig {
-            system_audio: device,
-            ..Default::default()
-        });
-        spawn_media_share(app, ctx, self.name().to_string(), None, audio);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 具体端点：确定目标（文件）
-// ---------------------------------------------------------------------------
-
-/// 文件端点（确定目标）：load 探测文件可读；share 一次性推送（传完回 Idle）。
-///
-/// 本地路径只存在于端点对象内（**绝不出现在 wire / 目录 / 摘要**）。
-pub struct FileEndpoint {
-    base: EndpointBase,
-    path: PathBuf,
-}
-
-impl FileEndpoint {
-    pub fn new(endpoint_id: String, name: String, path: PathBuf) -> Self {
-        Self {
-            base: EndpointBase {
-                id: endpoint_id,
-                kind: MediaKind::File,
-                name,
-                available: false,
-                last_error: None,
-            },
-            path,
-        }
-    }
-}
-
-impl Endpoint for FileEndpoint {
-    fn id(&self) -> &str {
-        &self.base.id
-    }
-    fn kind(&self) -> MediaKind {
-        self.base.kind
-    }
-    fn name(&self) -> &str {
-        &self.base.name
-    }
-    fn target(&self) -> TargetKind {
-        TargetKind::Determined
-    }
-    fn available(&self) -> bool {
-        self.base.available
-    }
-    fn last_error(&self) -> Option<&str> {
-        self.base.last_error.as_deref()
-    }
-    fn load(&mut self) -> StdResult<(), String> {
-        if self.path.is_file() {
-            self.base.available = true;
-            self.base.last_error = None;
-            Ok(())
-        } else {
-            let e = format!("文件不可读: {}", self.path.display());
-            self.base.mark_failed(e.clone());
-            Err(e)
-        }
-    }
-    fn share(&self, app: Arc<Kernel>, ctx: SubscribeCtx) {
-        let path = self.path.clone();
-        let name = self.name().to_string();
-        let endpoint_id = self.id().to_string();
-        tokio::spawn(async move {
-            let Some(url) = resolve_file_url(&app, &ctx) else {
-                tracing::warn!(
-                    "文件端点 {endpoint_id} 无可用推送地址（pull 未锚定中继 / push 缺订阅方地址）"
-                );
-                return;
-            };
-            let watcher_base = resolve_watcher_base(&app, &ctx);
-            let opts = FilePushOptions {
-                push_url: url,
-                stream_id: ctx.stream_id.clone(),
-                title: format!("文件 {name}"),
-                share_token: if ctx.delivery == Delivery::Push {
-                    ctx.share_token.clone()
-                } else {
-                    None
-                },
-                watcher_base,
-            };
-            match push_file(&path, &opts).await {
-                Ok(sent) => tracing::info!(
-                    "文件端点 {endpoint_id} 已推送「{name}」({sent} 字节, stream={}) 给订阅方 {}",
-                    ctx.stream_id,
-                    ctx.subscriber,
-                ),
-                Err(e) => tracing::warn!(
-                    "文件端点 {endpoint_id} 推送失败（订阅方 {}）: {e:#}",
-                    ctx.subscriber
-                ),
-            }
-        });
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 共享辅助：媒体推流 / 推送地址
-// ---------------------------------------------------------------------------
-
-/// 媒体端点自动推流（实时目标共用）：pull 推本机中继（地址自动），
-/// push 凭订阅方凭证出站推入订阅方中继（复用既有 B2 路径）。
-fn spawn_media_share(
-    app: Arc<Kernel>,
-    ctx: SubscribeCtx,
-    title: String,
-    video: Option<VideoSource>,
-    audio: Option<AudioSourceConfig>,
-) {
-    tokio::spawn(async move {
-        let cfg = StreamConfig {
-            stream_id: ctx.stream_id.clone(),
-            title,
-            video,
-            quality: Quality::MEDIUM,
-            audio,
-            duration_secs: None,
-            share_token: if ctx.delivery == Delivery::Push {
-                ctx.share_token.clone()
-            } else {
-                None
-            },
-        };
-        let relay_url = resolve_media_url(&ctx);
-        match app.start_stream(cfg, relay_url).await {
-            Ok(r) => tracing::info!(
-                "端点已自动推流: stream={} 订阅方 {}",
-                r.stream_id,
-                ctx.subscriber
-            ),
-            Err(e) => tracing::warn!("端点自动推流失败（订阅方 {}）: {e:#}", ctx.subscriber),
-        }
-    });
-}
-
-/// 媒体推流的目标地址：push → 订阅方中继 + `/ws/push`；pull → `None`
-/// （推本机中继，地址由内核自动选择）。
-fn resolve_media_url(ctx: &SubscribeCtx) -> Option<String> {
-    if ctx.delivery == Delivery::Push {
-        let base = ctx.relay_addr.as_deref()?;
-        Some(format!("{base}/ws/push"))
-    } else {
-        None
-    }
-}
-
-/// 文件泵推送地址：push → 订阅方中继；pull → 自己的受控中继（回环地址）。
-fn resolve_file_url(app: &Kernel, ctx: &SubscribeCtx) -> Option<String> {
-    match ctx.delivery {
-        Delivery::Push => {
-            let base = ctx.relay_addr.as_deref()?;
-            Some(format!("{base}/ws/push"))
-        }
-        Delivery::Pull | Delivery::Both => {
-            let port = app.relay_port()?;
-            Some(format!("ws://127.0.0.1:{port}/ws/push"))
-        }
-    }
-}
-
-/// 观看数轮询基址（文件泵等观看者接入用）：push = 订阅方中继；pull = 自己中继。
-fn resolve_watcher_base(app: &Kernel, ctx: &SubscribeCtx) -> Option<String> {
-    match ctx.delivery {
-        Delivery::Push => ctx.relay_addr.clone(),
-        Delivery::Pull | Delivery::Both => app.relay_port().map(|p| format!("ws://127.0.0.1:{p}")),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 订阅事件 / 文件源
-// ---------------------------------------------------------------------------
-
-/// 订阅事件载荷：端点 `share` 开推的依据（协商层授予成功后构造，
-/// docs/endpoint-model.md §5 联动）。
-#[derive(Debug, Clone)]
-pub struct SubscribeCtx {
-    /// 订阅方节点 device_id。
-    pub subscriber: String,
-    /// 公开方定稿后的数据面方向。
-    pub delivery: Delivery,
-    /// 数据面流 id：pull = 公开方本机会话（内核预授权）；push = 订阅方自签会话。
-    pub stream_id: String,
-    /// push 模式：订阅方中继 HTTP 基址（`ws://ip:port`；公开方出站 push 目标）。
-    pub relay_addr: Option<String>,
-    /// push 模式：订阅方自签的一次性接入凭证（推流 Hello 出示）。
-    pub share_token: Option<String>,
-}
-
-/// 文件端点本地文件源（`control.rs` 状态展示用；路径不落 wire）。
-#[derive(Debug, Clone)]
-pub struct FileSource {
-    pub path: PathBuf,
-    pub name: String,
-    pub size: u64,
-}
-
-// ---------------------------------------------------------------------------
-// 注册表（单层：一张端点表）
-// ---------------------------------------------------------------------------
 
 /// 端点条目：行为对象（[`Endpoint`]）+ 通告参数（公开者声明）。
 pub struct EndpointEntry {
@@ -749,10 +288,21 @@ impl EndpointRegistry {
     }
 }
 
+/// 文件端点本地文件源（`control.rs` 状态展示用；路径不落 wire）。
+#[derive(Debug, Clone)]
+pub struct FileSource {
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::result::Result as StdResult;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use stross_endpoint::contract::Probe;
+    use stross_proto::message::MediaKind;
 
     fn ok_probe() -> Probe {
         Arc::new(|| Ok(()))
@@ -764,7 +314,10 @@ mod tests {
     }
 
     fn screen() -> Box<dyn Endpoint> {
-        Box::new(ScreenEndpoint::new("屏幕", ok_probe()))
+        Box::new(stross_endpoint::screen::ScreenEndpoint::new(
+            "屏幕",
+            ok_probe(),
+        ))
     }
 
     #[test]
@@ -778,10 +331,12 @@ mod tests {
         assert!(!m.published, "登记后未通告");
         // 不可用端点（探测失败）：保留在表里但标记不可挂载 + 原因
         let mut r2 = EndpointRegistry::new();
-        assert!(r2.seed(Box::new(ScreenEndpoint::new(
-            "屏幕",
-            fail_probe("无图形会话（DISPLAY / WAYLAND_DISPLAY 均未设置）")
-        ))));
+        assert!(
+            r2.seed(Box::new(stross_endpoint::screen::ScreenEndpoint::new(
+                "屏幕",
+                fail_probe("无图形会话（DISPLAY / WAYLAND_DISPLAY 均未设置）")
+            )))
+        );
         let m2 = r2.manifest("screen:0").unwrap();
         assert!(!m2.available);
         assert_eq!(
@@ -901,7 +456,6 @@ mod tests {
             m.endpoint_id
         );
         assert!(m.available, "文件端点 load 应探测可读");
-        assert_eq!(m.endpoint_id, m.endpoint_id, "动态端点");
         assert_eq!(m.transports.len(), 2, "确定目标默认 QUIC>WS");
         assert_eq!(m.transports[0].transport, TransportId::Quic);
         // 文件源可查（本地路径不落 wire：清单里没有 path 字段）
@@ -929,7 +483,7 @@ mod tests {
         let fired = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
         struct CountingEndpoint {
-            base: EndpointBase,
+            base: stross_endpoint::contract::EndpointBase,
             fired: Arc<AtomicUsize>,
         }
         impl Endpoint for CountingEndpoint {
@@ -955,14 +509,18 @@ mod tests {
                 self.base.available = true;
                 Ok(())
             }
-            fn share(&self, _app: Arc<Kernel>, ctx: SubscribeCtx) {
+            fn share(
+                &self,
+                _app: Arc<dyn stross_endpoint::contract::EndpointApp>,
+                ctx: SubscribeCtx,
+            ) {
                 assert_eq!(ctx.subscriber, "dev-phone");
                 self.fired.fetch_add(1, Ordering::SeqCst);
             }
         }
         let mut r = EndpointRegistry::new();
         r.seed(Box::new(CountingEndpoint {
-            base: EndpointBase {
+            base: stross_endpoint::contract::EndpointBase {
                 id: "rec:0".into(),
                 kind: MediaKind::Mic,
                 name: "录音".into(),

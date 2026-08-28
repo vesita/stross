@@ -13,7 +13,7 @@
 //! * `stop` 停止采集并释放持有的 `tx`（通道关闭会触发推流端优雅 Bye）。
 //! * `status` 返回采集的真实状态（Android 上由原生控制帧异步回报）。
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
@@ -69,16 +69,20 @@ pub trait CaptureBackend: Send + Sync {
 }
 
 /// 桌面端采集后端：ffmpeg 子进程（见 [`crate::pipeline::StreamSession`]）。
+///
+/// Wayland 屏幕共享：内部路由到 portal+pipewire 采集（见
+/// [`crate::screen::wayland`]），启动/运行错误经 `error_rx` 转发到
+/// [`CaptureStatus::error`]（桌面侧 `CaptureStatusView` 轮询展示）。
 pub struct FfmpegBackend {
     session: Mutex<Option<StreamSession>>,
-    status: Mutex<CaptureStatus>,
+    status: Arc<Mutex<CaptureStatus>>,
 }
 
 impl FfmpegBackend {
     pub fn new() -> Self {
         Self {
             session: Mutex::new(None),
-            status: Mutex::new(CaptureStatus::default()),
+            status: Arc::new(Mutex::new(CaptureStatus::default())),
         }
     }
 }
@@ -108,7 +112,18 @@ impl CaptureBackend for FfmpegBackend {
     }
 
     fn start(&self, cfg: &StreamConfig, tx: mpsc::Sender<Frame>) -> anyhow::Result<()> {
-        let session = StreamSession::spawn(cfg, tx)?;
+        let mut session = StreamSession::spawn(cfg, tx)?;
+        // Wayland 采集错误（portal 拒绝 / 协商失败）→ CaptureStatus.error；
+        // 流会随 ffmpeg stdin 关闭自然结束
+        if let Some(mut error_rx) = session.take_error_rx() {
+            let status = self.status.clone();
+            tokio::spawn(async move {
+                while let Some(e) = error_rx.recv().await {
+                    tracing::warn!("采集错误: {e}");
+                    status.lock().unwrap().error = Some(e);
+                }
+            });
+        }
         let mut status = self.status.lock().unwrap();
         status.started = true;
         status.error = None;

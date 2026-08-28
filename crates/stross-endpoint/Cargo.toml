@@ -1,0 +1,43 @@
+[package]
+name = "stross-endpoint"
+description = "Stross data-source/sink plugin area: endpoint contract + per-source implementations (screen/audio/file), capture & restore machinery (ffmpeg pipeline, wayland portal capture, playback)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Wayland 屏幕采集（portal + pipewire）：linux 目标专用依赖由
+# [target.'cfg(target_os = "linux")'.dependencies] 提供；在其他目标上
+# 该 feature 是惰性的（依赖不存在则不编译），Android 交叉编译不受影响。
+default = ["wayland-capture"]
+wayland-capture = ["dep:ashpd", "dep:lamco-pipewire", "dep:lamco-portal"]
+
+[dependencies]
+stross-proto.workspace = true
+stross-types.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+
+# cpal 仅在非 Android 目标启用：Android 播放走 Kotlin MediaCodec（1f-3），
+# cpal-android 会链接 -laaudio（NDK 27 无独立 aaudio 库导致交叉编译失败）。
+[target.'cfg(not(target_os = "android"))'.dependencies]
+cpal.workspace = true
+
+# Wayland 屏幕采集栈（仅 linux；版本统一在根 [workspace.dependencies]）：
+# lamco-pipewire = pipewire 采集（低层 API，KWin 协商 + SHM/CPU 帧），
+# lamco-portal = xdg-desktop-portal ScreenCast 会话；ashpd 用于选源
+# （lamco-portal 的 start 不先选源）。
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { workspace = true, optional = true }
+lamco-pipewire = { workspace = true, optional = true }
+lamco-portal = { workspace = true, optional = true }
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

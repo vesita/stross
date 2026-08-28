@@ -12,8 +12,8 @@
 
 use anyhow::bail;
 use clap::{Args, Subcommand};
+use stross_endpoint::pipeline::StreamConfig;
 use stross_kernel::CtrlRequest;
-use stross_media::pipeline::StreamConfig;
 use stross_proto::message::{Delivery, Visibility};
 
 use crate::push::QualityArg;

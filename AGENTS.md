@@ -19,17 +19,23 @@ crates/
   stross-types      应用契约层：跨壳层类型单一真源（展示视图 AppInfo/RelayInfo/
                     StreamStatus…、控制面载荷 CtrlPayload、DTO CameraDevice/
                     PendingRequest/MediaSubscribeOutcome；依赖只到 proto）
-  stross-kernel     ★ 内核（全部平台无关服务，单一门面 Kernel）：
+  stross-endpoint   数据源/宿插件区（端点层）：Endpoint 契约（端点化 + 数据还原，
+                    EndpointApp 经契约调内核调度）+ 具体端点 screen/（linux
+                    Wayland portal+pipewire / X11、windows gdigrab）、audio/、
+                    file/；采集与还原机制（capture FfmpegBackend、pipeline
+                    StreamConfig、playback PlaybackSink、devices 枚举、codec/
+                    convert 数据处理辅助）；新增数据源 = 加目录实现契约即挂载
+  stross-kernel     ★ 内核（纯管理调度，单一门面 Kernel）：
                     中继 server + 中继 HTTP 客户端（relay/，契约单一真源）、
                     mDNS Discovery、sender/watch/jitter、控制面 CtrlServer
                     + client（D7）、凭证协商 ShareNegotiator + client、
-                    端点框架 kernel/（会话/路由/鉴权/端点注册表）、
+                    端点注册表 kernel/endpoint.rs（会话/路由/鉴权/登记）、
                     订阅方编排 subscriber、文件传输 file_xfer、引导 bootstrap、
                     扫描聚合 devices、推流引擎 engine、接收 receiver、view 展示视图构造
-                    （pub use stross_types::* 保持壳层路径兼容）
-  stross-media      采集（ffmpeg 后端）、播放（PlaybackSink/cpal）、流水线 StreamConfig
-  stross-bridge     平台适应桥接层：paths（数据目录）/ hostname / 平台设备枚举
-                    （只产出参数注入内核，不持有状态）
+                    （pub use stross_types::* 与端点契约重导出保持壳层路径兼容；
+                    零媒体数据面细节，经 EndpointApp 契约调度端点层）
+  stross-bridge     平台适应桥接层：paths（数据目录）/ hostname / 平台判定
+                    （端点构造委托 stross-endpoint factory，只产出参数，不持有状态）
   mdns              mdns-sd 0.21 的本地 fork（workspace crate；跨设备发现修复都在这里）
 apps/
   stross-cli        CLI：serve/ctrl/devices/adb/push/receive/relay/scan

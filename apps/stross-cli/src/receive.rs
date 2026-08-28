@@ -16,7 +16,7 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use clap::Args;
-use stross_media::playback::{AudioOut, RenderedFrame};
+use stross_endpoint::playback::{AudioOut, RenderedFrame};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum AudioOutArg {

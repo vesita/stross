@@ -18,9 +18,9 @@ use crate::session_channel::{SessionDataManager, channel_kind_for_url};
 use crate::watch;
 // 桌面解码播放路径（ffmpeg 子进程）；Android 走 `start_raw` 编码帧转发，
 // 由 Kotlin MediaCodec 解码（见 stross-gui `mobile::spawn_android_playback`）。
-use stross_media::playback::RenderedFrame;
+use stross_endpoint::playback::RenderedFrame;
 #[cfg(not(target_os = "android"))]
-use stross_media::playback::{
+use stross_endpoint::playback::{
     AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackSession, PlaybackSink,
     VideoOut,
 };

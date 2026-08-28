@@ -292,6 +292,37 @@ pub fn video_command(cfg: &StreamConfig) -> Result<Vec<String>> {
     Ok(args)
 }
 
+/// Wayland 屏幕采集的视频命令：rawvideo 从 stdin 输入（Rust 侧喂帧），
+/// 编码参数与常规视频路径一致（Annex-B H.264，SPS/PPS 重复在关键帧前）。
+///
+/// 与 [`video_command`] 的差异：无 `-re`（帧率由 Rust 侧节流控制，避免
+/// ffmpeg 全速空转）；输入是 `pipe:0`（无采集输入参数）。
+pub fn rawvideo_video_command(cfg: &StreamConfig) -> Result<Vec<String>> {
+    let q = &cfg.quality;
+    let mut args = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "warning".into(),
+        "-nostdin".into(),
+        "-f".into(),
+        "rawvideo".into(),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-video_size".into(),
+        format!("{}x{}", q.width, q.height),
+        "-framerate".into(),
+        q.fps.to_string(),
+        "-i".into(),
+        "pipe:0".into(),
+    ];
+    if let Some(d) = cfg.duration_secs {
+        args.push("-t".into());
+        args.push(d.to_string());
+    }
+    args.extend(video_encode_args(q));
+    Ok(args)
+}
+
 /// 构建音频子进程的完整命令行。
 pub fn audio_command(cfg: &StreamConfig) -> Result<Vec<String>> {
     let a = cfg.audio.as_ref().context("没有音频源")?;

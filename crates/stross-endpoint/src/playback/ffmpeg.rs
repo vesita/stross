@@ -25,7 +25,7 @@ use stross_proto::message::{
 };
 use tokio::sync::mpsc;
 
-use crate::nal::{AnnexBSplitter, NAL_SPS, nal_type, sps_dimensions};
+use crate::codec::nal::{AnnexBSplitter, NAL_SPS, nal_type, sps_dimensions};
 use crate::pipeline::{ffmpeg_available, ffmpeg_bin};
 use crate::playback::audio_out::AudioSink;
 use crate::playback::{

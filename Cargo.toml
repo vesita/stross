@@ -5,7 +5,7 @@ members = [
     "crates/stross-types",
     "crates/stross-transport",
     "crates/stross-kernel",
-    "crates/stross-media",
+    "crates/stross-endpoint",
     "crates/stross-bridge",
     "apps/stross-relay",
     "apps/stross-cli",
@@ -39,6 +39,12 @@ cpal = "0.18.2"
 # （optional 依赖在 crate 内补 `optional = true`，版本仍以本文件为准）。
 # ---------------------------------------------------------------------------
 async-trait = "0.1"
+# Wayland 屏幕采集栈（linux 目标；stross-endpoint wayland-capture feature 启用）：
+# lamco-pipewire = pipewire 采集（低层 API，KWin 协商 + SHM/CPU 路径），
+# lamco-portal = xdg-desktop-portal ScreenCast 会话；ashpd 用于选源。
+ashpd = "0.13"
+lamco-pipewire = "0.6.10"
+lamco-portal = "0.4.4"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.23.1"
 clap = { version = "4", features = ["derive"] }
@@ -77,7 +83,7 @@ stross-proto = { path = "crates/stross-proto", version = "0.1.0" }
 stross-types = { path = "crates/stross-types", version = "0.1.0" }
 stross-transport = { path = "crates/stross-transport", version = "0.1.0" }
 stross-kernel = { path = "crates/stross-kernel", version = "0.1.0" }
-stross-media = { path = "crates/stross-media", version = "0.1.0" }
+stross-endpoint = { path = "crates/stross-endpoint", version = "0.1.0" }
 stross-bridge = { path = "crates/stross-bridge", version = "0.1.0" }
 
 # mDNS 服务发现：fork 自 mdns-sd 0.21（crates/mdns），本地维护以修跨设备

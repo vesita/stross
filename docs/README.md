@@ -20,4 +20,4 @@ Stross 的设计与使用文档。建议阅读顺序：先 [requirements.md](req
   [`stross-transport`](../crates/stross-transport/src/lib.rs)
 - 想改中继：见 [`stross-kernel/src/relay/`](../crates/stross-kernel/src/relay/mod.rs)
 - 想改内核门面：见 [`stross-kernel/src/kernel/`](../crates/stross-kernel/src/kernel/mod.rs)
-- 想改 ffmpeg 管线：见 [`stross-media/src/pipeline/`](../crates/stross-media/src/pipeline/mod.rs)
+- 想改 ffmpeg 管线：见 [`stross-endpoint/src/pipeline/`](../crates/stross-endpoint/src/pipeline/mod.rs)

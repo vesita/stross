@@ -18,10 +18,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures_util::StreamExt;
-use stross_kernel::session_channel::{ChannelKind, SessionDataManager};
-use stross_media::playback::{
+use stross_endpoint::playback::{
     AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackSink, VideoOut,
 };
+use stross_kernel::session_channel::{ChannelKind, SessionDataManager};
 use stross_proto::frame::Frame;
 use stross_proto::message::ControlMessage;
 use tokio_tungstenite::connect_async;

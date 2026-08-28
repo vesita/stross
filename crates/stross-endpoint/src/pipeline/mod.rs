@@ -7,8 +7,8 @@
 //! * 音频进程：麦克风 + 系统声音（PulseAudio monitor / Stereo Mix）
 //!   → AAC (ADTS) → stdout
 //!
-//! Rust 侧读取两个子进程的 stdout，用 [`AnnexBSplitter`](crate::nal::AnnexBSplitter)/
-//! [`AdtsSplitter`](crate::adts::AdtsSplitter) 切成帧，打上时间戳后送入
+//! Rust 侧读取两个子进程的 stdout，用 [`AnnexBSplitter`](crate::codec::nal::AnnexBSplitter)/
+//! [`AdtsSplitter`](crate::codec::adts::AdtsSplitter) 切成帧，打上时间戳后送入
 //! [`StreamSession`] 的帧通道。
 //!
 //! 模块划分：
@@ -19,7 +19,9 @@
 
 mod args;
 
-pub use args::{audio_command, ffmpeg_available, ffmpeg_bin, video_command};
+pub use args::{
+    audio_command, ffmpeg_available, ffmpeg_bin, rawvideo_video_command, video_command,
+};
 
 use std::process::Stdio;
 use std::sync::Arc;
@@ -34,8 +36,8 @@ use tokio::sync::mpsc;
 use stross_proto::frame::{CODEC_AAC, CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO};
 use stross_proto::message::CodecId;
 
-use crate::adts::AdtsSplitter;
-use crate::nal::{AccessUnitBuilder, AnnexBSplitter};
+use crate::codec::adts::AdtsSplitter;
+use crate::codec::nal::{AccessUnitBuilder, AnnexBSplitter};
 
 /// 画质档位。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,6 +256,14 @@ impl StreamConfig {
 pub struct StreamSession {
     video: Option<Child>,
     audio: Option<Child>,
+    /// Wayland 屏幕采集控制器（仅 Wayland 屏幕共享时存在；持有以保活任务，
+    /// 停止经 ffmpeg 子进程 stdin 关闭自清理）。
+    #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
+    #[allow(dead_code)] // 只持有不读取，用于维持采集任务存活
+    wayland: Option<crate::screen::wayland::WaylandCapture>,
+    /// 采集侧错误通道（portal 授权失败 / 协商失败等；FfmpegBackend 转发到
+    /// CaptureStatus.error——桌面侧 CaptureStatusView 轮询展示）。
+    error_rx: Option<mpsc::Receiver<String>>,
     started: Instant,
     /// 会话起点墙上时刻（与 [`Self::started`] 同一时刻）；延迟校准用
     /// （`receive --calibrate` 读推流端 `--report-start` 的同一文件）。
@@ -278,15 +288,50 @@ impl StreamSession {
         let first_frame = Arc::new(std::sync::Mutex::new(None));
         let mut video = None;
         let mut audio = None;
+        #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
+        let mut wayland = None;
+        let (error_tx, error_rx) = mpsc::channel(4);
 
         if cfg.video.is_some() {
-            let args = video_command(cfg)?;
-            let mut child = spawn_ffmpeg(&args)?;
-            let stdout = child.stdout.take().context("视频进程没有 stdout")?;
-            let tx2 = tx.clone();
-            let ff = first_frame.clone();
-            tokio::spawn(read_video_loop(stdout, tx2, started, ff));
-            video = Some(child);
+            // Wayland 会话的屏幕共享：portal+pipewire 采集（Rust 侧喂帧）→
+            // ffmpeg rawvideo stdin → H.264 stdout（读循环与常规路径一致）
+            #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
+            let wayland_screen = {
+                matches!(cfg.video, Some(VideoSource::Screen))
+                    && crate::screen::wayland::is_wayland_session()
+            };
+            #[cfg(not(all(target_os = "linux", feature = "wayland-capture")))]
+            let wayland_screen = false;
+
+            if wayland_screen {
+                // 仅 wayland-capture feature 编译此分支（lamco/ashpd 依赖门控）
+                #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
+                {
+                    let args = rawvideo_video_command(cfg)?;
+                    let mut child = spawn_ffmpeg_piped(&args)?;
+                    let stdout = child.stdout.take().context("视频进程没有 stdout")?;
+                    let stdin = child.stdin.take().context("视频进程没有 stdin")?;
+                    let tx2 = tx.clone();
+                    let ff = first_frame.clone();
+                    tokio::spawn(read_video_loop(stdout, tx2, started, ff));
+                    wayland = Some(crate::screen::wayland::start(cfg, stdin, error_tx));
+                    video = Some(child);
+                }
+                #[cfg(not(all(target_os = "linux", feature = "wayland-capture")))]
+                {
+                    // feature 未启用时 wayland_screen 恒为 false，不可达
+                    unreachable!("wayland-capture feature 未启用");
+                }
+            } else {
+                let args = video_command(cfg)?;
+                let mut child = spawn_ffmpeg(&args)?;
+                let stdout = child.stdout.take().context("视频进程没有 stdout")?;
+                let tx2 = tx.clone();
+                let ff = first_frame.clone();
+                tokio::spawn(read_video_loop(stdout, tx2, started, ff));
+                video = Some(child);
+                drop(error_tx); // 无 Wayland 采集：错误通道关闭
+            }
         }
 
         if cfg.audio.is_some() {
@@ -305,6 +350,9 @@ impl StreamSession {
         Ok(Self {
             video,
             audio,
+            #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
+            wayland,
+            error_rx: Some(error_rx),
             started,
             started_wall,
             first_frame,
@@ -315,6 +363,11 @@ impl StreamSession {
     /// 会话已运行时长（毫秒）。
     pub fn elapsed_ms(&self) -> u32 {
         self.started.elapsed().as_millis() as u32
+    }
+
+    /// 取走采集侧错误通道（一次性；无 Wayland 采集时为 `None`）。
+    pub fn take_error_rx(&mut self) -> Option<mpsc::Receiver<String>> {
+        self.error_rx.take()
     }
 
     /// 停止所有子进程（会触发读循环结束）。
@@ -330,6 +383,17 @@ fn spawn_ffmpeg(args: &[String]) -> Result<Child> {
     let mut cmd = Command::new(ffmpeg_bin());
     cmd.args(args)
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    cmd.spawn().context("启动 ffmpeg 失败")
+}
+
+/// 带 stdin 管道的 ffmpeg 启动（Wayland 屏幕采集：Rust 侧喂 rawvideo 帧）。
+#[cfg(all(target_os = "linux", feature = "wayland-capture"))]
+fn spawn_ffmpeg_piped(args: &[String]) -> Result<Child> {
+    let mut cmd = Command::new(ffmpeg_bin());
+    cmd.args(args)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     cmd.spawn().context("启动 ffmpeg 失败")

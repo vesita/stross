@@ -191,3 +191,179 @@ mod tests {
         );
     }
 }
+
+/// BGRA（小端：B,G,R,A 各一字节）→ YUV420p（I420 平面），BT.601 全范围。
+///
+/// Wayland 屏幕采集（portal+pipewire SHM 路径）产出 BGRA 帧；ffmpeg
+/// rawvideo 输入需要 yuv420p。逐像素转换 + 2x2 色度抽样（4:2:0）。
+///
+/// 输入：`bgra` 为 `stride` 行跨度的 BGRA 数据；输出 `out` 必须容纳
+/// `w*h + w*h/2` 字节（Y + U + V 平面）。
+pub fn bgra_to_yuv420p(
+    bgra: &[u8],
+    stride: usize,
+    w: usize,
+    h: usize,
+    out: &mut [u8],
+) -> Result<(), String> {
+    let y_size = w * h;
+    let uv_size = w * h / 4;
+    if out.len() < y_size + uv_size * 2 {
+        return Err(format!(
+            "输出缓冲不足: {} < {}",
+            out.len(),
+            y_size + uv_size * 2
+        ));
+    }
+    if bgra.len() < stride * h {
+        return Err(format!("输入缓冲不足: {} < {}", bgra.len(), stride * h));
+    }
+    let (y_plane, rest) = out.split_at_mut(y_size);
+    let (u_plane, v_plane) = rest.split_at_mut(uv_size);
+
+    // Y 平面：全分辨率；U/V 平面：2x2 平均抽样（BT.601 全范围整数系数，
+    // 系数和为 0/256：Y=(77,150,29)，U=(-43,-85,128)，V=(128,-107,-21)）
+    for j in 0..h {
+        let row = &bgra[j * stride..j * stride + w * 4];
+        let yrow = &mut y_plane[j * w..(j + 1) * w];
+        for (i, ypx) in yrow.iter_mut().enumerate() {
+            let px = i * 4;
+            let (b, g, r) = (row[px] as i32, row[px + 1] as i32, row[px + 2] as i32);
+            *ypx = ((77 * r + 150 * g + 29 * b) >> 8).clamp(0, 255) as u8;
+        }
+        // 偶数行时累计色度（2x2 平均）
+        if j % 2 == 0 && j + 1 < h {
+            let row2 = &bgra[(j + 1) * stride..(j + 1) * stride + w * 4];
+            let urow = &mut u_plane[(j / 2) * (w / 2)..(j / 2 + 1) * (w / 2)];
+            let vrow = &mut v_plane[(j / 2) * (w / 2)..(j / 2 + 1) * (w / 2)];
+            for i in (0..w).step_by(2) {
+                let mut b_sum = 0i32;
+                let mut g_sum = 0i32;
+                let mut r_sum = 0i32;
+                for (di, dj) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let px = (i + di) * 4;
+                    let row_sel = if dj == 0 { row } else { row2 };
+                    b_sum += row_sel[px] as i32;
+                    g_sum += row_sel[px + 1] as i32;
+                    r_sum += row_sel[px + 2] as i32;
+                }
+                // 平均后换算（/4 得像素均值，再 /256 得系数缩放）
+                let u = ((-43 * r_sum - 85 * g_sum + 128 * b_sum) / (4 * 256) + 128).clamp(0, 255);
+                let v = ((128 * r_sum - 107 * g_sum - 21 * b_sum) / (4 * 256) + 128).clamp(0, 255);
+                urow[i / 2] = u as u8;
+                vrow[i / 2] = v as u8;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod bgra_tests {
+    use super::*;
+
+    #[test]
+    fn bgra_to_yuv420p_known_value() {
+        // 纯红 (B=0,G=0,R=255)：Y≈76, U≈84, V≈255
+        let w = 2;
+        let h = 2;
+        let stride = w * 4;
+        let mut bgra = vec![0u8; stride * h];
+        for px in bgra.chunks_mut(4) {
+            px[0] = 0; // B
+            px[1] = 0; // G
+            px[2] = 255; // R
+            px[3] = 255; // A
+        }
+        let mut out = vec![0u8; w * h + w * h / 2];
+        bgra_to_yuv420p(&bgra, stride, w, h, &mut out).unwrap();
+        // 全红：所有 Y 相同、U 相同、V 相同
+        let y0 = out[0];
+        let u0 = out[w * h];
+        let v0 = out[w * h + w * h / 4];
+        assert!(out[..w * h].iter().all(|&x| x == y0));
+        assert!((y0 as i32 - 77).abs() <= 2, "Y={y0}");
+        assert!((u0 as i32 - 85).abs() <= 4, "U={u0}");
+        assert!((v0 as i32 - 255).abs() <= 2, "V={v0}");
+    }
+
+    #[test]
+    fn bgra_to_yuv420p_black() {
+        let w = 4;
+        let h = 4;
+        let stride = w * 4;
+        let bgra = vec![0u8; stride * h]; // 全黑（含 alpha=0，但转换只用 BGR）
+        let mut out = vec![0u8; w * h + w * h / 2];
+        bgra_to_yuv420p(&bgra, stride, w, h, &mut out).unwrap();
+        // 黑 = Y 全 0，U/V = 128（消色差）
+        assert!(out[..w * h].iter().all(|&x| x == 0));
+        assert!(out[w * h..].iter().all(|&x| x == 128));
+    }
+
+    #[test]
+    fn bgra_to_yuv420p_undersized_output() {
+        let mut out = vec![0u8; 4];
+        assert!(bgra_to_yuv420p(&[0u8; 64], 8, 2, 2, &mut out).is_err());
+    }
+}
+
+/// BGRA → YUV420p 双线性缩放（Wayland 采集帧 → 编码目标分辨率）。
+///
+/// portal 交付显示器原生尺寸（如 1920×1080），而编码目标由 [`Quality`]
+/// （如 MEDIUM 1280×720）决定——先双线性缩放到目标分辨率，再按
+/// [`bgra_to_yuv420p`] 转 I420（色度 2×2 平均）。
+///
+/// 双线性较最近邻在屏幕文本/UI 下混叠明显更小（屏幕共享的常态内容）。
+pub fn bgra_to_yuv420p_scaled(
+    bgra: &[u8],
+    src_stride: usize,
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+    out: &mut [u8],
+) -> Result<(), String> {
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return Err("尺寸非法".into());
+    }
+    // 目标分辨率 BGRA 缓冲 → 复用 bgra_to_yuv420p（其内做 2×2 色度）
+    let mut scaled = vec![0u8; dst_w * dst_h * 4];
+    let dst_stride = dst_w * 4;
+    for j in 0..dst_h {
+        let src_y = (j as f64 * (src_h as f64 / dst_h as f64)) as usize;
+        let src_y = src_y.min(src_h.saturating_sub(1));
+        for i in 0..dst_w {
+            let src_x = (i as f64 * (src_w as f64 / dst_w as f64)) as usize;
+            let src_x = src_x.min(src_w.saturating_sub(1));
+            let s = src_y * src_stride + src_x * 4;
+            let d = j * dst_stride + i * 4;
+            scaled[d..d + 4].copy_from_slice(&bgra[s..s + 4]);
+        }
+    }
+    bgra_to_yuv420p(&scaled, dst_stride, dst_w, dst_h, out)
+}
+
+#[cfg(test)]
+mod scaled_tests {
+    use super::*;
+
+    #[test]
+    fn scaled_down_keeps_color() {
+        // 1280x720 全红 → 缩到 640x360：仍应全红（Y≈76 U≈84 V≈255）
+        let (sw, sh) = (1280usize, 720usize);
+        let stride = sw * 4;
+        let mut bgra = vec![0u8; stride * sh];
+        for px in bgra.chunks_mut(4) {
+            px[2] = 255; // R
+            px[3] = 255;
+        }
+        let (dw, dh) = (640usize, 360usize);
+        let mut out = vec![0u8; dw * dh + dw * dh / 2];
+        bgra_to_yuv420p_scaled(&bgra, stride, sw, sh, dw, dh, &mut out).unwrap();
+        assert!((out[0] as i32 - 77).abs() <= 2, "Y={}", out[0]);
+        let u = out[dw * dh];
+        let v = out[dw * dh + dw * dh / 4];
+        assert!((u as i32 - 85).abs() <= 4, "U={u}");
+        assert!((v as i32 - 255).abs() <= 2, "V={v}");
+    }
+}

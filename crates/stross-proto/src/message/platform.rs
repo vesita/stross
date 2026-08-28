@@ -1,10 +1,10 @@
 //! 运行平台标签（**纯值**，无任何平台调用 / 分支）。
 //!
 //! 平台知识（哪个平台有哪些设备能力、数据目录在哪）在 [`stross_bridge`]：
-//! 壳层经桥接层判定平台并注入内核；内核只保存这个标签用于展示
-//! （`app_info().platform`）与设备清单种子的选择依据。
+//! 壳层经桥接层判定平台并注入；端点层（端点装配）与内核（展示 / 种子
+//! 选择）共用这个标签。
 
-/// 运行平台（UI 层经 [`stross_bridge::devices::platform`] 判定后注入）。
+/// 运行平台（UI 层经桥接层判定后注入）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     Desktop,

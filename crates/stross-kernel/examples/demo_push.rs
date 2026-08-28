@@ -13,9 +13,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use stross_endpoint::capture::FfmpegBackend;
+use stross_endpoint::pipeline::{Quality, StreamConfig};
 use stross_kernel::SenderEngine;
-use stross_media::capture::FfmpegBackend;
-use stross_media::pipeline::{Quality, StreamConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

@@ -21,6 +21,7 @@ pub mod discovery;
 pub mod endpoint;
 pub mod ids;
 pub mod negotiator;
+pub mod platform;
 pub mod stream;
 pub mod token;
 
@@ -35,5 +36,6 @@ pub use ids::{CapabilityKind, CodecId, MediaKind, ReliabilityProfile, RoleId, Tr
 pub use negotiator::{
     EndpointDir, EndpointNode, RelayAddr, ShareGrant, ShareRequest, ShareTokenView,
 };
+pub use platform::Platform;
 pub use stream::{StreamInfo, TrackInfo};
 pub use token::ShareToken;

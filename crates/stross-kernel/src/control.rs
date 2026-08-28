@@ -18,7 +18,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
-use stross_media::pipeline::StreamConfig;
+use stross_endpoint::pipeline::StreamConfig;
 use stross_proto::message::{Delivery, TransportPreference, Visibility};
 
 use crate::Kernel;

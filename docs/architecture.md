@@ -15,8 +15,10 @@
 │   信令 control / negotiator / subscriber / file_xfer / bootstrap       │
 │   devices(扫描) / engine(推流) / receiver(接收) / kernel(会话·路由·端点)  │
 ├───────────────────────────────┬──────────────────────────────────┤
-│ crates/stross-media           │ （stross-transport / stross-proto  │
-│ ④ 能力层：采集/播放/管线/设备枚举 │   在其下，见 §0 依赖表）            │
+│ crates/stross-endpoint        │ （stross-transport / stross-proto  │
+│ ④ 端点层：数据源/宿插件区（端点 │   在其下，见 §0 依赖表）            │
+│   契约 + screen/audio/file +  │                                  │
+│   采集/播放/管线/设备枚举）     │                                  │
 ├───────────────────────────────┴──────────────────────────────────┤
 │ crates/stross-transport ①½ 传输插件层：Transport/DataSession 抽象   │
 │   ws（无损）/ webrtc（有损）/ srt（自适应）/ quic（无损多路复用）    │
@@ -29,10 +31,10 @@
 |---|---|---|---|
 | ① 协议 | `stross-proto` | 线上契约：24 字节 v2 帧头（含 seq/分片）+ JSON 控制消息（含能力协商与路由）+ 协商握手/L2 目录 | 无内部依赖 |
 | ①½ 传输 | `stross-transport` | 可插拔传输层：`Transport`/`DataSession` 抽象 + ws/webrtc/srt/quic/memory 实现 + RelayUrl + 本机 IP | proto |
-| ④ 能力 | `stross-media` | 采集（ffmpeg 后端）/ 播放（PlaybackSink/cpal）/ 管线 StreamConfig / H.264/AAC 切帧 / 设备枚举 | proto |
-| ② 内核 | `stross-kernel` | **全部平台无关服务**：中继 server+client、发现、控制面、协商、订阅、文件传输、引导、端点/会话/路由/鉴权、推流/接收编排；单一门面 `Kernel` | proto + transport + media |
-| ⑤ 桥接 | `stross-bridge` | 平台适应：数据目录解析 / 主机名 / 平台设备枚举（只产出参数，注入内核） | kernel |
-| ⑥ UI | `stross-cli` / `stross-gui` / `stross-relay` | 参数解析 + 展示 + 平台适配（adb/ufw/采集播放后端选择） | kernel + bridge + media |
+| ④ 端点 | `stross-endpoint` | **数据源/宿插件区**：Endpoint 契约（端点化 + 数据还原）+ screen/（linux Wayland portal+pipewire / X11）、audio/、file/ + 采集播放机制（CaptureBackend/FfmpegBackend、管线 StreamConfig、PlaybackSink、H.264/AAC 切帧 codec/、设备枚举） | proto + types |
+| ② 内核 | `stross-kernel` | **纯管理调度**：中继 server+client、发现、控制面、协商、订阅、文件传输、引导、端点注册表/会话/路由/鉴权、推流/接收编排；单一门面 `Kernel` | proto + transport + endpoint + types |
+| ⑤ 桥接 | `stross-bridge` | 平台适应：数据目录解析 / 主机名 / 平台判定（端点构造委托 endpoint factory，只产出参数，注入内核） | kernel + endpoint |
+| ⑥ UI | `stross-cli` / `stross-gui` / `stross-relay` | 参数解析 + 展示 + 平台适配（adb/ufw/采集播放后端选择） | kernel + bridge + endpoint |
 
 > 协议为何保持独立小 crate：能力层与内核**都**要使用 `Frame`/`ControlMessage`，
 > 独立成 crate 才能让 media 只依赖协议、而不反向依赖内核（否则 media 会拉进 axum 等中继依赖）。
@@ -133,7 +135,7 @@
 `Hello`（推流端声明）→ `Welcome`（中继确认）；接收端连上即收 `Ready`；
 `Bye` 结束；`Error` 携带错误。
 
-## 3. 系统适配模块（crates/stross-media）
+## 3. 端点层/系统适配模块（crates/stross-endpoint）
 
 ### 采集后端抽象（capture.rs）
 
@@ -149,12 +151,21 @@ pub trait CaptureBackend: Send + Sync {
 ```
 
 - 桌面：`FfmpegBackend`（本 crate）—— ffmpeg 子进程采集；
+  **Linux Wayland 屏幕**：`FfmpegBackend` 内部路由到
+  `screen/wayland.rs` 的 portal+pipewire 采集（xdg-desktop-portal ScreenCast
+  授权 → lamco-pipewire SHM/CPU 路径，合成器无关）→ BGRA 帧双线性缩放到
+  编码目标分辨率 → yuv420p → 按目标帧率节流 → 喂 ffmpeg rawvideo stdin
+  （H.264 编码与 Annex-B 读循环与常规路径一致）；启动/运行错误经
+  `CaptureStatus.error` 回报（portal 拒绝/协商失败）。
+  X11 会话走 ffmpeg x11grab（既有路径），Windows 走 gdigrab。
 - Android：`AndroidCapture`（UI 层 `mobile.rs` 实现）—— MediaProjection + MediaCodec，
   经 Tauri `Channel` 回传帧；`status()` 由 Kotlin 控制帧（`t=9`）异步回报。
 
-### 桌面采集管线（pipeline.rs）
+### 桌面采集管线（pipeline/）
 
-两个 ffmpeg 子进程并行，编码参数刻意选择：
+两个 ffmpeg 子进程并行，编码参数刻意选择（Wayland 屏幕共享的 ffmpeg
+以 `-f rawvideo -pix_fmt yuv420p -video_size <目标> -i pipe:0` 收 Rust 侧喂帧，
+`-re` 换成 Rust 侧节流，编码参数一致）：
 
 | 参数 | 原因 |
 |---|---|
@@ -195,7 +206,7 @@ Rust 侧用 `AnnexBSplitter`（状态机切 NAL）→ `AccessUnitBuilder`
 浏览器观看端已移除（D1：接收端全部原生，无内嵌 viewer / jmuxer / MSE）。
 
 桌面接收链路（`Receiver` + `PlaybackSink`，见 crates/stross-kernel/src/receiver.rs、
-crates/stross-media/src/playback.rs）：
+crates/stross-endpoint/src/playback/）：
 
 1. 订阅 `ws://host/ws/watch?stream=ID`（或 SRT/QUIC watch）收媒体帧；
 2. 抖动缓冲（SessionDataManager 流式通道）：定长环形缓冲按 seq/pts 索引排序，
@@ -208,7 +219,7 @@ crates/stross-media/src/playback.rs）：
 Android 接收（B7 Rust 化）：编码帧 → Kotlin `PlaybackPlugin`（**MediaCodec/
 AudioTrack 系统 API 薄壳**，`feedVideo` 入队立即返回 + 独立解码线程 + 短超时）；
 解码输出 YUV 经 **JNI 直传 Rust**（stross-gui `mobile_jni.rs`）——SPS/csd 解析
-（`stross_media::nal`）、YUV→RGBA 缩放（`stross_media::yuv`）、base64 事件
+（`stross_endpoint::codec::nal`）、YUV→RGBA 缩放（`stross_endpoint::convert::yuv`）、base64 事件
 `receive-frame`、解码统计回写全部在 Rust 完成，Java 不再做位级解析与逐像素
 转换（四重瓶颈根治：同步解码 / 纯 Java 像素循环 / 5s 阻塞 / JSON 数字数组事件）。
 

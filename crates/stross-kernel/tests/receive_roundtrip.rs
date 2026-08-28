@@ -7,14 +7,14 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use stross_endpoint::capture::FfmpegBackend;
+use stross_endpoint::pipeline::ffmpeg_available;
+use stross_endpoint::pipeline::{Quality, StreamConfig, StreamSession, VideoSource};
+use stross_endpoint::playback::AudioOut;
 use stross_kernel::relay::RelayServer;
 use stross_kernel::transport::srt::SrtTransport;
 use stross_kernel::transport::{PeerAddr, SessionPacket, SessionParams, Transport};
 use stross_kernel::{Kernel, Platform, Receiver};
-use stross_media::capture::FfmpegBackend;
-use stross_media::pipeline::ffmpeg_available;
-use stross_media::pipeline::{Quality, StreamConfig, StreamSession, VideoSource};
-use stross_media::playback::AudioOut;
 use stross_proto::frame::Frame;
 use stross_proto::message::{ControlMessage, ReliabilityProfile};
 use tokio::sync::mpsc;

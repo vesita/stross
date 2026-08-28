@@ -163,25 +163,22 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 title,
                 sinks: sinks.split(',').map(|s| s.trim().to_string()).collect(),
             };
-            let payload = request(&args.connect, req).await?;
-            tracing::info!(
-                "sessionId: {}",
-                payload["sessionId"].as_str().unwrap_or("?")
-            );
+            let r: stross_types::SessionCreatedView = request_as(&args.connect, req).await?;
+            tracing::info!("sessionId: {}", r.session_id);
         }
         CtrlCommand::Authorize { session_id, code } => {
             let req = CtrlRequest::Authorize {
                 session_id: session_id.clone(),
                 access_code: code,
             };
-            let _ = request(&args.connect, req).await?;
+            let _: stross_types::AuthorizedView = request_as(&args.connect, req).await?;
             tracing::info!("已鉴权: {session_id}");
         }
         CtrlCommand::Teardown { session_id } => {
             let req = CtrlRequest::Teardown {
                 session_id: session_id.clone(),
             };
-            let _ = request(&args.connect, req).await?;
+            let _: stross_types::TeardownView = request_as(&args.connect, req).await?;
             tracing::info!("已拆除会话: {session_id}");
         }
         CtrlCommand::ShareToken { session_id, ttl } => {
@@ -189,15 +186,14 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 session_id: session_id.clone(),
                 ttl_secs: ttl,
             };
-            let payload = request(&args.connect, req).await?;
-            let token = payload["token"].as_str().unwrap_or("?");
+            let r: stross_types::IssuedShareTokenView = request_as(&args.connect, req).await?;
             tracing::info!(
                 "已签发接入凭证: streamId={} pin={} expiresAt={}",
-                payload["streamId"].as_str().unwrap_or("?"),
-                payload["pin"].as_str().unwrap_or("?"),
-                payload["expiresAt"],
+                r.stream_id,
+                r.pin,
+                r.expires_at,
             );
-            tracing::info!("推流端出示凭证（--share-token）: {token}");
+            tracing::info!("推流端出示凭证（--share-token）: {}", r.token);
         }
         CtrlCommand::StartStream {
             secs,
@@ -218,60 +214,53 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 config,
                 relay_url: relay,
             };
-            let payload = request(&args.connect, req).await?;
+            let r: stross_types::StartResult = request_as(&args.connect, req).await?;
             tracing::info!(
                 "推流已启动: streamId={} relayPort={} watchUrls={:?}",
-                payload["streamId"].as_str().unwrap_or("?"),
-                payload["relayPort"],
-                payload["watchUrls"]
+                r.stream_id,
+                r.relay_port,
+                r.watch_urls
             );
         }
         CtrlCommand::StopStream => {
-            let req = CtrlRequest::StopStream;
-            let _ = request(&args.connect, req).await?;
+            let _: stross_types::StoppedView =
+                request_as(&args.connect, CtrlRequest::StopStream).await?;
             tracing::info!("推流已停止");
         }
         CtrlCommand::ListSessions => {
-            let req = CtrlRequest::ListSessions;
-            let payload = request(&args.connect, req).await?;
-            tracing::info!("会话: {payload}");
+            let r: stross_types::SessionsPayload =
+                request_as(&args.connect, CtrlRequest::ListSessions).await?;
+            tracing::info!("会话: {}", serde_json::to_string(&r)?);
         }
         CtrlCommand::Status { json } => {
-            let req = CtrlRequest::Status;
-            let payload = request(&args.connect, req).await?;
+            let r: stross_types::StatusView =
+                request_as(&args.connect, CtrlRequest::Status).await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&payload)?);
+                println!("{}", serde_json::to_string_pretty(&r)?);
                 return Ok(());
             }
-            print_status(&payload);
+            print_status(&r);
         }
         CtrlCommand::Events { secs } => events(&args.connect, secs).await?,
         CtrlCommand::NegotiatorList { json } => {
-            let payload = request(&args.connect, CtrlRequest::NegotiatorPending).await?;
+            let r: stross_types::PendingRequestsPayload =
+                request_as(&args.connect, CtrlRequest::NegotiatorPending).await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&payload)?);
+                println!("{}", serde_json::to_string_pretty(&r)?);
                 return Ok(());
             }
-            let pending = payload["pending"].as_array().cloned().unwrap_or_default();
-            if pending.is_empty() {
+            if r.pending.is_empty() {
                 println!("无待确认的协商请求");
                 return Ok(());
             }
             println!("待确认的凭证协商请求：");
-            for p in &pending {
+            for p in &r.pending {
                 println!(
                     "  {}  {}（{}）media={}",
-                    p["id"].as_str().unwrap_or("?"),
-                    p["deviceName"].as_str().unwrap_or("?"),
-                    p["deviceId"].as_str().unwrap_or("?"),
-                    p["media"]
-                        .as_array()
-                        .map(|m| m
-                            .iter()
-                            .filter_map(|x| x.as_str())
-                            .collect::<Vec<_>>()
-                            .join(","))
-                        .unwrap_or_default(),
+                    p.id,
+                    p.device_name,
+                    p.device_id,
+                    p.media.join(","),
                 );
             }
             println!(
@@ -283,7 +272,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
             deny,
             remember,
         } => {
-            let payload = request(
+            let r: stross_types::GrantResponseView = request_as(
                 &args.connect,
                 CtrlRequest::NegotiatorRespond {
                     req_id: req_id.clone(),
@@ -292,13 +281,13 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 },
             )
             .await?;
-            if deny {
+            if deny || r.denied {
                 println!("已拒绝请求 {req_id}");
             } else {
                 println!(
                     "已允许 {req_id} → streamId={} pin={}",
-                    payload["streamId"].as_str().unwrap_or("?"),
-                    payload["pin"].as_str().unwrap_or("?")
+                    r.stream_id.as_deref().unwrap_or("?"),
+                    r.pin.as_deref().unwrap_or("?"),
                 );
             }
         }
@@ -316,12 +305,12 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                     transports: None,
                     codecs: None,
                 };
-                let payload = request(&args.connect, req).await?;
+                let m: stross_types::EndpointPublishedView = request_as(&args.connect, req).await?;
                 println!(
                     "已公开端点 {}（{}）delivery={}",
-                    payload["endpointId"].as_str().unwrap_or("?"),
-                    payload["name"].as_str().unwrap_or("?"),
-                    payload["delivery"].as_str().unwrap_or("?"),
+                    m.endpoint_id,
+                    m.name,
+                    m.delivery.as_str(),
                 );
             }
             EndpointCommand::PublishFile {
@@ -335,54 +324,54 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                     visibility: parse_visibility(&visibility, &nodes)?,
                     delivery: parse_delivery(&delivery)?,
                 };
-                let payload = request(&args.connect, req).await?;
+                let r: stross_types::FilePublishedView = request_as(&args.connect, req).await?;
                 println!(
                     "已公开文件端点 {}（{}，{} 字节）delivery={}",
-                    payload["endpointId"].as_str().unwrap_or("?"),
-                    payload["name"].as_str().unwrap_or("?"),
-                    payload["size"].as_u64().unwrap_or(0),
-                    payload["delivery"].as_str().unwrap_or("?"),
+                    r.endpoint_id,
+                    r.name,
+                    r.size,
+                    r.delivery.as_str(),
                 );
             }
             EndpointCommand::Unpublish { endpoint_id } => {
                 let req = CtrlRequest::EndpointUnpublish {
                     endpoint_id: endpoint_id.clone(),
                 };
-                let _ = request(&args.connect, req).await?;
+                let _: stross_types::UnpublishedView = request_as(&args.connect, req).await?;
                 println!("已取消公开端点: {endpoint_id}");
             }
             EndpointCommand::List { json } => {
-                let payload = request(&args.connect, CtrlRequest::EndpointList).await?;
+                let r: stross_types::EndpointListPayload =
+                    request_as(&args.connect, CtrlRequest::EndpointList).await?;
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                    println!("{}", serde_json::to_string_pretty(&r)?);
                     return Ok(());
                 }
-                let endpoints = payload["endpoints"].as_array().cloned().unwrap_or_default();
-                println!("本节点端点（{} 个）：", endpoints.len());
-                for e in &endpoints {
-                    let avail = if e["available"].as_bool().unwrap_or(false) {
+                println!("本节点端点（{} 个）：", r.endpoints.len());
+                for e in &r.endpoints {
+                    let avail = if e.available {
                         "可用".to_string()
                     } else {
                         format!(
                             "不可用（{}）",
-                            e["lastError"].as_str().unwrap_or("未知原因")
+                            e.last_error.as_deref().unwrap_or("未知原因")
                         )
                     };
                     println!(
                         "  {}「{}」{} {}{} vis={} delivery={} state={} subscribers={}",
-                        e["endpointId"].as_str().unwrap_or("?"),
-                        e["name"].as_str().unwrap_or("?"),
+                        e.endpoint_id,
+                        e.name,
                         avail,
-                        if e["published"].as_bool().unwrap_or(false) {
+                        if e.published {
                             "已通告"
                         } else {
                             "未通告"
                         },
-                        e["kind"].as_str().unwrap_or("?"),
-                        e["visibility"].as_str().unwrap_or("?"),
-                        e["delivery"].as_str().unwrap_or("?"),
-                        e["state"].as_str().unwrap_or("?"),
-                        e["subscribers"].as_u64().unwrap_or(0),
+                        e.kind.as_str(),
+                        e.visibility.as_str(),
+                        e.delivery.as_str(),
+                        e.state.as_str(),
+                        e.subscribers,
                     );
                 }
                 println!(
@@ -396,30 +385,27 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
 
 /// 可见性参数解析（public | confirm | private + 白名单节点）。
 fn parse_visibility(s: &str, nodes: &[String]) -> anyhow::Result<Visibility> {
-    match s {
-        "public" => Ok(Visibility::Public),
-        "confirm" => Ok(Visibility::Confirm),
-        "private" => Ok(Visibility::Private {
+    match Visibility::from_wire(s) {
+        Some(Visibility::Private { .. }) => Ok(Visibility::Private {
             nodes: nodes.to_vec(),
         }),
-        other => bail!("--visibility 取值 public|confirm|private，收到 {other}"),
+        Some(v) => Ok(v),
+        None => bail!("--visibility 取值 public|confirm|private，收到 {s}"),
     }
 }
 
 /// delivery 参数解析（pull | push | both）。
 fn parse_delivery(s: &str) -> anyhow::Result<Delivery> {
-    match s {
-        "pull" => Ok(Delivery::Pull),
-        "push" => Ok(Delivery::Push),
-        "both" => Ok(Delivery::Both),
-        other => bail!("--delivery 取值 pull|push|both，收到 {other}"),
-    }
+    Delivery::from_wire(s)
+        .ok_or_else(|| anyhow::anyhow!("--delivery 取值 pull|push|both，收到 {s}"))
 }
 
-/// 发一个请求并等待响应（忽略事件推送）。信封解析在库层
-/// `stross_kernel::control::client`（docs/layering-architecture.md）。
-async fn request(connect: &str, req: CtrlRequest) -> anyhow::Result<serde_json::Value> {
-    stross_kernel::control::client::request(connect, req).await
+/// 发请求并把载荷反序列化为类型化视图（内核产出，壳层不定义响应结构）。
+async fn request_as<T: serde::de::DeserializeOwned>(
+    connect: &str,
+    req: CtrlRequest,
+) -> anyhow::Result<T> {
+    stross_kernel::control::client::request_as(connect, req).await
 }
 
 /// 订阅并打印内核事件（`StreamStarted` / `StreamEnded` / 会话变化等）。
@@ -432,34 +418,27 @@ async fn events(connect: &str, secs: u64) -> anyhow::Result<()> {
 }
 
 /// 人类可读的实例状态输出（`stross ctrl status`）。
-fn print_status(p: &serde_json::Value) {
-    let get = |k: &str| p.get(k).cloned().unwrap_or(serde_json::Value::Null);
+fn print_status(s: &stross_types::StatusView) {
     println!("Stross 实例状态");
-    println!(
-        "  版本      v{} ({})",
-        get("version").as_str().unwrap_or("?"),
-        get("platform").as_str().unwrap_or("?")
-    );
-    println!(
-        "  运行时长  {}",
-        fmt_dur(get("uptimeSecs").as_u64().unwrap_or(0))
-    );
-    let relay = get("relayPort").as_u64().unwrap_or(0);
-    let transports = match (get("srtPort").as_u64(), get("quicPort").as_u64()) {
-        (Some(s), Some(q)) => format!("（SRT {s} · QUIC {q}）"),
-        (Some(s), None) => format!("（SRT {s}）"),
-        (None, Some(q)) => format!("（QUIC {q}）"),
+    println!("  版本      v{} ({})", s.version, s.platform);
+    println!("  运行时长  {}", fmt_dur(s.uptime_secs));
+    let relay = s.relay_port;
+    let transports = match (s.srt_port, s.quic_port) {
+        (Some(srt), Some(quic)) => format!("（SRT {srt} · QUIC {quic}）"),
+        (Some(srt), None) => format!("（SRT {srt}）"),
+        (None, Some(quic)) => format!("（QUIC {quic}）"),
         (None, None) => String::new(),
     };
     println!("  中继      ws://127.0.0.1:{relay}{transports}");
-    if get("streaming").as_bool().unwrap_or(false) {
-        let sid = get("streamId").as_str().unwrap_or("?").to_string();
-        let title = get("streamTitle")
-            .as_str()
-            .filter(|s| !s.is_empty())
+    if s.streaming {
+        let sid = s.stream_id.as_deref().unwrap_or("?").to_string();
+        let title = s
+            .stream_title
+            .as_deref()
+            .filter(|t| !t.is_empty())
             .unwrap_or("未命名")
             .to_string();
-        let since = get("streamStartedAt").as_u64().unwrap_or(0);
+        let since = s.stream_started_at.unwrap_or(0);
         let now = stross_proto::time::unix_secs();
         println!(
             "  推流      运行中 {sid}「{title}」已推 {}",
@@ -468,7 +447,7 @@ fn print_status(p: &serde_json::Value) {
     } else {
         println!("  推流      未运行");
     }
-    println!("  会话数    {}", get("sessions").as_u64().unwrap_or(0));
+    println!("  会话数    {}", s.sessions);
 }
 
 /// 秒数 → "X 分 Y 秒" / "Y 秒"。

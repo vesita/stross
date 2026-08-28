@@ -230,15 +230,9 @@ pub fn endpoint_publish(
     delivery: String,
 ) -> Result<stross_proto::message::EndpointManifest, String> {
     use stross_proto::message::{Delivery, Visibility};
-    let visibility = match visibility.as_str() {
-        "confirm" => Visibility::Confirm,
-        _ => Visibility::Public,
-    };
-    let delivery = match delivery.as_str() {
-        "push" => Delivery::Push,
-        "both" => Delivery::Both,
-        _ => Delivery::Pull,
-    };
+    // wire 字符串 → 枚举的解析单一真源在 proto（from_wire），前端不重复定义
+    let visibility = Visibility::from_wire(&visibility).unwrap_or(Visibility::Public);
+    let delivery = Delivery::from_wire(&delivery).unwrap_or(Delivery::Pull);
     state
         .publish_endpoint(&device_id, visibility, delivery, None, None)
         .map_err(|e| e.to_user_string())
@@ -276,10 +270,9 @@ pub async fn endpoint_subscribe_media(
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir());
-    let delivery = delivery.as_deref().map(|s| match s {
-        "push" => stross_proto::message::Delivery::Push,
-        _ => stross_proto::message::Delivery::Pull,
-    });
+    let delivery = delivery
+        .as_deref()
+        .and_then(stross_proto::message::Delivery::from_wire);
     stross_kernel::subscribe_media(
         &state.inner().clone(),
         &base,
@@ -309,10 +302,9 @@ pub async fn endpoint_subscribe(
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir());
-    let delivery = delivery.as_deref().map(|s| match s {
-        "push" => stross_proto::message::Delivery::Push,
-        _ => stross_proto::message::Delivery::Pull,
-    });
+    let delivery = delivery
+        .as_deref()
+        .and_then(stross_proto::message::Delivery::from_wire);
     stross_kernel::subscribe_file(
         &app_state,
         &base,

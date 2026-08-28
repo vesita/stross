@@ -10,6 +10,7 @@
     "types": []
   },
   "files": [
+    "app/types.ts",
     "app/state.ts",
     "app/ui.ts",
     "app/discovery.ts",

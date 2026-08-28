@@ -292,7 +292,9 @@
     </div>
   </div>
 
-  <!-- 前端脚本：app/ 目录按依赖序加载（script 全局作用域共享，勿改顺序） -->
+  <!-- 前端脚本：app/ 目录按依赖序加载（script 全局作用域共享，勿改顺序；
+       types.js 必须是第一个——类型/标签/字符串联合的单一真源） -->
+  <script src="app/types.js"></script>
   <script src="app/state.js"></script>
   <script src="app/ui.js"></script>
   <script src="app/discovery.js"></script>

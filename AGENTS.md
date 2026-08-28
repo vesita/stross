@@ -16,13 +16,17 @@ crates/
                     message/negotiator.rs）
   stross-transport  传输层：SRT / QUIC / WS / WebRTC、RelayUrl、
                     net（local_ips / advertise_ip / fake-IP 判定）
+  stross-types      应用契约层：跨壳层类型单一真源（展示视图 AppInfo/RelayInfo/
+                    StreamStatus…、控制面载荷 CtrlPayload、DTO CameraDevice/
+                    PendingRequest/MediaSubscribeOutcome；依赖只到 proto）
   stross-kernel     ★ 内核（全部平台无关服务，单一门面 Kernel）：
                     中继 server + 中继 HTTP 客户端（relay/，契约单一真源）、
                     mDNS Discovery、sender/watch/jitter、控制面 CtrlServer
                     + client（D7）、凭证协商 ShareNegotiator + client、
                     端点框架 kernel/（会话/路由/鉴权/端点注册表）、
                     订阅方编排 subscriber、文件传输 file_xfer、引导 bootstrap、
-                    扫描聚合 devices、推流引擎 engine、接收 receiver、view 展示视图
+                    扫描聚合 devices、推流引擎 engine、接收 receiver、view 展示视图构造
+                    （pub use stross_types::* 保持壳层路径兼容）
   stross-media      采集（ffmpeg 后端）、播放（PlaybackSink/cpal）、流水线 StreamConfig
   stross-bridge     平台适应桥接层：paths（数据目录）/ hostname / 平台设备枚举
                     （只产出参数注入内核，不持有状态）

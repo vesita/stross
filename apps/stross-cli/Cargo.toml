@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 stross-kernel.workspace = true
+stross-types.workspace = true
 stross-bridge.workspace = true
 stross-media.workspace = true
 stross-proto.workspace = true

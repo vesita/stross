@@ -18,7 +18,6 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use stross_media::pipeline::StreamConfig;
 use stross_proto::message::{Delivery, TransportPreference, Visibility};
 
@@ -114,6 +113,16 @@ impl CtrlResponse {
     pub fn err(message: impl Into<String>) -> Self {
         Self::Err {
             message: message.into(),
+        }
+    }
+
+    /// 把类型化载荷序列化为 `Ok` 响应——wire 键由 serde 派生（单一真源），
+    /// 不再手写 JSON 字符串键（docs/layering-architecture.md：壳层只消费
+    /// 内核产出的类型，不自行定义响应结构）。
+    fn ok_json<T: Serialize>(payload: T) -> Self {
+        match serde_json::to_value(payload) {
+            Ok(v) => Self::ok(v),
+            Err(e) => Self::err(format!("载荷序列化失败: {e}")),
         }
     }
 }
@@ -214,20 +223,9 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             let Some(neg) = &state.negotiator else {
                 return CtrlResponse::err("凭证协商服务未启动（serve 未启用协商端点）");
             };
-            let pending: Vec<serde_json::Value> = neg
-                .pending_requests()
-                .iter()
-                .map(|r| {
-                    json!({
-                        "id": r.id,
-                        "deviceId": r.device_id,
-                        "deviceName": r.device_name,
-                        "media": r.media,
-                        "createdAt": r.created_at,
-                    })
-                })
-                .collect();
-            CtrlResponse::ok(json!({ "pending": pending }))
+            CtrlResponse::ok_json(stross_types::PendingRequestsPayload {
+                pending: neg.pending_requests(),
+            })
         }
         CtrlRequest::NegotiatorRespond {
             req_id,
@@ -238,13 +236,20 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
                 return CtrlResponse::err("凭证协商服务未启动（serve 未启用协商端点）");
             };
             match neg.respond(&req_id, allow, remember) {
-                Ok(Some(grant)) => CtrlResponse::ok(json!({
-                    "streamId": grant.view.stream_id,
-                    "pin": grant.view.pin,
-                    "expiresAt": grant.view.expires_at,
-                    "trusted": grant.trusted,
-                })),
-                Ok(None) => CtrlResponse::ok(json!({ "denied": true })),
+                Ok(Some(grant)) => CtrlResponse::ok_json(stross_types::GrantResponseView {
+                    stream_id: Some(grant.view.stream_id),
+                    pin: Some(grant.view.pin),
+                    expires_at: Some(grant.view.expires_at),
+                    trusted: grant.trusted,
+                    denied: false,
+                }),
+                Ok(None) => CtrlResponse::ok_json(stross_types::GrantResponseView {
+                    stream_id: None,
+                    pin: None,
+                    expires_at: None,
+                    trusted: false,
+                    denied: true,
+                }),
                 Err(e) => CtrlResponse::err(e),
             }
         }
@@ -255,11 +260,7 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             transports,
             codecs,
         } => match app.publish_endpoint(&device_id, visibility, delivery, transports, codecs) {
-            Ok(m) => CtrlResponse::ok(json!({
-                "endpointId": m.endpoint_id,
-                "name": m.name,
-                "delivery": serde_json::to_string(&m.delivery).unwrap_or_default(),
-            })),
+            Ok(m) => CtrlResponse::ok_json(m),
             Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::EndpointPublishFile {
@@ -267,46 +268,28 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             visibility,
             delivery,
         } => match app.publish_file_endpoint(std::path::Path::new(&path), visibility, delivery) {
-            Ok(m) => CtrlResponse::ok(json!({
-                "endpointId": m.endpoint_id,
-                "name": m.name,
-                "size": app.file_source(&m.endpoint_id).map(|s| s.size).unwrap_or(0),
-                "delivery": serde_json::to_string(&m.delivery).unwrap_or_default(),
-            })),
+            Ok(m) => CtrlResponse::ok_json(stross_types::FilePublishedView {
+                size: app.file_source(&m.endpoint_id).map(|s| s.size).unwrap_or(0),
+                endpoint_id: m.endpoint_id,
+                name: m.name,
+                delivery: m.delivery,
+            }),
             Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::EndpointUnpublish { endpoint_id } => {
             match app.unpublish_endpoint(&endpoint_id) {
-                Ok(()) => {
-                    CtrlResponse::ok(json!({ "endpointId": endpoint_id, "unpublished": true }))
-                }
+                Ok(()) => CtrlResponse::ok_json(stross_types::UnpublishedView {
+                    endpoint_id,
+                    unpublished: true,
+                }),
                 Err(e) => CtrlResponse::err(e.to_user_string()),
             }
         }
         CtrlRequest::EndpointList => {
             // 单层端点模型：一张端点表（含未通告），published/available 自标注
-            let endpoints: Vec<serde_json::Value> = app
-                .endpoint_catalog()
-                .iter()
-                .map(|e| {
-                    json!({
-                        "endpointId": e.endpoint_id,
-                        "kind": serde_json::to_string(&e.kind).unwrap_or_default(),
-                        "name": e.name,
-                        "available": e.available,
-                        "lastError": e.last_error,
-                        "published": e.published,
-                        "visibility": serde_json::to_string(&e.visibility).unwrap_or_default(),
-                        "delivery": serde_json::to_string(&e.delivery).unwrap_or_default(),
-                        "state": serde_json::to_string(&e.state).unwrap_or_default(),
-                        "subscribers": e.subscribers,
-                        "transports": e.transports.iter().map(|t| {
-                            json!({ "transport": serde_json::to_string(&t.transport).unwrap_or_default(), "priority": t.priority })
-                        }).collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
-            CtrlResponse::ok(json!({ "endpoints": endpoints }))
+            CtrlResponse::ok_json(stross_types::EndpointListPayload {
+                endpoints: app.endpoint_catalog(),
+            })
         }
         CtrlRequest::CreateSession { title, sinks } => {
             // 源节点固定为本机（register_local_node 注册的 "local"）；
@@ -316,7 +299,10 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
                 ..Default::default()
             };
             match app.create_session("local", &sinks, &prefs) {
-                Ok(s) => CtrlResponse::ok(json!({ "sessionId": s.id, "title": s.title })),
+                Ok(s) => CtrlResponse::ok_json(stross_types::SessionCreatedView {
+                    session_id: s.id,
+                    title: s.title,
+                }),
                 Err(e) => CtrlResponse::err(e.to_user_string()),
             }
         }
@@ -324,20 +310,19 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             session_id,
             access_code,
         } => match app.authorize(&session_id, access_code.as_deref()) {
-            Ok(()) => CtrlResponse::ok(json!({ "sessionId": session_id, "authorized": true })),
+            Ok(()) => CtrlResponse::ok_json(stross_types::AuthorizedView {
+                session_id,
+                authorized: true,
+            }),
             Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::Teardown { session_id } => match app.teardown(&session_id) {
-            Ok(()) => CtrlResponse::ok(json!({ "sessionId": session_id })),
+            Ok(()) => CtrlResponse::ok_json(stross_types::TeardownView { session_id }),
             Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::StartStream { config, relay_url } => {
             match app.start_stream(config, relay_url).await {
-                Ok(r) => CtrlResponse::ok(json!({
-                    "relayPort": r.relay_port,
-                    "watchUrls": r.watch_urls,
-                    "streamId": r.stream_id,
-                })),
+                Ok(r) => CtrlResponse::ok_json(r),
                 Err(e) => CtrlResponse::err(e.to_user_string()),
             }
         }
@@ -352,53 +337,51 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
                 media,
                 std::time::Duration::from_secs(ttl_secs),
             ) {
-                Ok(token) => CtrlResponse::ok(json!({
-                    "token": token.to_token_string(),
-                    "streamId": token.stream_id,
-                    "pin": token.pin,
-                    "expiresAt": token.expires_at,
-                    "media": token.media.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>(),
-                })),
+                Ok(token) => CtrlResponse::ok_json(stross_types::IssuedShareTokenView {
+                    token: token.to_token_string(),
+                    stream_id: token.stream_id,
+                    pin: token.pin,
+                    expires_at: token.expires_at,
+                    media: token.media,
+                }),
                 Err(e) => CtrlResponse::err(e.to_user_string()),
             }
         }
         CtrlRequest::StopStream => match app.stop_stream().await {
-            Ok(()) => CtrlResponse::ok(json!({ "stopped": true })),
+            Ok(()) => CtrlResponse::ok_json(stross_types::StoppedView { stopped: true }),
             Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::ListSessions => {
-            let sessions: Vec<serde_json::Value> = app
+            let sessions: Vec<stross_types::SessionView> = app
                 .sessions()
                 .iter()
-                .map(|s| {
-                    json!({
-                        "sessionId": s.id,
-                        "source": s.source,
-                        "sinks": s.sinks,
-                        "requiresPin": s.requires_pin,
-                    })
+                .map(|s| stross_types::SessionView {
+                    session_id: s.id.clone(),
+                    source: s.source.clone(),
+                    sinks: s.sinks.clone(),
+                    requires_pin: s.requires_pin,
                 })
                 .collect();
-            CtrlResponse::ok(json!({ "sessions": sessions }))
+            CtrlResponse::ok_json(stross_types::SessionsPayload { sessions })
         }
         CtrlRequest::Status => {
             let status = app.stream_status();
             let (ws_port, srt_port, quic_port) =
                 app.relay_ports()
                     .unwrap_or((app.stream_relay_port(), None, None));
-            CtrlResponse::ok(json!({
-                "version": env!("CARGO_PKG_VERSION"),
-                "platform": app.platform_str(),
-                "uptimeSecs": app.uptime_secs(),
-                "relayPort": ws_port,
-                "srtPort": srt_port,
-                "quicPort": quic_port,
-                "streaming": status.running,
-                "streamId": status.stream_id,
-                "streamTitle": status.title,
-                "streamStartedAt": status.started_at,
-                "sessions": app.sessions().len(),
-            }))
+            CtrlResponse::ok_json(stross_types::StatusView {
+                version: env!("CARGO_PKG_VERSION").into(),
+                platform: app.platform_str().to_string(),
+                uptime_secs: app.uptime_secs(),
+                relay_port: ws_port,
+                srt_port,
+                quic_port,
+                streaming: status.running,
+                stream_id: status.stream_id,
+                stream_title: status.title,
+                stream_started_at: status.started_at,
+                sessions: app.sessions().len(),
+            })
         }
     }
 }
@@ -443,6 +426,16 @@ pub mod client {
                 _ => {}
             }
         }
+    }
+
+    /// 发送控制请求并**反序列化载荷为类型化视图**（[`crate::view`]）——
+    /// 壳层不再手写 `payload["key"]` 字符串键（wire 键单一真源 = serde）。
+    pub async fn request_as<T: serde::de::DeserializeOwned>(
+        connect: &str,
+        req: CtrlRequest,
+    ) -> anyhow::Result<T> {
+        let payload = request(connect, req).await?;
+        serde_json::from_value(payload).context("控制响应载荷类型不符")
     }
 
     /// 订阅控制面事件流（无 `rsp` 标签的 [`KernelEvent`]），收集 `secs` 秒。

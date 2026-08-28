@@ -4848,6 +4848,7 @@ dependencies = [
  "stross-kernel",
  "stross-media",
  "stross-proto",
+ "stross-types",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",
@@ -4890,6 +4891,7 @@ dependencies = [
  "stross-media",
  "stross-proto",
  "stross-transport",
+ "stross-types",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -4908,6 +4910,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stross-proto",
+ "stross-types",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -4959,6 +4962,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tungstenite 0.30.0",
+]
+
+[[package]]
+name = "stross-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "stross-proto",
 ]
 
 [[package]]

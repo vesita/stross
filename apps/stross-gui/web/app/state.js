@@ -1,63 +1,14 @@
 "use strict";
-// Stross 前端 —— 全局状态与类型（script 全局作用域共享，勿加 import/export）。
+// Stross 前端 —— 全局运行时状态（script 全局作用域共享，勿加 import/export）。
 //
 // 界面模型（设备 × 共享流 组合管理）：
 //   · 设备（Device）是实体：本机 + 局域网发现/手动添加的设备；
 //   · 共享流（Share）是设备之间的连接实例：方向（出站共享 / 入站接收）、
 //     媒体（屏幕/摄像头/麦克风/系统声）、对端（广播或具体设备）、状态。
 // 左栏设备列表发起共享，右栏共享流统一管理（含停止）。
-const QUALITIES = {
-    LOW: { width: 640, height: 360, fps: 24, bitrateKbps: 800 },
-    MEDIUM: { width: 1280, height: 720, fps: 30, bitrateKbps: 2500 },
-    HIGH: { width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 },
-};
-const LS_RELAY = 'stross.lastRelay';
-const LS_TITLE = 'stross.lastTitle';
-const LS_RECENT = 'stross.recentRelays';
-/** 可见性中文显示。 */
-const VISIBILITY_LABELS = {
-    public: '公开',
-    confirm: '需确认',
-    private: '私密',
-};
-/** delivery 中文显示。 */
-const DELIVERY_LABELS = {
-    pull: '拉取',
-    push: '推送',
-    both: '双向',
-};
-/** 设备类型中文显示。 */
-const DEVICE_KIND_LABELS = {
-    screen: '屏幕',
-    window: '窗口',
-    camera: '摄像头',
-    mic: '麦克风',
-    systemAudio: '系统声',
-    input: '输入',
-    clipboard: '剪贴板',
-    file: '文件',
-    service: '服务',
-};
-// ---------------------------------------------------------------------------
-// 单一状态源：全部运行时状态集中在此，各域文件显式读写；
-// 渲染是状态（state）的纯函数，消灭「散文件 let 全局变量 + 脆弱互斥拼真相」。
-// ---------------------------------------------------------------------------
-/** 运行平台 / 环境。 */
-let IS_ANDROID = false;
-/** 本机采集设备（相机/音频输入/系统声；由 list_devices 填充）。 */
-let devices = { cameras: [], audioInputs: [], systemAudio: [] };
-/** 本机锚点（免先连：init 自动 `start_relay`；推流/级联兜底的数据面入口）。 */
-let anchor = null;
-/** 手动添加的设备地址（http://host:port，免 mDNS；与最近历史共享持久化）。 */
-let manualRelays = [];
-/** 设备列表（本机 + 局域网设备；渲染左栏）。 */
-let deviceViews = [];
-/** 当前选中的设备 key（展开态保持）。 */
-let expandedDevice = null;
-/** 流 id → 流信息缓存（接收传输自动选择按 video/audio 类型决策）。 */
-const remoteStreams = new Map();
-/** 本机在线共享缓存（供本机卡片流区渲染）。 */
-let localStreams = [];
+//
+// 类型与标签映射见 types.ts（本文件只放运行时可变状态 + 少量状态常量；
+// 各域文件显式读写，渲染是状态（state）的纯函数）。
 // —— 交互状态（轮询句柄 / in-flight 防重入） ——
 let statusTimer = null; // 状态轮询句柄（应用打开期间常驻）
 let scanInFlight = false; // 「扫描设备」in-flight
@@ -95,8 +46,8 @@ let targetRelay = null;
 // —— 协商 / 授权状态 ——
 /** 当前等待人工确认的协商请求（negotiator-request 事件送达；null = 无）。 */
 let pendingApprove = null;
-// —— 端点框架状态（节点 → 设备 → 端点） ——
-/** 本机目录（设备 + 已公开端点；local_catalog 填充，渲染本机设备树）。 */
+// —— 端点框架状态（节点 → 端点） ——
+/** 本机目录（端点清单；local_catalog 填充，渲染本机端点树）。 */
 let localCatalog = { endpoints: [] };
 /** 通告弹窗目标（null = 未打开）。 */
 let publishTarget = null;
@@ -108,16 +59,20 @@ const remoteDirs = new Map();
 const remoteDirAt = new Map();
 /** 远端目录拉取中（按设备 base；防重入）。 */
 const remoteDirLoading = new Set();
-/** 角色英文 → 中文显示（mDNS TXT `roles`）。 */
-const ROLE_LABELS = {
-    sender: '共享',
-    viewer: '接收',
-    relay: '中继',
-};
-/** 共享媒体 → 中文显示。 */
-const MEDIA_LABELS = {
-    screen: '屏幕',
-    camera: '摄像头',
-    mic: '麦克风',
-    systemAudio: '系统声',
-};
+// —— 设备 / 锚点 / 采集 ——
+/** 运行平台 / 环境。 */
+let IS_ANDROID = false;
+/** 本机采集设备（相机/音频输入/系统声；由 list_devices 填充）。 */
+let devices = { cameras: [], audioInputs: [], systemAudio: [] };
+/** 本机锚点（免先连：init 自动 `start_relay`；推流/级联兜底的数据面入口）。 */
+let anchor = null;
+/** 手动添加的设备地址（http://host:port，免 mDNS；与最近历史共享持久化）。 */
+let manualRelays = [];
+/** 设备列表（本机 + 局域网设备；渲染左栏）。 */
+let deviceViews = [];
+/** 当前选中的设备 key（展开态保持）。 */
+let expandedDevice = null;
+/** 流 id → 流信息缓存（接收传输自动选择按 video/audio 类型决策）。 */
+const remoteStreams = new Map();
+/** 本机在线共享缓存（供本机卡片流区渲染）。 */
+let localStreams = [];

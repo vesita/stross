@@ -60,9 +60,8 @@ use crate::negotiator::DeviceIdentity;
 use crate::platform::Platform;
 use crate::receiver::{LocalProxy, Receiver};
 use crate::relay::{DEFAULT_PORT, RelayEvent, RelayHandle, RelayServer};
-use crate::view::{
-    self, AppInfo, CaptureStatusView, DeviceList, RelayInfo, StartResult, StreamStatus,
-};
+use crate::view;
+use stross_types::{AppInfo, CaptureStatusView, DeviceList, RelayInfo, StartResult, StreamStatus};
 
 use self::graph::DeviceGraph;
 use self::session::{Router, SessionManager};
@@ -327,9 +326,9 @@ impl Kernel {
     }
 
     /// 本机目录视图（全部端点；节点卡片端点树渲染用）。
-    pub fn local_catalog(&self) -> crate::view::LocalCatalog {
+    pub fn local_catalog(&self) -> stross_types::LocalCatalog {
         let endpoints = self.endpoint_catalog();
-        crate::view::LocalCatalog { endpoints }
+        stross_types::LocalCatalog { endpoints }
     }
 
     // -----------------------------------------------------------------------
@@ -1058,7 +1057,7 @@ impl Kernel {
     ///
     /// 手机出示凭证直接推入本机受控中继（`Hello.share_token`），电脑随后
     /// 用同一会话 id 原生接收——B0 凭证式接入，不开放任何远程控制面。
-    pub fn issue_share_token(&self, ttl_secs: Option<u64>) -> Result<crate::view::ShareTokenView> {
+    pub fn issue_share_token(&self, ttl_secs: Option<u64>) -> Result<stross_types::ShareTokenView> {
         self.issue_share_token_for("接收手机麦克风".into(), vec![MediaKind::Mic], ttl_secs)
     }
 
@@ -1068,7 +1067,7 @@ impl Kernel {
         title: String,
         media: Vec<MediaKind>,
         ttl_secs: Option<u64>,
-    ) -> Result<crate::view::ShareTokenView> {
+    ) -> Result<stross_types::ShareTokenView> {
         let prefs = SessionPrefs {
             title,
             ..Default::default()
@@ -1076,7 +1075,7 @@ impl Kernel {
         let session = self.create_session("local", &["local".into()], &prefs)?;
         let ttl = Duration::from_secs(ttl_secs.unwrap_or(600));
         let token = self.create_share_token(&session.id, media, ttl)?;
-        Ok(crate::view::ShareTokenView {
+        Ok(stross_types::ShareTokenView {
             token: token.to_token_string(),
             stream_id: token.stream_id,
             pin: token.pin,

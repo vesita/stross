@@ -26,7 +26,7 @@ try {
 }
 const { JSDOM } = requireJsdom('jsdom');
 const html = readFileSync(join(root, 'apps/stross-gui/web/index.html'), 'utf8');
-const appFiles = ['state', 'ui', 'discovery', 'endpoints', 'subscribe', 'firewall', 'main'];
+const appFiles = ['types', 'state', 'ui', 'discovery', 'endpoints', 'subscribe', 'firewall', 'main'];
 const appSrc = appFiles
   .map((f) => readFileSync(join(root, 'apps/stross-gui/web/app', f + '.js'), 'utf8'))
   .join('\n');

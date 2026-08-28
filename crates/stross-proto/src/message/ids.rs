@@ -70,6 +70,23 @@ pub enum MediaKind {
     Service,
 }
 
+impl MediaKind {
+    /// wire 字符串（camelCase；与 serde 序列化一致，单一真源）。
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            MediaKind::Screen => "screen",
+            MediaKind::Window => "window",
+            MediaKind::Camera => "camera",
+            MediaKind::Mic => "mic",
+            MediaKind::SystemAudio => "systemAudio",
+            MediaKind::Input => "input",
+            MediaKind::Clipboard => "clipboard",
+            MediaKind::File => "file",
+            MediaKind::Service => "service",
+        }
+    }
+}
+
 /// 设备角色（发现广播 F1.2 用；有限集合）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

@@ -78,13 +78,20 @@ pub use platform::Platform;
 pub use receiver::{ReceiveStats, Receiver};
 pub use relay::{DEFAULT_PORT, GUI_PORT, RelayHandle, RelayServer};
 pub use sender::RelayClient;
+/// 应用契约层（壳层只读；展示视图 + 控制面载荷，定义单一真源在
+/// stross-types crate，此处重导出保持 `stross_kernel::*` 路径兼容）。
+pub use stross_types::{
+    AppInfo, AuthorizedView, CameraDevice, CaptureStatusView, DeviceList, EndpointListPayload,
+    FilePublishedView, GrantResponseView, IssuedShareTokenView, LocalCatalog,
+    PendingRequestsPayload, RelayInfo, SessionCreatedView, SessionView, SessionsPayload,
+    ShareTokenView, StartResult, StatusView, StoppedView, StreamStatus, TeardownView,
+    UnpublishedView,
+};
 pub use subscriber::{
     MediaSubscribeOutcome, SubscribeOutcome, fetch_directory, subscribe_file, subscribe_media,
 };
-pub use view::{
-    AppInfo, CaptureStatusView, DeviceList, LocalCatalog, RelayInfo, ShareTokenView, StartResult,
-    StreamStatus,
-};
+/// 展示视图构造帮助函数（`relay_info` / `watch_urls`；兼容重导出见 [`view`]）。
+pub use view::{relay_info, watch_urls};
 
 /// SRT/QUIC 固定传输端口（权限自动化：防火墙只放行已知端口）。
 pub const DEFAULT_SRT_PORT: u16 = 33462;

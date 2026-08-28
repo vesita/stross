@@ -191,21 +191,8 @@ fn new_device_id() -> String {
 // 待确认请求（UI 面，非线协议）
 // ---------------------------------------------------------------------------
 
-/// 待人工确认的请求（推送给 UI 展示）。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingRequest {
-    /// 挂起请求 id（`negotiator_respond` 时回填）。
-    pub id: String,
-    pub device_id: String,
-    pub device_name: String,
-    /// 序列化后的媒体名（`MediaKind` camelCase；前端展示用）。
-    pub media: Vec<String>,
-    /// 订阅目标端点名（端点语义；旧语义为 `None`）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint_name: Option<String>,
-    pub created_at: u64,
-}
+/// 待人工确认的请求（纯数据 DTO，定义收敛至 stross-types——应用契约层单一真源）。
+pub use stross_types::PendingRequest;
 
 /// UI 层回调接口：有挂起请求时通知（Tauri 层实现为 emit 事件）。
 pub trait NegotiatorUi: Send + Sync {

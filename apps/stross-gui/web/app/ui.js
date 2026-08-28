@@ -103,7 +103,7 @@ function roleChip(role) {
     return c;
 }
 function roleLabel(r) {
-    return ROLE_LABELS[r] || r;
+    return labelOf(ROLE_LABELS, r);
 }
 /** 轨道小标签（视频/音频 chip）。 */
 function chipEl(kind, label) {

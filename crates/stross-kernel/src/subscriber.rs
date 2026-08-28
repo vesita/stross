@@ -57,16 +57,8 @@ pub struct SubscribeOutcome {
 
 /// 媒体端点订阅结果（GUI 命令 / 未来 CLI 共用）：握手后交给既有接收链路
 /// `start_receive(relay_url, stream_id)` 实际观看 / 播放。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaSubscribeOutcome {
-    /// 公开方拍板后的方向（pull = 连公开方中继；push = 公开方推入本机）。
-    pub delivery: Delivery,
-    /// watch 入口（ws://host:port；pull = 公开方中继，push = 本机中继）。
-    pub relay_url: String,
-    /// 观看流 id（pull = 公开方会话；push = 本机自签会话）。
-    pub stream_id: String,
-}
+/// （纯数据 DTO，定义收敛至 stross-types——应用契约层单一真源。）
+pub use stross_types::MediaSubscribeOutcome;
 
 /// 订阅远端媒体端点并返回观看入口（pull：公开方中继；push：本机中继 +
 /// 自签凭证，公开方凭凭证出站推入）。订阅达成后公开方经端点驱动自动开推

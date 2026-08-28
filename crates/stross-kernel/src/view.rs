@@ -1,84 +1,15 @@
-//! 展示视图（壳层只读；**内核产出，壳层不定义 wire 结构**）。
+//! 展示视图构造（壳层只读；**内核产出，壳层不定义 wire 结构**）。
 //!
-//! 分层：线协议类型在 stross-proto；跨壳层复用的展示视图（设备卡片 / 推流
-//! 状态 / 中继入口）由内核统一产出，壳层只做渲染与参数转译——避免各平台
-//! 各写一份响应结构体（曾发生分层反转，见 layering 判据）。
-
-use serde::Serialize;
+//! 分层：线协议类型在 stross-proto；跨壳层复用的**类型定义**（设备卡片 / 推流
+//! 状态 / 中继入口 / 控制面载荷）全部收敛在 stross-types（应用契约层单一真源），
+//! 本模块只保留**构造帮助函数**（`relay_info` / `watch_urls`），并为既有
+//! `stross_kernel::view::*` 调用点做兼容重导出。
+//!
+//! 新代码请优先引用 `stross_types`（或顶层重导出 `stross_kernel::XxxView`）。
 
 use stross_proto::message::{EndpointSummary, RoleId, TransportId};
 
-/// 应用信息（版本 / 平台 / ffmpeg 是否可用 / 本机 IP）。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppInfo {
-    pub version: String,
-    /// "desktop" | "android"
-    pub platform: String,
-    pub ffmpeg: bool,
-    pub ips: Vec<String>,
-}
-
-/// 摄像头 / 麦克风 / 系统声音设备清单。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceList {
-    pub cameras: Vec<stross_media::devices::CameraDevice>,
-    pub audio_inputs: Vec<String>,
-    pub system_audio: Vec<String>,
-}
-
-/// 中继入口信息（mDNS 能力引导；本机中继或扫描结果共用）。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RelayInfo {
-    pub port: u16,
-    pub urls: Vec<String>,
-    /// 设备名（mDNS 能力引导 `name`；本机中继或缺失时为 `None`）。
-    pub name: Option<String>,
-    /// 类型（relay / sender / …）。
-    pub kind: Option<String>,
-    /// 角色（mDNS 能力引导 `roles`；枚举，序列化与字符串时代一致）。
-    pub roles: Vec<RoleId>,
-    /// 支持的传输（mDNS 能力引导 `transports`；序列化后与字符串时代一致）。
-    pub transports: Vec<TransportId>,
-    /// 中继 IP（本机中继时为 `None`，用 urls 展示）。
-    pub ip: Option<String>,
-    /// 端点框架 L1：该节点公开的端点清单摘要（id/kind/name/是否可挂载/
-    /// 是否已通告；本机 = 注册表快照，对端 = mDNS `DiscoveryInfo v3.endpoints` 解码）。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub endpoints: Vec<EndpointSummary>,
-}
-
-/// 推流启动结果。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StartResult {
-    pub relay_port: u16,
-    pub watch_urls: Vec<String>,
-    /// 实际流 id（内核签发，D4：与 session id 合一；接收端据此订阅）。
-    pub stream_id: String,
-}
-
-/// 推流状态。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StreamStatus {
-    pub running: bool,
-    pub stream_id: Option<String>,
-    pub title: Option<String>,
-    pub relay_port: Option<u16>,
-    pub started_at: Option<u64>,
-}
-
-/// 采集真实状态视图。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CaptureStatusView {
-    pub active: bool,
-    pub started: bool,
-    pub error: Option<String>,
-}
+pub use stross_types::*;
 
 /// 本机中继入口视图（含多网卡全部局域网 IP）。
 ///
@@ -116,17 +47,3 @@ pub fn watch_urls(relay_url: Option<&str>, relay_port: u16) -> Vec<String> {
     }
     crate::transport::RelayUrl::http_entries(relay_port)
 }
-
-/// 本机目录（全部端点；节点卡片端点树渲染用）。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalCatalog {
-    pub endpoints: Vec<stross_proto::message::EndpointManifest>,
-}
-
-/// 手机麦克风接入凭证视图（B2：电脑端签发后展示给手机）。
-///
-/// 线协议类型已收敛至 stross-proto：此处重导出保持
-/// `stross_kernel::view::ShareTokenView` / `stross_kernel::ShareTokenView`
-/// 路径兼容（GUI 命令层在用）。
-pub use stross_proto::message::ShareTokenView;

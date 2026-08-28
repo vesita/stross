@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/stross-proto",
+    "crates/stross-types",
     "crates/stross-transport",
     "crates/stross-kernel",
     "crates/stross-media",
@@ -73,6 +74,7 @@ jni = "0.21"
 # （需要开启 feature 的成员可写 `xxx = { workspace = true, features = [...] }`）。
 # ---------------------------------------------------------------------------
 stross-proto = { path = "crates/stross-proto", version = "0.1.0" }
+stross-types = { path = "crates/stross-types", version = "0.1.0" }
 stross-transport = { path = "crates/stross-transport", version = "0.1.0" }
 stross-kernel = { path = "crates/stross-kernel", version = "0.1.0" }
 stross-media = { path = "crates/stross-media", version = "0.1.0" }

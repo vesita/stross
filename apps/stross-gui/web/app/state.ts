@@ -1,305 +1,13 @@
-// Stross 前端 —— 全局状态与类型（script 全局作用域共享，勿加 import/export）。
+// Stross 前端 —— 全局运行时状态（script 全局作用域共享，勿加 import/export）。
 //
 // 界面模型（设备 × 共享流 组合管理）：
 //   · 设备（Device）是实体：本机 + 局域网发现/手动添加的设备；
 //   · 共享流（Share）是设备之间的连接实例：方向（出站共享 / 入站接收）、
 //     媒体（屏幕/摄像头/麦克风/系统声）、对端（广播或具体设备）、状态。
 // 左栏设备列表发起共享，右栏共享流统一管理（含停止）。
-
-/** Tauri invoke 的弱类型契约（与 Rust 命令面逐步收紧）。 */
-type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<any>;
-
-// 与 Rust 端 Quality 预设保持一致
-interface Quality { width: number; height: number; fps: number; bitrateKbps: number; }
-const QUALITIES: Record<string, Quality> = {
-  LOW: { width: 640, height: 360, fps: 24, bitrateKbps: 800 },
-  MEDIUM: { width: 1280, height: 720, fps: 30, bitrateKbps: 2500 },
-  HIGH: { width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 },
-};
-
-const LS_RELAY = 'stross.lastRelay';
-const LS_TITLE = 'stross.lastTitle';
-const LS_RECENT = 'stross.recentRelays';
-
-interface CameraDevice { id: string; name: string; }
-interface DeviceList { cameras: CameraDevice[]; audioInputs: string[]; systemAudio: string[]; }
-/** 本机锚点（`start_relay` 启动的受控中继 + mDNS 广播；推流/级联兜底的数据面入口）。 */
-interface Anchor {
-  port: number;
-  /** http://ip:port 入口地址（供其它设备连接）。 */
-  urls: string[];
-  /** SRT / QUIC 拨号地址（/api/info 拉取到后填充；null = 不可用）。 */
-  srtUrl: string | null;
-  quicUrl: string | null;
-}
-interface AppInfo { version: string; platform: string; ffmpeg: boolean; ips: string[]; }
-interface RelayInfo {
-  port: number;
-  urls: string[];
-  /** mDNS TXT 设备名（本机中继时为 null）。 */
-  name: string | null;
-  kind: string | null;
-  roles: string[];
-  transports: string[];
-  ip: string | null;
-}
-interface StartResult { relayPort: number; watchUrls: string[]; streamId: string; }
-interface StreamStatus {
-  running: boolean; streamId: string | null; title: string | null;
-  relayPort: number | null; startedAt: number | null;
-}
-interface CaptureStatus { active: boolean; started: boolean; error: string | null; }
-interface ReceiveStats {
-  running: boolean; received: number; decodedVideo: number;
-  audioBlocks: number; dropped: number; error: string | null;
-}
-interface TrackInfo {
-  codec: string;
-  width: number | null;
-  height: number | null;
-  fps: number | null;
-  sampleRate: number | null;
-  channels: number | null;
-}
-interface RemoteStream {
-  streamId: string;
-  title: string;
-  watchers: number;
-  /** 是否含视频/音频轨：布尔投影（Rust `StreamView`）；兼容历史 /api/streams
-   *  直读的 TrackInfo 对象（真值判断两者等价）。 */
-  video: boolean | TrackInfo | null;
-  audio: boolean | TrackInfo | null;
-}
-
-/** L1 端点摘要（Rust `EndpointSummary`，mDNS 摘要层：id/kind/name/可挂载/已通告）。 */
-interface L1EndpointSummary {
-  endpointId: string;
-  kind: string;
-  name: string;
-  available: boolean;
-  published: boolean;
-}
-
-/** 扫描聚合视图（Rust `stross_app::devices::ScannedDevice`——mDNS + 探测
- *  聚合全在库层，前端只消费结果不再自写 /api/* 探测）。 */
-interface ScannedDevice {
-  name: string;
-  ip: string;
-  port: number;
-  isSelf: boolean;
-  roles: string[];
-  media: string[];
-  transports: string[];
-  endpoints: L1EndpointSummary[];
-  online: boolean;
-  srtPort: number | null;
-  quicPort: number | null;
-  streams: RemoteStream[];
-}
-/** 一个可接收的中继（本机锚点 / 局域网设备）。 */
-interface TargetRelay {
-  /** WS 基址（ws://host:port）。 */
-  wsBase: string;
-  /** SRT / QUIC 拨号地址（null = 不可用）。 */
-  srtUrl: string | null;
-  quicUrl: string | null;
-}
-type VideoSource =
-  | { kind: 'screen' }
-  | { kind: 'camera'; device: string | null }
-  | { kind: 'synthetic'; pattern: string };
-interface StreamConfig {
-  streamId: string;
-  title: string;
-  /** null = 纯音频推流（B2 手机麦克风反向推流）。 */
-  video: VideoSource | null;
-  quality: Quality;
-  audio: { mic: string | null; systemAudio: string | null; sampleRate: number; channels: number; bitrateKbps: number } | null;
-  durationSecs: number | null;
-  /** 一次性接入凭证（跨设备推流到对方受控中继的 ShareToken JSON；本机推流为 null）。 */
-  shareToken: string | null;
-}
-
-/** 电脑端签发的手机麦克风接入凭证（Rust `issue_share_token` 返回值）。 */
-interface ShareTokenView {
-  /** ShareToken JSON 字符串（手机端原样粘贴到「共享麦克风」）。 */
-  token: string;
-  streamId: string;
-  pin: string;
-  expiresAt: number;
-}
-
-// —— 权限自动化（B2.5：凭证自动协商 + 防火墙） ——
-// 协商端点端口在 Rust 命令层默认（`stross_app::DEFAULT_NEGOTIATOR_PORT`），
-// 前端不持有端口常量（docs/layering-architecture.md：端口真源在库层）。
-
-/** 本机持久化身份（Rust `device_identity` 返回值）。 */
-interface DeviceIdentity {
-  deviceId: string;
-  deviceName: string;
-}
-
-/** 协商签发的接入凭证（Rust `ShareGrant`：ShareTokenView + trusted）。 */
-interface ShareGrant {
-  token: string;
-  streamId: string;
-  pin: string;
-  expiresAt: number;
-  /** 是否因设备受信任而自动签发（未人工确认）。 */
-  trusted: boolean;
-}
-
-/** 待人工确认的挂起请求（Rust `PendingRequest`，经 `negotiator-request` 事件送达）。 */
-interface PendingRequest {
-  id: string;
-  deviceId: string;
-  deviceName: string;
-  /** 序列化后的媒体名（camelCase）。 */
-  media: string[];
-  createdAt: number;
-}
-
-// —— 端点框架（节点 → 设备 → 端点；docs/endpoint-model.md） ——
-
-/** 端点清单（单层端点模型，Rust `EndpointManifest` 平铺：可挂载性 + 通告状态）。 */
-interface EndpointManifest {
-  endpointId: string;
-  kind: string;
-  name: string;
-  /** load 探测结果：能否被挂载成节点（false = 不可通告、不可订阅）。 */
-  available: boolean;
-  /** load/share 失败原因（不可用时展示）。 */
-  lastError: string | null;
-  /** 是否已通告（未通告 = 仅本机可见）。 */
-  published: boolean;
-  visibility: string;
-  delivery: string;
-  transports: { transport: string; priority: number }[];
-  codecs: string[];
-  state: string;
-  subscribers: number;
-  updatedAt: number;
-}
-
-/** 本机目录（Rust `local_catalog`：全部端点，含未通告与不可挂载）。 */
-interface LocalCatalog {
-  endpoints: EndpointManifest[];
-}
-
-/** L2 目录（Rust `EndpointDir`：节点 + 已通告端点；服务端已滤 Private）。 */
-interface RemoteDir {
-  node: { deviceId: string; deviceName: string };
-  endpoints: EndpointManifest[];
-}
-
-/** 媒体端点订阅结果（Rust `MediaSubscribeOutcome`：watch 入口 + 流 id）。 */
-interface MediaSubscribeOutcome {
-  delivery: string;
-  relayUrl: string;
-  streamId: string;
-}
-
-/** 可见性中文显示。 */
-const VISIBILITY_LABELS: Record<string, string> = {
-  public: '公开',
-  confirm: '需确认',
-  private: '私密',
-};
-
-/** delivery 中文显示。 */
-const DELIVERY_LABELS: Record<string, string> = {
-  pull: '拉取',
-  push: '推送',
-  both: '双向',
-};
-
-/** 设备类型中文显示。 */
-const DEVICE_KIND_LABELS: Record<string, string> = {
-  screen: '屏幕',
-  window: '窗口',
-  camera: '摄像头',
-  mic: '麦克风',
-  systemAudio: '系统声',
-  input: '输入',
-  clipboard: '剪贴板',
-  file: '文件',
-  service: '服务',
-};
-
-/** 防火墙自检结果（Rust `firewall_status`，仅 Linux 桌面）。 */
-interface FirewallStatus {
-  ufwActive: boolean;
-  defaultDenyIncoming: boolean;
-  rules: { portProto: string; from: string }[];
-  /** 缺失放行的 `port/proto`（空 = 已就绪）。 */
-  missing: string[];
-}
-
-/** 设备实体（左栏卡片）：本机或局域网发现/手动添加的设备。 */
-interface DeviceView {
-  /** 唯一键：'local' 或设备 http://host:port 基址。 */
-  key: string;
-  name: string;
-  /** 展示用 meta（IP:端口 等）。 */
-  meta: string;
-  isLocal: boolean;
-  /** mDNS 角色（仅非本机；手动添加为空）。 */
-  roles: string[];
-  /** 手动添加（无 mDNS 角色信息）。 */
-  manual: boolean;
-  /** 非本机设备基址 http://host:port；本机为 null。 */
-  base: string | null;
-  /** 设备 SRT/QUIC 拨号地址（扫描聚合带出；null = 不可用）。 */
-  srtUrl: string | null;
-  quicUrl: string | null;
-  /** 设备 QUIC 端口（协商/推流域选传输用，来自扫描；null = 不可用）。 */
-  quicPort: number | null;
-  /** 该设备在线共享流（点流即接收）。 */
-  streams: RemoteStream[];
-}
-
-/** 共享媒体类型（与设备能力徽标一致）。 */
-type ShareMedia = 'screen' | 'camera' | 'mic' | 'systemAudio';
-
-/** 活动共享流条目（右栏统一管理；方向 × 媒体 × 对端）。 */
-interface ShareItem {
-  /** 唯一 id（流 id / 会话 id）。 */
-  id: string;
-  /** out = 本机共享出去（广播或定向）；in = 本机从对端接收。 */
-  direction: 'out' | 'in';
-  media: ShareMedia;
-  /** 对端展示：'局域网广播' / 设备名。 */
-  target: string;
-  /** starting / live / error。 */
-  state: 'starting' | 'live' | 'error';
-  /** 状态详情（统计/错误）。 */
-  detail: string;
-}
-
-// ---------------------------------------------------------------------------
-// 单一状态源：全部运行时状态集中在此，各域文件显式读写；
-// 渲染是状态（state）的纯函数，消灭「散文件 let 全局变量 + 脆弱互斥拼真相」。
-// ---------------------------------------------------------------------------
-
-/** 运行平台 / 环境。 */
-let IS_ANDROID = false;
-
-/** 本机采集设备（相机/音频输入/系统声；由 list_devices 填充）。 */
-let devices: DeviceList = { cameras: [], audioInputs: [], systemAudio: [] };
-
-/** 本机锚点（免先连：init 自动 `start_relay`；推流/级联兜底的数据面入口）。 */
-let anchor: Anchor | null = null;
-/** 手动添加的设备地址（http://host:port，免 mDNS；与最近历史共享持久化）。 */
-let manualRelays: string[] = [];
-
-/** 设备列表（本机 + 局域网设备；渲染左栏）。 */
-let deviceViews: DeviceView[] = [];
-/** 当前选中的设备 key（展开态保持）。 */
-let expandedDevice: string | null = null;
-/** 流 id → 流信息缓存（接收传输自动选择按 video/audio 类型决策）。 */
-const remoteStreams = new Map<string, RemoteStream>();
-/** 本机在线共享缓存（供本机卡片流区渲染）。 */
-let localStreams: RemoteStream[] = [];
+//
+// 类型与标签映射见 types.ts（本文件只放运行时可变状态 + 少量状态常量；
+// 各域文件显式读写，渲染是状态（state）的纯函数）。
 
 // —— 交互状态（轮询句柄 / in-flight 防重入） ——
 let statusTimer: number | null = null; // 状态轮询句柄（应用打开期间常驻）
@@ -342,8 +50,8 @@ let targetRelay: TargetRelay | null = null;
 /** 当前等待人工确认的协商请求（negotiator-request 事件送达；null = 无）。 */
 let pendingApprove: PendingRequest | null = null;
 
-// —— 端点框架状态（节点 → 设备 → 端点） ——
-/** 本机目录（设备 + 已公开端点；local_catalog 填充，渲染本机设备树）。 */
+// —— 端点框架状态（节点 → 端点） ——
+/** 本机目录（端点清单；local_catalog 填充，渲染本机端点树）。 */
 let localCatalog: LocalCatalog = { endpoints: [] };
 /** 通告弹窗目标（null = 未打开）。 */
 let publishTarget: { ep: EndpointManifest } | null = null;
@@ -356,17 +64,24 @@ const remoteDirAt = new Map<string, number>();
 /** 远端目录拉取中（按设备 base；防重入）。 */
 const remoteDirLoading = new Set<string>();
 
-/** 角色英文 → 中文显示（mDNS TXT `roles`）。 */
-const ROLE_LABELS: Record<string, string> = {
-  sender: '共享',
-  viewer: '接收',
-  relay: '中继',
-};
+// —— 设备 / 锚点 / 采集 ——
 
-/** 共享媒体 → 中文显示。 */
-const MEDIA_LABELS: Record<ShareMedia, string> = {
-  screen: '屏幕',
-  camera: '摄像头',
-  mic: '麦克风',
-  systemAudio: '系统声',
-};
+/** 运行平台 / 环境。 */
+let IS_ANDROID = false;
+
+/** 本机采集设备（相机/音频输入/系统声；由 list_devices 填充）。 */
+let devices: DeviceList = { cameras: [], audioInputs: [], systemAudio: [] };
+
+/** 本机锚点（免先连：init 自动 `start_relay`；推流/级联兜底的数据面入口）。 */
+let anchor: Anchor | null = null;
+/** 手动添加的设备地址（http://host:port，免 mDNS；与最近历史共享持久化）。 */
+let manualRelays: string[] = [];
+
+/** 设备列表（本机 + 局域网设备；渲染左栏）。 */
+let deviceViews: DeviceView[] = [];
+/** 当前选中的设备 key（展开态保持）。 */
+let expandedDevice: string | null = null;
+/** 流 id → 流信息缓存（接收传输自动选择按 video/audio 类型决策）。 */
+const remoteStreams = new Map<string, RemoteStream>();
+/** 本机在线共享缓存（供本机卡片流区渲染）。 */
+let localStreams: RemoteStream[] = [];

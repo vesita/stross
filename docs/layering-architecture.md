@@ -20,7 +20,10 @@
 │   数据面 relay{srv,client} · sender/watch/jitter · discovery(mDNS)     │
 │   信令 control{srv,client} · negotiator{srv,client} · subscriber        │
 │   file_xfer · bootstrap · devices(扫描聚合) · engine(推流) · receiver(接收)│
-│   kernel{会话/路由/鉴权/凭证/端点/设备图} · view(展示视图)                  │
+│   kernel{会话/路由/鉴权/凭证/端点/设备图} · view(展示视图构造)              │
+├──────────────────────────────────────────────────────────────────┤
+│ stross-types   应用契约层：跨壳层类型单一真源（展示视图 + 控制面载荷 +      │
+│                DTO：AppInfo/StatusView/CtrlPayload/CameraDevice…）      │
 ├──────────────────────────────────────────────────────────────────┤
 │ stross-media   能力层：CaptureBackend / PlaybackSink / StreamConfig /    │
 │                设备枚举/采集播放抽象（ffmpeg/cpal 后端实现）             │
@@ -34,12 +37,13 @@
 
 | 层 | crate | 职责 | 依赖 |
 |---|---|---|---|
-| 协议 | `stross-proto` | 线上契约：帧头 + 控制消息 + 协商握手 + L2 目录（`message/negotiator.rs`） | 无内部依赖 |
+| 协议 | `stross-proto` | 线上契约：帧头 + 控制消息 + 协商握手 + L2 目录（`message/negotiator.rs`）+ 枚举 wire 字符串（`as_str`/`from_wire`） | 无内部依赖 |
 | 传输 | `stross-transport` | `Transport`/`DataSession` 抽象 + ws/webrtc/srt/quic/memory 实现 + RelayUrl + 本机 IP | proto |
-| 能力 | `stross-media` | 采集（ffmpeg 后端）/ 播放（PlaybackSink/cpal）/ 管线 StreamConfig / 设备枚举 | proto |
-| **内核** | **`stross-kernel`** | **全部平台无关服务**（见 §2），以 [`Kernel`] 门面为单一入口 | proto + transport + media |
+| 能力 | `stross-media` | 采集（ffmpeg 后端）/ 播放（PlaybackSink/cpal）/ 管线 StreamConfig / 设备枚举（`CameraDevice` 收敛至 types，此处重导出） | proto + types |
+| **契约** | **`stross-types`** | **跨壳层应用契约单一真源**：展示视图（AppInfo/RelayInfo/StreamStatus…）+ 控制面载荷（CtrlResponse::Ok payload）+ DTO（CameraDevice/PendingRequest/MediaSubscribeOutcome/ShareTokenView） | proto |
+| **内核** | **`stross-kernel`** | **全部平台无关服务**（见 §2），以 [`Kernel`] 门面为单一入口；`pub use stross_types::*` 保持壳层路径兼容 | proto + transport + media + types |
 | 桥接 | `stross-bridge` | 平台适应：paths / hostname / 平台端点构造（load 探测注入，只产出**参数**，不持有状态） | kernel + media |
-| 壳层 | `stross-cli` / `stross-gui` / `stross-relay` | 参数解析 + 展示 + 平台适配 | kernel + bridge + media |
+| 壳层 | `stross-cli` / `stross-gui` / `stross-relay` | 参数解析 + 展示 + 平台适配 | kernel + bridge + media + types |
 
 ## 2. 内核定义（第七轮落定）
 
@@ -56,7 +60,7 @@
 | 信令 | `control`（CtrlServer + client）、`negotiator` + `negotiator_client`、`subscriber`、`file_xfer`、`bootstrap` | 控制面/协商端点（服务端 + 客户端）、订阅方编排、文件端点传输、引导层 |
 | 端点框架 | `kernel::endpoint`（EndpointRegistry + Endpoint 契约）、`kernel::graph`、`kernel::session`、`kernel::auth` | 单层端点（load/share 契约，端点自驱动）、设备图、会话/路由、PIN 鉴权 |
 | 编排 | `kernel`（Kernel 门面）、`engine`（SenderEngine）、`receiver`（Receiver） | 状态机、推流引擎、接收编排（在 `stross-media` 能力之上） |
-| 展示 | `view` | 跨壳层复用的展示视图（AppInfo/RelayInfo/StreamStatus…），壳层不定义响应结构体 |
+| 展示 | `view`（构造助手）+ `stross-types`（类型） | 跨壳层复用的展示视图构造（relay_info/watch_urls）；类型定义在 stross-types，壳层不定义响应结构体 |
 | 端口 | `relay::{DEFAULT_PORT=18777, GUI_PORT=8777}`、`DEFAULT_CTRL_PORT=18778`、`DEFAULT_NEGOTIATOR_PORT=18779`、`DEFAULT_SRT_PORT=33462`、`DEFAULT_QUIC_PORT=33464` | 全仓端口字面量清零（壳层/前端一律引用库常量） |
 
 **事件面**：所有变更经 `Kernel::subscribe()` → [`KernelEvent`] 广播（会话/路由/
@@ -92,7 +96,7 @@
 | 数据目录解析 / 主机名 / 平台端点构造 | stross-bridge | 壳层各写一份 XDG/HOME 回退链 |
 | 采集 / 播放 / 平台能力 | stross-media + 壳层适配 | kernel（能力交付型 `cfg` 除外） |
 | 端口常量 | stross-kernel | 壳层/前端硬编码端口 |
-| 展示视图 | stross-kernel `view`（或壳层本地视图） | 壳层定义 wire 结构体 |
+| 展示视图类型 / 控制面载荷 / 共享 DTO | stross-types | 壳层定义 wire 结构体（类型单一真源在契约层） |
 
 ## 5. 红线（改动前必读）
 

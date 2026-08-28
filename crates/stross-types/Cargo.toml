@@ -1,0 +1,10 @@
+[package]
+name = "stross-types"
+description = "Shared application-contract types for Stross: shell-facing views, control-plane payloads, and device/negotiation DTOs (proto = wire, types = contract, kernel = logic)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+stross-proto.workspace = true
+serde.workspace = true

@@ -43,6 +43,27 @@ pub enum Visibility {
     Private { nodes: Vec<String> },
 }
 
+impl Visibility {
+    /// wire 字符串（camelCase；与 serde 序列化一致，单一真源）。
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Visibility::Public => "public",
+            Visibility::Confirm => "confirm",
+            Visibility::Private { .. } => "private",
+        }
+    }
+
+    /// 从 wire 字符串解析（与 [`as_str`](Self::as_str) 互逆；未知值返回 `None`）。
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "public" => Some(Self::Public),
+            "confirm" => Some(Self::Confirm),
+            "private" => Some(Self::Private { nodes: Vec::new() }),
+            _ => None,
+        }
+    }
+}
+
 /// 数据面连接方向（由公开者声明；订阅握手时定稿）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +74,27 @@ pub enum Delivery {
     Push,
     /// 两种都可，订阅方可在握手中选一种。
     Both,
+}
+
+impl Delivery {
+    /// wire 字符串（camelCase；与 serde 序列化一致，单一真源）。
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Delivery::Pull => "pull",
+            Delivery::Push => "push",
+            Delivery::Both => "both",
+        }
+    }
+
+    /// 从 wire 字符串解析（与 [`as_str`](Self::as_str) 互逆；未知值返回 `None`）。
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "pull" => Some(Self::Pull),
+            "push" => Some(Self::Push),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
 }
 
 /// 公开者选择的传输协议（priority 升序 = 公开者偏好）。
@@ -73,6 +115,17 @@ pub enum EndpointState {
     Active,
     /// 暂停（手动挂起）。
     Suspended,
+}
+
+impl EndpointState {
+    /// wire 字符串（camelCase；与 serde 序列化一致，单一真源）。
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            EndpointState::Idle => "idle",
+            EndpointState::Active => "active",
+            EndpointState::Suspended => "suspended",
+        }
+    }
 }
 
 /// 端点清单：公开方协议 / 可见性 / delivery / 挂载性 / 运行状态的唯一来源。
@@ -208,6 +261,64 @@ mod tests {
             .unwrap(),
             r#"{"private":{"nodes":["dev-a"]}}"#
         );
+    }
+
+    #[test]
+    fn wire_strings_roundtrip() {
+        // as_str / from_wire 与 serde 序列化保持一致（单一真源不漂移）
+        for v in [Visibility::Public, Visibility::Confirm] {
+            assert_eq!(Visibility::from_wire(v.as_str()), Some(v.clone()));
+            assert_eq!(
+                serde_json::to_string(&v).unwrap(),
+                format!("\"{}\"", v.as_str())
+            );
+        }
+        // Private 的节点清单不在 wire 字符串里（解析出空清单，调用方补充）
+        let v = Visibility::Private {
+            nodes: vec!["dev-a".into()],
+        };
+        assert_eq!(
+            Visibility::from_wire(v.as_str()),
+            Some(Visibility::Private { nodes: vec![] })
+        );
+        assert_eq!(Visibility::from_wire("internal"), None);
+
+        for d in [Delivery::Pull, Delivery::Push, Delivery::Both] {
+            assert_eq!(Delivery::from_wire(d.as_str()), Some(d));
+            assert_eq!(
+                serde_json::to_string(&d).unwrap(),
+                format!("\"{}\"", d.as_str())
+            );
+        }
+        assert_eq!(Delivery::from_wire("upstream"), None);
+
+        for s in [
+            EndpointState::Idle,
+            EndpointState::Active,
+            EndpointState::Suspended,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&s).unwrap(),
+                format!("\"{}\"", s.as_str())
+            );
+        }
+        // MediaKind 全变体与 serde 一致（camelCase）
+        for k in [
+            crate::message::ids::MediaKind::Screen,
+            crate::message::ids::MediaKind::Window,
+            crate::message::ids::MediaKind::Camera,
+            crate::message::ids::MediaKind::Mic,
+            crate::message::ids::MediaKind::SystemAudio,
+            crate::message::ids::MediaKind::Input,
+            crate::message::ids::MediaKind::Clipboard,
+            crate::message::ids::MediaKind::File,
+            crate::message::ids::MediaKind::Service,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&k).unwrap(),
+                format!("\"{}\"", k.as_str())
+            );
+        }
     }
 
     #[test]

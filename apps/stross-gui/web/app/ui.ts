@@ -108,7 +108,7 @@ function roleChip(role: string): HTMLElement {
 }
 
 function roleLabel(r: string): string {
-  return ROLE_LABELS[r] || r;
+  return labelOf(ROLE_LABELS, r);
 }
 
 /** 轨道小标签（视频/音频 chip）。 */

@@ -52,7 +52,7 @@ function renderLocalDevices(): void {
     name.textContent = ep.name;
     const meta = document.createElement('span');
     meta.className = 'ep-meta';
-    const kindLabel = DEVICE_KIND_LABELS[ep.kind] || ep.kind;
+    const kindLabel = labelOf(DEVICE_KIND_LABELS, ep.kind);
     meta.textContent = ep.available
       ? kindLabel
       : `${kindLabel} · 不可用（${ep.lastError || '未知原因'}）`;
@@ -69,8 +69,8 @@ function renderLocalDevices(): void {
       const badge = document.createElement('span');
       badge.className = 'badge ep-badge';
       badge.textContent =
-        '已通告 · ' + (VISIBILITY_LABELS[ep.visibility] || ep.visibility) +
-        ' · ' + (DELIVERY_LABELS[ep.delivery] || ep.delivery) +
+        '已通告 · ' + labelOf(VISIBILITY_LABELS, ep.visibility) +
+        ' · ' + labelOf(DELIVERY_LABELS, ep.delivery) +
         (ep.subscribers ? ` · ${ep.subscribers} 订阅` : '');
       row.appendChild(badge);
       const unpub = document.createElement('button');
@@ -90,25 +90,6 @@ function renderLocalDevices(): void {
       row.appendChild(pub);
     }
     box.appendChild(row);
-  }
-}
-
-/** 设备类型 → 图标名（雪碧图）。 */
-function deviceKindIcon(kind: string): string {
-  switch (kind) {
-    case 'screen':
-    case 'window':
-      return 'monitor';
-    case 'camera':
-      return 'camera';
-    case 'mic':
-      return 'mic';
-    case 'systemAudio':
-      return 'speaker';
-    case 'file':
-      return 'download';
-    default:
-      return 'server';
   }
 }
 
@@ -230,8 +211,8 @@ function renderRemoteDir(dev: DeviceView, dir: RemoteDir): void {
     const meta = document.createElement('span');
     meta.className = 'ep-meta';
     meta.textContent =
-      (VISIBILITY_LABELS[ep.visibility] || ep.visibility) + ' · ' +
-      (DELIVERY_LABELS[ep.delivery] || ep.delivery) +
+      labelOf(VISIBILITY_LABELS, ep.visibility) + ' · ' +
+      labelOf(DELIVERY_LABELS, ep.delivery) +
       (ep.subscribers ? ` · ${ep.subscribers} 订阅中` : '');
     body.appendChild(name);
     body.appendChild(meta);
@@ -281,8 +262,8 @@ function openSubscribeModal(host: string, endpointId: string): void {
   subscribeTarget = { host, ep };
   $('sub-modal-title').textContent = `订阅「${ep.name}」`;
   $('sub-modal-sub').textContent =
-    `可见性=${VISIBILITY_LABELS[ep.visibility] || ep.visibility} · ` +
-    `方向=${DELIVERY_LABELS[ep.delivery] || ep.delivery} · 传输=` +
+    `可见性=${labelOf(VISIBILITY_LABELS, ep.visibility)} · ` +
+    `方向=${labelOf(DELIVERY_LABELS, ep.delivery)} · 传输=` +
     (ep.transports.map((t) => t.transport).join('/') || '按默认');
   const sel = $('sub-delivery') as HTMLSelectElement;
   sel.innerHTML = '';
@@ -291,7 +272,7 @@ function openSubscribeModal(host: string, endpointId: string): void {
         { value: 'pull', label: '拉取（连公开方中继，观看更省本机资源）' },
         { value: 'push', label: '推送（公开方凭凭证推入本机中继）' },
       ]
-    : [{ value: ep.delivery, label: DELIVERY_LABELS[ep.delivery] || ep.delivery }];
+    : [{ value: ep.delivery, label: labelOf(DELIVERY_LABELS, ep.delivery) }];
   fillSelect(sel, opts, '');
   $('sub-error').classList.add('hidden');
   $('sub-modal').classList.remove('hidden');

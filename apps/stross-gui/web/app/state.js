@@ -97,7 +97,7 @@ let targetRelay = null;
 let pendingApprove = null;
 // —— 端点框架状态（节点 → 设备 → 端点） ——
 /** 本机目录（设备 + 已公开端点；local_catalog 填充，渲染本机设备树）。 */
-let localCatalog = { devices: [], endpoints: [] };
+let localCatalog = { endpoints: [] };
 /** 通告弹窗目标（null = 未打开）。 */
 let publishTarget = null;
 /** 订阅弹窗目标（远端端点；null = 未打开）。 */

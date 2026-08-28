@@ -71,11 +71,12 @@ interface RemoteStream {
   audio: boolean | TrackInfo | null;
 }
 
-/** L1 设备摘要（Rust `DeviceSummary`，mDNS 摘要层）。 */
-interface L1DeviceSummary {
-  deviceId: string;
+/** L1 端点摘要（Rust `EndpointSummary`，mDNS 摘要层：id/kind/name/可挂载/已通告）。 */
+interface L1EndpointSummary {
+  endpointId: string;
   kind: string;
   name: string;
+  available: boolean;
   published: boolean;
 }
 
@@ -89,7 +90,7 @@ interface ScannedDevice {
   roles: string[];
   media: string[];
   transports: string[];
-  devices: L1DeviceSummary[];
+  endpoints: L1EndpointSummary[];
   online: boolean;
   srtPort: number | null;
   quicPort: number | null;
@@ -160,18 +161,17 @@ interface PendingRequest {
 
 // —— 端点框架（节点 → 设备 → 端点；docs/endpoint-model.md） ——
 
-/** 节点上的持久能力实体（Rust `DeviceInfo`）。 */
-interface LocalDevice {
-  deviceId: string;
-  kind: string;
-  name: string;
-  builtin: boolean;
-}
-
-/** 端点清单（公开方协议 / 可见性 / delivery / 状态；Rust `EndpointManifest`）。 */
+/** 端点清单（单层端点模型，Rust `EndpointManifest` 平铺：可挂载性 + 通告状态）。 */
 interface EndpointManifest {
   endpointId: string;
-  device: LocalDevice;
+  kind: string;
+  name: string;
+  /** load 探测结果：能否被挂载成节点（false = 不可通告、不可订阅）。 */
+  available: boolean;
+  /** load/share 失败原因（不可用时展示）。 */
+  lastError: string | null;
+  /** 是否已通告（未通告 = 仅本机可见）。 */
+  published: boolean;
   visibility: string;
   delivery: string;
   transports: { transport: string; priority: number }[];
@@ -181,16 +181,14 @@ interface EndpointManifest {
   updatedAt: number;
 }
 
-/** 本机目录（Rust `local_catalog`：设备 + 已公开端点）。 */
+/** 本机目录（Rust `local_catalog`：全部端点，含未通告与不可挂载）。 */
 interface LocalCatalog {
-  devices: LocalDevice[];
   endpoints: EndpointManifest[];
 }
 
-/** L2 目录（Rust `EndpointDir`：节点 + 设备 + 可订阅端点；服务端已滤 Private）。 */
+/** L2 目录（Rust `EndpointDir`：节点 + 已通告端点；服务端已滤 Private）。 */
 interface RemoteDir {
   node: { deviceId: string; deviceName: string };
-  devices: LocalDevice[];
   endpoints: EndpointManifest[];
 }
 
@@ -346,9 +344,9 @@ let pendingApprove: PendingRequest | null = null;
 
 // —— 端点框架状态（节点 → 设备 → 端点） ——
 /** 本机目录（设备 + 已公开端点；local_catalog 填充，渲染本机设备树）。 */
-let localCatalog: LocalCatalog = { devices: [], endpoints: [] };
+let localCatalog: LocalCatalog = { endpoints: [] };
 /** 通告弹窗目标（null = 未打开）。 */
-let publishTarget: { device: LocalDevice } | null = null;
+let publishTarget: { ep: EndpointManifest } | null = null;
 /** 订阅弹窗目标（远端端点；null = 未打开）。 */
 let subscribeTarget: { host: string; ep: EndpointManifest } | null = null;
 /** 远端目录缓存（设备 base → RemoteDir；TTL 内命中直接渲染）。 */

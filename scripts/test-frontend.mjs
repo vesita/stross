@@ -76,19 +76,19 @@ const invoke = async (cmd, args) => {
       return [
         {
           name: 'Stross 本机中继', ip: '192.168.1.50', port: 8777, isSelf: true, online: true,
-          roles: [], media: [], transports: [], devices: [], srtPort: 9001, quicPort: 9002,
+          roles: [], media: [], transports: [], endpoints: [], srtPort: 9001, quicPort: 9002,
           streams: streamRunning
             ? [{ streamId: 'sess-test', title: '我的屏幕', watchers: 0, video: true, audio: false }]
             : [],
         },
         {
           name: '手机A', ip: '192.168.1.51', port: 9001, isSelf: false, online: true,
-          roles: ['sender'], media: [], transports: [], devices: [], srtPort: null, quicPort: 9002,
+          roles: ['sender'], media: [], transports: [], endpoints: [], srtPort: null, quicPort: 9002,
           streams: [{ streamId: 's1', title: '手机麦克风', watchers: 0, video: false, audio: true }],
         },
         {
           name: '电脑B', ip: '192.168.1.52', port: 9002, isSelf: false, online: true,
-          roles: ['relay'], media: [], transports: [], devices: [], srtPort: null, quicPort: 9002,
+          roles: ['relay'], media: [], transports: [], endpoints: [], srtPort: null, quicPort: 9002,
           streams: [{ streamId: 's2', title: '电脑屏幕', watchers: 1, video: true, audio: false }],
         },
       ];
@@ -126,27 +126,34 @@ const invoke = async (cmd, args) => {
       return undefined;
     // —— 端点框架（节点 → 设备 → 端点） ——
     case 'local_catalog': {
-      const devices = [
-        { deviceId: 'screen:0', kind: 'screen', name: '屏幕', builtin: true },
-        { deviceId: 'mic:builtin', kind: 'mic', name: '麦克风', builtin: true },
+      // 单层端点模型：平铺清单（available/lastError/published 自标注）
+      const base = [
+        { endpointId: 'screen:0', kind: 'screen', name: '屏幕', available: true, lastError: null },
+        { endpointId: 'mic:builtin', kind: 'mic', name: '麦克风', available: true, lastError: null },
       ];
-      const endpoints = Array.from(localEpState.entries()).map(([deviceId, p]) => ({
-        endpointId: deviceId,
-        device: devices.find((d) => d.deviceId === deviceId),
-        visibility: p.visibility,
-        delivery: p.delivery,
-        transports: [], codecs: [], state: 'idle', subscribers: 0, updatedAt: 0,
-      }));
-      return { devices, endpoints };
+      const endpoints = base.map((d) => {
+        const p = localEpState.get(d.endpointId);
+        return {
+          ...d,
+          published: !!p,
+          visibility: p ? p.visibility : 'confirm',
+          delivery: p ? p.delivery : 'pull',
+          transports: [], codecs: [], state: 'idle', subscribers: 0, updatedAt: 0,
+        };
+      });
+      return { endpoints };
     }
     case 'endpoint_ls':
       return {
         node: { deviceId: 'dev-b', deviceName: '电脑B' },
-        devices: [],
         endpoints: [
           {
             endpointId: 'screen:0',
-            device: { deviceId: 'screen:0', kind: 'screen', name: '屏幕', builtin: true },
+            kind: 'screen',
+            name: '屏幕',
+            available: true,
+            lastError: null,
+            published: true,
             visibility: 'confirm',
             delivery: 'pull',
             transports: [{ transport: 'quic', priority: 0 }, { transport: 'ws', priority: 1 }],
@@ -161,7 +168,11 @@ const invoke = async (cmd, args) => {
       localEpState.set(args.deviceId, { visibility: args.visibility, delivery: args.delivery });
       return {
         endpointId: args.deviceId,
-        device: { deviceId: args.deviceId, kind: 'mic', name: '麦克风', builtin: true },
+        kind: 'mic',
+        name: '麦克风',
+        available: true,
+        lastError: null,
+        published: true,
         visibility: args.visibility,
         delivery: args.delivery,
         transports: [], codecs: [], state: 'idle', subscribers: 0, updatedAt: 0,

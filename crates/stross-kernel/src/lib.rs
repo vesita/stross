@@ -35,7 +35,6 @@ pub mod control;
 pub mod devices;
 #[cfg(feature = "discovery")]
 pub mod discovery;
-pub mod endpoint_driver;
 pub mod engine;
 pub mod error;
 pub mod file_xfer;
@@ -65,9 +64,10 @@ pub use engine::SenderEngine;
 pub use error::{Error, RelayOpError, Result, WatchError};
 pub use file_xfer::{FilePushOptions, ReceivedFile, receive_file, receive_file_session};
 pub use kernel::{
-    AuthError, AuthPolicy, DataPlaneBackend, EndpointRegistry, FileSource, Kernel, KernelEvent,
-    NodeInfo, NodeRole, PinAuthPolicy, RelayDataPlane, Session, SessionPrefs, SubscribeCtx,
-    SubscribeHook, TransportAddr,
+    AuthError, AuthPolicy, DataPlaneBackend, Endpoint, EndpointBase, EndpointEntry,
+    EndpointRegistry, FileEndpoint, FileSource, Kernel, KernelEvent, MicEndpoint, NodeInfo,
+    NodeRole, PinAuthPolicy, Probe, RelayDataPlane, ScreenEndpoint, Session, SessionPrefs,
+    SubscribeCtx, SystemAudioEndpoint, TargetKind, TransportAddr,
 };
 pub use negotiator::{
     CliUi, DEFAULT_NEGOTIATOR_PORT, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest,

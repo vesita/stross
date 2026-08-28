@@ -4830,6 +4830,7 @@ version = "0.1.0"
 dependencies = [
  "hostname",
  "stross-kernel",
+ "stross-media",
  "stross-proto",
 ]
 

@@ -15,7 +15,7 @@ use crate::net::local_ips;
 use crate::relay::client as relay_http;
 use serde::{Deserialize, Serialize};
 use stross_proto::message::{
-    DeviceSummary, DiscoveryInfo, MediaKind, RoleId, StreamInfo, TransportId,
+    DiscoveryInfo, EndpointSummary, MediaKind, RoleId, StreamInfo, TransportId,
 };
 
 /// 单条流的展示视图（video/audio 布尔投影；`adb status` 复用）。
@@ -57,8 +57,8 @@ pub struct ScannedDevice {
     pub media: Vec<MediaKind>,
     /// 支持的传输（WS / SRT / QUIC …）。
     pub transports: Vec<TransportId>,
-    /// 端点框架 L1：该节点公开的设备清单摘要（id/kind/name/是否已公开）。
-    pub devices: Vec<DeviceSummary>,
+    /// 端点框架 L1：该节点公开的端点清单摘要（id/kind/name/是否可挂载/是否已通告）。
+    pub endpoints: Vec<EndpointSummary>,
     /// `/api/info` 可达（HTTP 探测成功）才为 true。
     pub online: bool,
     pub srt_port: Option<u16>,
@@ -105,7 +105,10 @@ pub async fn scan(
                 .as_ref()
                 .map(|i| i.transports.clone())
                 .unwrap_or_default(),
-            devices: info.as_ref().map(|i| i.devices.clone()).unwrap_or_default(),
+            endpoints: info
+                .as_ref()
+                .map(|i| i.endpoints.clone())
+                .unwrap_or_default(),
             online: false,
             srt_port: None,
             quic_port: None,
@@ -188,7 +191,7 @@ pub async fn probe_base(base: &str, probe: Duration) -> Option<ScannedDevice> {
         roles: vec![],
         media: vec![],
         transports: vec![],
-        devices: vec![],
+        endpoints: vec![],
         online: false,
         srt_port: None,
         quic_port: None,
@@ -236,7 +239,7 @@ mod tests {
             media: vec![MediaKind::Screen],
             transports: vec![TransportId::Ws],
             codecs: vec![],
-            devices: vec![],
+            endpoints: vec![],
         }
         .to_txt();
         let found = vec![

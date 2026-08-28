@@ -243,7 +243,7 @@ async fn prepare_local_receiver(app: &Arc<Kernel>) -> anyhow::Result<LocalReceiv
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NoopUi, Platform, ShareNegotiator, endpoint_driver::install_endpoint_driver};
+    use crate::{MicEndpoint, NoopUi, Platform, Probe, ShareNegotiator};
     use std::path::PathBuf;
     use stross_proto::message::Visibility;
 
@@ -253,11 +253,15 @@ mod tests {
         d
     }
 
+    fn ok_probe() -> Probe {
+        std::sync::Arc::new(|| Ok(()))
+    }
+
     /// 进程内双节点闭环（订阅方侧走库接口 [`subscribe_file`]）：
-    /// 公开方（中继 + 目录/握手端点 + 文件端点 + 驱动）↔ 订阅方
+    /// 公开方（中继 + 目录/握手端点 + 文件端点）↔ 订阅方
     /// （身份 → 握手 → watch → 落盘），文件逐字节一致。
-    /// 覆盖：新订阅 API 全路径（pull），驱动默认行为（bootstrap 收敛后
-    /// 安装即开推），以及「流尚未出现」竞态重试的收敛。
+    /// 覆盖：新订阅 API 全路径（pull），端点自驱动（share 契约）默认行为，
+    /// 以及「流尚未出现」竞态重试的收敛。
     #[tokio::test]
     async fn subscribe_file_pull_roundtrip_in_process() {
         let dir_a = tmp_dir("a");
@@ -271,8 +275,6 @@ mod tests {
         let neg = ShareNegotiator::start(app_a.clone(), Arc::new(NoopUi), &dir_a, 0)
             .await
             .unwrap();
-        // 订阅驱动：默认行为由 bootstrap::start 安装；此处等价手动安装
-        install_endpoint_driver(&app_a);
         let src = dir_a.join("payload.txt");
         let payload = b"subscriber roundtrip payload\n";
         std::fs::write(&src, payload).unwrap();
@@ -314,12 +316,7 @@ mod tests {
         let dir_a = tmp_dir("ma");
         let dir_b = tmp_dir("mb");
         let app_a = Arc::new(Kernel::new(Platform::Desktop));
-        app_a.seed_device(stross_proto::message::DeviceInfo {
-            device_id: "mic:builtin".into(),
-            kind: stross_proto::message::MediaKind::Mic,
-            name: "麦克风".into(),
-            builtin: true,
-        });
+        app_a.seed_endpoint(Box::new(MicEndpoint::new("麦克风", ok_probe())));
         bootstrap::ensure_identity(&app_a, &dir_a, "stross");
         let relay = app_a.start_relay_on(0, "stross").await.unwrap();
         let neg = ShareNegotiator::start(app_a.clone(), Arc::new(NoopUi), &dir_a, 0)

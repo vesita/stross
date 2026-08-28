@@ -10,7 +10,8 @@
 //! * 会话管理（[`session`]）：会话拓扑（source → sinks[]）与协商结果
 //! * 路由（[`session::Router`]）：传输方向控制（直连 / 经中继 / 组播）
 //! * 鉴权（[`auth`]）：会话级访问码（PIN）策略
-//! * 端点（[`endpoint`]）：节点设备表 + 已公开端点（1:1）与订阅事件
+//! * 端点（[`endpoint`]）：单层端点表 + load/share 行为契约（端点自维护
+//!   可挂载性，内核不做类型分派）与订阅事件
 //! * 数据面接线（[`data_plane`]）：受控中继作为数据面后端
 //!
 //! 所有变更通过 [`KernelEvent`] 广播给 UI（替代轮询）。
@@ -25,7 +26,10 @@ pub mod session;
 
 pub use auth::{AuthError, AuthPolicy, PinAuthPolicy};
 pub use data_plane::{DataPlaneBackend, RelayDataPlane};
-pub use endpoint::{EndpointRegistry, FileSource, SubscribeCtx, SubscribeHook};
+pub use endpoint::{
+    Endpoint, EndpointBase, EndpointEntry, EndpointRegistry, FileEndpoint, FileSource, MicEndpoint,
+    Probe, ScreenEndpoint, SubscribeCtx, SystemAudioEndpoint, TargetKind,
+};
 pub use graph::{NodeInfo, NodeRole, TransportAddr};
 pub use session::{Negotiated, Session, SessionPrefs};
 
@@ -43,8 +47,8 @@ use stross_media::playback::AudioOut;
 use stross_media::playback::RenderedFrame;
 use stross_proto::frame::Frame;
 use stross_proto::message::{
-    CapabilityDescriptor, CodecId, Delivery, DeviceInfo, DiscoveryInfo, EndpointManifest,
-    MediaKind, RoutePath, ShareToken, StreamInfo, TransportId, TransportPreference, Visibility,
+    CapabilityDescriptor, CodecId, Delivery, DiscoveryInfo, EndpointManifest, MediaKind, RoutePath,
+    ShareToken, StreamInfo, TransportId, TransportPreference, Visibility,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -202,9 +206,12 @@ impl Kernel {
         *self.backend.lock_poisoned() = Some(backend);
     }
 
-    /// 注册一个设备（幂等：按 device_id 去重；平台设备枚举由桥接层提供）。
-    pub fn seed_device(&self, device: DeviceInfo) {
-        self.registry.lock_poisoned().register_device(device);
+    /// 登记一个端点并立即 load（探测可挂载性；幂等：按端点 id 去重）。
+    ///
+    /// 平台端点构造（探测闭包注入）由桥接层提供；load 失败不阻止登记——
+    /// 端点保留但标记不可挂载（`available=false` + `last_error`）。
+    pub fn seed_endpoint(&self, ep: Box<dyn Endpoint>) {
+        self.registry.lock_poisoned().seed(ep);
     }
 
     /// 注入本机持久化身份（UI 层启动时调用；缺失时 mDNS 实例名回退旧格式）。
@@ -244,37 +251,36 @@ impl Kernel {
     }
 
     // -----------------------------------------------------------------------
-    // 端点框架（P1：节点 → 设备 → 端点，见 docs/endpoint-model.md）
+    // 端点框架（单层端点模型：节点 → 端点，见 docs/endpoint-model.md）
     // -----------------------------------------------------------------------
 
-    /// 公开设备为端点（P1 1:1：同一设备重复公开报错）。
+    /// 通告端点为可订阅（可见性 / delivery / 传输由公开者声明）。
     ///
-    /// `transports` / `codecs` 缺省时按端点类型给默认（协议由公开者声明：
-    /// 媒体类 Lossy → QUIC>SRT>WS，其余 Lossless → QUIC>WS）。
+    /// 不可挂载端点（`available=false`）拒绝通告，错误携带 load 探测原因
+    /// （如「无图形会话」——屏幕获取失败前置化）。`transports` / `codecs`
+    /// 缺省时按端点**目标类型**给默认（实时目标 Lossy → QUIC>SRT>WS，
+    /// 确定目标 Lossless → QUIC>WS）。
     pub fn publish_endpoint(
         &self,
-        device_id: &str,
+        endpoint_id: &str,
         visibility: Visibility,
         delivery: Delivery,
         transports: Option<Vec<TransportPreference>>,
         codecs: Option<Vec<CodecId>>,
     ) -> Result<EndpointManifest> {
         let mut reg = self.registry.lock_poisoned();
-        let kind = reg
-            .device(device_id)
-            .ok_or_else(|| Error::Message(format!("设备不存在: {device_id}")))?
-            .kind;
-        let transports = transports.unwrap_or_else(|| EndpointRegistry::default_transports(kind));
+        let target = reg.target(endpoint_id).unwrap_or(TargetKind::Live);
+        let transports = transports.unwrap_or_else(|| EndpointRegistry::default_transports(target));
         let codecs = codecs.unwrap_or_else(|| vec![CodecId::H264, CodecId::Aac]);
-        reg.publish(device_id, visibility, delivery, transports, codecs)
+        reg.publish(endpoint_id, visibility, delivery, transports, codecs)
     }
 
-    /// 取消公开端点（已订阅会话由上层决定宽限期，P1 直接移除）。
+    /// 取消通告端点（端点保留在表里可再次通告；已订阅会话由上层决定宽限期）。
     pub fn unpublish_endpoint(&self, endpoint_id: &str) -> Result<()> {
         self.registry.lock_poisoned().unpublish(endpoint_id)
     }
 
-    /// 公开本地文件为文件端点（动态设备 `file:<名>`；本地路径登记但不出现在
+    /// 公开本地文件为文件端点（动态端点 `file:<名>`；本地路径登记但不出现在
     /// 目录 / 摘要 / wire，见 docs/endpoint-model.md §3.6）。
     pub fn publish_file_endpoint(
         &self,
@@ -287,7 +293,7 @@ impl Kernel {
             .publish_file(path, visibility, delivery)
     }
 
-    /// 文件端点的本地文件源（订阅驱动开推用）。
+    /// 文件端点的本地文件源（control.rs 状态展示）。
     pub fn file_source(&self, endpoint_id: &str) -> Option<FileSource> {
         self.registry
             .lock_poisoned()
@@ -295,38 +301,35 @@ impl Kernel {
             .cloned()
     }
 
-    /// 接线订阅事件回调（上层启动时安装一次；协商层授予成功后触发，
-    /// 见 docs/endpoint-model.md §5 联动）。
-    pub fn set_subscribe_hook(&self, hook: Option<Arc<SubscribeHook>>) {
-        self.registry.lock_poisoned().set_subscribe_hook(hook);
-    }
-
-    /// 订阅达成事件（协商层授予成功后调用；触发上层驱动开推）。
+    /// 订阅达成事件（协商层授予成功后调用）：触发端点 `share`（端点自驱动，
+    /// 内核不做类型分派）。
     ///
-    /// hook 在注册表锁**外**调用：驱动回调会再次访问注册表
-    /// （`endpoint_manifest` / `file_source`），持锁回调会死锁（实测挂死握手）。
-    pub fn fire_endpoint_subscribed(&self, endpoint_id: &str, ctx: &SubscribeCtx) {
-        let hook = self.registry.lock_poisoned().subscribed_hook();
-        if let Some(hook) = hook {
-            hook(endpoint_id, ctx);
-        }
+    /// share 在注册表锁**外**调用（端点实现会再次访问内核），持锁回调会死锁。
+    pub fn on_endpoint_subscribed(&self, app: Arc<Kernel>, endpoint_id: &str, ctx: &SubscribeCtx) {
+        self.registry
+            .lock_poisoned()
+            .on_subscribed(&app, endpoint_id, ctx);
     }
 
     /// 端点清单查询（订阅握手 / 目录 API 用）。
     pub fn endpoint_manifest(&self, endpoint_id: &str) -> Option<EndpointManifest> {
-        self.registry.lock_poisoned().manifest(endpoint_id).cloned()
+        self.registry.lock_poisoned().manifest(endpoint_id)
     }
 
-    /// 目录快照：全部设备 + 全部端点（Private 端点可见性过滤由调用方做）。
-    pub fn endpoint_catalog(&self) -> (Vec<DeviceInfo>, Vec<EndpointManifest>) {
-        let reg = self.registry.lock_poisoned();
-        (reg.devices(), reg.manifests())
+    /// 目录快照：全部端点清单（Private / 未通告可见性过滤由调用方做）。
+    pub fn endpoint_catalog(&self) -> Vec<EndpointManifest> {
+        self.registry.lock_poisoned().manifests()
     }
 
-    /// 本机目录视图（设备 + 已公开端点；节点卡片设备树渲染用）。
+    /// 已通告端点清单（对端目录用；Private 过滤由协商层做）。
+    pub fn published_endpoints(&self) -> Vec<EndpointManifest> {
+        self.registry.lock_poisoned().published_manifests()
+    }
+
+    /// 本机目录视图（全部端点；节点卡片端点树渲染用）。
     pub fn local_catalog(&self) -> crate::view::LocalCatalog {
-        let (devices, endpoints) = self.endpoint_catalog();
-        crate::view::LocalCatalog { devices, endpoints }
+        let endpoints = self.endpoint_catalog();
+        crate::view::LocalCatalog { endpoints }
     }
 
     // -----------------------------------------------------------------------
@@ -664,8 +667,7 @@ impl Kernel {
                     self.registry.lock_poisoned().summaries(),
                 ));
             }
-        }
-        // 优先指定端口；被占用时回退随机端口（本机中继"能用就行"，不因端口冲突失败）
+        } // 优先指定端口；被占用时回退随机端口（本机中继"能用就行"，不因端口冲突失败）
         let handle = match RelayServer::start_controlled_with(port, srt_port, quic_port).await {
             Ok(h) => h,
             Err(_) => {
@@ -706,7 +708,7 @@ impl Kernel {
                     MediaKind::SystemAudio,
                 ],
             )
-            .with_devices(self.registry.lock_poisoned().summaries());
+            .with_endpoints(self.registry.lock_poisoned().summaries());
             match crate::discovery::Discovery::start(
                 &instance,
                 &crate::net::local_ips(),
@@ -771,7 +773,10 @@ impl Kernel {
                         .map(|i| i.transports.clone())
                         .unwrap_or_default(),
                     ip: Some(d.ip.to_string()),
-                    devices: info.as_ref().map(|i| i.devices.clone()).unwrap_or_default(),
+                    endpoints: info
+                        .as_ref()
+                        .map(|i| i.endpoints.clone())
+                        .unwrap_or_default(),
                 }
             })
             .collect())

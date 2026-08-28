@@ -1,11 +1,9 @@
-# 端点框架 · 设计规格（节点 → 设备 → 端点）
+# 端点框架 · 设计规格（节点 → 端点，单层模型 + load/share 契约）
 
-> 状态：**讨论定稿；P1 已提交（2f22f21）、第二轮已提交（ab5dd9b）、第三轮
-> 已完成待提交**（文件端点 TRACK_FILE 传输、订阅→推流联动、端点命令、
-> 本地双端小文件互发测试、TXT 拆多 key 修复）。待办：GUI 前端渲染与公开/订阅
-> 交互、目录互斥锁、真机回归、Private 白名单动态过滤、publish 时 mDNS 重广播。
-> 对齐 `iteration-plan.md` 阶段 A/B；P1 范围：媒体类端点、一设备一端点（1:1）、
-> 双向 delivery、主程序代持目录。
+> 状态：**讨论定稿；第六轮已提交**（单层端点模型——设备/端点合并为一层，
+> 端点自维护可挂载性 + load/share 行为契约，屏幕获取失败前置化为 load 探测）。
+> 待办：目录互斥锁、真机回归、Private 白名单动态过滤、publish 时 mDNS 重广播、
+> 运行期重探测（权限授予后 reload）。对齐 `iteration-plan.md` 阶段 A/B。
 > 本文件是协议与实现的唯一规格源；术语定稿见 §1，任何讨论改动须先改这里。
 
 ---
@@ -15,187 +13,119 @@
 | 层级 | 术语 | 英文 | 定义 |
 |---|---|---|---|
 | L0 | **节点** | Node | 物理机器上的一个 Stross 运行实例（手机、电脑）；**mDNS 广播单位**，有 IP、有持久身份（`identity.json` 的 device_id） |
-| L1 | **设备** | Device | 节点上**持久存在**的能力实体：摄像头、麦克风、屏幕、系统声音、文件、服务……与订阅与否无关，一直存在，有稳定 id |
-| L2 | **端点** | Endpoint | 设备**被公开后**形成的订阅入口实例：携带协议选择（公开者选）、可见性、delivery、运行状态；有生命周期（通告/取消通告）。P1 为 1:1（一设备至多一个公开端点） |
-| — | 引导层 | Bootstrap | 发现（节点级 mDNS）+ 目录（节点→设备→端点）+ 订阅握手；不是独立进程，是每节点自带的逻辑层 |
-| — | 发现 / 通告 / 订阅 / 推流 | Discovery / Publish / Subscribe / Push | 发现=节点广播/浏览；通告=设备实例化为端点；订阅=对端点的意图登记→握手→凭证→数据面；推流=订阅成立后的传输，沿用 watch/push 双路径 |
+| L1 | **端点** | Endpoint | 节点上**可共享的能力实体**：屏幕、麦克风、摄像头、系统声音、文件、服务……与订阅与否无关，一直存在，有稳定 id。**自维护「可挂载性」**（`available`：能否被挂载成节点） |
+| — | 行为契约 | load / share | 端点 ↔ 内核的**约定**（非语言特性）：每个端点实现 `load`（探测自身可用性 → 维护 available/last_error）与 `share`（订阅达成后启动共享推流）。内核不做类型分派 |
+| — | 目标类型 | TargetKind | 端点分两类：**确定目标**（文件等，内容预先确定，一次推送、有完成态）与**实时目标**（相机等，内容持续产生，持续推流）。共性 = load/share 契约；差异 = 目标类型 + 各端点实现 |
+| — | 通告 / 订阅 / 推流 | Publish / Subscribe / Push | 通告=端点参数化（可见性/delivery/协议）并进入对端目录；订阅=对端点的意图登记→握手→凭证→数据面；推流=订阅成立后的传输，沿用 watch/push 双路径 |
+| — | 引导层 | Bootstrap | 发现（节点级 mDNS）+ 目录（节点→端点）+ 订阅握手；不是独立进程，是每节点自带的逻辑层 |
 
-协议 wire 字段统一英文 `nodeId / deviceId / endpointId`（与现有 `stream_id` 风格一致）；
-本表中文术语只管 UI 与文档。UI：原"设备卡片"改称**节点卡片**，卡片内列**设备**。
+协议 wire 字段统一英文 `nodeId / endpointId`（与现有 `stream_id` 风格一致）；
+本表中文术语只管 UI 与文档。UI：原"设备卡片"改称**节点卡片**，卡片内列**端点**。
 
 ---
 
-## 2. 三层模型与数据流
+## 2. 单层模型与数据流
 
 ```
 节点 A（手机）                    节点 B（电脑）
-  ├─ 设备 mic:builtin  ◄──公开──►  端点（1:1，协议/可见性/delivery/状态）
-  ├─ 设备 screen:0                 目录持有者 = 节点（每节点一个）
-  └─ 设备 camera:0
+  ├─ 端点 mic:builtin   ◄──通告──► 对端目录（B 可见、可订阅）
+  ├─ 端点 screen:0                 目录持有者 = 节点（每节点一个）
+  └─ 端点 sysaudio:builtin
 ```
 
 **Pull 流（订阅者连公开者）** —— 订阅 B 的屏幕：
-B 公开「屏幕」端点（idle，无订阅）→ A 发现节点 B → 拉端点详情 → 订阅
-（Public/Confirm/Private 决策）→ 授予接入 → B 收到订阅事件**自动建会话并启动采集/推流**
-→ A 连 B 中继 watch（现有 `Watch` 路径零改动）。
+B 通告「屏幕」端点（idle，无订阅）→ A 发现节点 B → 拉端点详情 → 订阅
+（Public/Confirm/Private 决策）→ 授予接入 → B 收到订阅事件**自动调端点
+`share`**（端点自驱动：建会话并启动采集/推流）→ A 连 B 中继 watch（现有
+`Watch` 路径零改动）。
 
 **Push 流（公开者连订阅者）** —— 订阅 B 的麦克风（反向外设）：
-B 公开「麦克风」端点 → A 订阅时在请求里附带**自己的中继地址**（`/api/info` 的
-ws/srt/quic 端口）→ 授予凭证（现有 `ShareToken`）→ A 侧中继等待 → B 凭凭证出站
-push 到 A 中继（现有 `Hello + share_token` 路径零改动）。
+B 通告「麦克风」端点 → A 订阅时在请求里附带**自己的中继地址**（`/api/info`
+的 ws/srt/quic 端口）→ 授予凭证（现有 `ShareToken`）→ A 侧中继等待 →
+B 凭凭证出站 push 到 A 中继（现有 `Hello + share_token` 路径零改动）。
 
-**采集生命周期解耦**：端点可常驻 Idle；订阅达成才建会话、启动采集/编码；无订阅者
-不采集（省电/省资源）。`startOnPublish`（一通告就推、后到订阅者连看）列入 P1 后。
+**挂载生命周期**：端点 `seed` 时立即 `load`（探测可用性）→ `available` +
+`last_error`。**不可挂载端点保留在表里**（UI 显示原因），但不可通告、不可
+订阅。**采集生命周期解耦**：端点可常驻 Idle；订阅达成才建会话、启动采集/
+编码；无订阅者不采集（省电/省资源）。
 
 ---
 
-## 3. 数据模型（stross-proto 扩展）
+## 3. 数据模型（stross-proto，wire v3）
 
-全部新增字段带 `#[serde(default)]` / `skip_serializing_if`，旧端解析忽略未知字段，
-wire 格式稳定（`rename_all` 与现状一致）。
+> **v3 为破坏性升级**（单层端点模型）：`DeviceInfo` / `DeviceSummary` 消失，
+> `EndpointManifest` 平铺、`DiscoveryInfo.endpoints` 携带 `available`、
+> 目录 `EndpointDir` 不再有独立 `devices` 数组。旧端（v2 及以前）与新端
+> 互不解析对方目录/摘要，**需全端同步升级**。新增字段带 `#[serde(default)]`
+> / `skip_serializing_if` 的惯例保留。
 
-### 3.1 设备种类
+### 3.1 端点种类
 
-扩展 `MediaKind`，追加两个占位变体（二期 E 与后续启用）：
+`MediaKind` 沿用：`Screen, Window, Camera, Mic, SystemAudio, Input, Clipboard,
+File, Service`（`Input` / `Service` 为游戏联机等扩展预留，见 §13）。
 
-```rust
-pub enum MediaKind {
-    Screen, Window, Camera, Mic, SystemAudio, Input, Clipboard,
-    File,        // 二期 E：文件互传
-    Service,     // 后续：程序服务端点（schema 未定，仅占位）
-}
-```
-
-### 3.2 设备与摘要
+### 3.2 端点摘要与清单
 
 ```rust
-/// 目录详情层（L2，GET /api/endpoints）用。
-pub struct DeviceInfo {
-    pub device_id: String,   // 节点内稳定 id："mic:builtin" / "screen:0" / "camera:front"
-    pub kind: MediaKind,
-    pub name: String,        // 用户可见："内置麦克风"（P1 用默认名，改名后置）
-    pub builtin: bool,       // 随节点常驻（静态枚举）或动态加入
-}
-
-/// mDNS 摘要层（L1，DiscoveryInfo v2）用——只带 id/kind/name/是否已公开，绝无详情。
-pub struct DeviceSummary {
-    pub device_id: String,
+/// mDNS 摘要层（L1，DiscoveryInfo v3）用——只带 id/kind/name/可挂载/已通告。
+pub struct EndpointSummary {
+    pub endpoint_id: String,
     pub kind: MediaKind,
     pub name: String,
+    pub available: bool,     // load 探测结果：能否被挂载成节点
     pub published: bool,
 }
-```
 
-### 3.3 端点清单（公开方协议/可见性/状态的唯一来源）
-
-```rust
-pub enum Visibility {
-    Public,                                  // 任何人可订阅，免确认
-    Confirm,                                 // 首见人工确认；已信任节点自动（复用 TrustStore）
-    Private { nodes: Vec<String> },          // 仅白名单节点（按节点 device_id）
-}
-
-pub enum Delivery { Pull, Push, Both }       // 数据面连接方向，见 §2
-
-pub struct TransportPreference {
-    pub transport: TransportId,              // 复用现有枚举 Ws/WebRtc/Srt/Quic/Memory
-    pub priority: u8,                        // 0 = 公开者最优先
-}
-
+/// 端点清单（目录 L2 / 本机目录 / 控制面）：公开方协议/可见性/挂载性的唯一来源。
 pub struct EndpointManifest {
-    pub endpoint_id: String,                 // 全局：节点内唯一短 id（1:1 时 = device_id）
-    pub device: DeviceInfo,
+    pub endpoint_id: String,
+    pub kind: MediaKind,
+    pub name: String,
+    pub available: bool,                 // load 探测结果
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,      // load/share 失败原因（不可用时展示）
+    pub published: bool,                 // 是否已通告（未通告仅本机可见）
     pub visibility: Visibility,
     pub delivery: Delivery,
-    pub transports: Vec<TransportPreference>,// 公开者选择的协议（按优先序）
-    pub codecs: Vec<CodecId>,                // 该端点实际可用的编解码
-    pub state: EndpointState,                // idle | active | suspended
-    pub subscribers: u32,                    // 当前订阅数（= 关联会话 watchers/sinks）
+    pub transports: Vec<TransportPreference>,
+    pub codecs: Vec<CodecId>,
+    pub state: EndpointState,            // idle | active | suspended
+    pub subscribers: u32,
     pub updated_at: u64,
 }
 ```
 
-> 协议选择的正确性由 `ReliabilityProfile` 兜底：文件/剪贴板/服务 → Lossless
-> （QUIC/WS）；屏幕/音频 → Lossy/Adaptive（SRT/QUIC/WebRTC）。公开者按端点类型
-> 选协议，订阅者只在 `transports` 列表内协商/降级（复用 `Offer`/`Answer`）。
+> 协议选择的正确性由目标类型兜底：确定目标 → Lossless（QUIC/WS）；
+> 实时目标 → Lossy/Adaptive（SRT/QUIC/WebRTC）。公开者按端点目标类型选协议
+> （`EndpointRegistry::default_transports(target)`），订阅者只在 `transports`
+> 列表内协商/降级（复用 `Offer`/`Answer`）。
 
-### 3.4 DiscoveryInfo v2（L1 摘要）
+### 3.3 DiscoveryInfo v3（L1 摘要）
 
 ```rust
 pub struct DiscoveryInfo {
-    pub v: u8,                               // 2
+    pub v: u8,                               // 3
     pub name: String,
-    pub roles: Vec<RoleId>,                  // 不变
-    pub media: Vec<MediaKind>,               // 不变（设备级能力总和，兼容旧端）
-    pub transports: Vec<TransportId>,        // 不变
-    pub codecs: Vec<CodecId>,                // 不变
+    pub roles: Vec<RoleId>,
+    pub media: Vec<MediaKind>,               // 端点能力总和，兼容旧端
+    pub transports: Vec<TransportId>,
+    pub codecs: Vec<CodecId>,
     #[serde(default)]
-    pub devices: Vec<DeviceSummary>,         // 新增：设备清单摘要
+    pub endpoints: Vec<EndpointSummary>,     // 新增（v3）：端点清单摘要
 }
 ```
 
-**TXT 上限风险（§11.1，第三轮已实测并修复）**：mDNS TXT 单条 character-string
-≤ 255B（RFC 1035，mdns-sd 强校验）。实测整包 JSON（base ≈200B + 3 台设备摘要
-≈270B → **449B**）广播直接失败（`TXT property length 449 exceeding 255`）。
-采用 **方案 b：拆多 key**（2026-08-27 拍板）：
-- `stross` key：基础能力（base ≤255B，恒不含 `devices`）；
-- `dev.<n>` key：每台设备一个摘要（≤255B）；
-- v1 端只读 `stross` key（忽略未知 key）→ 双向兼容，实测通过。
+**TXT 上限（§11.1 方案 b 沿用）**：mDNS TXT 单条 character-string ≤ 255B。
+`stross` key 承载 base（恒不含 `endpoints`）；每个端点各占 `ep.<n>` key。
 
-### 3.5 协商消息扩展（18779）
+### 3.4 协商消息扩展（18779，不变）
 
-```rust
-pub struct ShareRequest {                    // 向后兼容：endpointId 为空 = 旧语义
-    pub device_id: String,
-    pub device_name: String,
-    #[serde(default)]
-    pub endpoint_id: Option<String>,         // 新增：订阅目标端点
-    #[serde(default)]
-    pub delivery_mode: Option<Delivery>,     // 新增：订阅方期望方向
-    #[serde(default)]
-    pub relay_addr: Option<String>,          // 新增：push 模式下订阅方自己的中继 HTTP 基址（ws://ip:port）
-    #[serde(default)]
-    pub share_token: Option<String>,         // 新增：push 模式下订阅方**自签**的一次性接入凭证
-                                             //   （订阅方先建会话+签凭证，公开方凭此出站推入订阅方中继）
-    pub media: Vec<MediaKind>,               // 保留（旧端用；新端与端点 device.kind 一致）
-}
+`ShareRequest` / `ShareGrant` 与 v2 逐字节一致（`endpointId` 非空 = 订阅端点）。
 
-pub struct ShareGrant {                      // 现有字段不变，新增：
-    #[serde(flatten)]
-    pub view: ShareTokenView,
-    pub trusted: bool,
-    #[serde(default)]
-    pub delivery: Option<Delivery>,          // 公开方拍板后的方向（与请求可不同）
-    #[serde(default)]
-    pub transports: Option<Vec<TransportId>>,// pull 模式：公开方接受的传输（按优先序）
-    #[serde(default)]
-    pub relay: Option<RelayAddr>,            // pull 模式：公开方中继地址（ws/srt/quic 端口）
-    // push 模式不开 relay：公开方凭 share_token 连订阅方 relay_addr
-}
-```
+### 3.5 文件端点与传输协议（沿用第三轮）
 
-### 3.6 文件端点与传输协议（第三轮，Lossless）
-
-文件端点（`MediaKind::File`）在公开时登记**本地文件源**（路径只存本地，绝不进
-wire 目录/摘要）；订阅达成后公开方把文件当**数据流**推送，复用既有数据面
-（watch/push/Hello，**中继零改动**）：
-
-```rust
-// stross-proto：文件元数据（首帧载荷，JSON）
-pub struct FileMeta { pub name: String, pub size: u64, pub sha256: Option<String> }
-
-// stross-proto frame：新增轨道与编解码值（u8 空间内扩展，旧端忽略未知轨道）
-pub const TRACK_FILE: u8 = 2;    // 0=视频 1=音频 2=文件
-pub const CODEC_FILE: u8 = 3;    // 1=H.264 2=AAC 3=文件（无编解码语义，占位）
-```
-
-帧序列（全部 TRACK_FILE / CODEC_FILE，seq=0 无损路径）：
-1. **首帧** `FLAG_CONFIG`：载荷 = `FileMeta` JSON（文件名/大小）；
-2. **数据帧**：载荷 = ≤64KiB 文件块（pts_ms = 块序，无时间语义）；
-3. **末帧** `FLAG_END`：载荷 = 末块（空文件则空载荷）。
-
-中继行为不变：`forward` 只缓存视频关键帧、`handle_watch` 只门控视频轨——
-文件轨逐帧直通、不补发，因此**订阅方必须先接到流才开始推**（见 §5 等待观看者）。
+`TRACK_FILE=2` / `CODEC_FILE=3` / `FileMeta` 首帧载荷 / 帧序列（CONFIG → 数据
+块 → END）不变；中继零改动。文件 = 确定目标端点的典型实现。
 
 ---
 
@@ -203,7 +133,7 @@ pub const CODEC_FILE: u8 = 3;    // 1=H.264 2=AAC 3=文件（无编解码语义�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/endpoints` | 本节点 `{ node, devices, endpoints }`。**可见性过滤**：Private 端点只对白名单节点的 ip/device_id 可见（P1 按请求方 ip 匹配粗略，device_id 鉴权后置） |
+| GET | `/api/endpoints` | 本节点 `{ node, endpoints }`：**已通告**端点清单。不可挂载端点（`available=false`）**可见但不可订阅**（UI 灰显 + 原因；握手校验拒绝）。**Private 端点只对白名单节点的 ip/device_id 可见**（P1 按请求方 ip 匹配粗略，device_id 鉴权后置） |
 | POST | `/api/negotiator/request` | 订阅握手（§5）；无 `endpointId` 时行为与现状完全一致（旧端兼容） |
 
 > 目录不挂 18778（控制面仅回环，D7 门控不动）；新增路由挂在协商 Router 下，
@@ -223,69 +153,91 @@ B ── 决策表 ──▶ A:
     Confirm + 已信任 → 自动签发（trusted=true）
     Confirm + 未信任 → 挂起 60s 人工确认（复用 PendingRequest/negotiator-respond；可记住）
     Private + 白名单 → 自动签发 / Private + 非白名单 → 403
-    endpointId 不存在/未公开 → 404
+    endpointId 不存在/未通告 → 404
+    endpointId 不可挂载（available=false）→ 404 + 原因（last_error）
 A 收 ShareGrant { delivery, transports, relay?, ShareToken }：
     pull → A 连 B 的 relay 地址 watch（token.stream_id + Hello）
     push → B 凭 **A 自签的 shareToken** 出站推入 A 中继（A 侧 watch 自己的中继接收）
 ```
 
-> **push 凭证修正（第三轮）**：push 方向的数据面接入凭证必须由**订阅方**签发
-> （凭证校验器挂在订阅方内核上），公开方签发的凭证在订阅方中继校验不过。
-> 因此 push 模式下订阅方在请求里随 `relay_addr` 附带自签 `share_token`；
-> 公开方出站 Hello 出示该凭证。LAN 可信模型下与「二维码贴凭证」等价风险
-> （§9）。pull 模式无需凭证（watch 路径不鉴权），公开方推入**自己的**受控
-> 中继（回环来源 + 内核预授权会话放行）。
+> **push 凭证修正（第三轮，沿用）**：push 方向的数据面接入凭证必须由**订阅方**
+> 签发；公开方签发的凭证在订阅方中继校验不过。LAN 可信模型下与「二维码贴
+> 凭证」等价风险。pull 模式无需凭证（watch 路径不鉴权），公开方推入**自己的**
+> 受控中继（回环来源 + 内核预授权会话放行）。
 
-错误码：400 参数非法 / 403 被拒或超时 / 404 端点不存在 / 408/504 人工确认超时
-（沿用现状 `handle_request` 分支）。
+错误码：400 参数非法 / 403 被拒或超时 / 404 端点不存在或不可挂载 /
+408/504 人工确认超时。
 
-**联动（第三轮接线）**：公开方在**授予成功后**触发订阅事件（`SubscribeCtx`：
+**联动（契约化接线）**：公开方在**授予成功后**触发订阅事件（`SubscribeCtx`：
 订阅方 device_id、定稿 delivery、数据面 stream_id、push 模式的 relay_addr 与
-share_token），上层驱动按端点类型自动开推：
-* 文件端点 → 文件泵：凭 stream_id 推入对应中继（pull=自己的受控中继，
-  push=订阅方中继），**先等 ≥1 个观看者接入**（轮询中继 `/api/streams`，
-  超时 8s）再发文件帧——避免广播不补发导致订阅方丢文件头；
-* 媒体端点 → 复用 `start_stream`：pull 推本机中继（可被多订阅者观看），
-  push 带订阅方凭证出站（复用既有 B2 手机推 PC 路径）；
-* 无订阅者时端点回 Idle（P1：单次订阅推送完成即结束，常驻推送后置）。
+share_token），**端点自驱动**——协商层直接调 `endpoint.share(app, ctx)`，
+内核不再按类型分派（原 `endpoint_driver` 的 match 分派已删除）：
+* 文件端点（确定目标）→ 文件泵：凭 stream_id 推入对应中继（pull=自己的
+  受控中继，push=订阅方中继），**先等 ≥1 个观看者接入**（轮询中继
+  `/api/streams`，超时 8s）再发文件帧——避免广播不补发导致订阅方丢文件头；
+  传完自动回 Idle（有完成态）；
+* 媒体端点（实时目标）→ 各端点自行组 `StreamConfig` 调 `start_stream`：
+  pull 推本机中继（可被多订阅者观看），push 带订阅方凭证出站；持续推流
+  直到停止；
+* 新增端点类型（剪贴板/服务/游戏输入）→ 新 struct 实现 load/share，
+  **内核与协商层零改动**。
 
 ---
 
-## 6. 内核 EndpointRegistry（stross-kernel）
+## 6. 内核 EndpointRegistry（stross-kernel，单层表）
 
-新模块 `crates/stross-kernel/src/kernel/endpoint.rs`：
+模块 `crates/stross-kernel/src/kernel/endpoint.rs`：
 
 ```rust
-pub struct EndpointRegistry {
-    devices: HashMap<String, DeviceInfo>,        // 节点设备表（静态枚举 + 文件动态设备）
-    endpoints: HashMap<String, EndpointManifest>,// 已公开端点（1:1：device_id ↔ endpoint_id）
-    file_sources: HashMap<String, FileSource>,   // 文件端点：端点 id → 本地文件源（路径不落 wire）
+/// 端点 ↔ 内核行为契约（§1）：每个端点实现两个约定行为——
+/// load：探测自身可用性（能否被挂载成节点），维护 available/last_error；
+/// share：订阅达成后启动共享（推流），类型自决，内核不做分派。
+pub trait Endpoint: Send + Sync {
+    fn id(&self) -> &str;
+    fn kind(&self) -> MediaKind;
+    fn name(&self) -> &str;
+    fn target(&self) -> TargetKind;          // Determined | Live（§1 目标类型）
+    fn available(&self) -> bool;             // load 探测结果
+    fn last_error(&self) -> Option<&str>;
+    fn load(&mut self) -> std::result::Result<(), String>;
+    fn share(&self, app: Arc<Kernel>, ctx: SubscribeCtx);
 }
-pub struct FileSource { path: PathBuf, name: String, size: u64 }
-pub struct SubscribeCtx {                        // 订阅事件载荷（驱动开推的依据）
-    subscriber: String,                          //   ​订阅方节点 device_id
-    delivery: Delivery,                          //   定稿方向
-    stream_id: String,                           //   pull=公开方本机会话 / push=订阅方会话
-    relay_addr: Option<String>,                  //   push：订阅方中继 HTTP 基址
-    share_token: Option<String>,                 //   push：订阅方自签凭证
+
+/// load 探测函数：平台适应层注入（查环境/设备/权限），内核零 OS 调用。
+pub type Probe = Arc<dyn Fn() -> std::result::Result<(), String> + Send + Sync>;
+
+pub struct EndpointRegistry {
+    endpoints: HashMap<String, EndpointEntry>,   // 单表：行为对象 + 通告参数
+    file_sources: HashMap<String, FileSource>,   // 文件端点本地源（不落 wire）
+}
+pub struct EndpointEntry {
+    ep: Arc<dyn Endpoint>,
+    published: bool, visibility: Visibility, delivery: Delivery,
+    transports: Vec<TransportPreference>, codecs: Vec<CodecId>,
+    state: EndpointState, subscribers: u32, updated_at: u64,
 }
 impl EndpointRegistry {
-    pub fn publish(&mut self, device_id, visibility, delivery, transports) -> Result<EndpointManifest>;
-    //  1:1 约束：同 device 已公开 → Err("该设备已公开")
+    pub fn seed(&mut self, ep: Box<dyn Endpoint>) -> bool;
+    //  登记端点并立即 load；id 已存在返回 false。load 失败不阻止登记：
+    //  端点保留但 available=false + last_error（UI 可见原因）
+    pub fn publish(&mut self, id, visibility, delivery, transports, codecs) -> Result<EndpointManifest>;
+    //  不可挂载（available=false）拒绝，错误携带原因；重复通告报错
+    pub fn unpublish(&mut self, endpoint_id) -> Result<()>;   // 端点保留，可再次通告
     pub fn publish_file(&mut self, path, visibility, delivery) -> Result<EndpointManifest>;
-    //  文件 = 动态设备（device_id "file:<名>"，重名自动加序号）；登记 file_sources
-    pub fn unpublish(&mut self, endpoint_id) -> Result<()>;
-    //  同时移除 file_sources
-    pub fn manifest(&self, endpoint_id) -> Option<&EndpointManifest>;   // 供 /api/endpoints
-    pub fn file_source(&self, endpoint_id) -> Option<&FileSource>;
-    pub fn set_state(&mut self, endpoint_id, state, subscribers);
-    pub fn on_subscribed(&self, endpoint_id, ctx: &SubscribeCtx);       // 触发驱动开推
+    //  文件 = 动态端点（endpoint_id "file:<名>"，重名自动加序号）
+    pub fn manifest / manifests / published_manifests / summaries(...);
+    pub fn on_subscribed(&self, app: &Arc<Kernel>, endpoint_id, ctx);
+    //  出锁克隆端点对象后调 share（端点自驱动；持锁调用会死锁）
+    pub fn default_transports(target: TargetKind) -> Vec<TransportPreference>;
+    //  实时目标 → QUIC>SRT>WS；确定目标 → QUIC>WS（不再按 MediaKind 匹配）
 }
 ```
 
-- 设备表 P1 按平台静态枚举：桌面 `[screen:0, mic:builtin, sysaudio:builtin]`，
-  Android `[mic:builtin, sysaudio:builtin, screen:0]`；`camera` 按现有采集能力
-  决定是否枚举（开放问题 §11）。
+- 端点实现：`ScreenEndpoint` / `MicEndpoint` / `SystemAudioEndpoint`
+  （实时目标，探测闭包注入）+ `FileEndpoint`（确定目标，动态构造）；
+  构造器在 stross-bridge（平台筛选 + 探测闭包），kernel 只收行为对象；
+- 目标类型维度表达差异：默认传输（Lossless/Lossy）、共享生命周期
+  （文件传完回 Idle / 媒体持续推流）；
 - 状态：`subscribers` 复用关联会话的 `watchers`/`sinks` 计数，不另起炉灶。
 
 ---
@@ -304,13 +256,13 @@ impl EndpointRegistry {
 
 | 版本 | 兼容规则 |
 |---|---|
-| DiscoveryInfo v1 | v2 广播新增 `devices` 字段；v1 解析器忽略未知字段（serde 默认），不再带版本化的旧结构 |
-| negotiator request v1 | 新字段全部 optional；旧端（无 endpointId）行为与现状逐字节一致 |
-| ShareGrant v1 | 新增字段 optional；旧 UI 只读现有字段不受影响 |
+| wire v2 → v3 | **破坏性升级**：`DeviceInfo`/`DeviceSummary` 消失，`EndpointManifest` 平铺（kind/name/available/lastError/published），`DiscoveryInfo.endpoints`、`EndpointDir` 去 devices。旧端忽略未知字段惯例不再覆盖整体结构变化，需全端同步升级 |
+| negotiator request v1 | 字段全部 optional；旧端（无 endpointId）行为与现状逐字节一致（v3 未动） |
+| ShareGrant v1 | 未动 |
 | 数据面 | watch/push/Hello/ShareToken **零改动**，本框架只改发现与信令 |
 
-P1 后扩展点：一设备多端点（endpoint_id 与 device_id 解耦）、文件/剪贴板端点
-（二期 E，Lossless）、参数协商（分辨率/码率，复用 Offer/Answer 语义）、服务端点
+P1 后扩展点：运行期重探测（权限授予后 reload）、一设备多端点（endpoint_id
+与 kind 解耦）、参数协商（分辨率/码率，复用 Offer/Answer 语义）、服务端点
 （QUIC 多路复用 + schema）、其它进程回环注册目录。
 
 ---
@@ -319,7 +271,7 @@ P1 后扩展点：一设备多端点（endpoint_id 与 device_id 解耦）、文
 
 - 可见性三档决定**目录可见性 + 授予决策**两件事：Private 端点不出现在
   `/api/endpoints` 响应（非白名单），mDNS 摘要只含 `published` 布尔、不含可见性；
-- 信任按**节点**（`trusted_devices.json` 现有语义）：信任手机=手机上的设备端点免确认；
+- 信任按**节点**（`trusted_devices.json` 现有语义）：信任手机=手机上的端点免确认；
 - 凭证复用 `ShareToken`（一次性、短时效、服务端比对），不进日志不进 mDNS TXT；
 - 控制面 18778 仍仅回环；目录/订阅只走 18777/18779；LAN 可信模型不变。
 
@@ -327,86 +279,56 @@ P1 后扩展点：一设备多端点（endpoint_id 与 device_id 解耦）、文
 
 ## 10. P1 验收清单
 
-1. 单测：`DiscoveryInfo v2` roundtrip/容错；`EndpointRegistry` publish/unpublish/
-   1:1 约束；协商扩展解析（旧请求无 endpointId 兼容）；
+1. 单测：`DiscoveryInfo v3` roundtrip/容错；`EndpointRegistry` seed/publish/
+   unpublish/不可挂载拒绝；load 契约（探测失败 → available=false + 原因）；
 2. 双机真机：A 订阅 B 屏幕端点（pull）观看闭环；A 订阅 B 麦克风端点（push）
    收声闭环（复用 `share-token-test.sh` 扩展）；
 3. 可见性：Public 免确认 / Confirm 首见弹窗可记住 / Private 非白名单 403；
-4. GUI：节点卡片→设备→公开（选可见性/协议/delivery）→ 状态与订阅数展示；
-5. 兼容：旧端（无端点字段）发现/推流/观看全链路不受影响。
-
----
-
-## 12. 实现记录
-
-### P1（已提交 2f22f21）
-
-| 落点 | 内容 |
-|---|---|
-| `crates/stross-proto/src/message/endpoint.rs` | DeviceInfo / DeviceSummary / Visibility / Delivery / TransportPreference / EndpointState / EndpointManifest + wire 单测 |
-| `crates/stross-proto/src/message/ids.rs` | MediaKind 追加 `File` / `Service` 占位（顺带补齐 `apps/stross-cli/src/devices.rs` 的穷尽 match） |
-| `crates/stross-proto/src/message/discovery.rs` | DiscoveryInfo v2：`devices` 摘要 + `VERSION=2` + `with_devices` + 兼容单测（v1 载荷解析） |
-| `crates/stross-kernel/src/kernel/endpoint.rs` | EndpointRegistry：publish/unpublish（1:1 约束）、状态、订阅 hook、默认传输 + 单测 |
-| `crates/stross-kernel/src/kernel/graph.rs` | 既有 `Endpoint` 重命名为 `TransportAddr`（避免与端点概念撞名） |
-| `crates/stross-kernel/src/kernel/mod.rs` | Kernel 门面：registry 字段、发布/查询方法、mDNS 摘要接入（平台设备枚举移至 stross-bridge::devices） |
-| `crates/stross-kernel/src/negotiator.rs` | ShareRequest/ShareGrant/PendingRequest 扩展、`policy_decision`、`compose_grant`、`GET /api/endpoints` |
-| `crates/stross-kernel/src/lib.rs` | 导出 EndpointRegistry / RelayAddr / TransportAddr |
-
-### 第二轮：引导层 + L1 浏览闭环（已提交 ab5dd9b）
-
-| 落点 | 内容 |
-|---|---|
-| `crates/stross-kernel/src/bootstrap.rs` | 引导层编排门面：`ensure_identity` / `anchor`（中继锚定 + mDNS L1）/ `start_handshake`（18779 目录+握手）/ `start` 完整组合；CLI serve 与 GUI 桌面启动均接入 |
-| `crates/stross-app/src/app.rs` | `RelayInfo.devices`（L1 设备摘要：本机 = 注册表快照，对端 = mDNS 解码）；`scan_relays` 透传 |
-| `apps/stross-cli/src/devices.rs` | `stross devices` 输出每节点设备清单（含「已公开」标记） |
-| `crates/stross-core/src/discovery.rs` | 选址改纯函数 `select_reachable_ip_from(self_ips, reachable)`——测试显式注入本机网段，与环境解耦（原硬编码"本机在某网段"，网段迁移后必挂）；`BrowseAgg` 类型别称修 clippy type-complexity |
-
-未做（后续步骤）：GUI 前端渲染设备清单 / 公开与订阅交互、目录互斥锁、
-设备重命名、`/api/endpoints` 的 Private 白名单动态过滤（当前一律不下发
-Private 端点）、mDNS L1 摘要在 publish/unpublish 时重广播（当前仅锚定时刻）。
-
-### 第三轮：文件端点 + 订阅联动 + 端点命令（已提交 2182bc0）
-
-| 落点 | 内容 |
-|---|---|
-| `stross-proto` | `TRACK_FILE`=2 / `CODEC_FILE`=3（frame.rs）；`FileMeta`（endpoint.rs，首帧 CONFIG 载荷）；`ShareRequest.share_token`（push 凭证修正 §5）；**DiscoveryInfo TXT 拆多 key**（§3.4 方案 b：`stross` + `dev.<n>`，实测 449B 超限 → 每 key ≤255B，v1 双向兼容） |
-| `stross-app` | EndpointRegistry `publish_file` / `file_source` / `SubscribeCtx` / `subscribed_hook`（hook 克隆出锁调用，**修复持锁回调死锁**——曾挂死订阅握手）；`file_xfer.rs` 文件泵+文件接收（**等观看者接入再推**，轮询 `/api/streams`，8s 超时；空文件 END 帧路径）；`endpoint_driver.rs` 订阅联动（文件→文件泵，屏幕/麦克风→start_stream） |
-| `stross-app` 协商 | PendingEntry 携带 relay_addr/share_token；授予成功后 `notify_subscribed` → `SubscribeCtx` 触发驱动（pull 用公开方会话，push 用订阅方凭证内的流 id） |
-| `stross-core` | `RelayClient` shutdown 前**冲完帧通道排队帧**（修复 stop 抢占丢失文件末帧，`try_recv` 排空后 Bye） |
-| `stross-app` 控制面 | CtrlRequest `EndpointPublish` / `EndpointPublishFile` / `EndpointUnpublish` / `EndpointList` |
-| `stross-cli` | serve `--negotiator-port` / `--data-dir`（本地双端不同身份/端口）；ctrl `endpoint publish/publish-file/unpublish/list`；新增 `endpoint ls`（L2 目录拉取）与 `endpoint subscribe`（pull/push 双向收文件；**watch 对「流尚未出现」重试**收敛建流竞态；push 模式**watch 自己签发的流**——曾误用 grant 会话 id） |
-| 验证 | 单测（FileMeta / Registry 文件源 / 订阅 ctx / DiscoveryInfo 多 key ≤255B 回归）；进程内中继文件泵↔文件收（含空文件）集成测试；**本地双端脚本 `scripts/dual-node-file-test.sh`：3 条链路（A→B pull 800KB / A→B push / B→A pull）文件逐字节一致** |
-
-本地双端实测（2026-08-27，同机双 serve）：
-`stross devices` 同时发现两节点（L1 摘要闭环，0 次 TXT 超限）；
-`endpoint ls` 拉到动态文件设备与可订阅端点（L2）；`endpoint subscribe`
-404 边界（端点不存在 / 已取消公开）均正确拒绝。
-
-### 第四轮：分层收敛——核心逻辑收束出壳（docs/layering-architecture.md）
-
-问题：核心逻辑外溢到壳层——中继 HTTP 契约 4 处手写客户端（含分层反转：
-响应类型定义在 CLI 而非 core）、订阅流程整个塞在 `stross endpoint subscribe`、
-广告 IP / 数据目录各两份。本轮按「线协议→proto、HTTP 契约→core、订阅
-编排→app 库、壳层只调接口」收敛：
-
-| 落点 | 内容 |
-|---|---|
-| `stross-proto` | 新增 `message/negotiator.rs`：`ShareTokenView` / `RelayAddr` / `ShareRequest` / `ShareGrant` / `EndpointNode` / `EndpointDir`（线格式与旧实现**逐字节一致**，单测锁定 camelCase 字段）；目录 devices 为完整 `DeviceInfo`（对齐现有 `/api/endpoints` 序列化） |
-| `stross-core` | 新增 `relay/client.rs`：中继 HTTP API 官方客户端（`http_get` / `get_json` / `post_json` / `info` / `streams` / `stream_watchers`，raw TCP 零新依赖、平台无关）；`stross-transport::net` 新增 `advertise_ip` / `is_fake_or_link_local`（fake-IP 198.18/15 + 链路本地过滤单一真源） |
-| `stross-app` | `subscriber.rs`：订阅方编排库接口（`fetch_directory` / `subscribe_file`，含本地接收准备、握手超时 70s 盖过 Confirm 挂起窗、「流尚未出现」重试收敛）；`paths.rs`：`data_dir` 单一真源；`file_xfer.rs` 换用 core 客户端（删本地 raw TCP）；`bootstrap::start` **默认安装订阅驱动**（幂等；serve 不再手动接线，修复 GUI 类壳层漏装=订阅了不推）；协商线协议类型改重导出，目录处理器用类型化 `EndpointDir` |
-| `stross-cli` | `endpoint.rs` 变薄为纯参数解析+展示（~200 行删剩 170，删 advertise_ip/http_post_json/LocalReceiver/receive_file_retry/base_dir）；`devices.rs` / `adb.rs` 探测走 core 客户端（`InfoResp`/`StreamsResp` 契约移出壳层）；`serve.rs` 去本地 base_dir 与手动驱动接线 |
-| 验证 | proto wire 单测（请求/授予/目录 camelCase）；`subscribe_file` 进程内双节点 pull 闭环（文件逐字节一致）；全 crate 测试 + `scripts/check.sh` + `scripts/dual-node-file-test.sh` 3 链路回归 |
-
-遗留（下一轮）：Web 前端（`discovery.ts` / `negotiate.ts` 等）仍是协议客户端，
-待 GUI 前端订阅交互落地时改走 Rust 命令（复用 `fetch_directory` /
-`subscribe_file`），JS 只留渲染。
+4. GUI：节点卡片→端点（通告选可见性/协议/delivery）→ 状态与订阅数展示；
+   不可挂载端点灰显 + 原因（屏幕获取失败可见化）；
+5. 兼容：旧语义（无 endpointId）发现/推流/观看全链路不受影响。
 
 ---
 
 ## 11. 开放问题（实施前实测/拍板）
 
-1. ~~**TXT 255B 上限**~~：**已解决（第三轮）**——实测整包 449B 超限，拍板 §3.4
-   方案 b（拆多 key），见 §3.4 与 §12 第三轮记录；
-2. **camera 设备是否枚举**：按现有采集能力（Android 摄像头/桌面 WebCam）决定 P1 是否列出；
+1. ~~**TXT 255B 上限**~~：**已解决（第三轮）**——方案 b（拆多 key），v3 沿用；
+2. **camera 端点是否构造**：按现有采集能力（Android 摄像头/桌面 WebCam）决定 P1 是否列出；
 3. **pull 模式"订阅→公开方自动建会话推流"真机验证**（B2 自动接收反向复用）；
-4. **设备重命名**：P1 用默认名，改名（本地持久化）是否入 P1。
+4. **运行期重探测**：权限授予（Android 麦克风）后如何触发端点 reload
+   （当前 load 仅 seed 时一次）。
+
+---
+
+## 12. 实现记录
+
+### 第六轮：单层端点模型 + load/share 契约（本次提交）
+
+问题：设备/端点两层 wire 身份 + `endpoint_driver` 按 `MediaKind` match 分派 +
+`platform_devices` 静态枚举——新增端点类型要改内核；「屏幕获取失败」要到
+订阅后推流才炸（headless/无 DISPLAY 时设备表照样有 screen:0）。
+
+| 落点 | 内容 |
+|---|---|
+| `stross-proto` | `DeviceInfo`/`DeviceSummary` 删除；`EndpointManifest` 平铺（kind/name/available/lastError/published）；新增 `EndpointSummary`（available/published）；`DiscoveryInfo v3.endpoints`（TXT key `ep.<n>`）；`EndpointDir` 去 devices |
+| `stross-kernel` | `kernel/endpoint.rs`：`Endpoint` trait（load/share 契约 + `TargetKind`）+ `ScreenEndpoint`/`MicEndpoint`/`SystemAudioEndpoint`/`FileEndpoint` + 注册表单表化（`seed` 即 load，不可挂载保留表内）；`endpoint_driver.rs` **删除**（端点自驱动，协商层直接调 share）；`default_transports` 改按 `TargetKind`；Kernel：`seed_device→seed_endpoint`、`on_endpoint_subscribed(app, ...)`、`endpoint_catalog→Vec<EndpointManifest>`；negotiator：目录只出已通告端点、不可挂载握手 404+原因；view/control/devices 摘要同步 |
+| `stross-bridge` | `platform_endpoints` + `seed_platform_endpoints`：构造端点 + **load 探测闭包注入**（`screen_probe`：ffmpeg + DISPLAY/WAYLAND——屏幕获取失败前置化；音频探测：ffmpeg）；依赖新增 `stross-media` |
+| `stross-cli` | `endpoint ls` 输出端点清单（可用/不可用+原因）；`ctrl endpoint list` 单表输出（available/lastError/published）；`devices` 端点摘要含不可用标记 |
+| 顺带修复 | 控制面客户端 `request` 匹配 `rsp:"error"` 而 serde 实际序列化 `"err"`（变体名小写）——错误响应被当事件忽略导致客户端无限等待（**既有 bug**，首个常用错误响应路径暴露） |
+| `stross-gui` | 前端端点树（available 灰显 + lastError；对端目录不可订阅灰显）；`state.ts`/`endpoints.ts`/`discovery.ts` 单层类型 |
+| 验证 | proto wire 单测（平铺 manifest/EndpointSummary/v3 摘要）；registry 单测（load 契约/不可挂载拒绝/单表 publish）；negotiator 订阅 share 契约测试；bridge 平台端点测试；前端无头 24 项断言全过；workspace 全测试过（`stross-media` 播放节奏测试为环境性波动，干净树同样失败） |
+
+### 前几轮（P1 2f22f21 / 二轮 ab5dd9b / 三轮 2182bc0 / 四轮分层收敛 / 五轮 UI 收敛）
+
+见 git 历史与 `docs/iteration-plan.md`；第三轮的文件端点/订阅联动/本地双端
+脚本（`scripts/dual-node-file-test.sh`）链路在 v3 下保持逐字节一致。
+
+---
+
+## 13. 扩展性主张（游戏联机等场景）
+
+端点框架的地基属性：**新增端点类型 = 新增一个实现 load/share 的 struct +
+构造器（含探测闭包），内核与协商层零改动**。预留的 `MediaKind::Input`
+（游戏手柄/键鼠注入，实时目标、延迟敏感）与 `MediaKind::Service`（游戏服务
+托管，QUIC 多路复用 + schema）即为该方向的扩展口；确定目标（存档/Mod/资源
+分发）与实时目标（观战/语音/输入）的分类已覆盖游戏联机的数据形态。

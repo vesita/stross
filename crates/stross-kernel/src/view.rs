@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use stross_proto::message::{DeviceSummary, RoleId, TransportId};
+use stross_proto::message::{EndpointSummary, RoleId, TransportId};
 
 /// 应用信息（版本 / 平台 / ffmpeg 是否可用 / 本机 IP）。
 #[derive(Serialize)]
@@ -44,10 +44,10 @@ pub struct RelayInfo {
     pub transports: Vec<TransportId>,
     /// 中继 IP（本机中继时为 `None`，用 urls 展示）。
     pub ip: Option<String>,
-    /// 端点框架 L1：该节点公开的设备清单摘要（id/kind/name/是否已公开；
-    /// 本机 = 注册表快照，对端 = mDNS `DiscoveryInfo v2.devices` 解码）。
+    /// 端点框架 L1：该节点公开的端点清单摘要（id/kind/name/是否可挂载/
+    /// 是否已通告；本机 = 注册表快照，对端 = mDNS `DiscoveryInfo v3.endpoints` 解码）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub devices: Vec<DeviceSummary>,
+    pub endpoints: Vec<EndpointSummary>,
 }
 
 /// 推流启动结果。
@@ -84,7 +84,7 @@ pub struct CaptureStatusView {
 ///
 /// 多网卡：列出全部局域网 IP 入口（无局域网 IP 时回退回环）。
 /// `name`：本机设备名（与 mDNS 广播名一致，壳层注入）。
-pub fn relay_info(port: u16, name: &str, devices: Vec<DeviceSummary>) -> RelayInfo {
+pub fn relay_info(port: u16, name: &str, endpoints: Vec<EndpointSummary>) -> RelayInfo {
     let urls = crate::transport::RelayUrl::http_entries(port);
     RelayInfo {
         port,
@@ -99,7 +99,7 @@ pub fn relay_info(port: u16, name: &str, devices: Vec<DeviceSummary>) -> RelayIn
             TransportId::Quic,
         ],
         ip: None,
-        devices,
+        endpoints,
     }
 }
 
@@ -117,11 +117,10 @@ pub fn watch_urls(relay_url: Option<&str>, relay_port: u16) -> Vec<String> {
     crate::transport::RelayUrl::http_entries(relay_port)
 }
 
-/// 本机目录（设备 + 已公开端点；节点卡片设备树渲染用）。
+/// 本机目录（全部端点；节点卡片端点树渲染用）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalCatalog {
-    pub devices: Vec<stross_proto::message::DeviceInfo>,
     pub endpoints: Vec<stross_proto::message::EndpointManifest>,
 }
 

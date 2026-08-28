@@ -196,7 +196,7 @@ mod tests {
                 TransportId::Quic,
             ],
             codecs: vec![CodecId::H264, CodecId::Aac],
-            devices: vec![],
+            endpoints: vec![],
         };
         let p = peer_from_discovered(discovered("192.168.1.9", 8777, info.to_txt()));
         assert_eq!(p.name, "客厅电脑");

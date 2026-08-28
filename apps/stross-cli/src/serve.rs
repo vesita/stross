@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
-use stross_bridge::{device_name_or, seed_platform_devices};
+use stross_bridge::{device_name_or, seed_platform_endpoints};
 use stross_kernel::{CtrlServer, Kernel, Platform, bootstrap};
 use stross_media::capture::FfmpegBackend;
 
@@ -45,7 +45,7 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     // 桌面采集后端（ffmpeg），供 ctrl start-stream 使用
     app.set_backend(Arc::new(FfmpegBackend::new()));
     // 平台设备清单（桥接层单一来源：桌面 = 屏幕/麦克风/系统声音）
-    seed_platform_devices(&app);
+    seed_platform_endpoints(&app);
     // 端点订阅驱动：订阅达成自动开推（文件泵 / 媒体推流），docs/endpoint-model.md §5
     // —— 已收敛为 bootstrap::start 的默认行为（幂等），此处无需再手动接线。
     // 引导层（docs/endpoint-model.md §0）：身份注入 → 锚定受控中继并广播

@@ -375,7 +375,7 @@ impl ShareNegotiator {
                     .endpoint_id
                     .as_ref()
                     .and_then(|eid| self.app.endpoint_manifest(eid))
-                    .map(|m| m.device.name.clone()),
+                    .map(|m| m.name.clone()),
                 created_at: 0, // 挂起表未记录创建时刻，置 0 表示未知
             })
             .collect()
@@ -392,7 +392,7 @@ impl ShareNegotiator {
             .as_ref()
             .and_then(|eid| self.app.endpoint_manifest(eid));
         let (title, media) = match &endpoint {
-            Some(m) => (format!("接收 {} 共享", m.device.name), vec![m.device.kind]),
+            Some(m) => (format!("接收 {} 共享", m.name), vec![m.kind]),
             None => (format!("接收 {device_name} 共享"), vec![MediaKind::Mic]),
         };
         compose_grant(
@@ -448,9 +448,18 @@ async fn handle_request(
     State(state): State<Arc<ServerState>>,
     Json(req): Json<ShareRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // 端点语义：先校验端点存在（404）；旧语义校验 media 非空（400）
+    // 端点语义：先校验端点存在与可挂载（404）；旧语义校验 media 非空（400）
     let endpoint = match &req.endpoint_id {
         Some(eid) => match state.app.endpoint_manifest(eid) {
+            Some(m) if !m.available => {
+                let reason = m.last_error.as_deref().unwrap_or("未知原因");
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": format!("端点不可用（{reason}）: {eid}")
+                    })),
+                );
+            }
             Some(m) => Some(m),
             None => {
                 return (
@@ -482,7 +491,7 @@ async fn handle_request(
     match policy_decision(&state.store, endpoint.as_ref(), &req.device_id) {
         Decision::Grant => {
             let (title, media) = match &endpoint {
-                Some(m) => (format!("接收 {} 共享", m.device.name), vec![m.device.kind]),
+                Some(m) => (format!("接收 {} 共享", m.name), vec![m.kind]),
                 None => (format!("接收 {} 共享", req.device_name), req.media.clone()),
             };
             match compose_grant(
@@ -543,7 +552,7 @@ async fn handle_request(
                 device_id: req.device_id.clone(),
                 device_name: req.device_name.clone(),
                 media: media_names,
-                endpoint_name: endpoint.as_ref().map(|m| m.device.name.clone()),
+                endpoint_name: endpoint.as_ref().map(|m| m.name.clone()),
                 created_at: unix_secs(),
             });
 
@@ -665,14 +674,14 @@ fn compose_grant(
 }
 
 /// 订阅达成事件（自由函数版，`handle_request` / `respond` 共用）：构造
-/// [`SubscribeCtx`] 触发公开方驱动开推（docs/endpoint-model.md §5 联动；
-/// 只对端点语义生效）。
+/// [`SubscribeCtx`] 触发端点 `share` 自动开推（docs/endpoint-model.md §1
+/// 契约 / §5 联动；只对端点语义生效）。
 ///
 /// * pull：数据面流 id = 公开方本机会话（`grant.view.stream_id`），推入
 ///   自己的受控中继，无需凭证；
 /// * push：流 id / 凭证取自**订阅方**自签 token（订阅方中继校验用）。
 fn notify_subscribed(
-    app: &Kernel,
+    app: &Arc<Kernel>,
     endpoint_id: Option<&str>,
     grant: &ShareGrant,
     subscriber: &str,
@@ -706,13 +715,15 @@ fn notify_subscribed(
             None
         },
     };
-    app.fire_endpoint_subscribed(endpoint_id, &ctx);
+    app.on_endpoint_subscribed(app.clone(), endpoint_id, &ctx);
 }
 
-/// 目录 API（L2）：本节点设备 + 已公开端点（Private 端点不对目录公开，§9）。
+/// 目录 API（L2）：本节点**已通告**端点（不可挂载端点可见但不可订阅——
+/// `available=false` 由订阅方 UI 与握手校验拒绝；Private 端点不对目录公开，§9）。
 async fn handle_endpoints(State(state): State<Arc<ServerState>>) -> Json<serde_json::Value> {
-    let (devices, endpoints) = state.app.endpoint_catalog();
-    let endpoints: Vec<EndpointManifest> = endpoints
+    let endpoints: Vec<EndpointManifest> = state
+        .app
+        .published_endpoints()
         .into_iter()
         .filter(|e| !matches!(e.visibility, Visibility::Private { .. }))
         .collect();
@@ -722,13 +733,12 @@ async fn handle_endpoints(State(state): State<Arc<ServerState>>) -> Json<serde_j
         .map(|i| (i.device_id, i.device_name))
         .unwrap_or_else(|| ("".into(), "本机".into()));
     // 类型化构造（stross-proto EndpointDir）：序列化与旧 json! 逐字节一致
-    // （node/deviceId/deviceName、devices、endpoints，全 camelCase）
+    // （node/deviceId/deviceName、endpoints，全 camelCase）
     let dir = EndpointDir {
         node: EndpointNode {
             device_id,
             device_name,
         },
-        devices,
         endpoints,
     };
     Json(serde_json::to_value(dir).unwrap_or_default())
@@ -792,8 +802,10 @@ async fn cors_layer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Platform;
-    use stross_proto::message::{DeviceInfo, MediaKind};
+    use crate::{
+        Endpoint, EndpointBase, MicEndpoint, Platform, Probe, ScreenEndpoint, SystemAudioEndpoint,
+    };
+    use stross_proto::message::MediaKind;
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("stross-neg-{tag}-{}", std::process::id()));
@@ -801,31 +813,17 @@ mod tests {
         d
     }
 
-    /// 桌面平台设备 fixture（平台枚举收在 stross-bridge；测试自备等价清单）。
+    /// 探测恒成功（测试环境无真实采集源，只验证契约）。
+    fn ok_probe() -> Probe {
+        std::sync::Arc::new(|| Ok(()))
+    }
+
+    /// 桌面平台端点 fixture（平台端点构造收在 stross-bridge；测试自备等价清单）。
     fn desktop_kernel() -> Kernel {
         let k = Kernel::new(Platform::Desktop);
-        for d in [
-            DeviceInfo {
-                device_id: "screen:0".into(),
-                kind: MediaKind::Screen,
-                name: "屏幕".into(),
-                builtin: true,
-            },
-            DeviceInfo {
-                device_id: "mic:builtin".into(),
-                kind: MediaKind::Mic,
-                name: "麦克风".into(),
-                builtin: true,
-            },
-            DeviceInfo {
-                device_id: "sysaudio:builtin".into(),
-                kind: MediaKind::SystemAudio,
-                name: "系统声音".into(),
-                builtin: true,
-            },
-        ] {
-            k.seed_device(d);
-        }
+        k.seed_endpoint(Box::new(ScreenEndpoint::new("屏幕", ok_probe())));
+        k.seed_endpoint(Box::new(MicEndpoint::new("麦克风", ok_probe())));
+        k.seed_endpoint(Box::new(SystemAudioEndpoint::new("系统声音", ok_probe())));
         k
     }
 
@@ -1033,9 +1031,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_subscription_fires_driver_ctx_with_subscriber_credentials() {
+    async fn push_subscription_fires_endpoint_share_with_subscriber_credentials() {
         use std::sync::Mutex as StdMutex;
-        let dir = tmp_dir("hook");
+        let dir = tmp_dir("share");
         // 订阅方自签凭证（文档 §5：push 数据面接入凭证挂在订阅方内核）
         let sub_token = ShareToken {
             v: ShareToken::VERSION,
@@ -1045,18 +1043,53 @@ mod tests {
             media: vec![MediaKind::File],
         };
         let app = Arc::new(desktop_kernel());
-        // 公开方文件端点（公开方侧挂驱动）
-        let file = dir.join("hello.txt");
-        std::fs::write(&file, b"hi").unwrap();
-        let m = app
-            .publish_file_endpoint(&file, Visibility::Public, Delivery::Push)
-            .unwrap();
+        // 订阅达成应触发端点 share（端点自驱动契约）：注入记录端点记录 ctx
         let fired: Arc<StdMutex<Vec<crate::kernel::SubscribeCtx>>> =
             Arc::new(StdMutex::new(Vec::new()));
-        let f = fired.clone();
-        app.set_subscribe_hook(Some(Arc::new(move |_eid, ctx| {
-            f.lock().unwrap().push(ctx.clone());
-        })));
+        struct RecordingEndpoint {
+            base: EndpointBase,
+            fired: Arc<StdMutex<Vec<crate::kernel::SubscribeCtx>>>,
+        }
+        impl Endpoint for RecordingEndpoint {
+            fn id(&self) -> &str {
+                &self.base.id
+            }
+            fn kind(&self) -> MediaKind {
+                self.base.kind
+            }
+            fn name(&self) -> &str {
+                &self.base.name
+            }
+            fn target(&self) -> crate::kernel::TargetKind {
+                crate::kernel::TargetKind::Determined
+            }
+            fn available(&self) -> bool {
+                self.base.available
+            }
+            fn last_error(&self) -> Option<&str> {
+                self.base.last_error.as_deref()
+            }
+            fn load(&mut self) -> Result<(), String> {
+                self.base.available = true;
+                Ok(())
+            }
+            fn share(&self, _app: std::sync::Arc<Kernel>, ctx: crate::kernel::SubscribeCtx) {
+                self.fired.lock().unwrap().push(ctx);
+            }
+        }
+        app.seed_endpoint(Box::new(RecordingEndpoint {
+            base: EndpointBase {
+                id: "rec:0".into(),
+                kind: MediaKind::File,
+                name: "记录".into(),
+                available: false,
+                last_error: None,
+            },
+            fired: fired.clone(),
+        }));
+        let m = app
+            .publish_endpoint("rec:0", Visibility::Public, Delivery::Push, None, None)
+            .unwrap();
 
         let neg = ShareNegotiator {
             app: app.clone(),
@@ -1065,7 +1098,7 @@ mod tests {
             task: tokio::spawn(async {}),
             port: 0,
         };
-        // 挂起条目携带订阅方中继 + 自签凭证；人工应答允许 → 触发驱动
+        // 挂起条目携带订阅方中继 + 自签凭证；人工应答允许 → 触发端点 share
         let (tx, rx) = oneshot::channel();
         neg.pending.lock_poisoned().insert(
             "np1".into(),
@@ -1082,7 +1115,7 @@ mod tests {
         neg.respond("np1", true, false).unwrap();
         rx.await.unwrap().expect("应签发 push 凭证");
         let ctxs = fired.lock().unwrap();
-        assert_eq!(ctxs.len(), 1, "确认后应触发一次订阅事件");
+        assert_eq!(ctxs.len(), 1, "确认后应触发一次端点 share");
         let ctx = &ctxs[0];
         assert_eq!(ctx.subscriber, "dev-sub");
         assert_eq!(ctx.delivery, Delivery::Push);
@@ -1162,9 +1195,54 @@ mod tests {
         let app = desktop_kernel();
         // 未知端点查不到
         assert!(app.endpoint_manifest("nope").is_none());
-        // 目录快照含设备 + 端点；Private 由 /api/endpoints 层过滤（见 handle_endpoints）
-        let (devices, endpoints) = app.endpoint_catalog();
-        assert_eq!(devices.len(), 3, "桌面平台默认 3 台设备");
-        assert!(endpoints.is_empty(), "未公开时不应有端点");
+        // 目录快照含全部端点（单层模型）；未通告时 published 全 false
+        let endpoints = app.endpoint_catalog();
+        assert_eq!(endpoints.len(), 3, "桌面平台默认 3 个端点");
+        assert!(endpoints.iter().all(|e| !e.published), "未通告时均不可订阅");
+        assert!(endpoints.iter().all(|e| e.available), "探测恒成功 fixture");
+    }
+
+    #[test]
+    fn unavailable_endpoint_rejected_by_publish_and_subscribe() {
+        // 屏幕端点探测失败（无图形会话）→ 不可挂载：拒绝通告；订阅握手 404
+        let app = Kernel::new(Platform::Desktop);
+        app.seed_endpoint(Box::new(ScreenEndpoint::new(
+            "屏幕",
+            std::sync::Arc::new(|| Err("无图形会话".into())),
+        )));
+        let err = app
+            .publish_endpoint("screen:0", Visibility::Public, Delivery::Pull, None, None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("无图形会话"),
+            "通告失败应携带 load 探测原因: {err}"
+        );
+        // 订阅握手对不可挂载端点返回 404 + 原因
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let state = Arc::new(ServerState {
+            app: Arc::new(app),
+            store: Arc::new(TrustStore::load(&tmp_dir("unavail"))),
+            ui: Arc::new(crate::NoopUi),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        });
+        let req = ShareRequest {
+            device_id: "dev-x".into(),
+            device_name: "申请方".into(),
+            endpoint_id: Some("screen:0".into()),
+            delivery_mode: None,
+            relay_addr: None,
+            share_token: None,
+            media: vec![MediaKind::Screen],
+        };
+        let (code, body) = rt.block_on(handle_request(State(state), Json(req)));
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert!(
+            body.0
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .contains("无图形会话"),
+            "握手拒绝应携带原因: {body:?}"
+        );
     }
 }

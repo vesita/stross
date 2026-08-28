@@ -320,7 +320,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 println!(
                     "已公开端点 {}（{}）delivery={}",
                     payload["endpointId"].as_str().unwrap_or("?"),
-                    payload["deviceName"].as_str().unwrap_or("?"),
+                    payload["name"].as_str().unwrap_or("?"),
                     payload["delivery"].as_str().unwrap_or("?"),
                 );
             }
@@ -339,7 +339,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 println!(
                     "已公开文件端点 {}（{}，{} 字节）delivery={}",
                     payload["endpointId"].as_str().unwrap_or("?"),
-                    payload["deviceName"].as_str().unwrap_or("?"),
+                    payload["name"].as_str().unwrap_or("?"),
                     payload["size"].as_u64().unwrap_or(0),
                     payload["delivery"].as_str().unwrap_or("?"),
                 );
@@ -357,28 +357,28 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                     return Ok(());
                 }
-                let devices = payload["devices"].as_array().cloned().unwrap_or_default();
                 let endpoints = payload["endpoints"].as_array().cloned().unwrap_or_default();
-                println!("本节点设备（{} 台）：", devices.len());
-                for d in &devices {
-                    println!(
-                        "  {}「{}」（{}{}）",
-                        d["deviceId"].as_str().unwrap_or("?"),
-                        d["name"].as_str().unwrap_or("?"),
-                        d["kind"].as_str().unwrap_or("?"),
-                        if d["published"].as_bool().unwrap_or(false) {
-                            "，已公开"
-                        } else {
-                            ""
-                        },
-                    );
-                }
-                println!("已公开端点（{} 个）：", endpoints.len());
+                println!("本节点端点（{} 个）：", endpoints.len());
                 for e in &endpoints {
+                    let avail = if e["available"].as_bool().unwrap_or(false) {
+                        "可用".to_string()
+                    } else {
+                        format!(
+                            "不可用（{}）",
+                            e["lastError"].as_str().unwrap_or("未知原因")
+                        )
+                    };
                     println!(
-                        "  {}「{}」vis={} delivery={} state={} subscribers={}",
+                        "  {}「{}」{} {}{} vis={} delivery={} state={} subscribers={}",
                         e["endpointId"].as_str().unwrap_or("?"),
                         e["name"].as_str().unwrap_or("?"),
+                        avail,
+                        if e["published"].as_bool().unwrap_or(false) {
+                            "已通告"
+                        } else {
+                            "未通告"
+                        },
+                        e["kind"].as_str().unwrap_or("?"),
                         e["visibility"].as_str().unwrap_or("?"),
                         e["delivery"].as_str().unwrap_or("?"),
                         e["state"].as_str().unwrap_or("?"),

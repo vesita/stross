@@ -1,54 +1,34 @@
-//! 端点框架（节点 → 设备 → 端点）：设备 / 端点模型与 mDNS 摘要。
+//! 端点框架（节点 → 端点）：**单层端点模型**与 L1 摘要。
 //!
 //! 设计规格：docs/endpoint-model.md。
 //!
-//! * **设备**：节点上持久存在的能力实体（摄像头 / 麦克风 / 屏幕……），
-//!   与订阅与否无关；
-//! * **端点**：设备**被公开后**形成的订阅入口实例，携带公开者声明的协议
-//!   （`transports` 优先序）、可见性、delivery 与运行状态。P1 为一设备一端点
-//!   （1:1，`endpoint_id == device_id`）。
-//!
-//! 协议、可见性、delivery 全部由**公开者**决定；订阅方只在 `transports` 列表
-//! 内协商/降级（复用 `Offer`/`Answer`）。
+//! * **端点**：节点上可共享的能力实体（屏幕 / 麦克风 / 摄像头 / 系统声音 /
+//!   文件……）。端点自维护「可挂载性」（`available`，load 探测结果）、失败
+//!   原因（`last_error`）与通告状态（`published`）；
+//! * **行为契约**（端点 ↔ 内核约定，非语言特性）：每个端点实现 `load`
+//!   （探测自身可用性，能否被挂载成节点）与 `share`（订阅达成后启动共享
+//!   推流），内核不做类型分派；
+//! * **目标类型**（内核契约层，不进 wire）：端点分两类——确定目标（文件等，
+//!   内容预先确定，一次推送）与实时目标（相机等，内容持续产生，持续推流）；
+//!   两类的共性抽象为 [`Endpoint`] 契约（stross-kernel），差异经目标类型
+//!   维度 + 各端点实现表达。
 
 use serde::{Deserialize, Serialize};
 
 use super::ids::{CodecId, MediaKind, TransportId};
 
-/// 节点上的持久能力实体。
+/// mDNS 摘要层（L1）：只带 id/kind/name/是否可挂载/是否已通告，绝无协议、
+/// 可见性等详情（详情走 L2 `GET /api/endpoints` 拉取）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeviceInfo {
-    /// 节点内稳定 id（"mic:builtin" / "screen:0" / "camera:front"）。
-    pub device_id: String,
-    pub kind: MediaKind,
-    /// 用户可见名（"内置麦克风"）。
-    pub name: String,
-    /// 是否随节点常驻（静态枚举）。
-    pub builtin: bool,
-}
-
-/// mDNS 摘要层（L1）：只带 id/kind/name/是否已公开，绝无协议、可见性等详情
-/// （详情走 L2 `GET /api/endpoints` 拉取）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceSummary {
-    pub device_id: String,
+pub struct EndpointSummary {
+    pub endpoint_id: String,
     pub kind: MediaKind,
     pub name: String,
+    /// load 探测结果：能否被挂载成节点（共享源可用）。
+    pub available: bool,
+    /// 是否已通告（目录可见、可订阅）。
     pub published: bool,
-}
-
-impl DeviceSummary {
-    /// 由完整设备生成摘要。
-    pub fn from_device(device: &DeviceInfo, published: bool) -> Self {
-        Self {
-            device_id: device.device_id.clone(),
-            kind: device.kind,
-            name: device.name.clone(),
-            published,
-        }
-    }
 }
 
 /// 端点可见性（决定**目录可见性 + 授予决策**两件事）。
@@ -87,21 +67,35 @@ pub struct TransportPreference {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EndpointState {
-    /// 已公开但无订阅（不采集）。
+    /// 已通告但无订阅（不采集/不推送）。
     Idle,
-    /// 有订阅（正在推流）。
+    /// 有订阅（正在共享：推流 / 传文件）。
     Active,
     /// 暂停（手动挂起）。
     Suspended,
 }
 
-/// 端点清单：公开方协议 / 可见性 / delivery / 运行状态的唯一来源。
+/// 端点清单：公开方协议 / 可见性 / delivery / 挂载性 / 运行状态的唯一来源。
+///
+/// 单层端点模型：端点 = 节点上可共享的能力实体（原「设备」与「端点」合并），
+/// `published` 表示是否已通告；未通告端点只在本机目录可见，不进对端目录/
+/// mDNS 摘要的可订阅集。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointManifest {
-    /// 全局端点名（P1 1:1 下 == device_id；多端点版本解耦）。
+    /// 节点内稳定 id（"screen:0" / "mic:builtin" / "file:notes.txt"）。
     pub endpoint_id: String,
-    pub device: DeviceInfo,
+    pub kind: MediaKind,
+    /// 用户可见名（"内置麦克风"）。
+    pub name: String,
+    /// load 探测结果：能否被挂载成节点（共享源可用）。
+    pub available: bool,
+    /// load/share 失败原因（`available=false` 时展示给用户；对端目录可见但
+    /// 不可订阅）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// 是否已通告（未通告 = 仅本机可见，不进目录/摘要可订阅集）。
+    pub published: bool,
     pub visibility: Visibility,
     pub delivery: Delivery,
     /// 公开者选择的传输（按 priority 升序）。
@@ -146,18 +140,47 @@ impl FileMeta {
 mod tests {
     use super::*;
 
-    #[test]
-    fn device_summary_from_device() {
-        let d = DeviceInfo {
-            device_id: "mic:builtin".into(),
+    fn sample_manifest() -> EndpointManifest {
+        EndpointManifest {
+            endpoint_id: "mic:builtin".into(),
             kind: MediaKind::Mic,
             name: "麦克风".into(),
-            builtin: true,
+            available: true,
+            last_error: None,
+            published: true,
+            visibility: Visibility::Confirm,
+            delivery: Delivery::Both,
+            transports: vec![
+                TransportPreference {
+                    transport: TransportId::Quic,
+                    priority: 0,
+                },
+                TransportPreference {
+                    transport: TransportId::Ws,
+                    priority: 1,
+                },
+            ],
+            codecs: vec![CodecId::Aac],
+            state: EndpointState::Idle,
+            subscribers: 0,
+            updated_at: 1_800_000_000,
+        }
+    }
+
+    #[test]
+    fn endpoint_summary_wire() {
+        let s = EndpointSummary {
+            endpoint_id: "screen:0".into(),
+            kind: MediaKind::Screen,
+            name: "屏幕".into(),
+            available: false,
+            published: true,
         };
-        let s = DeviceSummary::from_device(&d, true);
-        assert_eq!(s.device_id, "mic:builtin");
-        assert!(s.published);
-        assert_eq!(s.kind, MediaKind::Mic);
+        let text = serde_json::to_string(&s).unwrap();
+        assert!(text.contains("\"endpointId\":\"screen:0\""), "wire: {text}");
+        assert!(text.contains("\"available\":false"), "wire: {text}");
+        let back: EndpointSummary = serde_json::from_str(&text).unwrap();
+        assert_eq!(s, back);
     }
 
     #[test]
@@ -206,38 +229,31 @@ mod tests {
     }
 
     #[test]
-    fn manifest_roundtrip() {
-        let m = EndpointManifest {
-            endpoint_id: "mic:builtin".into(),
-            device: DeviceInfo {
-                device_id: "mic:builtin".into(),
-                kind: MediaKind::Mic,
-                name: "麦克风".into(),
-                builtin: true,
-            },
-            visibility: Visibility::Confirm,
-            delivery: Delivery::Both,
-            transports: vec![
-                TransportPreference {
-                    transport: TransportId::Quic,
-                    priority: 0,
-                },
-                TransportPreference {
-                    transport: TransportId::Ws,
-                    priority: 1,
-                },
-            ],
-            codecs: vec![CodecId::Aac],
-            state: EndpointState::Idle,
-            subscribers: 0,
-            updated_at: 1_800_000_000,
-        };
+    fn manifest_roundtrip_flat_single_layer() {
+        let m = sample_manifest();
         let text = serde_json::to_string(&m).unwrap();
+        // 单层端点模型：平铺 kind/name（无 device 嵌套）
         assert!(
             text.contains("\"endpointId\":\"mic:builtin\""),
             "wire: {text}"
         );
+        assert!(text.contains("\"kind\":\"mic\""), "wire: {text}");
+        assert!(
+            !text.contains("\"device\""),
+            "单层模型不应有 device 嵌套: {text}"
+        );
         let back: EndpointManifest = serde_json::from_str(&text).unwrap();
         assert_eq!(m, back);
+        // 不可用端点的 last_error 上 wire
+        let mut m2 = sample_manifest();
+        m2.available = false;
+        m2.last_error = Some("无图形会话".into());
+        let text2 = serde_json::to_string(&m2).unwrap();
+        assert!(
+            text2.contains("\"lastError\":\"无图形会话\""),
+            "wire: {text2}"
+        );
+        let back2: EndpointManifest = serde_json::from_str(&text2).unwrap();
+        assert_eq!(m2, back2);
     }
 }

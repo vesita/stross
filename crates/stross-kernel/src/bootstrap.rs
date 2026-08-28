@@ -2,8 +2,8 @@
 //!
 //! 框架语义（程序负责相互发现，**引导模块负责引导链接建立**）：
 //!
-//! 1. **相互嗅探**：锚定受控中继并广播 mDNS **L1 摘要**（节点 → 设备清单，
-//!    `DiscoveryInfo v2.devices`）；
+//! 1. **相互嗅探**：锚定受控中继并广播 mDNS **L1 摘要**（节点 → 端点清单，
+//!    `DiscoveryInfo v3.endpoints`）；
 //! 2. **基础通信链接**：受控中继（数据面入口）+ 协商端点 18779
 //!    （目录 **L2** 与订阅握手）；
 //! 3. **目录与订阅**：`GET /api/endpoints`（可订阅端点清单）+
@@ -81,9 +81,9 @@ pub async fn anchor(
 
 /// 第 3 步（目录 + 订阅握手）：启动协商端点（LAN 可达，CORS 放行）。
 ///
-/// **同时默认安装订阅驱动**（订阅达成 → 自动开推，docs/endpoint-model.md §5；
-/// 幂等）——任何拥有协商端点的实例（CLI serve / GUI 桌面）都必须行为一致，
-/// 否则"订阅了不推流"（GUI 曾漏装）。壳层无需再手动接线。
+/// 订阅联动由端点**自驱动**（`share` 契约，docs/endpoint-model.md §1）——
+/// 协商层授予成功后直接调用端点 share，无需壳层接线（曾需安装订阅驱动，
+/// GUI 漏装导致"订阅了不推流"；契约化后行为天然一致）。
 ///
 /// `port = 0` 理解为默认端口 [`DEFAULT_NEGOTIATOR_PORT`]（与本机中继端口
 /// 语义一致：0 = 常规部署端口）。本地双端测试用显式端口避免冲突。
@@ -98,7 +98,6 @@ pub async fn start_handshake_on(
     } else {
         port
     };
-    crate::endpoint_driver::install_endpoint_driver(&kernel);
     Ok(Arc::new(
         ShareNegotiator::start(kernel, ui, base_dir, port)
             .await

@@ -6,7 +6,8 @@
 //!
 //! * [`paths`]：数据目录解析（XDG/HOME 回退链，单一真源）
 //! * [`hostname`]：本机主机名（OS 调用收敛点）
-//! * [`devices`]：平台设备静态枚举（桌面 / Android 能力清单）与注入
+//! * [`devices`]：平台端点构造（load 探测闭包注入：屏幕可用性 / ffmpeg）
+//!   与注入
 //!
 //! 桥接层只产出**参数**，不持有状态：内核拿到 base_dir / hostname /
 //! 设备清单后自行运作，壳层无需再复制任何解析逻辑。
@@ -15,6 +16,6 @@ pub mod devices;
 pub mod hostname;
 pub mod paths;
 
-pub use devices::{platform_devices, seed_platform_devices};
+pub use devices::{platform_endpoints, seed_platform_endpoints};
 pub use hostname::{device_name_or, hostname_or};
 pub use paths::data_dir;

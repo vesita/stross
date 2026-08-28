@@ -28,8 +28,8 @@ pub use capability::{CapabilityDescriptor, RoutePath, SessionEventKind, Transpor
 pub use control::ControlMessage;
 pub use discovery::{DiscoveryInfo, TXT_KEY_DISCOVERY};
 pub use endpoint::{
-    Delivery, DeviceInfo, DeviceSummary, EndpointManifest, EndpointState, FileMeta,
-    TransportPreference, Visibility,
+    Delivery, EndpointManifest, EndpointState, EndpointSummary, FileMeta, TransportPreference,
+    Visibility,
 };
 pub use ids::{CapabilityKind, CodecId, MediaKind, ReliabilityProfile, RoleId, TransportId};
 pub use negotiator::{

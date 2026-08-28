@@ -101,13 +101,17 @@ fn print_device(dev: &ScannedDevice) {
     if !caps.is_empty() {
         println!("      {}", caps.join(" · "));
     }
-    if !dev.devices.is_empty() {
+    if !dev.endpoints.is_empty() {
         let list: Vec<String> = dev
-            .devices
+            .endpoints
             .iter()
-            .map(|d| format!("{}{}", d.name, if d.published { "（已公开）" } else { "" }))
+            .map(|e| {
+                let avail = if e.available { "" } else { "（不可用）" };
+                let pub_ = if e.published { "（已通告）" } else { "" };
+                format!("{}{}{}", e.name, avail, pub_)
+            })
             .collect();
-        println!("      设备: {}", list.join(" / "));
+        println!("      端点: {}", list.join(" / "));
     }
     if let Some(srt) = dev.srt_port {
         println!("      SRT {srt}");
@@ -186,7 +190,7 @@ mod tests {
             roles: vec![RoleId::Sender],
             media: vec![MediaKind::Screen],
             transports: vec![],
-            devices: vec![],
+            endpoints: vec![],
             online: true,
             srt_port: None,
             quic_port: None,

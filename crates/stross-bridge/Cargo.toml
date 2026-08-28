@@ -7,5 +7,6 @@ license.workspace = true
 
 [dependencies]
 stross-kernel.workspace = true
+stross-media.workspace = true
 stross-proto.workspace = true
 hostname.workspace = true

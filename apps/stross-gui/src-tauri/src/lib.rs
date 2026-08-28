@@ -110,7 +110,7 @@ pub fn run() {
     // 平台判定唯一来源在桥接层（`cfg(target_os)` 只允许出现在那里）
     let app_state = Kernel::new(stross_bridge::devices::platform());
     // 平台设备清单（桥接层单一来源：桌面 = 屏幕/麦克风/系统声音；Android = 麦克风/系统声音）
-    stross_bridge::seed_platform_devices(&app_state);
+    stross_bridge::seed_platform_endpoints(&app_state);
     // 桌面后端无依赖，可立即注入；Android 后端需要 plugin setup 阶段
     // 注册的 PluginHandle，只能在 Builder::setup（plugin setup 之后）注入。
     #[cfg(not(mobile))]

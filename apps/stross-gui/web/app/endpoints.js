@@ -18,7 +18,7 @@ let lastLocalCatalogSig = '';
 async function refreshLocalCatalog() {
     try {
         const next = (await call('local_catalog'));
-        const sig = JSON.stringify([next.devices, next.endpoints]);
+        const sig = JSON.stringify(next.endpoints);
         if (sig === lastLocalCatalogSig)
             return;
         lastLocalCatalogSig = sig;
@@ -29,37 +29,44 @@ async function refreshLocalCatalog() {
         // 目录拉取失败不打断主流程（设备树保留旧快照）
     }
 }
-/** 本机设备树渲染（写入本机卡片 [data-role="local-devices"] 容器）。 */
+/** 本机端点树渲染（写入本机卡片 [data-role="local-devices"] 容器）。 */
 function renderLocalDevices() {
     const box = document.querySelector('[data-role="local-devices"] .dev-list');
     if (!box)
         return;
     box.innerHTML = '';
-    if (!localCatalog.devices.length) {
-        box.appendChild(emptyState('server', '暂无可通告的设备'));
+    if (!localCatalog.endpoints.length) {
+        box.appendChild(emptyState('server', '暂无可共享的端点'));
         return;
     }
-    const byId = new Map(localCatalog.endpoints.map((e) => [e.device.deviceId, e]));
-    for (const d of localCatalog.devices) {
-        const ep = byId.get(d.deviceId);
+    for (const ep of localCatalog.endpoints) {
         const row = document.createElement('div');
-        row.className = 'ep-row';
+        row.className = 'ep-row' + (ep.available ? '' : ' ep-unavail');
         const ic = document.createElement('span');
         ic.className = 'ep-ic';
-        ic.innerHTML = icon(deviceKindIcon(d.kind));
+        ic.innerHTML = icon(deviceKindIcon(ep.kind));
         const body = document.createElement('span');
         body.className = 'ep-body';
         const name = document.createElement('span');
         name.className = 'ep-name';
-        name.textContent = d.name;
+        name.textContent = ep.name;
         const meta = document.createElement('span');
         meta.className = 'ep-meta';
-        meta.textContent = DEVICE_KIND_LABELS[d.kind] || d.kind;
+        const kindLabel = DEVICE_KIND_LABELS[ep.kind] || ep.kind;
+        meta.textContent = ep.available
+            ? kindLabel
+            : `${kindLabel} · 不可用（${ep.lastError || '未知原因'}）`;
         body.appendChild(name);
         body.appendChild(meta);
         row.appendChild(ic);
         row.appendChild(body);
-        if (ep) {
+        if (!ep.available) {
+            const hint = document.createElement('span');
+            hint.className = 'hint';
+            hint.textContent = '不可挂载';
+            row.appendChild(hint);
+        }
+        else if (ep.published) {
             const badge = document.createElement('span');
             badge.className = 'badge ep-badge';
             badge.textContent =
@@ -81,7 +88,7 @@ function renderLocalDevices() {
             pub.className = 'sm primary ep-act';
             pub.innerHTML = icon('radio') + '<span>通告</span>';
             pub.dataset.act = 'publish-device';
-            pub.dataset.device = d.deviceId;
+            pub.dataset.device = ep.endpointId;
             row.appendChild(pub);
         }
         box.appendChild(row);
@@ -109,12 +116,12 @@ function deviceKindIcon(kind) {
 // 通告（本机设备 → 端点）
 // ---------------------------------------------------------------------------
 /** 打开通告弹窗（可见性 / delivery 由公开者声明）。 */
-function openPublishModal(deviceId) {
-    const d = localCatalog.devices.find((x) => x.deviceId === deviceId);
-    if (!d)
+function openPublishModal(endpointId) {
+    const ep = localCatalog.endpoints.find((x) => x.endpointId === endpointId);
+    if (!ep)
         return;
-    publishTarget = { device: d };
-    $('pub-modal-title').textContent = `通告「${d.name}」`;
+    publishTarget = { ep };
+    $('pub-modal-title').textContent = `通告「${ep.name}」`;
     $('pub-modal-sub').textContent =
         '端点 = 订阅入口：对端节点在目录里看到它并订阅，订阅达成后自动开推（不采集则省资源）。';
     document.querySelector('input[name="pub-vis"][value="confirm"]').checked = true;
@@ -133,7 +140,7 @@ async function confirmPublish() {
     $('pub-error').classList.add('hidden');
     try {
         await call('endpoint_publish', {
-            deviceId: publishTarget.device.deviceId,
+            deviceId: publishTarget.ep.endpointId,
             visibility: vis,
             delivery,
         });
@@ -209,7 +216,7 @@ function renderRemoteDir(dev, dir) {
     status.className = 'dir-status hint';
     status.textContent = '展开即拉取（endpoint_ls，协商端口缺省）';
     container.appendChild(status);
-    if (!dir.devices.length && !dir.endpoints.length) {
+    if (!dir.endpoints.length) {
         container.appendChild(emptyState('server', '该节点暂未通告任何端点'));
         return;
     }
@@ -218,12 +225,12 @@ function renderRemoteDir(dev, dir) {
         row.className = 'ep-row';
         const ic = document.createElement('span');
         ic.className = 'ep-ic';
-        ic.innerHTML = icon(deviceKindIcon(ep.device.kind));
+        ic.innerHTML = icon(deviceKindIcon(ep.kind));
         const body = document.createElement('span');
         body.className = 'ep-body';
         const name = document.createElement('span');
         name.className = 'ep-name';
-        name.textContent = ep.device.name;
+        name.textContent = ep.name;
         const meta = document.createElement('span');
         meta.className = 'ep-meta';
         meta.textContent =
@@ -234,7 +241,14 @@ function renderRemoteDir(dev, dir) {
         body.appendChild(meta);
         row.appendChild(ic);
         row.appendChild(body);
-        if (ep.device.kind === 'file') {
+        if (!ep.available) {
+            // 不可挂载端点：可见原因，不可订阅（屏幕获取失败等 load 探测结果）
+            const hint = document.createElement('span');
+            hint.className = 'hint';
+            hint.textContent = '不可订阅（' + (ep.lastError || '未知原因') + '）';
+            row.appendChild(hint);
+        }
+        else if (ep.kind === 'file') {
             const hint = document.createElement('span');
             hint.className = 'hint';
             hint.textContent = '文件端点（CLI 订阅）';
@@ -270,7 +284,7 @@ function openSubscribeModal(host, endpointId) {
     if (!ep)
         return;
     subscribeTarget = { host, ep };
-    $('sub-modal-title').textContent = `订阅「${ep.device.name}」`;
+    $('sub-modal-title').textContent = `订阅「${ep.name}」`;
     $('sub-modal-sub').textContent =
         `可见性=${VISIBILITY_LABELS[ep.visibility] || ep.visibility} · ` +
             `方向=${DELIVERY_LABELS[ep.delivery] || ep.delivery} · 传输=` +

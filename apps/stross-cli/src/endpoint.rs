@@ -26,7 +26,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Args, Subcommand};
 use stross_kernel::{Kernel, Platform, fetch_directory, subscribe_file};
-use stross_proto::message::{Delivery, MediaKind};
+use stross_proto::message::Delivery;
 
 #[derive(Args, Debug)]
 pub struct EndpointArgs {
@@ -103,16 +103,21 @@ async fn run_ls(host: &str, port: u16, json: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     println!("节点 {}（{}）", dir.node.device_name, dir.node.device_id);
-    println!("设备（{} 台）：", dir.devices.len());
-    for d in &dir.devices {
-        println!("  {}「{}」（{}）", d.device_id, d.name, kind_label(&d.kind),);
-    }
-    println!("可订阅端点（{} 个）：", dir.endpoints.len());
+    println!("已通告端点（{} 个）：", dir.endpoints.len());
     for e in &dir.endpoints {
+        let avail = if e.available {
+            "可用".to_string()
+        } else {
+            format!(
+                "不可用（{}）",
+                e.last_error.as_deref().unwrap_or("未知原因")
+            )
+        };
         println!(
-            "  {}「{}」vis={} delivery={} state={}",
+            "  {}「{}」{} vis={} delivery={} state={}",
             e.endpoint_id,
-            e.device.name,
+            e.name,
+            avail,
             serde_json::to_string(&e.visibility).unwrap_or_default(),
             serde_json::to_string(&e.delivery).unwrap_or_default(),
             serde_json::to_string(&e.state).unwrap_or_default(),
@@ -148,18 +153,4 @@ async fn run_subscribe(
         outcome.stream_id,
     );
     Ok(())
-}
-
-fn kind_label(k: &MediaKind) -> String {
-    match k {
-        MediaKind::Screen => "屏幕".into(),
-        MediaKind::Window => "窗口".into(),
-        MediaKind::Camera => "摄像头".into(),
-        MediaKind::Mic => "麦克风".into(),
-        MediaKind::SystemAudio => "系统声".into(),
-        MediaKind::Input => "输入".into(),
-        MediaKind::Clipboard => "剪贴板".into(),
-        MediaKind::File => "文件".into(),
-        MediaKind::Service => "服务".into(),
-    }
 }

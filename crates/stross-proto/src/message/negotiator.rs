@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::endpoint::{Delivery, DeviceInfo, EndpointManifest};
+use super::endpoint::{Delivery, EndpointManifest};
 use super::ids::{MediaKind, TransportId};
 
 /// 一次性接入凭证视图（接收端签发后展示；订阅握手授予的 flatten 载荷）。
@@ -89,15 +89,13 @@ pub struct EndpointNode {
     pub device_name: String,
 }
 
-/// L2 目录响应（`GET /api/endpoints`）：节点 + 设备 + 可订阅端点。
-/// Private 端点在服务端已过滤（§9），此处为公开快照。
-/// 注：`devices` 是完整 [`DeviceInfo`]（含 `builtin`）——与目录接口现有
-/// 序列化一致（L1 摘要 `DeviceSummary` 用于 mDNS，不在此响应）。
+/// L2 目录响应（`GET /api/endpoints`）：节点 + 端点清单（单层端点模型）。
+/// Private 端点与不可挂载端点在服务端已过滤（§9），此处为公开快照。
+/// L1 摘要 `EndpointSummary` 用于 mDNS，不在此响应。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointDir {
     pub node: EndpointNode,
-    pub devices: Vec<DeviceInfo>,
     pub endpoints: Vec<EndpointManifest>,
 }
 
@@ -168,21 +166,14 @@ mod tests {
                 device_id: "node-1".into(),
                 device_name: "电脑".into(),
             },
-            devices: vec![],
             endpoints: vec![],
         };
         let json = serde_json::to_value(&dir).unwrap();
         assert_eq!(json["node"]["deviceId"], "node-1");
+        // 单层端点模型：目录不再携带独立 devices 数组
+        assert!(json.get("devices").is_none());
         let back: EndpointDir = serde_json::from_value(json).unwrap();
         assert_eq!(back.node.device_name, "电脑");
-        // 设备/端点结构引用同一类型（编译期校验序列化契约）
-        let _ = serde_json::to_value(DeviceInfo {
-            device_id: "mic:builtin".into(),
-            kind: MediaKind::Mic,
-            name: "内置麦克风".into(),
-            builtin: true,
-        })
-        .unwrap();
         let _ = serde_json::to_value(Visibility::Public).unwrap();
     }
 }

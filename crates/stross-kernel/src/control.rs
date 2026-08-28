@@ -257,7 +257,7 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
         } => match app.publish_endpoint(&device_id, visibility, delivery, transports, codecs) {
             Ok(m) => CtrlResponse::ok(json!({
                 "endpointId": m.endpoint_id,
-                "deviceName": m.device.name,
+                "name": m.name,
                 "delivery": serde_json::to_string(&m.delivery).unwrap_or_default(),
             })),
             Err(e) => CtrlResponse::err(e.to_user_string()),
@@ -269,7 +269,7 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
         } => match app.publish_file_endpoint(std::path::Path::new(&path), visibility, delivery) {
             Ok(m) => CtrlResponse::ok(json!({
                 "endpointId": m.endpoint_id,
-                "deviceName": m.device.name,
+                "name": m.name,
                 "size": app.file_source(&m.endpoint_id).map(|s| s.size).unwrap_or(0),
                 "delivery": serde_json::to_string(&m.delivery).unwrap_or_default(),
             })),
@@ -284,26 +284,18 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             }
         }
         CtrlRequest::EndpointList => {
-            let (devices, endpoints) = app.endpoint_catalog();
-            let devices: Vec<serde_json::Value> = devices
-                .iter()
-                .map(|d| {
-                    json!({
-                        "deviceId": d.device_id,
-                        "kind": serde_json::to_string(&d.kind).unwrap_or_default(),
-                        "name": d.name,
-                        "builtin": d.builtin,
-                    })
-                })
-                .collect();
-            let endpoints: Vec<serde_json::Value> = endpoints
+            // 单层端点模型：一张端点表（含未通告），published/available 自标注
+            let endpoints: Vec<serde_json::Value> = app
+                .endpoint_catalog()
                 .iter()
                 .map(|e| {
                     json!({
                         "endpointId": e.endpoint_id,
-                        "deviceId": e.device.device_id,
-                        "kind": serde_json::to_string(&e.device.kind).unwrap_or_default(),
-                        "name": e.device.name,
+                        "kind": serde_json::to_string(&e.kind).unwrap_or_default(),
+                        "name": e.name,
+                        "available": e.available,
+                        "lastError": e.last_error,
+                        "published": e.published,
                         "visibility": serde_json::to_string(&e.visibility).unwrap_or_default(),
                         "delivery": serde_json::to_string(&e.delivery).unwrap_or_default(),
                         "state": serde_json::to_string(&e.state).unwrap_or_default(),
@@ -314,20 +306,7 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
                     })
                 })
                 .collect();
-            // 已公开端点 id 集合（供设备行标注「已公开」）——设备表按注册顺序输出
-            let published: std::collections::HashSet<&str> = endpoints
-                .iter()
-                .filter_map(|e| e.get("endpointId").and_then(|x| x.as_str()))
-                .collect();
-            let devices: Vec<serde_json::Value> = devices
-                .into_iter()
-                .map(|mut d| {
-                    let id = d["deviceId"].as_str().unwrap_or("").to_string();
-                    d["published"] = serde_json::json!(published.contains(id.as_str()));
-                    d
-                })
-                .collect();
-            CtrlResponse::ok(json!({ "devices": devices, "endpoints": endpoints }))
+            CtrlResponse::ok(json!({ "endpoints": endpoints }))
         }
         CtrlRequest::CreateSession { title, sinks } => {
             // 源节点固定为本机（register_local_node 注册的 "local"）；
@@ -451,7 +430,10 @@ pub mod client {
                     let v: Value = serde_json::from_str(&text)?;
                     match v.get("rsp").and_then(|x| x.as_str()) {
                         Some("ok") => return Ok(v["payload"].clone()),
-                        Some("error") => {
+                        // CtrlResponse::Err 变体序列化 tag 为 "err"（serde tag 用
+                        // 变体名小写）；匹配实际 wire 值，否则错误响应被当事件忽略
+                        // → 客户端无限等待（曾实测挂死）。
+                        Some("err") => {
                             bail!("{}", v["message"].as_str().unwrap_or("未知错误"))
                         }
                         _ => {} // KernelEvent（type 标签），忽略

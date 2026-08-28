@@ -4,8 +4,8 @@
 //!
 //! 本层只做两件事：
 //!
-//! 1. 把 [`stross_app::StrossApp`]（核心封装模块）注入 Tauri 托管状态
-//! 2. 把前端 `invoke` 的每个命令转发给 `StrossApp`（薄命令层，见 [`commands`]）
+//! 1. 把 [`stross_kernel::Kernel`]（核心封装模块）注入 Tauri 托管状态
+//! 2. 把前端 `invoke` 的每个命令转发给 `Kernel`（薄命令层，见 [`commands`]）
 //!
 //! 平台差异（ffmpeg 桌面采集 vs Android 原生采集）被隔离在采集后端里：
 //! 桌面用 [`stross_media::capture::FfmpegBackend`]，Android 用 `mobile::AndroidCapture`。
@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use stross_app::{Platform, StrossApp};
+use stross_kernel::Kernel;
 #[cfg(not(mobile))]
 use stross_media::capture::FfmpegBackend;
 use tauri::{Emitter, Manager};
@@ -40,7 +40,7 @@ use crate::receive::*;
 
 /// 协商服务运行句柄（桌面启动后持有；Android 为空——仅作协商客户端）。
 pub(crate) struct NegotiatorHandle(
-    pub(crate) Arc<std::sync::Mutex<Option<Arc<stross_app::ShareNegotiator>>>>,
+    pub(crate) Arc<std::sync::Mutex<Option<Arc<stross_kernel::ShareNegotiator>>>>,
 );
 
 /// 协商事件 → Tauri 事件桥（电脑端 GUI 弹授权确认）。
@@ -50,8 +50,8 @@ struct NegotiatorUiBridge {
 }
 
 #[cfg(not(mobile))]
-impl stross_app::NegotiatorUi for NegotiatorUiBridge {
-    fn request_pending(&self, req: &stross_app::PendingRequest) {
+impl stross_kernel::NegotiatorUi for NegotiatorUiBridge {
+    fn request_pending(&self, req: &stross_kernel::PendingRequest) {
         let _ = self.app.emit("negotiator-request", req);
     }
 }
@@ -103,12 +103,10 @@ pub fn run() {
         )
         .init();
 
-    let platform = if cfg!(target_os = "android") {
-        Platform::Android
-    } else {
-        Platform::Desktop
-    };
-    let app_state = StrossApp::new(platform);
+    // 平台判定唯一来源在桥接层（`cfg(target_os)` 只允许出现在那里）
+    let app_state = Kernel::new(stross_bridge::devices::platform());
+    // 平台设备清单（桥接层单一来源：桌面 = 屏幕/麦克风/系统声音；Android = 麦克风/系统声音）
+    stross_bridge::seed_platform_devices(&app_state);
     // 桌面后端无依赖，可立即注入；Android 后端需要 plugin setup 阶段
     // 注册的 PluginHandle，只能在 Builder::setup（plugin setup 之后）注入。
     #[cfg(not(mobile))]
@@ -120,7 +118,7 @@ pub fn run() {
             #[cfg(mobile)]
             {
                 let backend = Arc::new(mobile::AndroidCapture::from_app(app.handle()));
-                app.state::<Arc<StrossApp>>().set_backend(backend);
+                app.state::<Arc<Kernel>>().set_backend(backend);
             }
             // 注入本机持久化身份：mDNS 实例名携带 device_id 前缀，
             // 多设备同端口广播时实例名唯一（否则 mdns-sd 同名互覆盖）。
@@ -130,11 +128,9 @@ pub fn run() {
                     .path()
                     .app_data_dir()
                     .unwrap_or_else(|_| std::env::temp_dir());
-                let name = hostname::get()
-                    .map(|h| h.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| "Stross 设备".into());
-                let id = stross_app::load_or_create_identity(&base, &name);
-                app.state::<Arc<StrossApp>>().set_identity(id);
+                let name = stross_bridge::hostname_or("Stross 设备");
+                let id = stross_kernel::load_or_create_identity(&base, &name);
+                app.state::<Arc<Kernel>>().set_identity(id);
             }
             // 凭证协商服务（权限自动化）：桌面启动；Android 仅作客户端不启动
             #[cfg(not(mobile))]
@@ -150,10 +146,10 @@ pub fn run() {
                     let ui = NegotiatorUiBridge {
                         app: app_handle.clone(),
                     };
-                    let app_state = app_handle.state::<Arc<StrossApp>>().inner().clone();
+                    let app_state = app_handle.state::<Arc<Kernel>>().inner().clone();
                     // 引导层（docs/endpoint-model.md §0）：目录（L2）与订阅握手端点
                     // （锚定由前端触发；Android 不起协商端点、仅作客户端）
-                    match stross_app::bootstrap::start_handshake(app_state, Arc::new(ui), &base)
+                    match stross_kernel::bootstrap::start_handshake(app_state, Arc::new(ui), &base)
                         .await
                     {
                         Ok(neg) => {
@@ -171,7 +167,7 @@ pub fn run() {
             // 内核事件桥：订阅 KernelEvent，转发为 Tauri 事件「kernel-event」
             // （前端可订阅替代轮询；设计文档 §3.2）
             {
-                let mut rx = app.state::<Arc<StrossApp>>().kernel().subscribe();
+                let mut rx = app.state::<Arc<Kernel>>().subscribe();
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     while let Ok(ev) = rx.recv().await {
@@ -200,7 +196,7 @@ pub fn run() {
 /// 单独充当局域网中继（服务器 / 常驻部署场景，不依赖 webkit/GTK）。
 #[cfg(not(mobile))]
 pub fn run_relay_only(args: &[String]) {
-    use stross_core::relay::{DEFAULT_PORT, RelayServer};
+    use stross_kernel::relay::{DEFAULT_PORT, RelayServer};
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -229,7 +225,11 @@ pub fn run_relay_only(args: &[String]) {
 
     let rt = tokio::runtime::Runtime::new().expect("创建 tokio runtime 失败");
     rt.block_on(async {
-        if let Err(e) = RelayServer::run_standalone(port, advertise, "sender-relay").await {
+        // mDNS 广播主机名：壳层平台适配负责取本机名（core 零 OS 调用）
+        let hostname = stross_bridge::hostname_or("stross");
+        if let Err(e) =
+            RelayServer::run_standalone(port, advertise, "sender-relay", &hostname).await
+        {
             tracing::error!("中继启动失败: {e}");
         }
     });

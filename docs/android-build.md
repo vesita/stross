@@ -86,5 +86,5 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk ANDROID_HOME=/opt/android-sdk \
 |---|---|---|---|
 | 1 | Android 打开 UI 全空白，JS 全部 `Unexpected token '<'` | `frontendDist` 写成**文件数组**，Android 资源打包未嵌入任何前端文件（APK assets 仅 tauri.conf.json） | 改回目录形式 `"frontendDist": "../web"`（桌面侧同样受益） |
 | 2 | 网格出现「点不开」的设备卡片（fe80 条目） | 广播侧 `enable_addr_auto()` 会把网卡全地址（含 fe80 link-local）带进 mDNS；browse 侧取地址集合首项偶取 fe80 | `Discovery::browse` 选址：**过滤 fe80/169.254，优先 IPv4**（双栈 WiFi 下不同设备 IPv6 前缀常不可达，IPv4 是可靠路径）；`broadcast_addrs` 同过滤；前端 `grid.ts` 追加 link-local 剔除 |
-| 3 | Android 观看页「解码 N」恒 0、状态卡「等待流数据」 | Android 解码在 Kotlin（MediaCodec），Rust 侧 ReceiveStats 无回写；状态只在无帧时置「等待流数据」、不随帧到达翻回 | `mobile.rs` 解码回调 → `StrossApp::note_android_decoded_frame` → `Receiver::note_decoded_video`；`watch.ts` 轮询在已绘制帧后翻回「接收中」 |
+| 3 | Android 观看页「解码 N」恒 0、状态卡「等待流数据」 | Android 解码在 Kotlin（MediaCodec），Rust 侧 ReceiveStats 无回写；状态只在无帧时置「等待流数据」、不随帧到达翻回 | `mobile.rs` 解码回调 → `Kernel::note_android_decoded_frame` → `Receiver::note_decoded_video`；`watch.ts` 轮询在已绘制帧后翻回「接收中」 |
 | 4 | 同一设备 IPv4/fe80 多卡片 | 广播携带全部地址、peer 表未去重 | 由 #2 的 browse 选址收敛（每服务选一个可达地址） |

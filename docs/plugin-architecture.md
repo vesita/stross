@@ -8,13 +8,13 @@
 > Adaptive）、`transport-quic`（quinn + rustls-ring，control/media 多路复用）——
 > 四种传输共用同一 `handle_push`/`handle_watch`（抽象价值四重证明）
 > · 决策推迟：WASM 策略插件、跨设备控制闭环、Sink 其余（见 §5.5 决策记录）
-> 关联：[architecture.md](architecture.md)（五层架构）· [protocol.md](protocol.md)（线上协议）· [roadmap.md](roadmap.md)（P0 设备路由 / P2 流解耦 / WebRTC 低延迟）
+> 关联：[architecture.md](architecture.md)（分层架构）· [protocol.md](protocol.md)（线上协议）· [roadmap.md](roadmap.md)（P0 设备路由 / P2 流解耦 / WebRTC 低延迟）
 
 ## 1. 背景与目标
 
-Stross 现有五层架构（proto → core/media → app → sender）已经是一个「准内核」：
+Stross 现有分层架构（proto → transport → kernel → bridge → UI）已经是一个「内核」：
 `stross-proto` 是传输无关的线上契约，`stross-media::capture::CaptureBackend` 已经是第一个插件接口，
-`stross-core::relay` 是数据面。但它还缺三件事：
+`stross-kernel::relay` 是数据面。设计之初它还缺三件事：
 
 1. **控制面（内核）与数据面耦合**：会话、路由、方向控制没有独立抽象，`RelayServer` 的 Router 同时干两件事；
 2. **传输层是 WS 专属**：帧格式注释写明「每个 WebSocket 二进制消息是一个完整的帧」，换传输要动协议；
@@ -134,8 +134,8 @@ impl Kernel {
 
 | 现状 | 目标 |
 |---|---|
-| `stross-core::relay`（Router 兼控制面+数据面） | 控制面逻辑上移到内核；数据面转发下沉为「Transport 之上的转发器」，关键帧对齐逻辑原样保留 |
-| `stross-app::StrossApp`（本地状态机） | 成为**本地应用门面**：组合 Kernel + 本地 Source + 本地内嵌中继；对 UI 的命令面（`app_info` / `list_devices` / `start_relay` / `scan_relays` / `start_stream` / `stop_stream` / `stream_status` / `capture_status` / `start_receive` / `stop_receive` / `receive_status`）保持兼容 |
+| `stross-kernel::relay`（Router 兼控制面+数据面） | 控制面在 `kernel` 门面（会话/路由/鉴权/凭证）；数据面转发下沉为「Transport 之上的转发器」，关键帧对齐逻辑原样保留 |
+| `stross-kernel::Kernel`（内核门面） | **第七轮落地**：原 `StrossApp` 状态机与原 `kernel::Kernel` 骨架合并为单一 `Kernel`；命令面（`app_info` / `list_devices` / `start_relay` / `scan_relays` / `start_stream` / `stop_stream` / `stream_status` / `capture_status` / `start_receive` / `stop_receive` / `receive_status`）保持兼容 |
 | `stross-media::capture::CaptureBackend` | 演进为 `Source` 能力：增加 `descriptor()`（media kind / codecs / 分辨率上限），`start/stop/status` 语义不变 |
 | `discovery.rs`（mDNS + TXT） | TXT 承载能力广播：`role=`、`transports=`、`codecs=`、控制端口 |
 | `stross-proto`（v1 帧 + 控制消息） | v2 帧头（seq/分片）+ 协商/路由控制消息（见 §5） |
@@ -283,10 +283,10 @@ pub enum ControlMessage {
 
 | 项 | 决策 | 理由 |
 |---|---|---|
-| 拆 `stross-transport` crate | ✅ 落地 | 阶段 1 已证明抽象价值（同一 `handle_watch` 驱动 ws/webrtc）；传输实现的重依赖（str0m，未来 quic）不再进入 core/media/app 的依赖树；`stross_core::transport` / `stross_core::net` 路径 re-export 保持兼容 |
+| 拆 `stross-transport` crate | ✅ 落地 | 阶段 1 已证明抽象价值（同一 `handle_watch` 驱动 ws/webrtc）；传输实现的重依赖（str0m，未来 quic）不再进入 core/media/app 的依赖树；`stross_kernel::transport` / `stross_kernel::net` 路径 re-export 保持兼容 |
 | `transport-srt` | ✅ 落地 | [rsrt 0.3](https://github.com/cesbo/rsrt) 是**纯 Rust SRT**（`#![deny(unsafe_code)]`，TSBPD/ARQ/HaiCrypt，依赖全为 RustCrypto/tokio，零 C 依赖，MIT/Apache-2.0）——推翻此前「无纯 Rust 实现」的过时结论；补上 `Adaptive` 可靠性契约（设计 §4.1 的第三个 profile），弱网/跨 NAT 推流通道；大帧按 v2 头 `frag_*` 分片/重组（SRT 单消息 ≤ 协商 MSS−44≈1456B），relay 开独立 UDP 端口（`RelayHandle::srt_port`），`RelayClient` 按 `srt://` scheme 选传输；集成测试证明同一 `handle_push` 驱动 ws/srt |
 | `transport-quic` | ✅ 落地 | **quinn 0.11 默认 features 即 `rustls-ring`**（ring 只需 cc 无 cmake，本机满足，MIT/Apache-2.0、rust-version 1.85）——「接受 ring」前提成立即落地；线格式：control/media **两条双向 stream**（stream 即类型，无需消息类型前缀），长度前缀分帧（QUIC 流是 lazy 的，客户端 open 后发空消息作就绪信号），大帧整体发送（无单消息大小限制，不需要 `frag_*`）；自签名证书（rcgen，进程内一次）+ 客户端接受任意证书（局域网可信模型，与 ws:// 明文同级）；relay 开独立 UDP 端口（`RelayHandle::quic_port`），`RelayClient` 按 `quic://` scheme 选传输；集成测试证明同一 `handle_push` 驱动 ws/quic |
-| 拆 `stross-kernel` crate | ⏸ 暂不拆 | 内核已与传输解耦（只依赖 proto 类型），留在 stross-app 内耦合度可接受；待出现第二个内核消费方（如独立 stross-viewer）再拆 |
+| 拆 `stross-kernel` crate | ✅ 已拆（第七轮） | `stross-core` 更名 `stross-kernel` 并吸收原 `stross-app` 全部服务：内核 = 所有平台无关服务，单一 `Kernel` 门面；平台适应独立 `stross-bridge`（见 docs/layering-architecture.md） |
 | 控制面 WASM 插件（Extism） | ⏸ 推迟 | 设计自标「远期可选」；阶段 2 已落地 `AuthPolicy` trait + 内置 `PinAuthPolicy`（设计 §7 承诺的内置实现），WASM 只需实现同一 trait，不动内核 |
 | 跨设备控制闭环（A 控制 B 推流） | ⏸ 推迟 | roadmap P0 级独立功能（远程控制 API + 鉴权 + UI），体量另立阶段；内核 `authorize`/`route` 命令面已为其留好接口 |
 
@@ -338,12 +338,12 @@ pub trait Sink: Send + Sync {
 | 改动 | 文件 |
 |---|---|
 | v2 帧头（seq/frag/reserved）+ 协商/路由控制消息 | `stross-proto/src/frame.rs`、`message.rs` |
-| `Transport` trait + `transport-ws` 实现（把现有 `/ws/push`、`/ws/watch` handler 包成 Transport；axum 路由保留 HTTP 部分） | `stross-core/src/relay.rs`（新增 `transport/` 模块） |
-| relay 数据面转发改为消费 `Transport` trait（单一 ws 实现，行为不变） | `stross-core/src/relay.rs` |
+| `Transport` trait + `transport-ws` 实现（把现有 `/ws/push`、`/ws/watch` handler 包成 Transport；axum 路由保留 HTTP 部分） | `stross-kernel/src/relay/` |
+| relay 数据面转发改为消费 `Transport` trait（单一 ws 实现，行为不变） | `stross-kernel/src/relay/` |
 | `CaptureBackend` 增加 `descriptor()` | `stross-media/src/capture.rs`、`mobile.rs` |
-| Kernel 骨架：`DeviceGraph` + `SessionManager` + `Router`（先支持 Direct / ViaRelay 两种 path）+ `route()` 命令 | `stross-app/src/`（新增 `kernel/` 模块） |
+| Kernel 骨架：`DeviceGraph` + `SessionManager` + `Router`（先支持 Direct / ViaRelay 两种 path）+ `route()` 命令 | `stross-kernel/src/kernel/` |
 | Tauri 命令面加 `route_session` / 内核事件（`KernelEvent` 订阅替代/补充 `stream_status` 轮询） | `apps/stross-gui/src-tauri/src/lib.rs` |
-| 测试：`transport-memory` 假实现 + Transport 层单测 | `stross-core/tests/` |
+| 测试：`transport-memory` 假实现 + Transport 层单测 | `stross-kernel/tests/` |
 
 **验收**：现有 150 个测试全绿；桌面端到端推流→接收行为与体验不变；帧头 v2 在 WS 上等价 v1。
 
@@ -363,8 +363,8 @@ A/B 两条传输共享同一内核测试套件。
 **已落地**：
 
 - ✅ 拆 `stross-transport` crate：`Transport`/`DataSession` 抽象 + ws/webrtc/srt/quic/memory
-  实现 + `net` 迁入独立 crate；`stross-core` re-export 保持路径兼容
-  （`stross_core::transport` / `stross_core::net`）；feature 传递（`discovery`
+  实现 + `net` 迁入独立 crate；`stross-kernel` re-export 保持路径兼容
+  （`stross_kernel::transport` / `stross_kernel::net`）；feature 传递（`discovery`
   同时启用传输层 mDNS 候选解析）；
 - ✅ Sink 扩展第一步：`Sink` trait + `RecordingSink`（录制，原始 ES 输出，
   无外部依赖，可测）；

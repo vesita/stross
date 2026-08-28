@@ -1,10 +1,10 @@
 //! GUI 接收播放域（Tauri 命令）：WS 收流 → 解码 → 帧转发前端（桌面 canvas /
 //! Android MediaCodec）。壳层职责：仅做**显示路径**粘合（缩放 / base64 / 事件），
-//! 流接收本身走 `stross_app::Receiver`。
+//! 流接收本身走 `stross_kernel::Receiver`。
 
 use std::sync::Arc;
 
-use stross_app::StrossApp;
+use stross_kernel::Kernel;
 use tauri::State;
 // 桌面接收路径 emit base64 帧载荷需要（Android 走 mobile_jni，不经此模块）。
 #[cfg(not(target_os = "android"))]
@@ -21,7 +21,7 @@ use tauri::Emitter;
 #[tauri::command]
 pub async fn start_receive(
     app: tauri::AppHandle,
-    state: State<'_, Arc<StrossApp>>,
+    state: State<'_, Arc<Kernel>>,
     relay: String,
     stream: String,
     audio: stross_media::playback::AudioOut,
@@ -69,13 +69,13 @@ pub async fn start_receive(
 
 /// 停止接收。
 #[tauri::command]
-pub fn stop_receive(state: State<'_, Arc<StrossApp>>) {
+pub fn stop_receive(state: State<'_, Arc<Kernel>>) {
     state.stop_receive();
 }
 
 /// 接收统计（帧数 / 解码 / 音频块）。
 #[tauri::command]
-pub fn receive_status(state: State<'_, Arc<StrossApp>>) -> stross_app::ReceiveStats {
+pub fn receive_status(state: State<'_, Arc<Kernel>>) -> stross_kernel::ReceiveStats {
     state.receive_status()
 }
 

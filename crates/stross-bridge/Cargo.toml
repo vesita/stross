@@ -1,0 +1,11 @@
+[package]
+name = "stross-bridge"
+description = "Platform adaptation bridge for Stross: path resolution, hostname, platform device enumeration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+stross-kernel.workspace = true
+stross-proto.workspace = true
+hostname.workspace = true

@@ -16,18 +16,20 @@ crates/
                     message/negotiator.rs）
   stross-transport  传输层：SRT / QUIC / WS / WebRTC、RelayUrl、
                     net（local_ips / advertise_ip / fake-IP 判定）
-  stross-core       数据共享：中继（server + data_plane + peers）、
-                    中继 HTTP 客户端（relay/client.rs，契约单一真源）、
-                    mDNS Discovery、sender/watch、jitter
+  stross-kernel     ★ 内核（全部平台无关服务，单一门面 Kernel）：
+                    中继 server + 中继 HTTP 客户端（relay/，契约单一真源）、
+                    mDNS Discovery、sender/watch/jitter、控制面 CtrlServer
+                    + client（D7）、凭证协商 ShareNegotiator + client、
+                    端点框架 kernel/（会话/路由/鉴权/端点注册表）、
+                    订阅方编排 subscriber、文件传输 file_xfer、引导 bootstrap、
+                    扫描聚合 devices、推流引擎 engine、接收 receiver、view 展示视图
   stross-media      采集（ffmpeg 后端）、播放（PlaybackSink/cpal）、流水线 StreamConfig
-  stross-app        应用编排库：StrossApp、控制面 CtrlServer（D7）、凭证协商
-                    ShareNegotiator、内核 Kernel（会话/路由/端点注册表）、
-                    订阅方编排 subscriber（fetch_directory/subscribe_file）、
-                    文件传输 file_xfer、引导 bootstrap、数据目录 paths
+  stross-bridge     平台适应桥接层：paths（数据目录）/ hostname / 平台设备枚举
+                    （只产出参数注入内核，不持有状态）
   mdns              mdns-sd 0.21 的本地 fork（workspace crate；跨设备发现修复都在这里）
 apps/
   stross-cli        CLI：serve/ctrl/devices/adb/push/receive/relay/scan
-                    （只做参数解析+展示，流程全部调 stross-app 库接口）
+                    （只做参数解析+展示，流程全部调 stross-kernel 库接口）
   stross-gui        Tauri GUI（桌面 + Android 共用一套 web 前端）
   stross-relay      独立中继 CLI
 scripts/            构建 / 测试 / 真机回归脚本（见 §5）
@@ -35,10 +37,11 @@ docs/               设计文档（layering-architecture.md 是分层判据；en
                     是端点框架规格）
 ```
 
-**分层铁律（docs/layering-architecture.md）**：线协议类型 → proto；中继 HTTP
-契约（server+client）→ core；流程编排（引导/协商/订阅/文件传输）→ app 库；
-壳层只调接口。**核心功能必须平台无关**（core 零路径/OS/UI 依赖）。壳层禁止
-再写 HTTP 客户端、响应结构体或复制 IP 过滤规则。
+**分层铁律（docs/layering-architecture.md）**：线协议类型 → proto；全部服务
+提供 → stross-kernel（数据面/信令/编排，单一 `Kernel` 门面）；平台适应 →
+stross-bridge 与壳层；壳层只做参数解析 + 展示 + 平台适配。**内核必须平台
+无关**（kernel 零路径约定、零 OS 调用、零平台分支；base_dir / hostname /
+设备清单一律注入）。壳层禁止再写 HTTP 客户端、响应结构体或复制 IP 过滤规则。
 
 ## 2. 关键概念与端口约定
 
@@ -131,7 +134,7 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
   点不开（曾两次复现）。
 - **Android 虚拟接口**：手机 rndis0（10.159.157.x USB 共享）、vgate0（OPPO
   游戏 VPN /32）会进 `local_ips()`；它们不是局域网可达地址。PC 端还有
-  Clash TUN fake-IP（198.18.0.0/15）。过滤/选址逻辑见 crates/stross-core
+  Clash TUN fake-IP（198.18.0.0/15）。过滤/选址逻辑见 crates/stross-kernel
   src/discovery.rs 与 crates/stross-transport/src/net.rs。
 - **协商端点只在 serve/GUI 有**：CLI `serve` 会启动 18779；其它进程若需
   被自动协商必须自己起 `ShareNegotiator`。

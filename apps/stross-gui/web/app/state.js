@@ -14,16 +14,12 @@ const QUALITIES = {
 const LS_RELAY = 'stross.lastRelay';
 const LS_TITLE = 'stross.lastTitle';
 const LS_RECENT = 'stross.recentRelays';
-// —— 权限自动化（B2.5：凭证自动协商 + 防火墙） ——
-/** 协商端点固定端口（与 Rust `stross_app::DEFAULT_NEGOTIATOR_PORT` 一致）。 */
-const NEGOTIATOR_PORT = 18779;
 // ---------------------------------------------------------------------------
 // 单一状态源：全部运行时状态集中在此，各域文件显式读写；
 // 渲染是状态（state）的纯函数，消灭「散文件 let 全局变量 + 脆弱互斥拼真相」。
 // ---------------------------------------------------------------------------
 /** 运行平台 / 环境。 */
 let IS_ANDROID = false;
-let MY_IPS = [];
 /** 本机采集设备（相机/音频输入/系统声；由 list_devices 填充）。 */
 let devices = { cameras: [], audioInputs: [], systemAudio: [] };
 /** 本机锚点（免先连：init 自动 `start_relay`；推流/级联兜底的数据面入口）。 */

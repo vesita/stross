@@ -10,8 +10,8 @@ name = "stross"
 path = "src/main.rs"
 
 [dependencies]
-stross-app.workspace = true
-stross-core = { workspace = true, features = ["discovery"] }
+stross-kernel.workspace = true
+stross-bridge.workspace = true
 stross-media.workspace = true
 stross-proto.workspace = true
 anyhow.workspace = true

@@ -14,7 +14,7 @@
 //! ```
 
 use clap::Parser;
-use stross_core::relay::{DEFAULT_PORT, RelayServer};
+use stross_kernel::relay::{DEFAULT_PORT, RelayServer};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -38,5 +38,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    RelayServer::run_standalone(args.port, !args.no_advertise, "relay").await
+    // mDNS 广播主机名：壳层平台适配负责取本机名（core 零 OS 调用）
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "stross".into());
+    RelayServer::run_standalone(args.port, !args.no_advertise, "relay", &hostname).await
 }

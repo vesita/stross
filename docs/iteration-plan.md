@@ -183,7 +183,7 @@ GStreamer 流水线。
       「本机入口 → 读取中…」卡占位——暴露 **UI bug：设备列表重建清空 ip-list
       后不重渲染**，已修复（renderDeviceList 统一重渲染 IP 列表）
 - [x] **跨设备 mDNS 发现故障检视（2026-08-27，未根治，证据已归档）**：
-      `stross devices` 扫不到手机但能扫到本机；`stross-core::discovery::browse`
+      `stross devices` 扫不到手机但能扫到本机；`stross_kernel::discovery::browse`
       已加 `accept_unsolicited(true)`（与 GUI 配置对齐；效果：ServiceFound 从
       「完全不触发」变为「可触发」，但手机实例仍不 resolve）。关键证据：
       a. 裸 python socket（SO_REUSEPORT + 加入 wlan0 组）能收到手机 PTR 响应，
@@ -391,3 +391,29 @@ GStreamer 流水线。
    与电脑播放闭环 → B4 延迟压测达标；
 3. C/D 与 B 的收尾并行（弱网测试可在 B4 延迟压测后立刻复用同一脚本框架）；
 4. E 二期（ReliableChannel）在 B/C 稳定后启动。
+
+---
+
+## 第七轮（统一化重构，2026-08-28）：内核定义落定 + 桥接层独立
+
+**目标**：解决「内核定义不明确」「app 里写内核太奇怪」——`stross-core` 更名
+`stross-kernel` 并吸收原 `stross-app` 全部服务；平台适应独立 `stross-bridge`；
+壳层只做参数解析 + 展示 + 平台适配（docs/layering-architecture.md §2/§3）。
+
+**变更**：
+| 项 | 落点 |
+|---|---|
+| crate 更名 | `stross-core` → `stross-kernel`；`stross-app` 删除（服务进 kernel，平台进 bridge） |
+| 单一门面 | 原 `kernel::Kernel`（会话/路由骨架）+ 原 `StrossApp`（运行态状态机）合并为 `stross_kernel::Kernel`（90+ 方法，事件经 `KernelEvent` 广播） |
+| 桥接层（新 crate） | `stross-bridge`：paths（数据目录）/ hostname（OS 调用收敛）/ 平台设备枚举（`cfg(target_os)` 唯一出现点）；只产出参数注入内核 |
+| 内核零 OS 调用 | `Kernel::start_relay*` / `bootstrap::ensure_identity` 主机名改为调用方注入；设备清单一律 `seed_device` 注入 |
+| 服务全量进内核 | 控制面（CtrlServer+client）/ 协商（srv+client）/ 订阅 / 文件传输 / 引导 / 扫描聚合 / 推流引擎 / 接收编排 / 端点框架 / 展示视图 |
+| 端口常量 | `relay::{DEFAULT_PORT=18777, GUI_PORT=8777}`、CTRL 18778、NEGOTIATOR 18779、SRT 33462、QUIC 33464（壳层/前端引用常量，无硬编码） |
+| UI 收尾 | 移除「本机入口」IP 列表（mDNS 自动发现后已无用途；`app_info().ips` 保留供调试）；GUI 平台设备播种接线到 bridge（此前漏接） |
+
+**验证**：
+- `cargo check --workspace` 零错误零警告；clippy `-D warnings` 通过；前端 tsc + jsdom 通过；
+- 全量单测 + 集成测试通过（含恢复的 sender_e2e / receive_roundtrip / kernel_relay_roundtrip 真实 ffmpeg 链路）；
+- `share-token-test.sh` ✅（164 帧 / 277 音频块）；`latency-stability-test.sh 60 ws` ✅（1726/1800 帧、2724/2820 音频块、p99−min≈12.7ms）；
+- 真机（OPPO PLC110，adb + CDP）：Android APK 构建安装成功；**互相发现**（PC 18777 ↔ 手机 8777 GUI_PORT）；**自动协商**（手机请求 → PC `negotiator-respond` 签发 grant → 手机 QUIC 推流进 PC 中继，Hello 接受、流启动）；
+- 遗留（非本轮回归，属手机侧/前端既有问题，待 UI 阶段）：手机麦克风推流 10s 内无媒体帧到达（采集/QUIC 推送链，与重构无关——PC↔PC 全链路回归通过）；协商应答曾有一次挂起（瞬时锁竞争，重试即通）；设备列表 5s 轮询重建会清空「接收手机麦克风」凭证展示框；Android `hostname` 恒为 localhost（设备名显示为 localhost）。

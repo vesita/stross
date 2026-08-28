@@ -1,0 +1,36 @@
+[package]
+name = "stross-kernel"
+description = "Kernel for Stross: platform-neutral services — relay (data plane), discovery, negotiation, control plane, subscription, file transfer, endpoint/session/routing, push/receive orchestration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+stross-proto.workspace = true
+stross-transport.workspace = true
+stross-media.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+axum.workspace = true
+mdns = { workspace = true, optional = true }
+
+[features]
+# mDNS 服务发现默认开启（内核自身含浏览/广播消费方：scan_lan / 引导锚定）；
+# 纯粹的中继消费方可用 default-features = false 剪掉。
+default = ["discovery"]
+discovery = ["dep:mdns", "stross-transport/discovery"]
+
+[dev-dependencies]
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+tungstenite.workspace = true
+str0m.workspace = true
+reqwest.workspace = true
+tracing-subscriber.workspace = true

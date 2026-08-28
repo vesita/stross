@@ -1,8 +1,9 @@
 //! `stross receive`：接收并原生解码播放（D6 桌面 PlaybackSink）。
 //!
-//! 链路：`watch`（WS / SRT / QUIC，按 `--relay` scheme 选传输，见
-//! [`stross_core::watch::connect_watch`]）→ [`SessionDataManager`] 无损通道
-//! （1b）→ [`FfmpegPlaybackSink`] 解码（1c）→ 可选 RGBA 帧落盘 / 扬声器输出。
+//! 链路：`stross_kernel::Receiver`（watch → [`SessionDataManager`] 无损通道 →
+//! [`FfmpegPlaybackSink`] 解码）→ 可选 RGBA 帧落盘 / 扬声器输出。
+//! 分层（docs/layering-architecture.md）：接收编排在库，本文件只做
+//! **参数解析 + 帧落盘/延迟统计展示**（CLI 工具行为）。
 //!
 //! ```text
 //! stross receive --relay ws://127.0.0.1:18777 --stream demo --out /tmp/out --secs 4
@@ -14,15 +15,8 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::Context;
 use clap::Args;
-use stross_core::SessionPacket;
-use stross_core::session_channel::{SessionDataManager, channel_kind_for_url};
-use stross_core::watch;
-use stross_media::playback::{
-    AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackSink, VideoOut,
-};
-use stross_proto::frame::TRACK_VIDEO;
+use stross_media::playback::{AudioOut, RenderedFrame};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum AudioOutArg {
@@ -68,35 +62,34 @@ pub struct ReceiveArgs {
 pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.out)?;
     tracing::info!("连接中继 {}（流 {}）", args.relay, args.stream);
-    let data = watch::connect_watch(&args.relay, &args.stream)
-        .await
-        .map_err(anyhow::Error::msg)
-        .context("连接中继失败")?;
 
-    // 播放会话：视频 → RGBA 通道；音频 → 设备或丢弃
-    let sink = FfmpegPlaybackSink;
-    let session = sink.open(PlaybackConfig {
-        video: Some(VideoOut { display: None }),
-        audio: Some(AudioOutSpec {
-            channels: 2,
-            sample_rate: 48_000,
-            out: match args.audio_out {
-                AudioOutArg::Device => AudioOut::Device,
-                AudioOutArg::Discard => AudioOut::Discard,
-            },
-        }),
-    })?;
-    let mut frames_rx = session.take_video_frames().expect("已配置视频轨");
+    // 接收链路统一在 stross_kernel::Receiver（watch → SessionDataManager →
+    // FfmpegPlaybackSink 解码 → 解码帧通道），CLI 只消费解码帧做落盘/统计。
+    // 分层（docs/layering-architecture.md）：接收编排不再在 CLI 重复实现
+    // （曾与 GUI 各写一份 watch→通道→播放）。
+    let audio_out = match args.audio_out {
+        AudioOutArg::Device => AudioOut::Device,
+        AudioOutArg::Discard => AudioOut::Discard,
+    };
+    let receiver = stross_kernel::Receiver::start_recording(
+        args.relay.clone(),
+        args.stream.clone(),
+        audio_out,
+        None,
+    )
+    .await?;
+    let mut frames = receiver.take_frames().expect("已配置视频轨");
 
     // 解码帧消费任务：默认落盘 RGBA；`--no-write` 只计数（长跑/延迟测试，
     // 避免 ~100MB/s 写盘耗尽 tmpfs 并干扰延迟测量）。无论哪种都持续消费，
     // 防止播放通道反压丢帧。
     let out_dir = args.out.clone();
     let no_write = args.no_write;
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<RenderedFrame>(8);
     let writer = tokio::spawn(async move {
         let mut n = 0u32;
         let mut size = (0u32, 0u32);
-        while let Some(f) = frames_rx.recv().await {
+        while let Some(f) = write_rx.recv().await {
             if !no_write {
                 let name = format!("{out_dir}/frame_{n:04}.rgba");
                 if let Err(e) = std::fs::write(&name, &f.rgba) {
@@ -110,17 +103,14 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
         (n, size)
     });
 
-    // 无损通道（全序不丢）：收帧 → 通道缓存 → 即时产出 → 播放（消息驱动）
-    let mut mgr = SessionDataManager::default();
-    let start = Instant::now();
-    let mut received = 0u64;
     // 延迟统计样本：(pts_ms, 到达时刻相对接收起点 ms)
     // relay 观看端接入时会先补发最近关键帧（历史帧 pts 小、到达最早，
     // 与真实转播帧同批到达），该帧作为离群参考点会污染直方图尾部；
     // 因此丢弃首条视频样本，其余按 pts 单调过滤（无损传输本应有序）。
-    let mut latency_samples: Vec<(u32, f64)> = Vec::new();
-    let mut max_pts: Option<u32> = None;
+    let start = Instant::now();
     let mut video_seen = 0u32;
+    let mut max_pts: Option<u32> = None;
+    let mut latency_samples: Vec<(u32, f64)> = Vec::new();
     // 绝对端到端延迟：`--calibrate` 读推流端 --report-start 写的 JSON
     // （同一文件一次读取：会话起点墙上毫秒 + 首帧 pts0 修正）。
     // 墙上时刻用单调钟递推（校准读取时采一次「墙上 − 单调」偏差，样本
@@ -149,78 +139,65 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
     };
     let mut abs_latency: Vec<f64> = Vec::new();
     loop {
+        // 后台播放会话预热失败等错误提前暴露（headless 不静默吞错）
+        if let Some(e) = receiver.stats().error.clone() {
+            anyhow::bail!("接收失败：{e}");
+        }
         let remaining = Duration::from_secs(args.secs).saturating_sub(start.elapsed());
         if remaining.is_zero() {
             break;
         }
-        match tokio::time::timeout(remaining, data.recv()).await {
-            Ok(Ok(Some(pkt))) => match pkt {
-                SessionPacket::Media(frame) => {
-                    received += 1;
-                    // 延迟统计只取视频轨（音频帧更密，混入会污染 pts 节奏）；
-                    // 首条视频样本（relay 补发的历史关键帧）与 pts 回退帧不进样本
-                    if frame.header.track == TRACK_VIDEO {
-                        let pts = frame.header.pts_ms;
-                        video_seen += 1;
-                        // 首条视频样本（relay 补发的历史关键帧）与 pts 回退帧
-                        // 不进样本（见 --latency 说明）
-                        if video_seen > 1 && max_pts.map(|m| pts >= m).unwrap_or(true) {
-                            max_pts = Some(pts);
-                            let arrival_ms = start.elapsed().as_secs_f64() * 1000.0;
-                            if args.latency {
-                                latency_samples.push((pts, arrival_ms));
-                            }
-                            // 绝对端到端延迟（校准模式）：到达墙上时刻 − (会话起点 + pts)
-                            if let Some(s0) = session_start_ms {
-                                let now_ms =
-                                    wall_mono_offset + start.elapsed().as_secs_f64() * 1000.0;
-                                abs_latency.push(now_ms - (s0 as f64 + pts as f64 - first_pts));
-                            }
-                        }
+        match tokio::time::timeout(remaining, frames.recv()).await {
+            Ok(Some(f)) => {
+                // 帧通道只含视频轨（音频走 AudioOut），pts 直接可用；
+                // 首条视频样本（relay 补发的历史关键帧）与 pts 回退帧
+                // 不进样本（见 --latency 说明）
+                let pts = f.pts_ms;
+                video_seen += 1;
+                if video_seen > 1 && max_pts.map(|m| pts >= m).unwrap_or(true) {
+                    max_pts = Some(pts);
+                    let arrival_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    if args.latency {
+                        latency_samples.push((pts, arrival_ms));
                     }
-                    // 单次借用通道：push + poll 共用一个 &mut（热路径）
-                    let channel = mgr.channel(&args.stream, channel_kind_for_url(&args.relay));
-                    channel.push(frame, Instant::now());
-                    for f in channel.poll(Instant::now()) {
-                        let _ = session.push(f);
+                    // 绝对端到端延迟（校准模式）：到达墙上时刻 − (会话起点 + pts)
+                    if let Some(s0) = session_start_ms {
+                        let now_ms = wall_mono_offset + start.elapsed().as_secs_f64() * 1000.0;
+                        abs_latency.push(now_ms - (s0 as f64 + pts as f64 - first_pts));
                     }
                 }
-                SessionPacket::Control(_) => {}
-            },
-            Ok(Ok(None)) => break,
-            Ok(Err(e)) => {
-                tracing::warn!("观看连接异常: {e}");
-                break;
+                // 转发落盘（写盘失败/通道关闭即停止采样）
+                if write_tx.send(f).await.is_err() {
+                    break;
+                }
             }
+            Ok(None) => break,
             Err(_) => break, // 接收时长到
         }
     }
-    // 收尾：冲净通道 + 停止播放（后台线程收尾后画面通道关闭）
-    let channel = mgr.channel(&args.stream, channel_kind_for_url(&args.relay));
-    for f in channel.poll(Instant::now()) {
-        let _ = session.push(f);
-    }
-    session.stop();
-
+    // 收尾：停止接收（库内拆净通道）→ 关闭转发 → 等落盘 task 结束
+    receiver.stop();
+    drop(write_tx);
     let (frames_out, size) = match tokio::time::timeout(Duration::from_secs(3), writer).await {
         Ok(Ok(v)) => v,
         _ => (0, (0, 0)),
     };
 
-    let s = session.stats();
+    let st = receiver.stats();
     tracing::info!(
-        "接收 {received} 帧 | 解码视频 {frames_out} 帧 ({}x{}) | 音频块 {}/{} | 缓冲丢弃 {}",
+        "接收 {} 帧 | 解码视频 {frames_out} 帧 ({}x{}) | 音频块 {}/{} | 缓冲丢弃 {}",
+        st.received,
         size.0,
         size.1,
-        s.audio_blocks_out,
-        s.audio_blocks_in,
-        s.dropped_push
+        st.audio_blocks,
+        st.audio_blocks_in,
+        st.dropped
     );
     std::fs::write(
         format!("{}/meta.txt", args.out),
         format!(
-            "stream={}\nwidth={}\nheight={}\nframes={frames_out}\nreceived={received}\n",
-            args.stream, size.0, size.1
+            "stream={}\nwidth={}\nheight={}\nframes={frames_out}\nreceived={}\n",
+            args.stream, size.0, size.1, st.received
         ),
     )?;
 

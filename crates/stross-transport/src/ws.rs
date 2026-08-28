@@ -1,7 +1,12 @@
 //! WebSocket 传输实现。
 //!
 //! * 客户端拨号：[`WsTransport::connect`]（tokio-tungstenite，推到中继）
-//! * 服务端接入：[`WsTransport::from_upgraded`]（包装已升级的 axum WebSocket）
+//! * 服务端接入：[`WsTransport::from_socket`]（包装外部已升级的 socket）
+//!
+//! 传输层不依赖任何 HTTP 框架：服务端 socket 由调用方（HTTP 层，如
+//! `stross-core::relay::http`）把已升级的连接适配成 [`WsIo`] 传入，
+//! axum 类型只存在于调用方（docs/layering-architecture.md：core 拥有
+//! 中继 HTTP API，transport 只描述传输）。
 //!
 //! 控制消息走文本帧（JSON），媒体帧走二进制帧（帧头 + 载荷），与现有
 //! `/ws/push`、`/ws/watch` 的线上格式完全一致。
@@ -38,17 +43,19 @@ impl WsTransport {
         }
     }
 
-    /// 服务端：把一个已升级的 axum WebSocket 包装成数据会话。
+    /// 服务端：把一个**已升级的 socket 适配**包装成数据会话。
     ///
-    /// `peer` 为对端地址（HTTP 升级处经 `ConnectInfo` 提取）；来源感知门控
-    /// （回环 = 本机预授权，非回环 = 凭证接入）依赖它，未知来源按非回环对待。
-    pub fn from_upgraded(
+    /// `io` 由 HTTP 层（axum 等具体框架）把已升级的连接适配成 [`WsIo`] 传入，
+    /// 传输层不感知具体框架。`peer` 为对端地址（HTTP 升级处经 `ConnectInfo`
+    /// 提取）；来源感知门控（回环 = 本机预授权，非回环 = 凭证接入）依赖它，
+    /// 未知来源按非回环对待。
+    pub fn from_socket(
         &self,
-        socket: axum::extract::ws::WebSocket,
+        io: Box<dyn WsIo>,
         peer: Option<std::net::SocketAddr>,
     ) -> Box<dyn DataSession> {
         Box::new(WsDataSession {
-            io: Box::new(AxumWs::new(socket)),
+            io,
             stats: self.stats.clone(),
             peer,
         })
@@ -89,7 +96,7 @@ impl Transport for WsTransport {
         _params: &SessionParams,
     ) -> Result<Box<dyn DataSession>, TransportError> {
         Err(TransportError::NotSupported(
-            "ws 服务端请使用 WsTransport::from_upgraded（HTTP 升级）",
+            "ws 服务端请使用 WsTransport::from_socket（HTTP 升级处构造 WsIo）",
         ))
     }
 
@@ -98,72 +105,20 @@ impl Transport for WsTransport {
     }
 }
 
-/// WS 线上消息（两种 socket 的统一视图）。
-enum WsMsg {
+/// WS 线上消息（客户端/服务端 socket 的统一视图，供 [`WsIo`] 适配实现使用）。
+pub enum WsMsg {
     Text(String),
     Binary(Bytes),
 }
 
-/// 底层 WS 通道适配（axum 服务端 / tungstenite 客户端各一个实现）。
+/// 底层 WS 通道适配（客户端 tungstenite 内置实现；服务端由 HTTP 层实现，
+/// 如 `stross-core::relay::http::AxumWs`——传输层不依赖具体 HTTP 框架）。
 #[async_trait]
-trait WsIo: Send + Sync + 'static {
+pub trait WsIo: Send + Sync + 'static {
     async fn send_msg(&self, msg: WsMsg) -> Result<(), TransportError>;
     /// `Ok(None)` 表示连接已关闭（Close 帧或 EOF）。
     async fn recv_msg(&self) -> Result<Option<WsMsg>, TransportError>;
     async fn close(&self) -> Result<(), TransportError>;
-}
-
-/// axum 服务端 socket 适配。
-struct AxumWs {
-    inner: Mutex<Option<axum::extract::ws::WebSocket>>,
-}
-
-impl AxumWs {
-    fn new(socket: axum::extract::ws::WebSocket) -> Self {
-        Self {
-            inner: Mutex::new(Some(socket)),
-        }
-    }
-}
-
-#[async_trait]
-impl WsIo for AxumWs {
-    async fn send_msg(&self, msg: WsMsg) -> Result<(), TransportError> {
-        use axum::extract::ws::Message as M;
-        let msg = match msg {
-            WsMsg::Text(s) => M::Text(s.into()),
-            WsMsg::Binary(b) => M::Binary(b),
-        };
-        let mut guard = self.inner.lock().await;
-        let socket = guard.as_mut().ok_or(TransportError::Closed)?;
-        socket
-            .send(msg)
-            .await
-            .map_err(|e| TransportError::Io(e.to_string()))
-    }
-
-    async fn recv_msg(&self) -> Result<Option<WsMsg>, TransportError> {
-        use axum::extract::ws::Message as M;
-        loop {
-            let mut guard = self.inner.lock().await;
-            let socket = guard.as_mut().ok_or(TransportError::Closed)?;
-            match socket.recv().await {
-                Some(Ok(M::Text(t))) => return Ok(Some(WsMsg::Text(t.to_string()))),
-                Some(Ok(M::Binary(b))) => return Ok(Some(WsMsg::Binary(b))),
-                Some(Ok(M::Close(_))) | None => return Ok(None),
-                Some(Ok(M::Ping(_)) | Ok(M::Pong(_))) => continue, // 不主动发 ping，忽略
-                Some(Err(e)) => return Err(TransportError::Io(e.to_string())),
-            }
-        }
-    }
-
-    async fn close(&self) -> Result<(), TransportError> {
-        let mut guard = self.inner.lock().await;
-        if let Some(mut socket) = guard.take() {
-            let _ = socket.send(axum::extract::ws::Message::Close(None)).await;
-        }
-        Ok(())
-    }
 }
 
 /// tungstenite 客户端 socket 适配。

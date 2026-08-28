@@ -13,7 +13,6 @@ serde.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 tracing.workspace = true
-axum.workspace = true
 futures-util.workspace = true
 local-ip-address.workspace = true
 mdns = { workspace = true, optional = true }

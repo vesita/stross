@@ -31,7 +31,6 @@ async function autoNegotiateMic(
   try {
     const grant = (await call('request_share_token', {
       host,
-      port: NEGOTIATOR_PORT,
       media: ['mic'],
     })) as ShareGrant;
     if (!grant.token || !grant.streamId) {

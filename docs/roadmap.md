@@ -117,8 +117,8 @@
 
 ## 已完成的架构基础（2026-08/09）
 
-- [x] 五层模块化：`stross-proto`（协议）/ `stross-core`（局域网共享）/
-      `stross-media`（系统适配）/ `stross-app`（核心封装）/ `stross-gui`（UI）
+- [x] 分层模块化：`stross-proto`（协议）/ `stross-transport`（传输）/ `stross-kernel`（内核）/
+      `stross-media`（能力）/ `stross-bridge`（平台适应）/ `stross-gui`（UI）
 - [x] `CaptureBackend` trait：桌面 ffmpeg 与 Android 原生采集统一抽象，
       命令面两边一致（`start_stream` / `capture_status`）
 - [x] Android 端到端验证：屏幕+麦克风推流 → 电脑观看（166 视频帧 + 260 音频帧/5s）

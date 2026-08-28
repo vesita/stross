@@ -7,25 +7,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
-use stross_app::{CtrlServer, Platform, StrossApp, bootstrap};
+use stross_bridge::{hostname_or, seed_platform_devices};
+use stross_kernel::{CtrlServer, Kernel, Platform, bootstrap};
 use stross_media::capture::FfmpegBackend;
 
 #[derive(Args, Debug)]
 pub struct ServeArgs {
-    /// 中继端口（0 = 随机；被占用时回退随机）
-    #[arg(short, long, default_value_t = 18777)]
+    /// 中继端口（0 = 随机；被占用时回退随机）。默认 = 协议约定固定端口
+    #[arg(short, long, default_value_t = stross_kernel::relay::DEFAULT_PORT)]
     pub port: u16,
     /// 控制面端口（0 = 随机；仅回环绑定，D7）
-    #[arg(long, default_value_t = 18778)]
+    #[arg(long, default_value_t = stross_kernel::DEFAULT_CTRL_PORT)]
     pub ctrl_port: u16,
     /// SRT 传输端口（0 = 随机；固定便于防火墙放行）
-    #[arg(long, default_value_t = stross_app::DEFAULT_SRT_PORT)]
+    #[arg(long, default_value_t = stross_kernel::DEFAULT_SRT_PORT)]
     pub srt_port: u16,
     /// QUIC 传输端口（0 = 随机；固定便于防火墙放行）
-    #[arg(long, default_value_t = stross_app::DEFAULT_QUIC_PORT)]
+    #[arg(long, default_value_t = stross_kernel::DEFAULT_QUIC_PORT)]
     pub quic_port: u16,
     /// 目录/订阅握手端点端口（0 = 18779；本地双端测试用自定义端口避免冲突）
-    #[arg(long, default_value_t = 18779)]
+    #[arg(long, default_value_t = stross_kernel::DEFAULT_NEGOTIATOR_PORT)]
     pub negotiator_port: u16,
     /// 身份/信任清单数据目录（默认 ~/.local/share/stross；本地双端测试需
     /// 两个节点用不同目录 → 不同 device_id）
@@ -34,30 +35,33 @@ pub struct ServeArgs {
 }
 
 /// 数据目录解析（identity.json / trusted_devices.json 所在）：
-/// 单一真源收敛在 `stross_app::paths::data_dir`（docs/layering-architecture.md）。
+/// 单一真源收敛在 `stross_bridge::data_dir`（docs/layering-architecture.md）。
 fn base_dir(data_dir: Option<PathBuf>) -> PathBuf {
-    stross_app::paths::data_dir(data_dir)
+    stross_bridge::data_dir(data_dir)
 }
 
 pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
-    let app = Arc::new(StrossApp::new(Platform::Desktop));
+    let app = Arc::new(Kernel::new(Platform::Desktop));
     // 桌面采集后端（ffmpeg），供 ctrl start-stream 使用
     app.set_backend(Arc::new(FfmpegBackend::new()));
+    // 平台设备清单（桥接层单一来源：桌面 = 屏幕/麦克风/系统声音）
+    seed_platform_devices(&app);
     // 端点订阅驱动：订阅达成自动开推（文件泵 / 媒体推流），docs/endpoint-model.md §5
     // —— 已收敛为 bootstrap::start 的默认行为（幂等），此处无需再手动接线。
     // 引导层（docs/endpoint-model.md §0）：身份注入 → 锚定受控中继并广播
     // mDNS L1 摘要（节点 → 设备清单）→ 目录/订阅握手端点；
-    // 与 GUI 桌面共用同一套启动原语。
+    // 与 GUI 桌面共用同一套启动原语（主机名经桥接层注入，内核零 OS 调用）。
     let base = base_dir(args.data_dir.clone());
-    bootstrap::ensure_identity(&app, &base);
+    bootstrap::ensure_identity(&app, &base, &hostname_or("Stross 设备"));
     let bootstrap_handle = bootstrap::start(
         app.clone(),
-        Arc::new(stross_app::CliUi),
+        Arc::new(stross_kernel::CliUi),
         &base,
         args.port,
         args.srt_port,
         args.quic_port,
         args.negotiator_port,
+        &hostname_or("stross"),
     )
     .await?;
     tracing::info!(

@@ -2,18 +2,21 @@
 
 ## 0. 分层架构
 
-五层模块化设计，依赖方向自底向上、单向无环：
+六层模块化设计，依赖方向自底向上、单向无环：
 
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
-│ apps/stross-gui  ⑤ UI 模块：Tauri 薄命令层 + web/ + android/(Kotlin) │
+│ apps/stross-cli / stross-gui  ⑥ UI 壳层：参数解析 + 展示 + 平台适配      │
 ├──────────────────────────────────────────────────────────────────┤
-│ crates/stross-app   ③ 核心封装模块：StrossApp 状态机 / SenderEngine / Kernel │
+│ crates/stross-bridge   ⑤ 平台适应桥接层：paths / hostname / 平台设备枚举 │
+├──────────────────────────────────────────────────────────────────┤
+│ crates/stross-kernel   ★ 内核：全部平台无关服务（单一 Kernel 门面）      │
+│   数据面 relay{srv,client} / sender / watch / jitter / discovery       │
+│   信令 control / negotiator / subscriber / file_xfer / bootstrap       │
+│   devices(扫描) / engine(推流) / receiver(接收) / kernel(会话·路由·端点)  │
 ├───────────────────────────────┬──────────────────────────────────┤
-│ crates/stross-core           │ crates/stross-media               │
-│ ② 核心局域网共享模块          │ ④ 系统适配模块                    │
-│ 中继 / 推流客户端 / mDNS      │ ffmpeg 管线 / 设备枚举            │
-│ / 发现引导                    │ / NAL·ADTS 解析 / Source+Sink 能力 │
+│ crates/stross-media           │ （stross-transport / stross-proto  │
+│ ④ 能力层：采集/播放/管线/设备枚举 │   在其下，见 §0 依赖表）            │
 ├───────────────────────────────┴──────────────────────────────────┤
 │ crates/stross-transport ①½ 传输插件层：Transport/DataSession 抽象   │
 │   ws（无损）/ webrtc（有损）/ srt（自适应）/ quic（无损多路复用）    │
@@ -24,15 +27,15 @@
 
 | 层 | crate | 职责 | 依赖 |
 |---|---|---|---|
-| ① 协议 | `stross-proto` | 线上契约：24 字节 v2 帧头（含 seq/分片）+ JSON 控制消息（含能力协商与路由） | 无内部依赖 |
-| ①½ 传输 | `stross-transport` | 可插拔传输层：`Transport`/`DataSession` 抽象 + ws/webrtc/srt/quic/memory 实现 + 本机 IP | proto |
-| ② 共享 | `stross-core` | 纯数据共享逻辑：中继、推流客户端、mDNS 发现引导（re-export transport/net） | proto + transport |
-| ④ 适配 | `stross-media` | 系统适配：ffmpeg 采集管线、设备枚举、H.264/AAC 切帧、`CaptureBackend`（Source）/ `Sink`（录制） | proto |
-| ③ 封装 | `stross-app` | 应用状态机 + 引擎组合 + 内核（设备图/会话/路由/鉴权），无 UI 依赖、可单测 | core + media |
-| ⑤ UI | `stross-gui` | Tauri 薄命令层 + Web 前端 + Android Kotlin 桥 | app |
+| ① 协议 | `stross-proto` | 线上契约：24 字节 v2 帧头（含 seq/分片）+ JSON 控制消息（含能力协商与路由）+ 协商握手/L2 目录 | 无内部依赖 |
+| ①½ 传输 | `stross-transport` | 可插拔传输层：`Transport`/`DataSession` 抽象 + ws/webrtc/srt/quic/memory 实现 + RelayUrl + 本机 IP | proto |
+| ④ 能力 | `stross-media` | 采集（ffmpeg 后端）/ 播放（PlaybackSink/cpal）/ 管线 StreamConfig / H.264/AAC 切帧 / 设备枚举 | proto |
+| ② 内核 | `stross-kernel` | **全部平台无关服务**：中继 server+client、发现、控制面、协商、订阅、文件传输、引导、端点/会话/路由/鉴权、推流/接收编排；单一门面 `Kernel` | proto + transport + media |
+| ⑤ 桥接 | `stross-bridge` | 平台适应：数据目录解析 / 主机名 / 平台设备枚举（只产出参数，注入内核） | kernel |
+| ⑥ UI | `stross-cli` / `stross-gui` / `stross-relay` | 参数解析 + 展示 + 平台适配（adb/ufw/采集播放后端选择） | kernel + bridge + media |
 
-> 协议为何保持独立小 crate：共享模块与系统适配模块**都**要使用 `Frame`/`ControlMessage`，
-> 独立成 crate 才能让 media 只依赖协议、而不反向依赖共享模块（否则 media 会拉进 axum 等中继依赖）。
+> 协议为何保持独立小 crate：能力层与内核**都**要使用 `Frame`/`ControlMessage`，
+> 独立成 crate 才能让 media 只依赖协议、而不反向依赖内核（否则 media 会拉进 axum 等中继依赖）。
 
 ### 交互模型
 
@@ -175,7 +178,7 @@ Rust 侧用 `AnnexBSplitter`（状态机切 NAL）→ `AccessUnitBuilder`
 - Linux：`/dev/video*` + sysfs 名称、`pactl` 源列表（monitor = 系统声音）；
 - macOS：`avfoundation` 设备列表（尽力而为）。
 
-## 4. 中继（crates/stross-core/src/relay.rs）
+## 4. 中继（crates/stross-kernel/src/relay/）
 
 - 数据面转发（`handle_push` / `handle_watch`）只依赖传输抽象
   （`stross-transport` 的 `Transport`/`DataSession`），ws 与 webrtc 共用同一套
@@ -191,7 +194,7 @@ Rust 侧用 `AnnexBSplitter`（状态机切 NAL）→ `AccessUnitBuilder`
 
 浏览器观看端已移除（D1：接收端全部原生，无内嵌 viewer / jmuxer / MSE）。
 
-桌面接收链路（`Receiver` + `PlaybackSink`，见 crates/stross-app/src/receiver.rs、
+桌面接收链路（`Receiver` + `PlaybackSink`，见 crates/stross-kernel/src/receiver.rs、
 crates/stross-media/src/playback.rs）：
 
 1. 订阅 `ws://host/ws/watch?stream=ID`（或 SRT/QUIC watch）收媒体帧；
@@ -212,7 +215,7 @@ AudioTrack 系统 API 薄壳**，`feedVideo` 入队立即返回 + 独立解码�
 > 中继侧"新观众先收最近关键帧 + Lagged 重对齐"机制（§4）与接收端抖动缓冲互补，
 > 保证随时接入可解码。
 
-## 6. 核心封装模块（crates/stross-app）
+## 6. 内核门面（crates/stross-kernel）
 
 ### 推流引擎（engine.rs）
 
@@ -224,24 +227,28 @@ AudioTrack 系统 API 薄壳**，`feedVideo` 入队立即返回 + 独立解码�
 
 `SenderEngine::stop()` 顺序：停采集 → 关闭帧通道 → 客户端优雅 Bye → 关中继。
 
-### 应用状态机（app.rs）
+### 内核门面（kernel/mod.rs）
 
-`StrossApp` 是命令面的唯一实现，**不依赖任何 UI 框架**：
+`Kernel` 是**全部服务提供的唯一入口**，**不依赖任何 UI 框架**（原
+`StrossApp` 状态机与原 `kernel::Kernel` 会话/路由骨架已合并）：
 
 | 方法 | 说明 |
 |---|---|
-| `start_relay()` | 启动/复用本机常驻中继 + mDNS 广播 |
-| `start_relay_fixed(port, srt, quic)` | 以固定端口启动（含 SRT/QUIC；防火墙放行前提） |
+| `start_relay_fixed(port, srt, quic, hostname)` | 以固定端口启动常驻受控中继（含 SRT/QUIC；防火墙放行前提；hostname 由桥接层注入） |
 | `scan_relays()` | mDNS 扫描局域网中继 |
 | `issue_share_token_for(title, media, ttl)` | 建会话 + 签发一次性凭证（手动路径与协商端点共用） |
+| `create_session / route / authorize / teardown` | 会话生命周期（受控中继只接受内核会话 id） |
 | `start_stream(cfg, relay_url)` | 组合引擎：外部中继 / 本机中继 / 内嵌中继 |
 | `stop_stream()` / `stream_status()` | 推流生命周期 |
 | `capture_status()` | 采集真实状态（Android 异步回报） |
 | `app_info()` / `list_devices()` | 信息与设备 |
 | `relay_ports()` | 本机中继实际监听端口（WS/SRT/QUIC；防火墙放行按实际端口） |
+| `publish_endpoint / endpoint_catalog / …` | 端点框架（节点 → 设备 → 端点） |
+| `subscribe()` | 内核事件广播（会话/路由/数据面流生命周期） |
 
 UI 层（桌面 / Android）只把 `invoke` 命令转发到这里，因此命令面两边完全一致：
-桌面 `start_stream` 与 Android 走同一条路径，平台差异被 `CaptureBackend` 隔离。
+桌面 `start_stream` 与 Android 走同一条路径，平台差异被 `CaptureBackend` 与
+`stross-bridge`（平台设备枚举）隔离。
 
 ## 7. Android 采集（apps/stross-gui/src-tauri/android/）
 
@@ -261,9 +268,9 @@ UI 层（桌面 / Android）只把 `invoke` 命令转发到这里，因此命令
 | 原始 ES 传输 + 原生端解码 | 统一桌面/Android 两条推流路径；接收端原生解码（D1 移除浏览器/jmuxer） |
 | WebSocket 优先，SRT/QUIC 按场景 | 实现简单、穿透局域网无压力；低延迟场景走 UDP 传输（视频 SRT、纯音频 QUIC） |
 | 每帧一个 WS 消息 | 接收端按帧统计、按帧对齐，无需解析容器 |
-| 中继独立于推流端 | 多机推流到同一中继；受控中继接受内核授权会话（F2.2） |
+| 内核独立于能力与传输 | 会话/路由/鉴权/凭证在 kernel，采集/播放能力经 trait 注入，传输可插拔（F2.2 受控中继只接受内核授权会话） |
 | 协议独立 crate | media 与 core 都要用 `Frame`，独立成 crate 让适配层不反向依赖共享层 |
-| 传输层独立 crate（阶段 2） | 传输实现（str0m/未来 quic/srt）的重依赖不进入 core/media/app 的依赖树；core re-export 保持路径兼容 |
+| 传输层独立 crate（阶段 2） | 传输实现（str0m/未来 quic/srt）的重依赖不进入 kernel/media 的依赖树；kernel re-export 保持路径兼容 |
 | `CaptureBackend` trait | 桌面 ffmpeg 与 Android 原生采集统一抽象，UI 命令面两边一致 |
 | `Sink` trait（阶段 2） | 录制/渲染/注入统一为接收侧能力，与 Source 共用能力描述与协商 |
 | 凭证协商端点 = 凭证柜台（B2.5） | LAN 端点只签发一次性短时凭证，不暴露控制操作；首次人工确认 + 信任记忆（持久化 identity/trusted_devices.json）；手动粘贴兜底 |

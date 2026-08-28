@@ -18,6 +18,6 @@ Stross 的设计与使用文档。建议阅读顺序：先 [requirements.md](req
 - 想跑起来：见根目录 [README](../README.md#快速开始桌面) 与 [platforms.md](platforms.md)
 - 想改传输层：先读 [plugin-architecture.md](plugin-architecture.md) §4 与
   [`stross-transport`](../crates/stross-transport/src/lib.rs)
-- 想改中继：见 [`stross-core/src/relay/`](../crates/stross-core/src/relay/mod.rs)
-- 想改内核控制面：见 [`stross-app/src/kernel/`](../crates/stross-app/src/kernel/mod.rs)
+- 想改中继：见 [`stross-kernel/src/relay/`](../crates/stross-kernel/src/relay/mod.rs)
+- 想改内核门面：见 [`stross-kernel/src/kernel/`](../crates/stross-kernel/src/kernel/mod.rs)
 - 想改 ffmpeg 管线：见 [`stross-media/src/pipeline/`](../crates/stross-media/src/pipeline/mod.rs)

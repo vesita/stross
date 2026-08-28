@@ -1,8 +1,11 @@
 //! `stross relay`：启动局域网中继（等同独立 `stross-relay`）。
+//!
+//! 分层（docs/layering-architecture.md）：启动样板统一在
+//! `RelayServer::run_standalone`（stross-core），本命令与 `stross-relay`
+//! 二进制同源，只解析参数 + 取主机名（平台适配）。
 
 use clap::Args;
-use stross_core::relay::{DEFAULT_PORT, RelayServer};
-use stross_proto::message::DiscoveryInfo;
+use stross_kernel::relay::{DEFAULT_PORT, RelayServer};
 
 #[derive(Args, Debug)]
 pub struct RelayArgs {
@@ -15,45 +18,8 @@ pub struct RelayArgs {
 }
 
 pub async fn run(args: RelayArgs) -> anyhow::Result<()> {
-    let handle = RelayServer::start(args.port).await?;
-    let ips = stross_core::net::local_ips();
-    tracing::info!("📡 Stross 中继已启动");
-    if ips.is_empty() {
-        tracing::info!("中继入口: http://127.0.0.1:{}/", handle.port);
-    }
-    for ip in &ips {
-        tracing::info!("中继入口: http://{ip}:{}/", handle.port);
-    }
-    tracing::info!("推流地址: ws://<中继IP>:{}/ws/push", handle.port);
-    if let Some(p) = handle.srt_port {
-        tracing::info!("SRT 推流地址: srt://<中继IP>:{p}（视频默认，UDP 自适应）");
-    }
-    if let Some(p) = handle.quic_port {
-        tracing::info!("QUIC 推流地址: quic://<中继IP>:{p}（音频默认，UDP 无损）");
-    }
-    tracing::info!("流列表API: /api/streams");
-    tracing::info!("中继信息API: /api/info（srtPort/quicPort 自动发现）");
-    tracing::info!("Ctrl+C 退出");
-
-    #[cfg(feature = "discovery")]
-    if !args.no_advertise {
-        let mut discovery = stross_core::discovery::Discovery::start(
-            &format!("relay-{}", handle.port),
-            &ips,
-            handle.port,
-            &DiscoveryInfo::relay_default("Stross 中继", vec![]),
-        )?;
-        tracing::info!("mDNS 广播中…");
-        tokio::signal::ctrl_c().await?;
-        discovery.stop();
-    } else {
-        tracing::info!("mDNS 广播已关闭");
-        tokio::signal::ctrl_c().await?;
-    }
-
-    #[cfg(not(feature = "discovery"))]
-    tokio::signal::ctrl_c().await?;
-
-    handle.stop().await;
-    Ok(())
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "stross".into());
+    RelayServer::run_standalone(args.port, !args.no_advertise, "relay", &hostname).await
 }

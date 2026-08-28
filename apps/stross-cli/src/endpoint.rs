@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Args, Subcommand};
-use stross_app::{Platform, StrossApp, fetch_directory, subscribe_file};
+use stross_kernel::{Kernel, Platform, fetch_directory, subscribe_file};
 use stross_proto::message::{Delivery, MediaKind};
 
 #[derive(Args, Debug)]
@@ -34,7 +34,7 @@ pub struct EndpointArgs {
     #[arg(long, global = true, default_value = "127.0.0.1")]
     pub host: String,
     /// 远端节点协商端口（目录 + 订阅握手；本地双端测试按 serve --negotiator-port）
-    #[arg(long, global = true, default_value_t = stross_app::DEFAULT_NEGOTIATOR_PORT)]
+    #[arg(long, global = true, default_value_t = stross_kernel::DEFAULT_NEGOTIATOR_PORT)]
     pub port: u16,
     /// 本机身份数据目录（identity.json；订阅请求携带的本节点 device_id）
     #[arg(long, global = true)]
@@ -81,7 +81,7 @@ impl DeliveryArg {
 }
 
 pub async fn run(args: EndpointArgs) -> anyhow::Result<()> {
-    let base = stross_app::paths::data_dir(args.data_dir.clone());
+    let base = stross_bridge::data_dir(args.data_dir.clone());
     match args.command {
         EndpointCommand::Ls { json } => run_ls(&args.host, args.port, json).await,
         EndpointCommand::Subscribe {
@@ -131,7 +131,7 @@ async fn run_subscribe(
     out: &std::path::Path,
     base: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let app = Arc::new(StrossApp::new(Platform::Desktop));
+    let app = Arc::new(Kernel::new(Platform::Desktop));
     let wanted = delivery_wish
         .map(|d| format!("{d:?}"))
         .unwrap_or_else(|| "按端点声明".into());

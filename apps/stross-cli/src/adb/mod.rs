@@ -11,7 +11,7 @@
 //! （手机监听 → PC）在部分 adb 版本/传输上注册却不生效，故统一用 forward。
 //!
 //! 模块划分（平台桥——adb 是设备层的平台粘合，**无内核逻辑**；探测契约
-//! 复用 `stross_core::relay::client` 与 `stross_app::devices`）：
+//! 复用 `stross_kernel::relay::client` 与 `stross_kernel::devices`）：
 //! * [`status`]：手机状态聚合 + 展示视图
 //! * [`ui`]：uiautomator 视图树解析 + UI 状态/点按辅助
 //! * [`device`]：adb 进程执行 / forward / 截屏 / 输入
@@ -26,6 +26,17 @@ use clap::{Args, Subcommand};
 use self::device::{adb_sh, parse_xy, pick_device, screenshot, tap};
 use self::status::{phone_status, print_status};
 
+/// 中继 WS 端口探测列表默认值：Android GUI 固定 8777 + 协议默认 18777。
+/// 端口真源在库层（`stross_kernel::relay::{GUI_PORT, DEFAULT_PORT}`），
+/// 壳层不得硬编码端口号（docs/layering-architecture.md）。
+fn default_probe_ports() -> String {
+    format!(
+        "{},{}",
+        stross_kernel::relay::GUI_PORT,
+        stross_kernel::relay::DEFAULT_PORT
+    )
+}
+
 #[derive(Args, Debug)]
 pub struct AdbArgs {
     #[command(subcommand)]
@@ -39,8 +50,8 @@ pub enum AdbCommand {
         /// JSON 输出（脚本化）
         #[arg(long)]
         json: bool,
-        /// 中继 WS 端口探测列表（逗号分隔；GUI 固定 8777，CLI serve 18777）
-        #[arg(long, default_value = "8777,18777")]
+        /// 中继 WS 端口探测列表（逗号分隔；Android GUI 固定 [GUI_PORT]，协议默认 [DEFAULT_PORT]）
+        #[arg(long, default_value_t = default_probe_ports())]
         ports: String,
     },
     /// 截取手机屏幕到 PNG

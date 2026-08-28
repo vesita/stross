@@ -14,7 +14,7 @@
 //! # 边界
 //!
 //! * 仅 Linux（`ufw` 为 Ubuntu/Debian 系防火墙）；其他平台命令返回未支持
-//! * 端口固定化是前提：SRT/QUIC 默认固定（`stross_app::DEFAULT_SRT/QUIC_PORT`），
+//! * 端口固定化是前提：SRT/QUIC 默认固定（`stross_kernel::DEFAULT_SRT/QUIC_PORT`），
 //!   被占用回退随机时按**实际端口**生成规则
 //! * `pkexec` 需要图形 polkit 代理（KDE/GNOME 桌面自带）；无代理时返回
 //!   可读错误并提示手动命令，绝不在应用内提权
@@ -169,15 +169,30 @@ To                         Action      From
     #[test]
     fn missing_detects_uncovered_ports() {
         let s = parse_ufw_verbose(SAMPLE);
+        // 本应放行的端口：真源在库层常量（防火墙规则不得自持端口号，
+        // docs/layering-architecture.md：端口真源统一在库层）
+        let required: Vec<String> = vec![
+            format!("{}/tcp", stross_kernel::relay::DEFAULT_PORT),
+            format!("{}/tcp", stross_kernel::DEFAULT_NEGOTIATOR_PORT),
+            format!("{}/udp", stross_kernel::DEFAULT_SRT_PORT),
+            format!("{}/udp", stross_kernel::DEFAULT_QUIC_PORT),
+        ];
+        let required_refs: Vec<&str> = required.iter().map(|s| s.as_str()).collect();
         let missing = missing_rules(
-            &["18777/tcp", "18779/tcp", "33462/udp", "33464/udp"],
+            &required_refs,
             &s.rules,
             "192.168.11.0/24",
             s.ufw_active,
             s.default_deny_incoming,
         );
-        // 18779/tcp 与 33464/udp 缺失（SAMPLE 只放行了 18777/tcp、22/tcp、33462/udp）
-        assert_eq!(missing, vec!["18779/tcp", "33464/udp"]);
+        // 协商 TCP 与 QUIC UDP 缺失（SAMPLE 只放行了 18777/tcp、22/tcp、33462/udp）
+        assert_eq!(
+            missing,
+            vec![
+                format!("{}/tcp", stross_kernel::DEFAULT_NEGOTIATOR_PORT),
+                format!("{}/udp", stross_kernel::DEFAULT_QUIC_PORT),
+            ]
+        );
     }
 
     #[test]

@@ -251,9 +251,9 @@ share_token），上层驱动按端点类型自动开推：
 
 ---
 
-## 6. 内核 EndpointRegistry（stross-app）
+## 6. 内核 EndpointRegistry（stross-kernel）
 
-新模块 `crates/stross-app/src/kernel/endpoint.rs`：
+新模块 `crates/stross-kernel/src/kernel/endpoint.rs`：
 
 ```rust
 pub struct EndpointRegistry {
@@ -346,17 +346,17 @@ P1 后扩展点：一设备多端点（endpoint_id 与 device_id 解耦）、文
 | `crates/stross-proto/src/message/endpoint.rs` | DeviceInfo / DeviceSummary / Visibility / Delivery / TransportPreference / EndpointState / EndpointManifest + wire 单测 |
 | `crates/stross-proto/src/message/ids.rs` | MediaKind 追加 `File` / `Service` 占位（顺带补齐 `apps/stross-cli/src/devices.rs` 的穷尽 match） |
 | `crates/stross-proto/src/message/discovery.rs` | DiscoveryInfo v2：`devices` 摘要 + `VERSION=2` + `with_devices` + 兼容单测（v1 载荷解析） |
-| `crates/stross-app/src/kernel/endpoint.rs` | EndpointRegistry：publish/unpublish（1:1 约束）、状态、订阅 hook、默认传输 + 单测 |
-| `crates/stross-app/src/kernel/graph.rs` | 既有 `Endpoint` 重命名为 `TransportAddr`（避免与端点概念撞名） |
-| `crates/stross-app/src/app.rs` | registry 字段、平台设备静态枚举、发布/查询方法、mDNS 摘要接入 |
-| `crates/stross-app/src/negotiator.rs` | ShareRequest/ShareGrant/PendingRequest 扩展、`policy_decision`、`compose_grant`、`GET /api/endpoints` |
-| `crates/stross-app/src/lib.rs` | 导出 EndpointRegistry / RelayAddr / TransportAddr |
+| `crates/stross-kernel/src/kernel/endpoint.rs` | EndpointRegistry：publish/unpublish（1:1 约束）、状态、订阅 hook、默认传输 + 单测 |
+| `crates/stross-kernel/src/kernel/graph.rs` | 既有 `Endpoint` 重命名为 `TransportAddr`（避免与端点概念撞名） |
+| `crates/stross-kernel/src/kernel/mod.rs` | Kernel 门面：registry 字段、发布/查询方法、mDNS 摘要接入（平台设备枚举移至 stross-bridge::devices） |
+| `crates/stross-kernel/src/negotiator.rs` | ShareRequest/ShareGrant/PendingRequest 扩展、`policy_decision`、`compose_grant`、`GET /api/endpoints` |
+| `crates/stross-kernel/src/lib.rs` | 导出 EndpointRegistry / RelayAddr / TransportAddr |
 
 ### 第二轮：引导层 + L1 浏览闭环（已提交 ab5dd9b）
 
 | 落点 | 内容 |
 |---|---|
-| `crates/stross-app/src/bootstrap.rs` | 引导层编排门面：`ensure_identity` / `anchor`（中继锚定 + mDNS L1）/ `start_handshake`（18779 目录+握手）/ `start` 完整组合；CLI serve 与 GUI 桌面启动均接入 |
+| `crates/stross-kernel/src/bootstrap.rs` | 引导层编排门面：`ensure_identity` / `anchor`（中继锚定 + mDNS L1）/ `start_handshake`（18779 目录+握手）/ `start` 完整组合；CLI serve 与 GUI 桌面启动均接入 |
 | `crates/stross-app/src/app.rs` | `RelayInfo.devices`（L1 设备摘要：本机 = 注册表快照，对端 = mDNS 解码）；`scan_relays` 透传 |
 | `apps/stross-cli/src/devices.rs` | `stross devices` 输出每节点设备清单（含「已公开」标记） |
 | `crates/stross-core/src/discovery.rs` | 选址改纯函数 `select_reachable_ip_from(self_ips, reachable)`——测试显式注入本机网段，与环境解耦（原硬编码"本机在某网段"，网段迁移后必挂）；`BrowseAgg` 类型别称修 clippy type-complexity |

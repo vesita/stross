@@ -63,18 +63,21 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 
 ## 架构
 
-五层模块化设计（依赖方向自底向上，单向无环）：
+分层模块化设计（依赖方向自底向上，单向无环）：
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ apps/stross-gui       ⑤ UI 模块：Tauri 薄命令层 + web/ + android/(Kotlin) │
+│ apps/stross-cli / stross-gui  ⑥ UI 壳层：参数解析 + 展示 + 平台适配 │
 ├────────────────────────────────────────────────────────────┤
-│ crates/stross-app        ③ 核心封装模块：StrossApp 状态机 / SenderEngine / Kernel │
+│ crates/stross-bridge    ⑤ 平台适应桥接层：paths / hostname / 平台设备枚举 │
+├────────────────────────────────────────────────────────────┤
+│ crates/stross-kernel   ★ 内核：全部平台无关服务（单一 Kernel 门面）   │
+│   数据面 relay{srv,client}/sender/watch/jitter/discovery       │
+│   信令 control/negotiator/subscriber/file_xfer/bootstrap       │
+│   devices(扫描)/engine(推流)/receiver(接收)/kernel(会话·路由·端点) │
 ├──────────────────────────────┬─────────────────────────────┤
-│ crates/stross-core          │ crates/stross-media          │
-│ ② 核心局域网共享模块        │ ④ 系统适配模块               │
-│ 中继 / 推流客户端 / mDNS    │ ffmpeg 管线 / 设备枚举        │
-│ / 观看端页面                │ / NAL·ADTS 解析 / Source+Sink │
+│ crates/stross-media          │ （transport/proto 在下方）    │
+│ ④ 能力层：采集/播放/管线/设备枚举 │                             │
 ├──────────────────────────────┴─────────────────────────────┤
 │ crates/stross-transport   ①½ 传输插件层：Transport/DataSession 抽象      │
 │            ws / webrtc / srt / quic 实现                      │
@@ -84,23 +87,25 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 ```
 
 - **① 协议模块**（`stross-proto`）：线上契约（24 字节 v2 帧头 + JSON 控制消息，
-  含能力协商与路由控制），保持独立小 crate —— 共享模块与系统适配模块都依赖它，但互不依赖。
+  含能力协商与路由控制），保持独立小 crate —— 能力层与内核都依赖它，但互不依赖。
 - **①½ 传输插件层**（`stross-transport`）：可插拔传输抽象（`Transport`/`DataSession`）
   与实现 —— ws（无损，现状）、webrtc（有损低延迟，str0m datachannel）、
   srt（自适应，rsrt 纯 Rust）、quic（无损多路复用，quinn）。
-  `stross-core` re-export 保持路径兼容。
-- **② 共享模块**（`stross-core`）：纯数据共享逻辑 —— 中继服务器（axum + WS/WebRTC）、
-  推流客户端、mDNS 发现、观看/级联代理。不含任何采集/平台代码。
-- **④ 系统适配模块**（`stross-media`）：把"本机媒体源变成协议帧"的平台适配 ——
+  `stross-kernel` re-export 保持路径兼容。
+- **② 内核**（`stross-kernel`）：**全部平台无关服务**，单一门面
+  [`Kernel`](crates/stross-kernel/src/kernel/mod.rs) —— 中继服务器 + 中继 HTTP
+  客户端（契约单一真源）、mDNS 发现、控制面、凭证协商、订阅/文件传输、引导、
+  端点框架（会话/路由/鉴权）、推流引擎与接收编排。不含任何路径/OS/平台代码。
+- **④ 能力层**（`stross-media`）：把"本机媒体源变成协议帧"的能力抽象 ——
   ffmpeg 采集管线、设备枚举、H.264/AAC 流切帧，以及统一的
   [`CaptureBackend`](crates/stross-media/src/capture.rs) trait（Source）与
-  [`Sink`](crates/stross-media/src/sink.rs) trait（录制/注入，§6.2）。
-- **③ 核心封装模块**（`stross-app`）：组合共享 + 适配 —— `SenderEngine`
-  （中继 + 推流客户端 + 采集后端）、`StrossApp` 状态机（先连接再收/发、mDNS、
-  状态查询）。**不依赖任何 UI 框架**，可独立单元测试。
-- **⑤ UI 模块**（`apps/stross-gui`）：Tauri 壳只做两件事 —— 把 `StrossApp`
-  注入托管状态、把前端命令转发给它；Android 原生采集以 `CaptureBackend`
-  实现（`mobile.rs`）藏在适配层后面，命令面与桌面完全一致。
+  [`Sink`](crates/stross-media/src/sink.rs) trait（录制/注入）。
+- **⑤ 平台适应桥接层**（`stross-bridge`）：数据目录解析 / 主机名 / 平台设备
+  静态枚举 —— 只产出**参数**注入内核（base_dir / hostname / 设备清单），
+  不持有状态、不定义协议。
+- **⑥ UI 壳层**（`apps/stross-gui` / `apps/stross-cli`）：Tauri 壳只做两件事 ——
+  把 `Kernel` 注入托管状态、把前端命令转发给它；Android 原生采集以
+  `CaptureBackend` 实现（`mobile.rs`）藏在能力层后面，命令面与桌面完全一致。
 
 数据流：
 
@@ -121,7 +126,8 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 
 详细设计见 [docs/architecture.md](docs/architecture.md)、[docs/protocol.md](docs/protocol.md)。
 下一阶段规划（设备路由 / 原生播放器 / AV 同步）见 [docs/roadmap.md](docs/roadmap.md)。
-内核 + 可插拔传输的插件化架构设计（方向已确认，三阶段实施）见 [docs/plugin-architecture.md](docs/plugin-architecture.md)。
+内核 + 可插拔传输的插件化架构设计见 [docs/plugin-architecture.md](docs/plugin-architecture.md)；
+分层判据见 [docs/layering-architecture.md](docs/layering-architecture.md)。
 
 ## 目录结构
 
@@ -129,12 +135,13 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 crates/
   stross-proto/      ① 协议：帧头 + 控制消息（serde）
   stross-transport/  ①½ 传输插件层：Transport/DataSession + ws/webrtc/srt/quic 实现
-  stross-core/       ② 局域网共享：中继 / 推流客户端 / mDNS 发现 / 级联代理
-    src/relay/        中继：mod（转发）/ http（路由·API·信令）/ peers（设备发现）
-  stross-media/      ④ 系统适配：ffmpeg 管线 / 设备枚举 / NAL·ADTS / CaptureBackend / Sink
+  stross-kernel/     ② 内核：全部平台无关服务（单一 Kernel 门面）
+    src/relay/        中继：mod（转发）/ http（路由·API·信令）/ client / peers
+    src/kernel/       门面：mod（Kernel）/ graph / session / auth / endpoint / data_plane
+    src/              控制面 control / 协商 negotiator / 订阅 subscriber / 引导 bootstrap …
+  stross-media/      ④ 能力层：ffmpeg 管线 / 设备枚举 / NAL·ADTS / CaptureBackend / Sink
     src/pipeline/     管线：mod（配置·会话）/ args（ffmpeg 命令构建）
-  stross-app/        ③ 核心封装：StrossApp 状态机 / SenderEngine / Kernel（无 UI 依赖，可单测）
-    src/kernel/       内核控制面：mod（门面）/ graph / session / auth
+  stross-bridge/     ⑤ 平台适应：paths（数据目录）/ hostname / 平台设备枚举
 apps/
   stross-relay/      独立中继二进制（纯 Rust，薄壳）
   stross-gui/     ⑤ UI：Tauri 客户端（桌面 + Android）
@@ -160,7 +167,7 @@ scripts/
 
 ```bash
 cargo test --workspace          # 单元 + 集成测试
-cargo test -p stross-app --test sender_e2e -- --nocapture   # 真实 ffmpeg 端到端
+cargo test -p stross-kernel --test sender_e2e -- --nocapture   # 真实 ffmpeg 端到端
 npx -y -p "typescript@5.9.3" tsc -p apps/stross-gui/web/tsconfig.json  # 前端类型检查（改 app.ts 后）
 
 scripts/check.sh                # 本地全量检查：fmt + clippy(-D warnings) + 测试 + 前端

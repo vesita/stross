@@ -10,26 +10,27 @@
 //! stross ctrl teardown <sid>
 //! ```
 
-use std::time::{Duration, Instant};
-
-use anyhow::{Context, bail};
+use anyhow::bail;
 use clap::{Args, Subcommand};
-use futures_util::{SinkExt, StreamExt};
-use stross_app::CtrlRequest;
+use stross_kernel::CtrlRequest;
 use stross_media::pipeline::StreamConfig;
 use stross_proto::message::{Delivery, Visibility};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
 
 use crate::push::QualityArg;
 
-/// 控制面默认地址（与 stross serve 的默认 ctrl 端口一致）。
-pub const DEFAULT_CTRL_URL: &str = "ws://127.0.0.1:18778/ws/ctrl";
+/// 控制面默认地址（与 `stross serve` 的默认 ctrl 端口一致；端口真源在
+/// `stross_kernel::DEFAULT_CTRL_PORT`，壳层不得硬编码端口号）。
+fn default_ctrl_url() -> String {
+    format!(
+        "ws://127.0.0.1:{}/ws/ctrl",
+        stross_kernel::DEFAULT_CTRL_PORT
+    )
+}
 
 #[derive(Args, Debug)]
 pub struct CtrlArgs {
     /// 控制面地址（仅回环，D7）
-    #[arg(long, default_value = DEFAULT_CTRL_URL)]
+    #[arg(long, default_value_t = default_ctrl_url())]
     pub connect: String,
     #[command(subcommand)]
     pub command: CtrlCommand,
@@ -415,52 +416,17 @@ fn parse_delivery(s: &str) -> anyhow::Result<Delivery> {
     }
 }
 
-/// 发一个请求并等待响应（忽略事件推送）。
+/// 发一个请求并等待响应（忽略事件推送）。信封解析在库层
+/// `stross_kernel::control::client`（docs/layering-architecture.md）。
 async fn request(connect: &str, req: CtrlRequest) -> anyhow::Result<serde_json::Value> {
-    let (mut ws, _) = connect_async(connect)
-        .await
-        .context("连接控制面失败（实例是否在运行？）")?;
-    ws.send(Message::Text(serde_json::to_string(&req)?.into()))
-        .await?;
-    loop {
-        match ws.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let v: serde_json::Value = serde_json::from_str(&text)?;
-                match v.get("rsp").and_then(|x| x.as_str()) {
-                    Some("ok") => return Ok(v["payload"].clone()),
-                    Some("error") => {
-                        bail!("{}", v["message"].as_str().unwrap_or("未知错误"))
-                    }
-                    _ => {} // KernelEvent（type 标签），忽略
-                }
-            }
-            Some(Ok(Message::Close(_))) | None => bail!("控制面连接关闭"),
-            _ => {}
-        }
-    }
+    stross_kernel::control::client::request(connect, req).await
 }
 
 /// 订阅并打印内核事件（`StreamStarted` / `StreamEnded` / 会话变化等）。
 async fn events(connect: &str, secs: u64) -> anyhow::Result<()> {
-    let (mut ws, _) = connect_async(connect)
-        .await
-        .context("连接控制面失败（实例是否在运行？）")?;
-    let deadline = Instant::now() + Duration::from_secs(secs);
-    while Instant::now() < deadline {
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-            msg = ws.next() => match msg {
-                Some(Ok(Message::Text(text))) => {
-                    let v: serde_json::Value = serde_json::from_str(&text)?;
-                    // 事件无 rsp 标签；响应（rsp）忽略
-                    if v.get("rsp").is_none() {
-                        tracing::info!("事件: {v}");
-                    }
-                }
-                Some(Ok(Message::Close(_))) | None => break,
-                _ => {}
-            },
-        }
+    let evs = stross_kernel::control::client::collect_events(connect, secs).await?;
+    for v in evs {
+        tracing::info!("事件: {v}");
     }
     Ok(())
 }

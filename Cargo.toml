@@ -3,9 +3,9 @@ resolver = "3"
 members = [
     "crates/stross-proto",
     "crates/stross-transport",
-    "crates/stross-core",
+    "crates/stross-kernel",
     "crates/stross-media",
-    "crates/stross-app",
+    "crates/stross-bridge",
     "apps/stross-relay",
     "apps/stross-cli",
     "apps/stross-gui/src-tauri",
@@ -74,9 +74,9 @@ jni = "0.21"
 # ---------------------------------------------------------------------------
 stross-proto = { path = "crates/stross-proto", version = "0.1.0" }
 stross-transport = { path = "crates/stross-transport", version = "0.1.0" }
-stross-core = { path = "crates/stross-core", version = "0.1.0" }
+stross-kernel = { path = "crates/stross-kernel", version = "0.1.0" }
 stross-media = { path = "crates/stross-media", version = "0.1.0" }
-stross-app = { path = "crates/stross-app", version = "0.1.0" }
+stross-bridge = { path = "crates/stross-bridge", version = "0.1.0" }
 
 # mDNS 服务发现：fork 自 mdns-sd 0.21（crates/mdns），本地维护以修跨设备
 # 发现（SO_REUSEPORT 端口竞争等）上游未覆盖的问题。

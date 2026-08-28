@@ -16,7 +16,7 @@
 //!
 //! Rust 侧完成：`stross_media::yuv::yuv420_to_rgba_scaled` 转换缩放 →
 //! base64 编码 → `receive-frame` 事件（与桌面接收路径同一前端事件）→
-//! 解码统计回写（`StrossApp::note_android_decoded_frame`）。
+//! 解码统计回写（`Kernel::note_android_decoded_frame`）。
 
 use std::sync::OnceLock;
 
@@ -84,7 +84,7 @@ pub extern "system" fn Java_dev_stross_sender_PlaybackPlugin_nativeSubmitYuvFram
             serde_json::json!({ "pts": pts, "width": tw, "height": th, "data": data }),
         );
         // 解码统计回写（Android 解码在 Kotlin 侧，此处与桌面解码线程同口径）
-        if let Some(sta) = app.try_state::<stross_app::StrossApp>() {
+        if let Some(sta) = app.try_state::<stross_kernel::Kernel>() {
             sta.note_android_decoded_frame();
         }
     }

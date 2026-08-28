@@ -18,7 +18,6 @@ async function init() {
     try {
         const info = (await call('app_info'));
         IS_ANDROID = info.platform === 'android';
-        MY_IPS = info.ips || [];
         $('ver-badge').textContent = 'v' + info.version;
         const fb = $('ffmpeg-badge');
         if (IS_ANDROID) {
@@ -36,10 +35,9 @@ async function init() {
         restorePrefs();
         deviceViews = [];
         await loadDevices();
-        // 免先连：先渲染本机卡片骨架（含 ip-list / 锚点状态位），
+        // 免先连：先渲染本机卡片骨架（含锚点状态位），
         // 再自动锚定本机（受控中继 + mDNS 广播）→ 扫描设备与在线共享
         void renderDeviceList();
-        renderIps(info.ips);
         await ensureAnchor();
         startStatusPolling();
         void refreshDevices();

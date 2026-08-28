@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Args;
-use stross_app::SenderEngine;
+use stross_kernel::SenderEngine;
 use stross_media::capture::FfmpegBackend;
 use stross_media::pipeline::{AudioSourceConfig, Quality, StreamConfig, VideoSource};
 

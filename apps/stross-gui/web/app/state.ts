@@ -129,9 +129,8 @@ interface ShareTokenView {
 }
 
 // —— 权限自动化（B2.5：凭证自动协商 + 防火墙） ——
-
-/** 协商端点固定端口（与 Rust `stross_app::DEFAULT_NEGOTIATOR_PORT` 一致）。 */
-const NEGOTIATOR_PORT = 18779;
+// 协商端点端口在 Rust 命令层默认（`stross_app::DEFAULT_NEGOTIATOR_PORT`），
+// 前端不持有端口常量（docs/layering-architecture.md：端口真源在库层）。
 
 /** 本机持久化身份（Rust `device_identity` 返回值）。 */
 interface DeviceIdentity {
@@ -216,7 +215,6 @@ interface ShareItem {
 
 /** 运行平台 / 环境。 */
 let IS_ANDROID = false;
-let MY_IPS: string[] = [];
 
 /** 本机采集设备（相机/音频输入/系统声；由 list_devices 填充）。 */
 let devices: DeviceList = { cameras: [], audioInputs: [], systemAudio: [] };

@@ -4825,24 +4825,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "stross-app"
+name = "stross-bridge"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "axum",
- "futures-util",
  "hostname",
- "serde",
- "serde_json",
- "stross-core",
- "stross-media",
+ "stross-kernel",
  "stross-proto",
- "thiserror 2.0.20",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tracing",
- "tracing-subscriber",
- "tungstenite 0.30.0",
 ]
 
 [[package]]
@@ -4855,38 +4843,14 @@ dependencies = [
  "hostname",
  "serde",
  "serde_json",
- "stross-app",
- "stross-core",
+ "stross-bridge",
+ "stross-kernel",
  "stross-media",
  "stross-proto",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "stross-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "futures-util",
- "hostname",
- "mdns",
- "reqwest",
- "serde",
- "serde_json",
- "str0m",
- "stross-proto",
- "stross-transport",
- "thiserror 2.0.20",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tracing",
- "tracing-subscriber",
- "tungstenite 0.30.0",
 ]
 
 [[package]]
@@ -4895,12 +4859,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "hostname",
  "jni 0.21.1",
  "serde",
  "serde_json",
- "stross-app",
- "stross-core",
+ "stross-bridge",
+ "stross-kernel",
  "stross-media",
  "stross-proto",
  "tauri",
@@ -4908,6 +4871,30 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "stross-kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "futures-util",
+ "mdns",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "str0m",
+ "stross-media",
+ "stross-proto",
+ "stross-transport",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "tracing-subscriber",
+ "tungstenite 0.30.0",
 ]
 
 [[package]]
@@ -4942,7 +4929,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "stross-core",
+ "hostname",
+ "stross-kernel",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -4953,7 +4941,6 @@ name = "stross-transport"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum",
  "bytes",
  "futures-util",
  "local-ip-address",

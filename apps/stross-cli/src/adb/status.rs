@@ -1,12 +1,12 @@
 //! 手机状态聚合 + 展示视图（经 adb forward 直通中继 HTTP；探测契约复用
-//! `stross_core::relay::client`，展示投影复用 `stross_app::devices`）。
+//! `stross_kernel::relay::client`，展示投影复用 `stross_kernel::devices`）。
 
 use std::time::Duration;
 
 use serde::Serialize;
-use stross_core::relay::client as relay_http;
+use stross_kernel::relay::client as relay_http;
 
-use stross_app::devices::StreamView;
+use stross_kernel::devices::StreamView;
 
 use super::device::{adb_forward, adb_forward_remove, adb_sh, free_local_port, pick_device};
 
@@ -83,7 +83,7 @@ pub(crate) async fn phone_status(ports_arg: &str) -> anyhow::Result<PhoneStatus>
                 status.quic_port = info.quic_port;
                 // /api/streams（同一 forward 会话）
                 if let Ok(list) = relay_http::streams("127.0.0.1", local_port, probe).await {
-                    status.streams = stross_app::devices::to_views(list);
+                    status.streams = stross_kernel::devices::to_views(list);
                 }
             }
             Err(_) => {

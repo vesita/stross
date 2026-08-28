@@ -2,11 +2,11 @@
 //! 客户端，一律经这里调 `stross_app` 库接口（docs/layering-architecture.md）。
 //!
 //! 与原桌面/Android 共用同一命令面；命令只做参数转译 + 错误 -> String，
-//! 逻辑全部在库层（`StrossApp` / `subscriber` / `devices` 等）。
+//! 逻辑全部在库层（`Kernel` / `subscriber` / `devices` 等）。
 
 use std::sync::Arc;
 
-use stross_app::{CaptureStatusView, StrossApp};
+use stross_kernel::{CaptureStatusView, Kernel};
 use stross_media::pipeline::StreamConfig;
 use tauri::{Manager, State};
 
@@ -17,25 +17,32 @@ use crate::NegotiatorHandle;
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn app_info(state: State<'_, Arc<StrossApp>>) -> stross_app::app::AppInfo {
+pub fn app_info(state: State<'_, Arc<Kernel>>) -> stross_kernel::AppInfo {
     state.app_info()
 }
 
 #[tauri::command]
-pub fn list_devices(state: State<'_, Arc<StrossApp>>) -> stross_app::app::DeviceList {
+pub fn list_devices(state: State<'_, Arc<Kernel>>) -> stross_kernel::DeviceList {
     state.list_devices()
 }
 
 #[tauri::command]
 pub async fn start_relay(
-    state: State<'_, Arc<StrossApp>>,
-) -> Result<stross_app::app::RelayInfo, String> {
-    // 固定端口（含 SRT/QUIC）：防火墙只放行已知端口（权限自动化）
+    state: State<'_, Arc<Kernel>>,
+) -> Result<stross_kernel::RelayInfo, String> {
+    // 固定端口（含 SRT/QUIC）：防火墙只放行已知端口（权限自动化）。
+    // 端口真源：协议默认 [DEFAULT_PORT]（桌面）；Android GUI 固定
+    // [GUI_PORT]（平台约定 AGENTS.md）——命令层按平台选，不定制逻辑。
+    #[cfg(mobile)]
+    let relay_port = stross_kernel::relay::GUI_PORT;
+    #[cfg(not(mobile))]
+    let relay_port = stross_kernel::relay::DEFAULT_PORT;
     state
         .start_relay_fixed(
-            stross_core::relay::DEFAULT_PORT,
-            stross_app::DEFAULT_SRT_PORT,
-            stross_app::DEFAULT_QUIC_PORT,
+            relay_port,
+            stross_kernel::DEFAULT_SRT_PORT,
+            stross_kernel::DEFAULT_QUIC_PORT,
+            &stross_bridge::hostname_or("stross"),
         )
         .await
         .map_err(|e| e.to_user_string())
@@ -44,17 +51,17 @@ pub async fn start_relay(
 /// mDNS 扫描（仅发现；探测/聚合走 [`scan_devices`]——前端不再自写 HTTP 探测）。
 #[tauri::command]
 pub async fn scan_relays(
-    state: State<'_, Arc<StrossApp>>,
-) -> Result<Vec<stross_app::app::RelayInfo>, String> {
+    state: State<'_, Arc<Kernel>>,
+) -> Result<Vec<stross_kernel::RelayInfo>, String> {
     state.scan_relays().await.map_err(|e| e.to_user_string())
 }
 
 #[tauri::command]
 pub async fn start_stream(
-    state: State<'_, Arc<StrossApp>>,
+    state: State<'_, Arc<Kernel>>,
     cfg: StreamConfig,
     relay_url: Option<String>,
-) -> Result<stross_app::app::StartResult, String> {
+) -> Result<stross_kernel::StartResult, String> {
     state
         .start_stream(cfg, relay_url)
         .await
@@ -62,17 +69,17 @@ pub async fn start_stream(
 }
 
 #[tauri::command]
-pub async fn stop_stream(state: State<'_, Arc<StrossApp>>) -> Result<(), String> {
+pub async fn stop_stream(state: State<'_, Arc<Kernel>>) -> Result<(), String> {
     state.stop_stream().await.map_err(|e| e.to_user_string())
 }
 
 #[tauri::command]
-pub fn stream_status(state: State<'_, Arc<StrossApp>>) -> stross_app::app::StreamStatus {
+pub fn stream_status(state: State<'_, Arc<Kernel>>) -> stross_kernel::StreamStatus {
     state.stream_status()
 }
 
 #[tauri::command]
-pub fn capture_status(state: State<'_, Arc<StrossApp>>) -> CaptureStatusView {
+pub fn capture_status(state: State<'_, Arc<Kernel>>) -> CaptureStatusView {
     state.capture_status()
 }
 
@@ -82,32 +89,31 @@ pub fn capture_status(state: State<'_, Arc<StrossApp>>) -> CaptureStatusView {
 
 /// 设备图快照（本机能力 + 发现结果）。
 #[tauri::command]
-pub fn kernel_nodes(state: State<'_, Arc<StrossApp>>) -> Vec<stross_app::kernel::NodeInfo> {
-    state.kernel().nodes()
+pub fn kernel_nodes(state: State<'_, Arc<Kernel>>) -> Vec<stross_kernel::kernel::NodeInfo> {
+    state.nodes()
 }
 
 /// 会话列表快照。
 #[tauri::command]
-pub fn kernel_sessions(state: State<'_, Arc<StrossApp>>) -> Vec<stross_app::kernel::Session> {
-    state.kernel().sessions()
+pub fn kernel_sessions(state: State<'_, Arc<Kernel>>) -> Vec<stross_kernel::kernel::Session> {
+    state.sessions()
 }
 
 /// 创建会话（「从 `src` 推送到 `sinks`」）。
 #[tauri::command]
 pub fn create_session(
-    state: State<'_, Arc<StrossApp>>,
+    state: State<'_, Arc<Kernel>>,
     src: String,
     sinks: Vec<String>,
     access_code: Option<String>,
-) -> Result<stross_app::kernel::Session, String> {
-    let prefs = stross_app::SessionPrefs {
+) -> Result<stross_kernel::kernel::Session, String> {
+    let prefs = stross_kernel::SessionPrefs {
         profile: stross_proto::message::ReliabilityProfile::Lossy,
         preferred_transport: None,
         access_code,
         title: String::new(),
     };
     state
-        .kernel()
         .create_session(&src, &sinks, &prefs)
         .map_err(|e| e.to_user_string())
 }
@@ -115,9 +121,9 @@ pub fn create_session(
 /// 签发「接收手机麦克风」接入凭证（B2）：建会话 + 签发一次性 ShareToken。
 #[tauri::command]
 pub fn issue_share_token(
-    state: State<'_, Arc<StrossApp>>,
+    state: State<'_, Arc<Kernel>>,
     ttl_secs: Option<u64>,
-) -> Result<stross_app::app::ShareTokenView, String> {
+) -> Result<stross_kernel::ShareTokenView, String> {
     state
         .issue_share_token(ttl_secs)
         .map_err(|e| e.to_user_string())
@@ -126,12 +132,11 @@ pub fn issue_share_token(
 /// 会话鉴权：校验访问码（PIN）；成功后该会话的控制操作放行。
 #[tauri::command]
 pub fn authorize_session(
-    state: State<'_, Arc<StrossApp>>,
+    state: State<'_, Arc<Kernel>>,
     session_id: String,
     access_code: Option<String>,
 ) -> Result<(), String> {
     state
-        .kernel()
         .authorize(&session_id, access_code.as_deref())
         .map_err(|e| e.to_user_string())
 }
@@ -139,34 +144,28 @@ pub fn authorize_session(
 /// 控制传输方向（会话存续期间动态改道）。
 #[tauri::command]
 pub fn route_session(
-    state: State<'_, Arc<StrossApp>>,
+    state: State<'_, Arc<Kernel>>,
     session_id: String,
     path: stross_proto::message::RoutePath,
 ) -> Result<(), String> {
     state
-        .kernel()
         .route(&session_id, path)
         .map_err(|e| e.to_user_string())
 }
 
 /// 拆除会话。
 #[tauri::command]
-pub fn teardown_session(
-    state: State<'_, Arc<StrossApp>>,
-    session_id: String,
-) -> Result<(), String> {
-    state
-        .kernel()
-        .teardown(&session_id)
-        .map_err(|e| e.to_user_string())
+pub fn teardown_session(state: State<'_, Arc<Kernel>>, session_id: String) -> Result<(), String> {
+    state.teardown(&session_id).map_err(|e| e.to_user_string())
 }
 
 // ---------------------------------------------------------------------------
 // 桥接：局域网扫描 / 目录 / 订阅 / 凭证申请（前端不再自写协议客户端）
 // ---------------------------------------------------------------------------
 
-/// 全量扫描局域网设备（mDNS + HTTP 探测聚合；与 CLI `stross devices` 同源
-/// `stross_app::devices::scan`）。返回含在线共享 / SRT / QUIC 的完整视图，
+/// 全量扫描局域网设备（与 CLI `stross devices` 同源
+/// `stross_kernel::devices::scan_lan`：mDNS 浏览 + HTTP 探测聚合 + 手动地址
+/// 并入全在库层）。返回含在线共享 / SRT / QUIC 的完整视图，
 /// 前端每轮刷新只需调它，不再自行 fetch `/api/info` `/api/streams`。
 ///
 /// `extra_base_urls`：手动添加的地址（无 mDNS），一并探测并入结果。
@@ -175,39 +174,20 @@ pub async fn scan_devices(
     probe_ms: u64,
     timeout_ms: Option<u64>,
     extra_base_urls: Vec<String>,
-) -> Result<Vec<stross_app::devices::ScannedDevice>, String> {
+) -> Result<Vec<stross_kernel::devices::ScannedDevice>, String> {
     let browse = std::time::Duration::from_millis(timeout_ms.unwrap_or(2000));
-    let found = stross_core::discovery::Discovery::browse(browse)
+    let probe = std::time::Duration::from_millis(probe_ms);
+    stross_kernel::devices::scan_lan(browse, probe, extra_base_urls)
         .await
-        .map_err(|e| format!("mDNS 扫描失败: {e}"))?;
-    let self_ips: Vec<String> = stross_core::net::local_ips()
-        .into_iter()
-        .map(|ip| ip.to_string())
-        .collect();
-    let probe = std::time::Duration::from_millis(probe_ms.max(100));
-    let mut devices = stross_app::devices::scan(found, &self_ips, probe).await;
-    // 手动地址并入（无 mDNS）：去重后追加探测条目
-    let mut seen: std::collections::HashSet<String> = devices
-        .iter()
-        .map(|d| format!("{}:{}", d.ip, d.port))
-        .collect();
-    for base in extra_base_urls {
-        let base = base.trim_end_matches('/').to_string();
-        if let Some(d) = stross_app::devices::probe_base(&base, probe).await
-            && seen.insert(format!("{}:{}", d.ip, d.port))
-        {
-            devices.push(d);
-        }
-    }
-    Ok(devices)
+        .map_err(|e| format!("局域网扫描失败: {e}"))
 }
 
 /// 本机锚点中继（127.0.0.1）在线共享列表——「等待流接入」轮询用
 /// （`beginAwaitMicStream` 等），不再由前端直接 fetch `/api/streams`。
 #[tauri::command]
-pub async fn anchor_streams(port: u16) -> Vec<stross_app::devices::StreamView> {
-    use stross_core::relay::client as relay_http;
-    stross_app::devices::to_views(
+pub async fn anchor_streams(port: u16) -> Vec<stross_kernel::devices::StreamView> {
+    use stross_kernel::relay::client as relay_http;
+    stross_kernel::devices::to_views(
         relay_http::streams("127.0.0.1", port, std::time::Duration::from_millis(1500))
             .await
             .unwrap_or_default(),
@@ -218,7 +198,7 @@ pub async fn anchor_streams(port: u16) -> Vec<stross_app::devices::StreamView> {
 /// 供「手动添加设备」校验地址用）。
 #[tauri::command]
 pub async fn probe_relay(base: String) -> bool {
-    use stross_core::relay::client as relay_http;
+    use stross_kernel::relay::client as relay_http;
     let url = format!("{}/api/streams", base.trim_end_matches('/'));
     relay_http::get_json::<serde_json::Value>(&url, std::time::Duration::from_secs(3))
         .await
@@ -231,23 +211,23 @@ pub async fn endpoint_ls(
     host: String,
     port: u16,
 ) -> Result<stross_proto::message::EndpointDir, String> {
-    stross_app::fetch_directory(&host, port)
+    stross_kernel::fetch_directory(&host, port)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
 /// 订阅远端文件端点并落盘到 `out_dir`（pull/push 全流程在库接口
-/// `stross_app::subscribe_file`）。
+/// `stross_kernel::subscribe_file`）。
 #[tauri::command]
 pub async fn endpoint_subscribe(
     app: tauri::AppHandle,
-    state: State<'_, Arc<StrossApp>>,
+    state: State<'_, Arc<Kernel>>,
     host: String,
     port: u16,
     endpoint_id: String,
     delivery: Option<String>,
     out_dir: String,
-) -> Result<stross_app::SubscribeOutcome, String> {
+) -> Result<stross_kernel::SubscribeOutcome, String> {
     let app_state = state.inner().clone();
     let base = app
         .path()
@@ -257,7 +237,7 @@ pub async fn endpoint_subscribe(
         "push" => stross_proto::message::Delivery::Push,
         _ => stross_proto::message::Delivery::Pull,
     });
-    stross_app::subscribe_file(
+    stross_kernel::subscribe_file(
         &app_state,
         &base,
         &host,
@@ -272,21 +252,21 @@ pub async fn endpoint_subscribe(
 
 /// 向对端申请一次性接入凭证（B2.5 免粘贴：首次对端人工允许，之后信任免问）。
 /// 旧语义（无端点）：`media` 指定申请媒体；返回授予（token / streamId）。
+/// `port` 缺省 = 协议约定协商端口（`stross_kernel::DEFAULT_NEGOTIATOR_PORT`）——
+/// 前端不再持有端口常量。
 #[tauri::command]
 pub async fn request_share_token(
     app: tauri::AppHandle,
     host: String,
-    port: u16,
+    port: Option<u16>,
     media: Vec<stross_proto::message::MediaKind>,
 ) -> Result<stross_proto::message::ShareGrant, String> {
     let base = app
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir());
-    let name = hostname::get()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "Stross 设备".into());
-    let ident = stross_app::load_or_create_identity(&base, &name);
+    let name = stross_bridge::hostname_or("Stross 设备");
+    let ident = stross_kernel::load_or_create_identity(&base, &name);
     let req = stross_proto::message::ShareRequest {
         device_id: ident.device_id,
         device_name: ident.device_name,
@@ -296,9 +276,13 @@ pub async fn request_share_token(
         share_token: None,
         media,
     };
-    stross_app::request_grant(&host, port, &req)
-        .await
-        .map_err(|e| format!("{e:#}"))
+    stross_kernel::request_grant(
+        &host,
+        port.unwrap_or(stross_kernel::DEFAULT_NEGOTIATOR_PORT),
+        &req,
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -307,15 +291,13 @@ pub async fn request_share_token(
 
 /// 本机持久化身份（device_id / device_name；首次运行生成，之后稳定）。
 #[tauri::command]
-pub fn device_identity(app: tauri::AppHandle) -> stross_app::DeviceIdentity {
+pub fn device_identity(app: tauri::AppHandle) -> stross_kernel::DeviceIdentity {
     let base = app
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir());
-    let name = hostname::get()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "Stross 设备".into());
-    stross_app::load_or_create_identity(&base, &name)
+    let name = stross_bridge::hostname_or("Stross 设备");
+    stross_kernel::load_or_create_identity(&base, &name)
 }
 
 /// 应答凭证协商请求（电脑端授权确认弹窗操作后调用）。
@@ -325,7 +307,7 @@ pub fn negotiator_respond(
     req_id: String,
     allow: bool,
     remember: bool,
-) -> Result<Option<stross_app::ShareGrant>, String> {
+) -> Result<Option<stross_kernel::ShareGrant>, String> {
     match state
         .0
         .lock()
@@ -342,16 +324,16 @@ pub fn negotiator_respond(
 // ---------------------------------------------------------------------------
 
 #[cfg(all(not(mobile), target_os = "linux"))]
-fn required_firewall_ports(state: &StrossApp) -> (Vec<String>, Vec<String>) {
+fn required_firewall_ports(state: &Kernel) -> (Vec<String>, Vec<String>) {
     // 实际端口（回退默认）：中继 WS + 凭证协商 TCP；SRT/QUIC UDP
     let (ws, srt, quic) = state.relay_ports().unwrap_or((
-        stross_core::relay::DEFAULT_PORT,
-        Some(stross_app::DEFAULT_SRT_PORT),
-        Some(stross_app::DEFAULT_QUIC_PORT),
+        stross_kernel::relay::DEFAULT_PORT,
+        Some(stross_kernel::DEFAULT_SRT_PORT),
+        Some(stross_kernel::DEFAULT_QUIC_PORT),
     ));
     let tcp = vec![
         format!("{ws}/tcp"),
-        format!("{}/tcp", stross_app::DEFAULT_NEGOTIATOR_PORT),
+        format!("{}/tcp", stross_kernel::DEFAULT_NEGOTIATOR_PORT),
     ];
     let mut udp = Vec::new();
     if let Some(p) = srt {
@@ -367,7 +349,7 @@ fn required_firewall_ports(state: &StrossApp) -> (Vec<String>, Vec<String>) {
 #[cfg(all(not(mobile), target_os = "linux"))]
 #[tauri::command]
 pub async fn firewall_status(
-    state: State<'_, Arc<StrossApp>>,
+    state: State<'_, Arc<Kernel>>,
 ) -> Result<crate::firewall::FirewallStatus, String> {
     let out = tokio::process::Command::new("ufw")
         .args(["status", "verbose"])
@@ -381,7 +363,7 @@ pub async fn firewall_status(
         ));
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let ips = stross_core::net::local_ips();
+    let ips = stross_kernel::net::local_ips();
     let subnet = crate::firewall::lan_subnet(&ips);
     let mut status = crate::firewall::parse_ufw_verbose(&text);
     let (tcp, udp) = required_firewall_ports(&state);
@@ -406,8 +388,8 @@ pub async fn firewall_status(
 /// 按本机局域网子网加入 ufw（精确收窄，不放行整个网段）。
 #[cfg(all(not(mobile), target_os = "linux"))]
 #[tauri::command]
-pub async fn firewall_allow(state: State<'_, Arc<StrossApp>>) -> Result<(), String> {
-    let ips = stross_core::net::local_ips();
+pub async fn firewall_allow(state: State<'_, Arc<Kernel>>) -> Result<(), String> {
+    let ips = stross_kernel::net::local_ips();
     let subnet = crate::firewall::lan_subnet(&ips)
         .ok_or_else(|| "未找到局域网 IPv4 地址，无法生成放行规则（请先连接网络）".to_string())?;
     // 只放行当前确实缺失的端口

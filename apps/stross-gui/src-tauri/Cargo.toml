@@ -13,11 +13,10 @@ name = "stross_gui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-hostname.workspace = true
 tauri.workspace = true
-stross-app.workspace = true
+stross-kernel.workspace = true
+stross-bridge.workspace = true
 stross-media.workspace = true
-stross-core = { workspace = true, features = ["discovery"] }
 stross-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true

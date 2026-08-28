@@ -1,19 +1,14 @@
 //! `stross devices`：扫描局域网设备（PC + 手机），展示设备能力与在线共享状态。
 //!
 //! 分层（docs/layering-architecture.md）：**聚合与探测收敛在
-//! `stross_app::devices::scan`**（内核层，CLI 与 GUI 共用）；本文件只做
+//! `stross_kernel::devices::scan_lan`**（内核层，CLI 与 GUI 共用）；本文件只做
 //! **参数解析 + 中文标签 + 展示**。
-//!
-//! 数据来源：mDNS 能力广播（`Discovery::browse`）+ 每设备 HTTP 探测
-//! （`/api/info` 与 `/api/streams`，core 官方客户端）——与 GUI 设备卡片同源，
-//! 命令行同样「打开即见 PC 与手机状态」。
 
 use std::time::Duration;
 
 use clap::Args;
-use stross_app::devices::ScannedDevice;
-use stross_core::discovery::{BROWSE_TIMEOUT, Discovery};
-use stross_core::net::local_ips;
+use stross_kernel::devices::ScannedDevice;
+use stross_kernel::discovery::BROWSE_TIMEOUT;
 use stross_proto::message::{MediaKind, RoleId};
 
 #[derive(Args, Debug)]
@@ -30,11 +25,9 @@ pub struct DevicesArgs {
 }
 
 pub async fn run(args: DevicesArgs) -> anyhow::Result<()> {
-    let found = Discovery::browse(Duration::from_secs(args.timeout)).await?;
-    let self_ips: Vec<String> = local_ips().into_iter().map(|ip| ip.to_string()).collect();
+    let browse = Duration::from_secs(args.timeout);
     let probe = Duration::from_millis(args.probe_ms);
-
-    let devices = stross_app::devices::scan(found, &self_ips, probe).await;
+    let devices = stross_kernel::devices::scan_lan(browse, probe, Vec::new()).await?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&devices)?);
@@ -175,7 +168,7 @@ fn media_label(m: &MediaKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stross_app::devices::StreamView;
+    use stross_kernel::devices::StreamView;
 
     #[test]
     fn role_and_media_labels() {

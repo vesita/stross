@@ -245,9 +245,6 @@ function renderDeviceList() {
     const box = $('device-list');
     box.innerHTML = '';
     box.appendChild(localDeviceCard());
-    // 本机卡片重建会重置 ip-list 为「读取中…」占位——重渲染 IP 列表
-    // （scanRelays/scanRemoteStreams 每次重建设备列表都会走到这里）
-    renderIps(MY_IPS);
     if (!deviceViews.length) {
         box.appendChild(emptyState('radio', '未发现局域网内其它设备（mDNS）。可手动输入地址添加。'));
         return;
@@ -331,18 +328,6 @@ function localDeviceCard() {
     localStreamsBox.appendChild(lsTitle);
     localStreamsBox.appendChild(streamListPlaceholder());
     detail.appendChild(localStreamsBox);
-    // 本机入口地址
-    const entryTitle = document.createElement('h3');
-    entryTitle.textContent = '本机入口';
-    detail.appendChild(entryTitle);
-    const ips = document.createElement('ul');
-    ips.id = 'ip-list';
-    ips.className = 'url-list';
-    const ipsHint = document.createElement('li');
-    ipsHint.className = 'hint';
-    ipsHint.textContent = '读取中…';
-    ips.appendChild(ipsHint);
-    detail.appendChild(ips);
     card.appendChild(detail);
     return card;
 }
@@ -541,29 +526,6 @@ function refreshNodeStreams() {
         if (badge)
             badge.textContent = dev.streams.length ? dev.streams.length + ' 条共享' : '';
     });
-}
-/** 本机局域网入口地址渲染（点击复制）。 */
-function renderIps(ips) {
-    const ul = $('ip-list');
-    ul.innerHTML = '';
-    ips.forEach((ip) => {
-        const li = document.createElement('li');
-        li.textContent = ip;
-        li.title = '点击复制';
-        makeClickable(li, () => {
-            navigator.clipboard?.writeText(ip).then(() => {
-                li.style.borderColor = 'var(--ok)';
-                li.textContent = '已复制 ' + ip;
-                setTimeout(() => {
-                    li.style.borderColor = '';
-                    li.textContent = ip;
-                }, 1500);
-            });
-        });
-        ul.appendChild(li);
-    });
-    if (!ips.length)
-        ul.innerHTML = '<li class="hint">未获取到局域网 IP</li>';
 }
 /** 刷新本机卡片锚点状态行（锚定成功后调用；SRT/QUIC 就绪状态在
  *  `refreshAnchorPorts` 拉取后二次刷新）。 */

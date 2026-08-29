@@ -384,13 +384,15 @@ GStreamer 流水线。
 | 5. 移除浏览器观看页后，控制 API/信令不受影响 | A3（docs 同步）+ 已有测试 |
 | 6. 跨平台互通矩阵通过 | D2 |
 
-## 建议推进顺序（截至第十一轮）
+## 建议推进顺序（截至第十二轮）
 
-1. **C 阶段（弱网与长跑）**：`weaknet-test.sh` 10% 丢包档 SRT 调参（上调
+1. **P0-2 断线自动重连**（closed-loop-plan.md §3）：接收端退避重连 + 推流端重 Hello +
+   拒绝原因透传——闭环验收 4 的最后缺口；
+2. **C 阶段（弱网与长跑）**：`weaknet-test.sh` 10% 丢包档 SRT 调参（上调
    `rcv_latency`/ARQ 参数）+ 长跑自动化固化——弱网基线已测（stress-test-report.md）；
-2. **D 阶段收尾**：跨平台互通矩阵（Windows/Android 实测）、传输统计推送进
+3. **D 阶段收尾**：跨平台互通矩阵（Windows/Android 实测）、传输统计推送进
    运行页（F5.3）、AV Sync（P3）；
-3. **E 二期**：剪贴板同步等 ReliableChannel 剩余项（文件端点已落地）。
+4. **E 二期**：剪贴板同步等 ReliableChannel 剩余项（文件端点已落地）。
 
 ---
 
@@ -398,139 +400,90 @@ GStreamer 流水线。
 
 **目标**：解决「内核定义不明确」「app 里写内核太奇怪」——`stross-core` 更名
 `stross-kernel` 并吸收原 `stross-app` 全部服务；平台适应独立 `stross-bridge`；
-壳层只做参数解析 + 展示 + 平台适配（docs/layering-architecture.md §2/§3）。
-
-**变更**：
-| 项 | 落点 |
-|---|---|
-| crate 更名 | `stross-core` → `stross-kernel`；`stross-app` 删除（服务进 kernel，平台进 bridge） |
-| 单一门面 | 原 `kernel::Kernel`（会话/路由骨架）+ 原 `StrossApp`（运行态状态机）合并为 `stross_kernel::Kernel`（90+ 方法，事件经 `KernelEvent` 广播） |
-| 桥接层（新 crate） | `stross-bridge`：paths（数据目录）/ hostname（OS 调用收敛）/ 平台设备枚举（`cfg(target_os)` 唯一出现点）；只产出参数注入内核 |
-| 内核零 OS 调用 | `Kernel::start_relay*` / `bootstrap::ensure_identity` 主机名改为调用方注入；设备清单一律 `seed_device` 注入 |
-| 服务全量进内核 | 控制面（CtrlServer+client）/ 协商（srv+client）/ 订阅 / 文件传输 / 引导 / 扫描聚合 / 推流引擎 / 接收编排 / 端点框架 / 展示视图 |
-| 端口常量 | `relay::{DEFAULT_PORT=18777, GUI_PORT=8777}`、CTRL 18778、NEGOTIATOR 18779、SRT 33462、QUIC 33464（壳层/前端引用常量，无硬编码） |
-| UI 收尾 | 移除「本机入口」IP 列表（mDNS 自动发现后已无用途；`app_info().ips` 保留供调试）；GUI 平台设备播种接线到 bridge（此前漏接） |
-
-**验证**：
-- `cargo check --workspace` 零错误零警告；clippy `-D warnings` 通过；前端 tsc + jsdom 通过；
-- 全量单测 + 集成测试通过（含恢复的 sender_e2e / receive_roundtrip / kernel_relay_roundtrip 真实 ffmpeg 链路）；
-- `share-token-test.sh` ✅（164 帧 / 277 音频块）；`latency-stability-test.sh 60 ws` ✅（1726/1800 帧、2724/2820 音频块、p99−min≈12.7ms）；
-- 真机（OPPO PLC110，adb + CDP）：Android APK 构建安装成功；**互相发现**（PC 18777 ↔ 手机 8777 GUI_PORT）；**自动协商**（手机请求 → PC `negotiator-respond` 签发 grant → 手机 QUIC 推流进 PC 中继，Hello 接受、流启动）；
-- 遗留（非本轮回归，属手机侧/前端既有问题，待 UI 阶段）：手机麦克风推流 10s 内无媒体帧到达（采集/QUIC 推送链，与重构无关——PC↔PC 全链路回归通过）；协商应答曾有一次挂起（瞬时锁竞争，重试即通）；设备列表 5s 轮询重建会清空「接收手机麦克风」凭证展示框；Android `hostname` 恒为 localhost（设备名显示为 localhost）。
-
----
+壳层只做参数解析 + 展示 + 平台适配。**产出**：单一 `Kernel` 门面（90+ 方法，事件经
+`KernelEvent` 广播）；端口常量收敛（relay 18777 / GUI 8777 / ctrl 18778 / 协商 18779 /
+SRT 33462 / QUIC 33464）；目录与订阅握手收敛。**验证**：workspace 零警告；真机互相发现 +
+自动协商闭环（详细变更见 git 历史）。
 
 ## 第八轮（UI 收敛到「通告 + 订阅」+ 内核推流状态修复，2026-08-28）
 
-**目标**：按用户意见把 UI 收敛为「本机设备通告 + 对端设备通告订阅」两极，
-删除旧广播/凭证/共享流模型 UI；修复数据面流结束后引擎状态滞留导致的
-「已经在推流中」卡死；消除设备名「Stross 本机中继」歧义；真机闭环验证。
-
-**变更**：
-| 项 | 落点 |
-|---|---|
-| 内核推流状态修复 | `Kernel.engine` 改 `Arc<Mutex<Option<RunningStream>>>`（kernel/mod.rs）；`attach_data_plane` 转发任务捕获 Arc，`RelayEvent::StreamEnded` 时若正是当前推流则 `take()` 并 `spawn(stop())` —— 采集进程中途退出后不再卡死后续端点自动推流 |
-| 端点订阅闭环（上一轮续） | `subscriber::subscribe_media` 握手 → 订阅达成 → `endpoint_driver` 自动开推（真机验证：手机订阅 PC `screen:0` → PC 自动推流 sess-1 → 手机收到 102 帧） |
-| UI 收敛（按用户指示） | 删除本机卡片「共享屏幕/麦克风（广播）」「接收手机麦克风」+ 凭证面板、对端卡片「共享麦克风到 TA」；删除右栏「共享流」面板 → 改为「接收」面板（订阅流播放/停止）；删除 publish.ts / negotiate.ts 两个死文件（tsconfig/index.html/测试同步）；「任何可共享设备都是节点端点，统一走通告/订阅」 |
-| 前端渲染签名门控 | `refreshDevices` 设备列表签名 + `refreshLocalCatalog` 目录签名：数据未变跳过重建——**消灭 2s/5s 轮询整树重绘导致的本机设备闪烁**；`renderDeviceList` 在卡片入 DOM 后渲染设备树（修构造期容器未入文档导致的空渲） |
-| 对端目录 TTL | `remoteDirs` 缓存 20s TTL（`remoteDirAt` 时间戳）：对端新通告/取消通告及时可见 |
-| 设备命名 | 内核广播名从硬编码「Stross 本机中继」改为**注入的主机名**（`DiscoveryInfo::relay_default(hostname, …)`）；`bridge::device_name_or` 过滤空/localhost/android 占位主机名（Android 恒 localhost）→ 回退「Stross 设备」；GUI/CLI 壳层注入点全部切换；`view::relay_info` 增 hostname 参数保持本机视图名一致 |
-
-**验证**：
-- 内核 `cargo test -p stross-kernel` 19 项 ✅；bridge 6 项 ✅（新增占位主机名过滤测试）；workspace 全量 ✅；clippy 0 告警；fmt 干净；
-- 前端 tsc ✅；jsdom 56 项断言全过（重写为通告/订阅流程：目录拉取 → 订阅握手 → 接收面板 → 断流自愈 → 遗留 UI 移除断言 → 通告/取消通告闭环 → 授权 → 防火墙）；
-- 真机（OPPO PLC110，adb + CDP，**一次性干净流程**，不再乱点）：冷启动 → 新 UI（本机设备树+通告按钮、对端目录、右栏「接收」）→ 展开 PC → 目录拉到「屏幕/麦克风 公开·拉取」→ 订阅屏幕 → PC 日志 `端点 screen:0 已自动推流（Screen）: stream=sess-1 订阅方 09ac…` → 手机「接收中 · 收到 102 帧 · 已绘制 49 帧」→ 停止接收回「未接收」✅（内核修复生效：无「已经在推流中」卡死）；
-- 命名验证：手机端 PC 卡片显示真实主机名 **noxy**（原「Stross 本机中继」）✅；
-- 遗留：Android 设备树仅有 麦克风/系统声音（平台设备枚举无屏幕项——Android 屏幕共享走采集授权路径，非端点设备，待后续）；PC 无麦克风硬件（媒体闭环用屏幕端点验证）。
-
----
+**目标**：按用户意见把 UI 收敛为「本机设备通告 + 对端设备通告订阅」两极，删除旧
+广播/凭证/共享流面板（publish.ts / negotiate.ts 删除，右栏改「接收」面板）；修复数据面
+流结束后引擎状态滞留导致的「已经在推流中」卡死。**产出**：`Kernel.engine` 改
+`Arc<Mutex<Option<RunningStream>>>` + `StreamEnded` 自动清理；端点订阅闭环（订阅达成 →
+端点自动开推）；前端渲染签名门控 + 对端目录 20s TTL；设备命名用注入主机名（Android
+回退「Stross 设备」）。**验证**：真机「手机订阅 PC 屏幕 → 自动推流 → 手机收帧」闭环；
+前端 jsdom 56 项断言。
 
 ## 第九轮（端点插件区 + Wayland 屏幕采集，2026-08-29）
 
-**目标**：修复 PC 端（Wayland 桌面）无法获取屏幕的 bug；按「端点插件区」愿景落地
-`stross-endpoint` 取代 `stross-media`，内核收敛为纯管理调度。
-
-**变更**：
-| 项 | 落点 |
-|---|---|
-| Wayland 屏幕采集 | `stross-endpoint/src/screen/wayland.rs`：XDG Desktop Portal（ashpd 0.13 `select_sources` + lamco-portal 会话）→ pipewire **SHM/CPU 路径**（`dmabuf=false`，合成器无关，规避 AMD linear dmabuf mmap 全零）→ BGRA 缩放转 yuv420p → 按目标帧率节流喂 ffmpeg rawvideo stdin 编码 H.264 |
-| 静止画面保活 | KWin portal 流是 damage 驱动，桌面静止即无新帧；空闲时按目标帧率**重发上一帧**：中继 `PUSH_SILENCE_TIMEOUT` 不再拆流，GOP 正常（关键帧 2s 一次，新观看端可随时接入） |
-| 采集错误上抛 | 采集进程异常 / portal 错误经 `CaptureStatus.error` 上报，不再静默黑屏 |
-| 端点插件区 crate | `stross-endpoint` 吸收并取代 `stross-media`：`Endpoint` 契约（端点化 + 数据还原，`EndpointApp`/`EndpointSeeder` 注入，不依赖内核）；端点 screen/（linux wayland+x11、windows、macos）、audio/、file/；采集与还原机制（capture/pipeline/playback/devices）+ codec/(nal,adts) convert/(yuv) 数据处理辅助；新增数据源 = 加目录实现契约即挂载 |
-| 内核收敛 | 内核只做管理调度（端点注册表 + `impl EndpointApp`/`EndpointSeeder`），零媒体数据面细节；`Platform` 枚举移入 `stross-proto`（kernel ← endpoint 无环）；`stross_kernel::ScreenEndpoint` 等路径重导出保持壳层兼容 |
-| 依赖统一 | 新增 ashpd 0.13 / lamco-pipewire 0.6.10 / lamco-portal 0.4.4，全部进根 `[workspace.dependencies]` |
-
-**验证**：
-- `cargo build --workspace`（default 与 `--no-default-features`）零警告；clippy `-D warnings`、fmt ✅；前端 tsc + jsdom ✅；
-- 全量单测 ✅（endpoint 47 项含真实 ffmpeg 链路；kernel/bridge/proto/types/transport 全部通过）；
-- 实机 Wayland e2e（KDE Plasma + AMD）：`stross push --screen` + `stross receive` 录制 **212 帧 1280×720、185 个色值分布的真实桌面内容**，流全程存活（保活修复生效）✅；
-- 提交 `43b8661`（63 文件，+2323/−918）。
-
-**遗留 / 待定**：
-- [ ] **PTS 驱动的播放调度层（待用户拍板）**：播放侧当前无调度层——帧进即解即出，延迟随缘。方案：抖动缓冲 + 目标延迟 ~150-200ms + 本地播放时钟按 `pts` 相对间距调度；过水位视频丢帧追平到实时（复用 `try_send` 丢帧语义，改按 pts 判定）、欠水位补帧/插静音、大 PTS 跳变重置缓冲。视频不采用倍速追平（WebRTC 同款结论）；倍速仅留给音频 NetEq 式时间伸缩（LAN 场景暂不需要）。
-- [ ] flake 修复备注：`decoded_pixels_match_native_ffmpeg` 根因是测试「先推完再读」= 推流期零消费，32 槽有界通道被解码瞬时超前顶满 → 修复为推流期并发排空（等价真实渲染循环）；产品侧丢帧语义不变（第九轮提交后单独修复，待提交）。
-
----
+**目标**：修复 PC 端（Wayland）无法获取屏幕的 bug；按「端点插件区」愿景落地
+`stross-endpoint` 取代 `stross-media`，内核收敛为纯管理调度。**产出**：Wayland 屏幕采集
+（portal+pipewire SHM 路径）+ 静止画面保活（按目标帧率重发上一帧）；`Endpoint` 契约
+（load/share，端点自驱动）+ screen/audio/file 端点 + codec/convert 处理辅助；
+`Platform` 移入 stross-proto。**验证**：Wayland 实机 e2e 212 帧真实桌面内容；提交 `43b8661`。
 
 ## 第十轮（播放体验：低延迟调参 + PTS 调度层 + 延迟回归固化，2026-08-29）
 
-**目标**（用户拍板：播放体验/延迟优先）：P0 SRT 低延迟调参 → P1 PTS 驱动播放
-调度层 → P2 延迟/节奏回归固化（验证：全量测试 + 实测）。
-
-**变更**：
-| 项 | 落点 |
-|---|---|
-| SRT 低延迟调参（P0） | `stross-transport/src/srt.rs`：`DEFAULT_SRT_LATENCY_MS` 120→**20**（40 实测 min 149-181ms 随负载漂移，20 稳定 ~143ms）；`srt_options()` 统一 bind/connect 两端；`STROSS_SRT_LATENCY_MS` 环境覆盖 + 回退单测 |
-| PTS 驱动播放调度层（P1） | `stross-endpoint/src/playback/schedule.rs`（新建）：`PlaybackScheduler` 纯逻辑 + 时间注入；锚定 `play(pts) = anchor + (pts−pts0)`；过水位按**队尾判据**丢最新帧钳制显示延迟；PTS 大跳变重置重锚；迟到帧立即发。`VideoPacing{target_delay:150ms, jump_reset:500ms}`，仅实时显示路径启用（headless/录制直通）；pacer 线程 std `sync_channel` + `recv_timeout` |
-| **ffmpeg 解码帧线程延迟（本轮回溯根因，-threads 1）** | `playback/ffmpeg.rs` 视频解码参数新增 `-threads 1`：h264 解码器默认帧线程数 = CPU 核数（本机 16），输出被管线延迟 (threads−1) 帧 —— **绝对延迟 566ms 的元凶**（隔离复现：30fps 喂流首帧延迟 = 16×33ms≈530ms + 解析 ~40ms）。单线程 720p30 解码余量充足，低延迟优先 |
-| 绝对延迟测量口径修正 | `latency-stability-test.sh`：期望帧/音频块按接收接入时移（~2s）折算（拓扑时移 ≠ 丢帧，10s 轮实测 241/300 帧 = 8.0s×30 ✓）；`MAX_ABS_MIN` 重校为**含解码管线**口径（B4 QUIC min≈0.9ms 是不含解码的传输层口径）：WS/SRT ≤200ms、QUIC ≤120ms，仅作回归保护 |
-
-**验证**：
-- `latency-stability-test.sh 10 ws srt quic` **三传输全达标**：WS min=99.9 / SRT min=145.4 / QUIC min=100.4 ms（修复前三传输均 ~566ms，-5.6x）；60s 长跑 srt/quic 亦达标（SRT min=171.3 为并发测试负载下，p99−min=71ms ≤250 尾延迟上界）；
-- workspace 全量测试 ✅（endpoint 58 / kernel 85 / transport 20 / 其余全绿）；clippy 0 告警；fmt 干净；前端 tsc + jsdom ✅；
-- 探针回放实证（隔离 + 真机同参数）：raw h264 demuxer 管道输入首帧延迟与解码帧线程数严格线性（threads N → 延迟 (N−1)×帧间隔），`-threads 1` 后 30fps 喂流首帧 ~73ms；
-- 中继补发语义确认：观看端接入 = 最近关键帧 + **实时帧**（非历史突发重放），无 burst 污染。
-
-**遗留 / 待定**：
-- [ ] 真机（手机→PC / PC→手机）延迟复测：本机双开已达标，跨设备路径（弱网/多跳）待用户环境实测；
-- [ ] QUIC ≤30ms 的传输层口径如需保留，需把延迟测量拆成「传输层」（不含解码）与「端到端含解码」两个指标；
-- [ ] 调度层（P1）的播放节奏在 GUI 实时显示路径的实测节奏回归（headless 直通不经过 pacer，本轮未覆盖 GUI 侧节奏）。
+**目标**（用户拍板）：播放体验/延迟优先——SRT 低延迟调参 → PTS 驱动播放调度层 →
+延迟/节奏回归固化。**产出**：`DEFAULT_SRT_LATENCY_MS` 120→20（实测 ~143ms 稳定）；
+`PlaybackScheduler`（`VideoPacing{target_delay:150ms, jump_reset:500ms}`，仅实时显示路径）；
+ffmpeg 解码 `-threads 1`（**绝对延迟 566ms 元凶**，-5.6x）；延迟测量口径修正
+（含解码管线）。**验证**：三传输全达标（WS min=99.9 / SRT min=145.4 / QUIC min=100.4 ms）。
 
 ## 第十一轮（代码质量提升：clippy pedantic 白名单 + 双代理审查修复 + 播放器完善，2026-08-29）
 
-**目标**：系统性代码质量提升。子代理双线审查（Rust 核心 77 文件 / GUI+前端 18 文件）
-+ clippy pedantic/nursery 统计（~1200 告警，doc 类噪音为主），实施高价值低风险改进。
+**目标**：系统性代码质量提升——clippy 代码类 lint 白名单机械修复（68 文件）+ 双代理
+审查驱动高危 Bug 修复。**产出**（高价值项）：SRT 分片计数 u8 回绕拒绝、QUIC 读侧
+4GiB OOM 上限（`MAX_MSG_LEN=64MB`）、pacer wait==0 阻塞、pts 队列代际清空、
+subscriber `Delivery::Both` unreachable→bail、前端错误显示全失效（errMsg）、
+startReceive 防重入+失败回滚、轮询边界修复、drawReceiveFrame 热路径复用。
+**验证**：`check.sh` full 全绿；kernel 85 / endpoint 61 / transport 21 全过。
 
-**变更**：
-| 项 | 落点 |
-|---|---|
-| clippy 白名单机械修复（68 文件） | 仅启用代码类 lint：`redundant_closure` / `uninlined_format_args` / `manual_let_else` / `single_match` / `map_unwrap_or(_else)` / `use_self` / `missing_const_for_fn` / `redundant_field_names` / `manual_midpoint`（adb bounds 中心点 u32 溢出 → `u32::midpoint`）/ `semicolon_if_nothing_returned` / `suboptimal_flops` / `cast_lossless`。**排除 doc_markdown 等文档类**（--fix 自动插 backtick 会切碎中文文档，曾误改后全量回退重做） |
-| **SRT 分片计数溢出（高）** | `srt.rs`：frag_cnt/frag_idx 为 u8，载荷 >255×1400B（4K IDR 可达）时回绕 → 接收端把消息当整帧逐片吐出（花屏）。发送前显式拒绝超限载荷 + 单测 `srt_rejects_fragment_overflow` |
-| **QUIC 读侧 4GiB OOM（高）** | `quic.rs`：读侧长度由对端声明无上限，任意可完成 TLS 的对端发 `0xFFFFFFFF` 即触发 4GiB 分配（Android 中继 OOM）。加 `MAX_MSG_LEN = 64MB` 与写侧对齐 |
-| **pacer wait==0 阻塞（高）** | `ffmpeg.rs::pacer_loop`：队首恰到期时 `recv_timeout` 超时后下一轮 wait==0 落入**阻塞 `recv()`**，被 hold 的帧推迟到下一输入帧才发出（突发流批量倾泻）。修复：循环顶部先 `emit_due`，wait==0 用 `recv_timeout(ZERO)` 空转补发 |
-| **pts 队列代际不清空（中）** | `ffmpeg.rs` 失步重建路径清空 `shared.pts`：旧代际被管道吞入未产出的帧对应 pts 残留，新代际前 N 帧弹到过期 pts → 时间戳回退/跳变 |
-| **subscriber 网络输入 unreachable!（中）** | `subscriber.rs` 两处 `Delivery::Both => unreachable!`（对端版本偏差可触发）→ `anyhow::bail` |
-| **bgra_to_yuv420p_scaled 文档与实现不符（中）** | `convert/yuv.rs`：文档声称双线性、实现是 floor 最近邻（屏幕文本缩放下锯齿）。补齐真双线性（中心对齐 + clamp，与 `rgba::rgba_scaled` 同约定） |
-| **中继锁统一 lock_poisoned（中）** | `relay/state.rs` 12 处 `.lock().unwrap()` → `lock_poisoned()`（本 crate lock.rs 自建约定，唯一违规点） |
-| **前端错误显示全失效（高）** | `ui.ts` 新增 `errMsg(e)`：Tauri 命令失败 rejection 是**字符串**非 Error 对象，`(e as Error).message` 显示 undefined。替换全部 10 处调用点 |
-| **startReceive 防重入 + 失败回滚（高）** | `subscribe.ts`：入口先 `stopReceive()` 清理旧会话；Rust 会话启动后接线失败 → `stop_receive` 回滚（消除收流/发声却无法停止的泄漏会话 + 监听器泄漏 + 轮询双链） |
-| **轮询边界修复（中）** | `pollReceiveStatus`：`!running` 即收尾（原要求 received>0，未接通时永久卡「等待流数据」）；await 后复查 receiving 防过期写 DOM；`pollMicRecv` 加到期/60 次轮次上限（凭证永不兑现时 2s 永久轮询泄漏） |
-| **drawReceiveFrame 热路径复用（中）** | `ui.ts`：缓存 RGBA 缓冲 + ImageData（构造引用不拷贝），尺寸不变时零重复分配；长度不符帧防御（防 ImageData 构造抛错） |
-| **死代码清理（低）** | `state.ts` 9 个无消费者变量（publishing/shareKind/micShare/localStreams 等遗留）；`ui.ts` showView/renderUrls/urlListItem/fmtElapsed；`commands.rs` 死语句 `let (_, _) = required_firewall_ports(...)` |
-| **前端测试 [5] mock 替换无效修复** | `test-frontend.mjs`：ui.ts 的 `call()` 在 eval 时捕获 invoke 引用，属性替换无效 → 改 mock 内可变开关 `scanReturnOverride`，[5] 场景真实走空列表路径 |
-| **video_pacing 测试 flake 根治** | `ffmpeg.rs` 测试：`capture_frames` 返回 1s@30fps ≈30 帧，全部重写 pts 后第 17 帧 528ms 越过 500ms 跳变阈值触发重锚 → span 断言失真。修复：`frames.truncate(5)` 只验证 0..132ms 五帧；节奏断言收紧为「有帧被 hold 才断言 span」（held>0 时 span≥33ms 必然） |
+### 历史遗留（第七~十一轮仍有效，去重合并；其余细节见 git 历史）
 
-**验证**：
-- `scripts/check.sh` full 全绿（fmt / clippy -D warnings / workspace 测试 / tsc / js 同步 / jsdom 35 断言）；
-- endpoint 61 / kernel 85 / transport 21（+SRT 上限单测）全过；video_pacing 连续 10+ 次稳定；
-- clippy pedantic/nursery 剩余告警全部为**文档类与噪音类**（doc_markdown 中文误报、must_use_candidate、needless_pass_by_value 的 Tauri command 签名约束），未启用为门禁。
-
-**遗留 / 待定**（审查报告其余项，收益/风险权衡后未做）：
-- [ ] `sender.rs` Hello 错误传播（推流拒绝时 connect 假成功）——状态机改动面大，留待推流 UX 专项；
-- [ ] `webrtc.rs` inbound `send().await` 反压阻塞 run loop → 改 `try_send` + 丢帧计数（媒体通道语义对齐）；
-- [ ] mDNS daemon `OnceLock<Result<…>>` 收敛（kernel discovery + webrtc 两处 expect panic）—— 待确认 ServiceDaemon 失败面；
-- [ ] 凭证校验实现两遍（`verify_share_token` vs `KernelTokenValidator::validate`）收敛；
+- [ ] Android 设备树无屏幕端点（Android 屏幕共享走采集授权路径，非端点模型，待后续）；
+- [ ] 真机（手机→PC / PC→手机）延迟复测待用户环境实测（本机双开已达标）；
+- [ ] 延迟测量拆「传输层 / 端到端含解码」两指标（如需保留 QUIC ≤30ms 口径）；
+- [ ] PTS 调度层（P1）在 GUI 实时显示路径的节奏回归（headless 直通不经过 pacer）；
+- [ ] `sender.rs` Hello 错误传播（推流拒绝时 connect 假成功）——留待 P0-2 推流 UX 专项；
+- [ ] `webrtc.rs` inbound `send().await` 反压阻塞 run loop → `try_send` + 丢帧计数；
+- [ ] mDNS daemon `OnceLock<Result<…>>` 收敛（两处 expect panic）；
+- [ ] 凭证校验实现两遍（`verify_share_token` vs `KernelTokenValidator`）收敛；
 - [ ] 中继/协商 CORS 中间件两份收敛；URL host:port 解析三份收敛（统一 `RelayUrl`）；
 - [ ] discovery 未知枚举值整设备消失（容忍反序列化）——混合版本演进策略需单独评估；
 - [ ] `frame.rs` 32 位目标 len 回绕 panic（`checked_add` 一行）；`pts_ms: u32` 回绕（49.7 天会话上限声明）；
 - [ ] 全量 must_use_candidate（186 处）与 # Errors/# Panics 文档补齐（量大，可分批）。
+
+---
+
+## 第十二轮（运行闭环 P0-1：端点共享生命周期治理，2026-09）
+
+> 方案：`docs/closed-loop-plan.md`。范围声明：开发期不做 wire 版本兼容；
+> 本轮只做工程闭环，协议优化（watch 鉴权 / 保活控制帧等）排后续。
+
+**目标**（对应闭环缺陷 #5/#6/#8/#9）：端点共享可停止、订阅者全断开自动收尾、
+同端点多订阅者收敛（pull 复用流）、会话/凭证/授权随流结束清理、端点状态实时更新。
+
+**变更**：
+| 项 | 落点 |
+|---|---|
+| 端点共享登记 | `EndpointApp::note_share_active(weak, endpoint_id, stream_id, delivery)` 新增（默认空实现）；`spawn_media_share` 传 endpoint_id（screen/audio 三处调用点）；Kernel `active_shares` 表（stream_id → 端点）+ `set_state(Active)` + 无观看者接入窗口兜底（`share_idle_delay` 10s，经 Weak 回调不拖住内核） |
+| 停止路径 | `Kernel::stop_endpoint_share`（幂等）+ `stop_share_by_stream`（同步：取引擎 spawn 收尾 + teardown + 清登记 + Idle）；`unpublish_endpoint` 改 async 并**联动停止活动共享**；GUI 新命令 `endpoint_stop_share` + 本机端点树「停止共享」按钮（state=active 时显示，badge live 样式） |
+| watchers→0 自动收尾 | `attach_data_plane`（改 `self: &Arc<Self>`）事件转发扩展：`WatchersChanged{0}` → 延迟复查（`share_stop_delay` 4s，经 `DataPlaneBackend::stream_watchers` 新增查询）仍无人观看才停；`StreamEnded` → 清登记 + Idle + **本机会话 teardown**（会话生命周期 = 流生命周期，顺带修复会话/授权/token 只增不减）；`teardown` 补充移除签发表（凭证随会话失效） |
+| 订阅收敛 | `compose_grant` 先查 `active_share_by_endpoint`：pull 复用同一流（grant 只带 stream_id，不新建会话/凭证）；push 第二订阅者拒绝（清晰报错，不再"grant 成功但流不存在"）；`notify_subscribed` 复用场景不重复触发 share |
+| 端点状态实时化 | `set_state` 生产接线：登记 Active / 停止 Idle / `WatchersChanged` 同步 subscribers=watchers |
+
+**验证**：
+- `scripts/check.sh` full 全绿（fmt / clippy -D warnings / workspace 测试 / tsc / js 同步 / jsdom 新增 [12] 停止共享断言）；
+- kernel 单测 89 项 ✅（新增：active_share 登记/查询/停止幂等、teardown 清 token、pull 复用同流、push 第二订阅拒绝）；
+- 集成测试 ✅ `endpoint_share_stops_after_last_watcher_leaves`：真实受控中继 + 双端，观看端断开 → watchers→0 延迟复查 → 登记清除 + 会话拆除 + 流回收；
+- 测试暴露机制细节：中继观看端只在「下一次广播」时发现对端已断（send 失败），断连检测依赖推流端持续发帧——真实端点共享恒 30fps 推流，生产路径成立。
+
+**遗留 / 待定**：
+- [ ] P0-2 断线自动重连（接收端退避重连 + 推流端重 Hello + 拒绝原因透传），见 closed-loop-plan.md §3；
+- [ ] 复用以登记为准（登记随停止/流结束同步清除）：停止与新订阅接入之间的极端竞态窗口由 P0-2 重试兜底；
+- [ ] 并发双订阅同端点（同一毫秒内）仍可能双建会话（share 先到者胜）——开发期可接受；
+- [ ] 协商层复用/拒绝的 HTTP 状态码暂用 500 承载业务错误（消息可读），协议优化阶段改 409；
+- [ ] 协议优化阶段：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕（closed-loop-plan.md §5）。
+

@@ -77,7 +77,7 @@ async fn kernel_session_drives_controlled_relay() {
     // 受控中继 + 内核接线（数据面后端）
     let relay = RelayServer::start_controlled(0).await.unwrap();
     let port = relay.port;
-    let kernel = Kernel::new(Platform::Desktop);
+    let kernel = Arc::new(Kernel::new(Platform::Desktop));
     kernel.attach_data_plane(Arc::new(RelayDataPlane::new(&relay)));
     let mut events = kernel.subscribe();
 
@@ -344,7 +344,7 @@ async fn remote_source_requires_token_even_when_authorized() {
 
     let relay: RelayHandle = RelayServer::start_controlled(0).await.unwrap();
     let port = relay.port;
-    let kernel = Kernel::new(Platform::Desktop);
+    let kernel = Arc::new(Kernel::new(Platform::Desktop));
     // 正常接线：create_session 会把 id 预授权给受控中继
     kernel.attach_data_plane(Arc::new(RelayDataPlane::new(&relay)));
     let session = kernel
@@ -396,6 +396,94 @@ async fn remote_source_requires_token_even_when_authorized() {
         },
         "跨设备来源出示凭证应放行"
     );
+    push.close(None).await.unwrap();
+    relay.stop().await;
+}
+
+/// 端点共享生命周期（docs/closed-loop-plan.md P0-1）：
+/// 订阅者全部断开（watchers→0）后，端点共享自动收尾——
+/// 清共享登记 + 本机会话拆除（会话生命周期 = 流生命周期）+ 流从数据面回收。
+#[tokio::test]
+async fn endpoint_share_stops_after_last_watcher_leaves() {
+    use stross_kernel::EndpointApp;
+    use stross_proto::message::Delivery;
+
+    let relay = RelayServer::start_controlled(0).await.unwrap();
+    let port = relay.port;
+    let mut kernel = Kernel::new(Platform::Desktop);
+    // 收紧生命周期延迟：本测试只验证 watchers→0 路径（idle 窗口拉长避免干扰）
+    kernel.set_share_lifecycle_delays(Duration::from_millis(150), Duration::from_secs(60));
+    let kernel = Arc::new(kernel);
+    kernel.attach_data_plane(Arc::new(RelayDataPlane::new(&relay)));
+
+    // 端点共享登记（真实路径：订阅达成 → share → start_stream 成功 → note_share_active）
+    let session = kernel
+        .create_session("local", &["local".into()], &SessionPrefs::default())
+        .unwrap();
+    let weak: std::sync::Weak<dyn EndpointApp> =
+        Arc::downgrade(&(kernel.clone() as Arc<dyn EndpointApp>));
+    kernel.note_share_active(weak, "screen:0", &session.id, Delivery::Pull);
+    assert!(kernel.active_share_by_endpoint("screen:0").is_some());
+
+    // 推流端（模拟端点自动推流进受控中继）
+    let (mut push, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/push"))
+        .await
+        .unwrap();
+    push.send(Message::Text(hello(&session.id).to_text().into()))
+        .await
+        .unwrap();
+    let _welcome = push.next().await.unwrap().unwrap();
+    push.send(Message::Binary(video_frame().into()))
+        .await
+        .unwrap();
+
+    // 观看端接入 → watchers=1（消费 Ready + 关键帧）
+    let (mut watch, _) = tokio_tungstenite::connect_async(format!(
+        "ws://127.0.0.1:{port}/ws/watch?stream={}",
+        session.id
+    ))
+    .await
+    .unwrap();
+    let _ready = watch.next().await.unwrap().unwrap();
+    let _kf = watch.next().await.unwrap().unwrap();
+
+    // 观看端断开 → watchers=0 → 延迟复查后自动收尾。
+    // 注：中继观看端只在「下一次广播」时发现对端已断（send 失败即退出循环），
+    // 因此断开后仍需推流端继续发帧触发检测（真实端点共享恒 30fps 推流）。
+    // close() 只发 Close 帧可能留半开连接，drop 强制拆 TCP（服务器端 send 立刻失败）。
+    watch.close(None).await.unwrap();
+    drop(watch);
+    for _ in 0..10 {
+        push.send(Message::Binary(video_frame().into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    // 轮询等待自动收尾（watchers→0 检测 + 150ms 复查延迟）
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline
+        && kernel.active_share_by_endpoint("screen:0").is_some()
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        kernel.active_share_by_endpoint("screen:0").is_none(),
+        "watchers=0 后端点共享登记应清除"
+    );
+    assert!(
+        !kernel.has_session(&session.id),
+        "流结束后续会话应拆除（会话生命周期 = 流生命周期）"
+    );
+    assert!(
+        relay
+            .state()
+            .streams()
+            .iter()
+            .all(|s| s.stream_id != session.id),
+        "流应从数据面回收"
+    );
+
     push.close(None).await.unwrap();
     relay.stop().await;
 }

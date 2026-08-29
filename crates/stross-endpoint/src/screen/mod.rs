@@ -89,6 +89,7 @@ impl Endpoint for ScreenEndpoint {
         spawn_media_share(
             app,
             ctx,
+            self.id(),
             self.name().to_string(),
             Some(VideoSource::Screen),
             None,

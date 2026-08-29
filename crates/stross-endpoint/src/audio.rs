@@ -70,6 +70,7 @@ impl Endpoint for MicEndpoint {
         spawn_media_share(
             app,
             ctx,
+            self.id(),
             self.name().to_string(),
             None,
             Some(AudioSourceConfig::default()),
@@ -136,6 +137,6 @@ impl Endpoint for SystemAudioEndpoint {
             system_audio: device,
             ..Default::default()
         });
-        spawn_media_share(app, ctx, self.name().to_string(), None, audio);
+        spawn_media_share(app, ctx, self.id(), self.name().to_string(), None, audio);
     }
 }

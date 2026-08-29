@@ -139,7 +139,10 @@ const invoke = async (cmd, args) => {
           published: !!p,
           visibility: p ? p.visibility : 'confirm',
           delivery: p ? p.delivery : 'pull',
-          transports: [], codecs: [], state: 'idle', subscribers: 0, updatedAt: 0,
+          transports: [], codecs: [],
+          state: p ? (p.state || 'idle') : 'idle',
+          subscribers: p ? (p.subscribers || 0) : 0,
+          updatedAt: 0,
         };
       });
       return { endpoints };
@@ -418,6 +421,21 @@ check('通告后弹窗关闭', $('pub-modal').classList.contains('hidden'));
 const screenRow2 = Array.from(document.querySelectorAll('[data-role="local-devices"] .ep-row')).find((r) => r.textContent.includes('屏幕'));
 check('通告后行显示「已通告」徽标（需确认 · 拉取）', !!screenRow2?.querySelector('.ep-badge') && screenRow2.textContent.includes('需确认') && screenRow2.textContent.includes('拉取'), screenRow2?.textContent || '行丢失');
 check('目录拉取走 endpoint_ls（端口缺省）', calls.some((c) => c.cmd === 'endpoint_ls' && (c.args.port === undefined || c.args.port === 18779)), JSON.stringify(calls.find((c) => c.cmd === 'endpoint_ls')?.args));
+
+console.log('\n[12] 端点活动共享 → 「停止共享」按钮（生命周期治理）');
+// 模拟端点共享已登记（真实路径：订阅达成 → 自动推流 → local_catalog.state=active）；
+// 状态经 2s 轮询（startStatusPolling → refreshLocalCatalog）驱动重渲染
+const screenEpState = localEpState.get('screen:0') || { visibility: 'confirm', delivery: 'pull' };
+localEpState.set('screen:0', { ...screenEpState, state: 'active', subscribers: 1 });
+await sleep(2300);
+const activeRow = Array.from(document.querySelectorAll('[data-role="local-devices"] .ep-row')).find((r) => r.textContent.includes('屏幕'));
+check('活动共享行显示 live 徽标（正在共享/订阅中）', !!activeRow?.querySelector('.ep-badge.live') && (activeRow.textContent.includes('正在共享') || activeRow.textContent.includes('订阅中')), activeRow?.textContent || '行丢失');
+const stopBtn = activeRow?.querySelector('[data-act="stop-share"]');
+check('「停止共享」按钮出现', !!stopBtn);
+stopBtn?.click();
+await sleep(300);
+const stopShareCalls = calls.filter((c) => c.cmd === 'endpoint_stop_share');
+check('endpoint_stop_share 被调用（endpointId=screen:0）', stopShareCalls.length === 1 && stopShareCalls[0].args.endpointId === 'screen:0', JSON.stringify(stopShareCalls[0]?.args));
 
 console.log(failures === 0 ? '\n✅ 全部通过' : `\n❌ ${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

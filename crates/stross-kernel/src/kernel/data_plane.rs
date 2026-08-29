@@ -26,6 +26,13 @@ pub trait DataPlaneBackend: Send + Sync + 'static {
     fn events(&self) -> broadcast::Receiver<RelayEvent>;
     /// 注入接入凭证校验器（B 阶段跨设备推流；默认不注入 = 行为与现状一致）。
     fn set_share_token_validator(&self, _validator: Arc<dyn ShareTokenValidator>) {}
+    /// 查询流的当前观看者数（`None` = 流不存在）。
+    ///
+    /// 端点共享自动收尾用：watchers=0 延时复查，确认无新观众接入后才停流。
+    fn stream_watchers(&self, stream_id: &str) -> Option<u32> {
+        let _ = stream_id;
+        None
+    }
 }
 
 /// 内嵌中继适配器：把中继共享状态包装为数据面后端（本机同进程闭环）。
@@ -62,5 +69,13 @@ impl DataPlaneBackend for RelayDataPlane {
 
     fn set_share_token_validator(&self, validator: Arc<dyn ShareTokenValidator>) {
         self.state.set_token_validator(Some(validator));
+    }
+
+    fn stream_watchers(&self, stream_id: &str) -> Option<u32> {
+        self.state
+            .streams()
+            .into_iter()
+            .find(|s| s.stream_id == stream_id)
+            .map(|s| s.watchers)
     }
 }

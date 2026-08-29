@@ -151,6 +151,7 @@ header {
   opacity: 0.85;
 }
 .badge.ok { color: var(--ok); border-color: rgba(52, 211, 153, 0.35); }
+.badge.live { color: var(--ok); border-color: rgba(52, 211, 153, 0.35); }
 .badge.err { color: var(--err); border-color: rgba(248, 113, 113, 0.4); }
 .badge.muted { color: var(--text-3); }
 .badge.muted::before { display: none; }

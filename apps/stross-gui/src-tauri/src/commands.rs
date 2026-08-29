@@ -238,14 +238,26 @@ pub fn endpoint_publish(
         .map_err(|e| e.to_user_string())
 }
 
-/// 取消通告端点（已订阅会话由上层决定宽限期，P1 直接移除）。
+/// 取消通告端点（活动共享联动停止——取消通告 = 不再共享，踢出当前订阅者）。
 #[tauri::command]
-pub fn endpoint_unpublish(
+pub async fn endpoint_unpublish(
     state: State<'_, Arc<Kernel>>,
     endpoint_id: String,
 ) -> Result<(), String> {
     state
         .unpublish_endpoint(&endpoint_id)
+        .await
+        .map_err(|e| e.to_user_string())
+}
+
+/// 停止端点活动共享（本机端点树「停止共享」按钮：停流 + 拆除会话，保留通告）。
+#[tauri::command]
+pub fn endpoint_stop_share(
+    state: State<'_, Arc<Kernel>>,
+    endpoint_id: String,
+) -> Result<(), String> {
+    state
+        .stop_endpoint_share(&endpoint_id)
         .map_err(|e| e.to_user_string())
 }
 

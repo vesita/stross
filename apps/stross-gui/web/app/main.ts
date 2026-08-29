@@ -127,6 +127,11 @@ $('device-list').addEventListener('click', (e) => {
       if (endpointId) void unpublishEndpoint(endpointId);
       break;
     }
+    case 'stop-share': {
+      const endpointId = btn.dataset.endpoint;
+      if (endpointId) void stopShare(endpointId);
+      break;
+    }
     case 'subscribe-endpoint': {
       const host = btn.dataset.host;
       const endpointId = btn.dataset.endpoint;

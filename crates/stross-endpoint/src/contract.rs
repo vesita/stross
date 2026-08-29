@@ -112,17 +112,38 @@ pub trait EndpointApp: Send + Sync {
     fn relay_port(&self) -> Option<u16>;
     /// 文件泵推送（文件端点确定目标的一次推送；返回发送字节数）。
     async fn push_file(&self, path: PathBuf, opts: FilePushOptions) -> anyhow::Result<u64>;
+    /// 端点共享登记：媒体端点 `start_stream` 成功后回调（实时目标生命周期治理用——
+    /// watchers=0 自动收尾 / 取消通告联动停止 / 同端点订阅收敛）。
+    ///
+    /// `self_weak`：发起共享的内核弱引用（生命周期治理任务在无观看者时经它回调
+    /// [`Self::stop_share_if_unwatched`]，避免任务持有强引用拖住内核）。
+    /// 默认空实现：不登记的端点（文件等有完成态）不受 watchers 自动停止影响。
+    fn note_share_active(
+        &self,
+        _self_weak: std::sync::Weak<dyn EndpointApp>,
+        _endpoint_id: &str,
+        _stream_id: &str,
+        _delivery: Delivery,
+    ) {
+    }
+    /// 端点共享停止回调：watchers 归零复查确认无人观看后调用（默认空实现）。
+    fn stop_share_if_unwatched(&self, _stream_id: &str) {}
 }
 
 /// 媒体端点自动推流（实时目标共用）：pull 推本机中继（地址自动），
 /// push 凭订阅方凭证出站推入订阅方中继。
+///
+/// `endpoint_id`：端点身份（共享登记用；见 [`EndpointApp::note_share_active`]）。
 pub fn spawn_media_share(
     app: Arc<dyn EndpointApp>,
     ctx: SubscribeCtx,
+    endpoint_id: &str,
     title: String,
     video: Option<VideoSource>,
     audio: Option<AudioSourceConfig>,
 ) {
+    let endpoint_id = endpoint_id.to_string();
+    let self_weak = std::sync::Arc::downgrade(&app);
     tokio::spawn(async move {
         let cfg = StreamConfig {
             stream_id: ctx.stream_id.clone(),
@@ -139,11 +160,15 @@ pub fn spawn_media_share(
         };
         let relay_url = resolve_media_url(&ctx);
         match app.start_stream(cfg, relay_url).await {
-            Ok(r) => tracing::info!(
-                "端点已自动推流: stream={} 订阅方 {}",
-                r.stream_id,
-                ctx.subscriber
-            ),
+            Ok(r) => {
+                tracing::info!(
+                    "端点已自动推流: stream={} 订阅方 {}",
+                    r.stream_id,
+                    ctx.subscriber
+                );
+                // 生命周期治理登记（watchers=0 自动收尾 / 取消通告联动停止 / 订阅收敛）
+                app.note_share_active(self_weak, &endpoint_id, &r.stream_id, ctx.delivery);
+            }
             Err(e) => tracing::warn!("端点自动推流失败（订阅方 {}）: {e:#}", ctx.subscriber),
         }
     });

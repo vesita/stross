@@ -71,6 +71,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         endpoint_subscribe,
         endpoint_publish,
         endpoint_unpublish,
+        endpoint_stop_share,
         endpoint_subscribe_media,
         local_catalog,
         request_share_token,

@@ -277,7 +277,7 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::EndpointUnpublish { endpoint_id } => {
-            match app.unpublish_endpoint(&endpoint_id) {
+            match app.unpublish_endpoint(&endpoint_id).await {
                 Ok(()) => CtrlResponse::ok_json(stross_types::UnpublishedView {
                     endpoint_id,
                     unpublished: true,

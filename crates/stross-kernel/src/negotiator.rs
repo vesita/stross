@@ -617,6 +617,10 @@ fn policy_decision(
 ///
 /// 端点语义：公开方拍板 delivery（`Both` 时尊重订阅方期望、缺省 Pull），
 /// 传输列表按公开者声明的优先序透传，pull 模式附带本机中继地址。
+///
+/// **订阅收敛（docs/closed-loop-plan.md P0-1）**：同端点已有活动共享时——
+/// * pull 复用同一流（中继多 watcher 生效，不新建会话/凭证、不重复触发 share）；
+/// * push 拒绝（公开方单引擎，一次仅一个订阅者，避免"grant 成功但流永不存在"）。
 fn compose_grant(
     app: &Kernel,
     store: &TrustStore,
@@ -626,6 +630,44 @@ fn compose_grant(
     media: Vec<MediaKind>,
     title: String,
 ) -> Result<ShareGrant, String> {
+    // 订阅收敛检查（先于建会话：复用不产生新会话）
+    if let Some(m) = endpoint
+        && let Some((sid, existing_delivery)) = app.active_share_by_endpoint(&m.endpoint_id)
+    {
+        // 定稿 delivery（复用判定用；公开方拍板）
+        let want = match (m.delivery, delivery_mode) {
+            (Delivery::Both, Some(w)) => w,
+            (Delivery::Both, None) => Delivery::Pull,
+            (d, _) => d,
+        };
+        if existing_delivery == Delivery::Pull && want == Delivery::Pull {
+            // pull 复用：订阅方只用 stream_id（watch 路径），凭证/中继地址同现流
+            tracing::info!(
+                "端点「{}」已有活动共享（{sid}），订阅方 {device_id} 复用同一流",
+                m.name
+            );
+            return Ok(ShareGrant {
+                view: stross_types::ShareTokenView {
+                    token: String::new(),
+                    stream_id: sid,
+                    pin: String::new(),
+                    expires_at: 0,
+                },
+                trusted: store.is_trusted(device_id),
+                delivery: Some(Delivery::Pull),
+                transports: Some(m.transports.iter().map(|t| t.transport).collect()),
+                relay: app.relay_ports().map(|(ws, srt, quic)| RelayAddr {
+                    ws_port: ws,
+                    srt_port: srt,
+                    quic_port: quic,
+                }),
+            });
+        }
+        return Err(format!(
+            "端点「{}」当前正被其它订阅者使用（一次仅一个订阅者）",
+            m.name
+        ));
+    }
     let view = app
         .issue_share_token_for(title, media, Some(DEFAULT_GRANT_TTL_SECS))
         .map_err(|e| e.to_user_string())?;
@@ -681,6 +723,12 @@ fn notify_subscribed(
     let Some(delivery) = grant.delivery else {
         return;
     };
+    // 订阅收敛（docs/closed-loop-plan.md P0-1）：该端点已有活动共享（复用场景）
+    // → 不重复触发 share（流已在推，新订阅者直接 watch 同流）
+    if app.active_share_by_endpoint(endpoint_id).is_some() {
+        tracing::info!("端点 {endpoint_id} 已有活动共享，复用流（订阅方 {subscriber}）");
+        return;
+    }
     let stream_id = match (delivery, share_token) {
         (Delivery::Push, Some(tok)) => ShareToken::from_token_string(tok)
             .map_or_else(|| grant.view.stream_id.clone(), |t| t.stream_id),
@@ -1012,6 +1060,106 @@ mod tests {
             )
             .unwrap();
         assert_eq!(grant.delivery, Some(Delivery::Pull));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 订阅收敛（docs/closed-loop-plan.md P0-1）：同端点已有活动共享（pull）时，
+    /// 第二个订阅者复用同一流（不新建会话/凭证），grant.stream_id 与首个一致。
+    #[tokio::test]
+    async fn pull_reuse_same_stream_for_second_subscriber() {
+        let dir = tmp_dir("reuse");
+        let app = Arc::new(desktop_kernel());
+        app.publish_endpoint(
+            "mic:builtin",
+            Visibility::Public,
+            Delivery::Pull,
+            None,
+            None,
+        )
+        .expect("公开麦克风端点");
+        let neg = ShareNegotiator {
+            app: app.clone(),
+            store: Arc::new(TrustStore::load(&dir)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            task: tokio::spawn(async {}),
+            port: 0,
+        };
+        // 第一个订阅者：无活动共享 → 新建会话
+        let g1 = neg
+            .grant(
+                "dev-a".into(),
+                "设备A".into(),
+                Some("mic:builtin".into()),
+                None,
+            )
+            .unwrap();
+        let sid1 = g1.view.stream_id.clone();
+        assert!(!sid1.is_empty());
+        // 模拟端点共享已登记（真实路径：share → start_stream 成功 → note_share_active）
+        let weak: std::sync::Weak<dyn crate::EndpointApp> =
+            std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
+        app.note_share_active(weak, "mic:builtin", &sid1, Delivery::Pull);
+        // 第二个订阅者：复用同一流
+        let g2 = neg
+            .grant(
+                "dev-b".into(),
+                "设备B".into(),
+                Some("mic:builtin".into()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            g2.view.stream_id, sid1,
+            "pull 复用：第二个订阅者拿同一流 id"
+        );
+        assert_eq!(g2.delivery, Some(Delivery::Pull));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 订阅收敛：同端点已有活动共享（push）时，第二个 push 订阅者被拒绝
+    /// （公开方单引擎，避免"grant 成功但流永不存在"）。
+    #[tokio::test]
+    async fn push_second_subscription_rejected() {
+        let dir = tmp_dir("pushrej");
+        let app = Arc::new(desktop_kernel());
+        app.publish_endpoint(
+            "mic:builtin",
+            Visibility::Public,
+            Delivery::Push,
+            None,
+            None,
+        )
+        .expect("公开麦克风端点");
+        let neg = ShareNegotiator {
+            app: app.clone(),
+            store: Arc::new(TrustStore::load(&dir)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            task: tokio::spawn(async {}),
+            port: 0,
+        };
+        let g1 = neg
+            .grant(
+                "dev-a".into(),
+                "设备A".into(),
+                Some("mic:builtin".into()),
+                Some(Delivery::Push),
+            )
+            .unwrap();
+        assert_eq!(g1.delivery, Some(Delivery::Push));
+        let sid1 = g1.view.stream_id;
+        let weak: std::sync::Weak<dyn crate::EndpointApp> =
+            std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
+        app.note_share_active(weak, "mic:builtin", &sid1, Delivery::Push);
+        // 第二个 push 订阅者：拒绝（错误信息可读）
+        let err = neg
+            .grant(
+                "dev-b".into(),
+                "设备B".into(),
+                Some("mic:builtin".into()),
+                Some(Delivery::Push),
+            )
+            .expect_err("同端点第二 push 订阅应被拒绝");
+        assert!(err.contains("正被其它订阅者使用"), "错误应说明原因: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

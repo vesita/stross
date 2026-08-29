@@ -52,8 +52,8 @@ use stross_endpoint::playback::AudioOut;
 use stross_endpoint::playback::RenderedFrame;
 use stross_proto::frame::Frame;
 use stross_proto::message::{
-    CapabilityDescriptor, CodecId, Delivery, DiscoveryInfo, EndpointManifest, MediaKind, RoutePath,
-    ShareToken, StreamInfo, TransportId, TransportPreference, Visibility,
+    CapabilityDescriptor, CodecId, Delivery, DiscoveryInfo, EndpointManifest, EndpointState,
+    MediaKind, RoutePath, ShareToken, StreamInfo, TransportId, TransportPreference, Visibility,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -128,6 +128,13 @@ pub struct Kernel {
     backend: Mutex<Option<Arc<dyn CaptureBackend>>>,
     /// 端点框架：节点设备表 + 已公开端点表（P1 1:1）。
     registry: Mutex<EndpointRegistry>,
+    /// 端点共享登记（stream_id → 端点）：实时目标生命周期治理——
+    /// watchers=0 自动收尾 / 取消通告联动停止 / 同端点订阅收敛（docs/closed-loop-plan.md P0-1）。
+    active_shares: Mutex<HashMap<String, ActiveShare>>,
+    /// watchers 归零后停止端点共享的延迟（给订阅者重连 / 新订阅者接入窗口；测试注入）。
+    share_stop_delay: Duration,
+    /// 端点共享启动后无任何观看者的接入窗口（订阅者从未接入时兜底停止）。
+    share_idle_delay: Duration,
     /// 接收播放：WS 收流 → 抖动缓冲 → 播放/解码（Android 走 raw 帧路径）。
     receiver: Mutex<Option<Arc<Receiver>>>,
     /// 本机持久化身份（`load_or_create_identity` 注入；用于 mDNS 实例名
@@ -155,6 +162,13 @@ struct RunningStream {
     title: String,
     stream_id: String,
     started_at: u64,
+}
+
+/// 端点共享登记条目（实时目标；文件端点不登记——有完成态，StreamEnded 统一清理）。
+#[derive(Debug, Clone)]
+struct ActiveShare {
+    endpoint_id: String,
+    delivery: Delivery,
 }
 
 impl Default for Kernel {
@@ -185,6 +199,9 @@ impl Kernel {
             anchor: Mutex::new(None),
             backend: Mutex::new(None),
             registry: Mutex::new(EndpointRegistry::new()),
+            active_shares: Mutex::new(HashMap::new()),
+            share_stop_delay: Duration::from_secs(4),
+            share_idle_delay: Duration::from_secs(10),
             receiver: Mutex::new(None),
             identity: Mutex::new(None),
             started: std::time::Instant::now(),
@@ -280,7 +297,11 @@ impl Kernel {
     }
 
     /// 取消通告端点（端点保留在表里可再次通告；已订阅会话由上层决定宽限期）。
-    pub fn unpublish_endpoint(&self, endpoint_id: &str) -> Result<()> {
+    ///
+    /// **活动共享联动**：该端点若正在被订阅观看，先停止共享并拆除会话
+    /// （取消通告 = 不再共享，踢出当前订阅者）。
+    pub async fn unpublish_endpoint(&self, endpoint_id: &str) -> Result<()> {
+        self.stop_endpoint_share(endpoint_id)?;
         self.registry.lock_poisoned().unpublish(endpoint_id)
     }
 
@@ -337,6 +358,132 @@ impl Kernel {
     }
 
     // -----------------------------------------------------------------------
+    // 端点共享生命周期（docs/closed-loop-plan.md P0-1）
+    // -----------------------------------------------------------------------
+
+    /// 端点共享登记（媒体端点 `start_stream` 成功后由端点层回调，
+    /// 见 [`EndpointApp::note_share_active`]）：登记 + 状态置 Active +
+    /// 启动"无观看者接入窗口"兜底检查（订阅者从未接入时停止）。
+    pub fn note_share_active(
+        &self,
+        self_weak: std::sync::Weak<dyn EndpointApp>,
+        endpoint_id: &str,
+        stream_id: &str,
+        delivery: Delivery,
+    ) {
+        {
+            let mut shares = self.active_shares.lock_poisoned();
+            shares.insert(
+                stream_id.to_string(),
+                ActiveShare {
+                    endpoint_id: endpoint_id.to_string(),
+                    delivery,
+                },
+            );
+        }
+        let _ = self
+            .registry
+            .lock_poisoned()
+            .set_state(endpoint_id, EndpointState::Active, 0);
+        tracing::info!("端点共享已登记: {endpoint_id} → {stream_id} ({delivery:?})");
+        // 接入窗口兜底：与事件顺序无关（StreamStarted 可能先于登记到达转发任务），
+        // 因此在登记处统一启动检查（经弱引用回调，不拖住内核）。
+        let stream_id = stream_id.to_string();
+        let idle = self.share_idle_delay;
+        tokio::spawn(async move {
+            tokio::time::sleep(idle).await;
+            if let Some(app) = self_weak.upgrade() {
+                app.stop_share_if_unwatched(&stream_id);
+            }
+        });
+    }
+
+    /// 停止指定端点的活动共享（幂等：无活动共享时直接成功）。
+    pub fn stop_endpoint_share(&self, endpoint_id: &str) -> Result<()> {
+        let sid = self
+            .active_shares
+            .lock_poisoned()
+            .iter()
+            .find_map(|(sid, s)| (s.endpoint_id == endpoint_id).then(|| sid.clone()));
+        let Some(sid) = sid else {
+            return Ok(()); // 无活动共享
+        };
+        self.stop_share_by_stream(&sid);
+        Ok(())
+    }
+
+    /// 按流停止端点共享：清登记 + 复位状态 + 优雅停流 + 拆除本机会话。
+    /// （同步：停流仅取出引擎并 spawn 收尾，不在本路径 await。）
+    fn stop_share_by_stream(&self, stream_id: &str) {
+        // 先取走登记（并发到达的停止请求只执行一次）
+        let Some(share) = self.clear_active_share(stream_id) else {
+            return;
+        };
+        tracing::info!("端点共享停止: {} (stream={stream_id})", share.endpoint_id);
+        let _ = self
+            .registry
+            .lock_poisoned()
+            .set_state(&share.endpoint_id, EndpointState::Idle, 0);
+        // 优雅停流（推流端 Bye；引擎当前流即该 stream_id 时才动作）
+        if self.engine_stream_id().as_deref() == Some(stream_id) {
+            let engine = self.engine.lock_poisoned().take();
+            if let Some(stream) = engine {
+                tokio::spawn(async move {
+                    stream.engine.stop().await;
+                });
+            }
+        }
+        // 拆除本机会话（会话生命周期 = 流生命周期；远程 push 会话不在本机，
+        // SessionNotFound 忽略）
+        if self.has_session(stream_id) {
+            let _ = self.teardown(stream_id);
+        }
+    }
+
+    /// watchers 归零复查：仍无人观看才停（期间有新观众接入则放弃）。
+    fn stop_share_if_unwatched(&self, stream_id: &str) {
+        let Some(dp) = self.data_plane.lock_poisoned().clone() else {
+            return;
+        };
+        // 流已消失（StreamEnded 路径清理）或有观众接入时不动
+        if let Some(0) = dp.stream_watchers(stream_id) {
+            self.stop_share_by_stream(stream_id);
+        }
+    }
+
+    /// 当前引擎推流的 stream_id。
+    fn engine_stream_id(&self) -> Option<String> {
+        self.engine
+            .lock_poisoned()
+            .as_ref()
+            .map(|s| s.stream_id.clone())
+    }
+
+    /// 生命周期治理延迟（默认 stop 4s / idle 10s；测试与嵌入式调用方可按需收紧）。
+    pub fn set_share_lifecycle_delays(&mut self, stop_delay: Duration, idle_delay: Duration) {
+        self.share_stop_delay = stop_delay;
+        self.share_idle_delay = idle_delay;
+    }
+
+    /// 查询端点当前活动共享（`(stream_id, delivery)`；订阅收敛用）。
+    pub fn active_share_by_endpoint(&self, endpoint_id: &str) -> Option<(String, Delivery)> {
+        self.active_shares
+            .lock_poisoned()
+            .iter()
+            .find_map(|(sid, s)| (s.endpoint_id == endpoint_id).then(|| (sid.clone(), s.delivery)))
+    }
+
+    /// 查询流的活动共享登记（watchers 事件反查端点用）。
+    fn active_share_by_stream(&self, stream_id: &str) -> Option<ActiveShare> {
+        self.active_shares.lock_poisoned().get(stream_id).cloned()
+    }
+
+    /// 取走流的活动共享登记（停止 / 流结束时调用）。
+    fn clear_active_share(&self, stream_id: &str) -> Option<ActiveShare> {
+        self.active_shares.lock_poisoned().remove(stream_id)
+    }
+
+    // -----------------------------------------------------------------------
     // 数据面接线
     // -----------------------------------------------------------------------
 
@@ -344,12 +491,18 @@ impl Kernel {
     /// [`KernelEvent`]（StreamStarted / StreamEnded / WatchersChanged）；
     /// 同时注入接入凭证校验器（B 阶段跨设备推流：受控中继在预授权之外
     /// 接受本内核签发的 [`ShareToken`]）。
-    pub fn attach_data_plane(&self, backend: Arc<dyn DataPlaneBackend>) {
+    ///
+    /// 事件转发同时承担**端点共享生命周期治理**（docs/closed-loop-plan.md P0-1）：
+    /// * `StreamEnded` → 清共享登记 + 复位状态 + 本机会话 teardown（会话生命周期 = 流生命周期）；
+    /// * `WatchersChanged{0}` → 延迟复查后停止端点共享（订阅者全部断开自动收尾）。
+    pub fn attach_data_plane(self: &Arc<Self>, backend: Arc<dyn DataPlaneBackend>) {
         *self.data_plane.lock_poisoned() = Some(backend.clone());
         backend.set_share_token_validator(self.token_validator());
         let mut rx = backend.events();
         let events = self.events.clone();
         let engine = Arc::clone(&self.engine);
+        let me = self.clone();
+        let stop_delay = self.share_stop_delay;
         let task = tokio::spawn(async move {
             while let Ok(ev) = rx.recv().await {
                 let kernel_ev = match ev {
@@ -358,8 +511,17 @@ impl Kernel {
                         info,
                     },
                     RelayEvent::StreamEnded { stream_id } => {
-                        // 数据面流结束 → 若正是当前推流，清理引擎状态
-                        // （防采集进程中途退出后「已经在推流中」卡死后续端点自动推流）
+                        // 1) 端点共享登记清理 + 状态复位（推流端断开 / 静默超时 /
+                        //    显式停止 / revoke 都可能触发）
+                        if let Some(share) = me.clear_active_share(&stream_id) {
+                            me.registry.lock_poisoned().set_state(
+                                &share.endpoint_id,
+                                EndpointState::Idle,
+                                0,
+                            );
+                        }
+                        // 2) 推流引擎状态清理（防采集进程中途退出后
+                        //    「已经在推流中」卡死后续端点自动推流）
                         let dead = {
                             let mut g = engine.lock_poisoned();
                             if let Some(s) = g.as_ref()
@@ -375,6 +537,11 @@ impl Kernel {
                                 st.engine.stop().await;
                             });
                         }
+                        // 3) 本机会话随流结束拆除（无 PIN 会话直接放行；
+                        //    远程 push 会话不在本机 → SessionNotFound 忽略）
+                        if me.has_session(&stream_id) {
+                            let _ = me.teardown(&stream_id);
+                        }
                         KernelEvent::StreamEnded {
                             session_id: stream_id,
                         }
@@ -382,10 +549,31 @@ impl Kernel {
                     RelayEvent::WatchersChanged {
                         stream_id,
                         watchers,
-                    } => KernelEvent::WatchersChanged {
-                        session_id: stream_id,
-                        watchers,
-                    },
+                    } => {
+                        // 端点共享自动收尾：watchers 归零 → 延迟复查仍无人观看才停
+                        // （给订阅者重连 / 新订阅者接入窗口）
+                        if watchers == 0 && me.active_share_by_stream(&stream_id).is_some() {
+                            let me2 = me.clone();
+                            let sid = stream_id.clone();
+                            let delay = stop_delay;
+                            tokio::spawn(async move {
+                                tokio::time::sleep(delay).await;
+                                me2.stop_share_if_unwatched(&sid);
+                            });
+                        }
+                        // 订阅数同步：端点共享的流 subscribers = watchers
+                        if let Some(share) = me.active_share_by_stream(&stream_id) {
+                            me.registry.lock_poisoned().set_state(
+                                &share.endpoint_id,
+                                EndpointState::Active,
+                                watchers,
+                            );
+                        }
+                        KernelEvent::WatchersChanged {
+                            session_id: stream_id,
+                            watchers,
+                        }
+                    }
                 };
                 let _ = events.send(kernel_ev);
             }
@@ -614,6 +802,7 @@ impl Kernel {
         self.sessions.require_authorized(id)?;
         self.sessions.remove(id);
         self.auth.set_code(id, None); // 清理访问码
+        self.share_tokens.lock_poisoned().remove(id); // 凭证随会话失效（防重放）
         let dp = self.data_plane.lock_poisoned().clone();
         if let Some(dp) = dp {
             dp.revoke_stream(id)
@@ -639,12 +828,12 @@ impl Kernel {
     /// 本机中继以**受控模式**启动（需求 F2.2「先会话后传输」）：只有内核
     /// 创建的会话 id 才能推流；中继作为数据面后端接入内核，
     /// 流生命周期事件转发为 [`KernelEvent`]。
-    pub async fn start_relay(&self, hostname: &str) -> Result<RelayInfo> {
+    pub async fn start_relay(self: &Arc<Self>, hostname: &str) -> Result<RelayInfo> {
         self.start_relay_on(DEFAULT_PORT, hostname).await
     }
 
     /// 在指定端口启动中继（受内核控制的数据面）；被占用时回退随机端口。
-    pub async fn start_relay_on(&self, port: u16, hostname: &str) -> Result<RelayInfo> {
+    pub async fn start_relay_on(self: &Arc<Self>, port: u16, hostname: &str) -> Result<RelayInfo> {
         self.start_relay_fixed(port, 0, 0, hostname).await
     }
 
@@ -656,7 +845,7 @@ impl Kernel {
     /// `hostname`：mDNS 广播主机名（**调用方注入**——内核零 OS 调用；
     /// 壳层经 [`stross_bridge::hostname`] 取值）。
     pub async fn start_relay_fixed(
-        &self,
+        self: &Arc<Self>,
         port: u16,
         srt_port: u16,
         quic_port: u16,
@@ -1099,7 +1288,7 @@ impl stross_endpoint::factory::EndpointSeeder for Kernel {
 }
 
 /// 端点层可见的内核调度能力（端点契约实现）：
-/// 推流 / 中继端口 / 文件泵——内核 = 纯管理调度，数据面执行在端点层。
+/// 推流 / 中继端口 / 文件泵 / 共享登记——内核 = 纯管理调度，数据面执行在端点层。
 #[async_trait::async_trait]
 impl EndpointApp for Kernel {
     async fn start_stream(
@@ -1118,6 +1307,20 @@ impl EndpointApp for Kernel {
 
     async fn push_file(&self, path: PathBuf, opts: FilePushOptions) -> anyhow::Result<u64> {
         crate::file_xfer::push_file(&path, &opts).await
+    }
+
+    fn note_share_active(
+        &self,
+        self_weak: std::sync::Weak<dyn EndpointApp>,
+        endpoint_id: &str,
+        stream_id: &str,
+        delivery: Delivery,
+    ) {
+        Self::note_share_active(self, self_weak, endpoint_id, stream_id, delivery);
+    }
+
+    fn stop_share_if_unwatched(&self, stream_id: &str) {
+        Self::stop_share_if_unwatched(self, stream_id);
     }
 }
 
@@ -1487,5 +1690,46 @@ mod tests {
         // 未注入身份：回退旧格式（兼容无 UI 接入方）
         assert_eq!(relay_mdns_instance(None, 8777), "sender-8777");
         assert_eq!(relay_mdns_instance(Some(""), 8777), "sender-8777");
+    }
+
+    /// 端点共享登记 → 查询 → 显式停止（stop_endpoint_share）→ 登记清除。
+    #[tokio::test]
+    async fn active_share_register_query_and_stop() {
+        let k = Arc::new(Kernel::new(Platform::Desktop));
+        let weak: std::sync::Weak<dyn EndpointApp> =
+            Arc::downgrade(&(k.clone() as Arc<dyn EndpointApp>));
+        k.note_share_active(weak, "mic:builtin", "sess-1", Delivery::Pull);
+        let got = k
+            .active_share_by_endpoint("mic:builtin")
+            .expect("登记后可查询");
+        assert_eq!(got.0, "sess-1");
+        assert_eq!(got.1, Delivery::Pull);
+
+        k.stop_endpoint_share("mic:builtin").unwrap();
+        assert!(
+            k.active_share_by_endpoint("mic:builtin").is_none(),
+            "停止后登记应清除"
+        );
+        // 幂等：无活动共享时停止直接成功
+        assert!(k.stop_endpoint_share("mic:builtin").is_ok());
+        assert!(k.stop_endpoint_share("screen:0").is_ok());
+    }
+
+    /// 会话拆除联动清除接入凭证（凭证随会话失效，防重放）。
+    #[tokio::test]
+    async fn teardown_clears_share_token() {
+        let k = Kernel::new(Platform::Desktop);
+        let s = k
+            .create_session("a", &["b".into()], &SessionPrefs::default())
+            .unwrap();
+        let t = k
+            .create_share_token(&s.id, vec![MediaKind::Mic], Duration::from_secs(60))
+            .unwrap();
+        assert!(k.verify_share_token(&t).is_ok());
+        k.teardown(&s.id).unwrap();
+        assert!(
+            k.verify_share_token(&t).is_err(),
+            "teardown 后凭证应失效（签发表移除）"
+        );
     }
 }

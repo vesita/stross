@@ -68,12 +68,24 @@ function renderLocalDevices() {
         }
         else if (ep.published) {
             const badge = document.createElement('span');
-            badge.className = 'badge ep-badge';
+            badge.className = 'badge ep-badge' + (ep.state === 'active' ? ' live' : '');
             badge.textContent =
                 '已通告 · ' + labelOf(VISIBILITY_LABELS, ep.visibility) +
                     ' · ' + labelOf(DELIVERY_LABELS, ep.delivery) +
-                    (ep.subscribers ? ` · ${ep.subscribers} 订阅` : '');
+                    (ep.state === 'active'
+                        ? (ep.subscribers ? ` · ${ep.subscribers} 订阅中` : ' · 正在共享')
+                        : '');
             row.appendChild(badge);
+            if (ep.state === 'active') {
+                // 运行中共享可停止（生命周期治理：停流 + 拆会话，保留通告）
+                const stop = document.createElement('button');
+                stop.type = 'button';
+                stop.className = 'sm danger ep-act';
+                stop.innerHTML = icon('stop') + '<span>停止共享</span>';
+                stop.dataset.act = 'stop-share';
+                stop.dataset.endpoint = ep.endpointId;
+                row.appendChild(stop);
+            }
             const unpub = document.createElement('button');
             unpub.type = 'button';
             unpub.className = 'sm ep-act';
@@ -137,7 +149,7 @@ async function confirmPublish() {
         setBtnLoading(btn, false);
     }
 }
-/** 取消通告（已订阅会话由上层决定宽限期，P1 直接移除）。 */
+/** 取消通告（活动共享联动停止——取消通告 = 不再共享，踢出当前订阅者）。 */
 async function unpublishEndpoint(endpointId) {
     try {
         await call('endpoint_unpublish', { endpointId });
@@ -145,6 +157,16 @@ async function unpublishEndpoint(endpointId) {
     }
     catch (e) {
         showGridError('取消通告失败：' + errMsg(e));
+    }
+}
+/** 停止端点活动共享（停流 + 拆会话，保留通告；订阅者断开后也会自动收尾）。 */
+async function stopShare(endpointId) {
+    try {
+        await call('endpoint_stop_share', { endpointId });
+        await refreshLocalCatalog();
+    }
+    catch (e) {
+        showGridError('停止共享失败：' + errMsg(e));
     }
 }
 // ---------------------------------------------------------------------------

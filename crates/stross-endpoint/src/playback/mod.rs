@@ -18,6 +18,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use stross_proto::frame::Frame;
 use stross_proto::message::{CapabilityDescriptor, CodecId};
@@ -28,6 +29,7 @@ pub mod audio_out;
 /// `apps/stross-gui/src-tauri/android/PlaybackPlugin.kt`）。
 #[cfg(not(target_os = "android"))]
 pub mod ffmpeg;
+pub mod schedule;
 
 #[cfg(not(target_os = "android"))]
 pub use ffmpeg::FfmpegPlaybackSink;
@@ -67,6 +69,34 @@ pub struct PlaybackConfig {
     pub video: Option<VideoOut>,
     /// 音频轨（AAC）；`None` = 不播放音频。
     pub audio: Option<AudioOutSpec>,
+    /// PTS 驱动播放调度（实时显示路径启用；`None` = 直通零延迟——录制/
+    /// headless 全量语义，不经过调度层）。
+    pub video_pacing: Option<VideoPacing>,
+}
+
+/// PTS 驱动播放调度配置。
+///
+/// 解码帧按源节奏（pts 相对间距）调度输出：首帧到达即锚定播放时钟，
+/// 后续帧等到各自 play 时刻再发出——网络抖动被缓冲吸收，显示节奏平滑；
+/// 队尾（最新帧）play 时刻晚于「现在 + [`Self::target_delay`]」时丢队尾
+/// 追平实时（发送端过快 / 时钟漂移；LAN 下实际缓冲 ≈ 网络抖动，远小于
+/// 该值）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoPacing {
+    /// 目标播放延迟水位：队尾 play 时刻超过该值 → 丢最新帧追平。
+    pub target_delay: Duration,
+    /// 大 PTS 跳变阈值：相邻锚点偏差超过该值 → 重置缓冲重锚定
+    /// （流切换 / 重连 / 失步重建）。
+    pub jump_reset: Duration,
+}
+
+impl Default for VideoPacing {
+    fn default() -> Self {
+        Self {
+            target_delay: Duration::from_millis(150),
+            jump_reset: Duration::from_millis(500),
+        }
+    }
 }
 
 /// 一帧解码后的画面（RGBA8888，可直接交给 GUI 绘制）。
@@ -97,6 +127,12 @@ pub struct PlaybackStats {
     pub audio_device_ok: bool,
     /// 内部缓冲满被丢弃的帧数（内存有界保障）。
     pub dropped_push: u64,
+    /// 调度层：过水位丢帧数（发送过快/时钟漂移时追平到实时）。
+    pub paced_dropped: u64,
+    /// 调度层：大 PTS 跳变重置锚点次数（流切换 / 重连 / 失步重建）。
+    pub paced_reanchors: u64,
+    /// 调度层：等待到 play 时刻后按时发出的帧数。
+    pub paced_held: u64,
 }
 
 /// 播放错误。

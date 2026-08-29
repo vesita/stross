@@ -21,6 +21,7 @@
 
 use std::net::SocketAddrV4;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -42,6 +43,40 @@ pub const FRAGMENT_LEN: usize = 1400;
 enum PktType {
     Control = 0x00,
     Media = 0x01,
+}
+
+/// SRT 接收延迟默认值（毫秒）。
+///
+/// rsrt `latency`（SRTO_RCVLATENCY）默认 120ms；链路两级（推流端→中继、
+/// 中继→观看端）各一个接收缓冲，默认值合计 ~240ms 系统性延迟
+/// （`latency-stability-test.sh` 实测 min=240.9ms / p99=245.0ms，分布极窄）。
+/// 局域网低延迟优先取 20ms/跳 → 全链路 ~40ms（实测 min≈143ms，与
+/// 40ms/跳相比分布更窄更稳：40ms 下 min 在 149-181ms 间随负载漂移）；
+/// 弱网可经 `STROSS_SRT_LATENCY_MS` 调大容错窗口（20ms 下丢包
+/// too-late 丢帧变多）。
+const DEFAULT_SRT_LATENCY_MS: u64 = 20;
+
+/// 解析 SRT 接收延迟（`STROSS_SRT_LATENCY_MS` 环境变量覆盖；非法/非正数回退默认）。
+fn srt_latency_from_env(env: Option<&str>) -> Duration {
+    env.and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_millis(DEFAULT_SRT_LATENCY_MS))
+}
+
+/// 统一的 SRT 套接字选项（bind 与 connect 共用，保证两端一致的低延迟窗口）。
+fn srt_options() -> rsrt::SrtOptions {
+    srt_options_with_latency(srt_latency_from_env(
+        std::env::var("STROSS_SRT_LATENCY_MS").ok().as_deref(),
+    ))
+}
+
+/// 按指定接收延迟构造选项（纯函数，便于测试与参数化）。
+fn srt_options_with_latency(latency: Duration) -> rsrt::SrtOptions {
+    rsrt::SrtOptions {
+        latency,
+        ..rsrt::SrtOptions::default()
+    }
 }
 
 /// SRT 传输（Adaptive profile）。
@@ -70,7 +105,7 @@ impl SrtTransport {
         &self,
         bind: impl tokio::net::ToSocketAddrs,
     ) -> Result<SrtListenerHandle, TransportError> {
-        let listener = rsrt::SrtListener::bind(bind, rsrt::SrtOptions::default())
+        let listener = rsrt::SrtListener::bind(bind, srt_options())
             .await
             .map_err(|e| TransportError::Io(format!("SRT 监听失败: {e}")))?;
         Ok(SrtListenerHandle {
@@ -99,7 +134,7 @@ impl Transport for SrtTransport {
         let addr = super::RelayUrl::parse(&peer.addr)
             .map(|u| format!("{}:{}", u.host(), u.port()))
             .unwrap_or_else(|| peer.addr.clone());
-        let sock = rsrt::SrtSocket::connect(&addr, rsrt::SrtOptions::default())
+        let sock = rsrt::SrtSocket::connect(&addr, srt_options())
             .await
             .map_err(|e| TransportError::Connect(format!("SRT 连接失败: {e}")))?;
         tracing::info!("SRT 已连接: {addr}");
@@ -455,5 +490,37 @@ mod tests {
     fn profile_is_adaptive() {
         assert_eq!(SrtTransport::new().profile(), ReliabilityProfile::Adaptive);
         assert_eq!(SrtTransport::new().id(), TransportId::Srt);
+    }
+
+    #[test]
+    fn srt_latency_defaults_without_env() {
+        assert_eq!(
+            srt_latency_from_env(None),
+            Duration::from_millis(DEFAULT_SRT_LATENCY_MS)
+        );
+    }
+
+    #[test]
+    fn srt_latency_env_overrides() {
+        assert_eq!(srt_latency_from_env(Some("80")), Duration::from_millis(80));
+    }
+
+    #[test]
+    fn srt_latency_invalid_env_falls_back() {
+        // 非数字 / 0 / 负数：一律回退默认（0 会让 TSBPD 无容错窗口）
+        assert_eq!(
+            srt_latency_from_env(Some("junk")),
+            Duration::from_millis(20)
+        );
+        assert_eq!(srt_latency_from_env(Some("0")), Duration::from_millis(20));
+        assert_eq!(srt_latency_from_env(Some("-5")), Duration::from_millis(20));
+    }
+
+    #[test]
+    fn srt_options_applies_latency() {
+        let opts = srt_options_with_latency(Duration::from_millis(40));
+        assert_eq!(opts.latency, Duration::from_millis(40));
+        // 默认构造应带统一默认延迟（不改动其它选项）
+        assert_eq!(opts.mss, rsrt::SrtOptions::default().mss);
     }
 }

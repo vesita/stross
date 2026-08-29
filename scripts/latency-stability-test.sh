@@ -7,9 +7,11 @@
 #   PC-A（接收端）: stross receive --latency --calibrate → 绝对端到端延迟 + 相对抖动
 #
 # 每轮一个传输（默认 srt + quic）：
-#   * 稳定性：长跑接收帧数/音频块数 vs 期望（30fps、AAC ~47 块/s）、serve 进程 RSS 有界
-#   * 延迟：绝对端到端 min/p50/p95/p99（同钟校准，含 ffmpeg 预热正偏差=上界）、
-#     相对附加延迟（传输/缓冲抖动）
+#   * 稳定性：长跑接收帧数/音频块数 vs 期望（30fps、AAC ~47 块/s；期望按
+#     接收接入时移折算）、serve 进程 RSS 有界
+#   * 延迟：绝对端到端 min/p50/p95/p99（同钟校准，含 ffmpeg 解码管线）、
+#     相对附加延迟（传输/缓冲抖动）；每传输 min 上界断言（WS/SRT ≤200ms、
+#     QUIC ≤120ms，解码管线下界 ~75ms）
 #
 # 用法：scripts/latency-stability-test.sh [SECS] [TRANS...]
 #   例：scripts/latency-stability-test.sh 120 srt quic ws
@@ -26,6 +28,14 @@ TRANS="${*:-srt quic}"   # 变参：300 srt quic ws 与 300 "srt quic ws" 等价
 MIN_FRAMES_PCT=90        # 接收帧数 ≥ 90% 期望
 MIN_AUDIO_PCT=90         # 音频块 ≥ 90% 期望
 MAX_TAIL_JITTER=250       # abs p99 − min ≤ 250ms（传输/缓冲尾延迟上界）
+# 每传输绝对端到端延迟 min 上界（ms）。
+# 测量口径：绝对延迟 = 解码帧到达墙钟 −（会话起点 + pts），**含 ffmpeg 解码
+# 管线**（B4 基线 QUIC min≈0.9ms 是不含解码的传输层口径，f7d34d3 重构后
+# 该口径不再成立）。解码管线下界 ≈75ms（-threads 1 单线程 h264 解码 +
+# 解复用/解析），实测 WS≈101 / SRT≈148 / QUIC≈100。
+# 上界仅作回归保护：RCVLATENCY 回退 120ms（+160ms）或解码线程数回退
+# （帧线程管线延迟 +~500ms）都会显著超标。
+declare -A MAX_ABS_MIN=( [srt]=200 [quic]=120 [ws]=200 )
 
 LAN_IP=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
 [ -n "$LAN_IP" ] || LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -38,8 +48,12 @@ log() { printf '\n\033[1;34m== %s ==\033[0m\n' "$*"; }
 cleanup() { kill "${A_PID:-}" 2>/dev/null || true; kill "${B_PID:-}" 2>/dev/null || true; }
 trap cleanup EXIT
 
-EXPECT_FRAMES=$((SECS * 30))
-EXPECT_AUDIO=$((SECS * 47))
+# 接收端在推流开始约 2s 后接入（sleep 1.5 + 连接/建会话/关键帧重放），
+# 实际看到的流时长 ≈ SECS − 2 秒；期望帧/音频块按此折算，避免拓扑时移
+# 把「接入晚」误报为「丢帧」（实测 10s 轮收到 241/300 帧 = 8.0s×30 ✓）。
+JOIN_OFFSET_S=2
+EXPECT_FRAMES=$(((SECS - JOIN_OFFSET_S) * 30))
+EXPECT_AUDIO=$(((SECS - JOIN_OFFSET_S) * 47))
 
 run_round() {
   local trans=$1
@@ -101,6 +115,12 @@ run_round() {
   local ok=1
   [ "$FRAMES" -ge $((EXPECT_FRAMES * MIN_FRAMES_PCT / 100)) ] || { echo "  ❌ 视频帧不足"; ok=0; }
   [ "$AUDIO" -ge $((EXPECT_AUDIO * MIN_AUDIO_PCT / 100)) ] || { echo "  ❌ 音频块不足"; ok=0; }
+  local max_min="${MAX_ABS_MIN[$trans]:-250}"
+  if [ -n "$ABS_MIN" ]; then
+    awk -v a="$ABS_MIN" -v t="$max_min" \
+      'BEGIN { if (a > t) { print "  ❌ 绝对延迟超限 (min=" a "ms > " t "ms)"; exit 1 } }' \
+      || ok=0
+  fi
   if [ -n "$ABS_MIN" ] && [ -n "$ABS_P99" ]; then
     awk -v a="$ABS_MIN" -v b="$ABS_P99" -v t="$MAX_TAIL_JITTER" \
       'BEGIN { if (b - a > t) { print "  ❌ 尾延迟超限 (p99−min=" b-a "ms > " t "ms)"; exit 1 } }' \

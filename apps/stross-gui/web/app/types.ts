@@ -138,7 +138,9 @@ interface StreamStatus {
 interface CaptureStatus { active: boolean; started: boolean; error: string | null; }
 interface ReceiveStats {
   running: boolean; received: number; decodedVideo: number;
-  audioBlocks: number; dropped: number; error: string | null;
+  audioBlocks: number; dropped: number;
+  pacedDropped: number; pacedReanchors: number; pacedHeld: number;
+  error: string | null;
 }
 interface TrackInfo {
   codec: string;

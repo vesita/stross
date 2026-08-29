@@ -55,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
             sample_rate: 48_000,
             out: AudioOut::Discard,
         }),
+        video_pacing: None,
     })?;
     let mut frames_rx = session.take_video_frames().expect("已配置视频轨");
 

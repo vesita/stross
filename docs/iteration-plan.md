@@ -469,3 +469,29 @@ GStreamer 流水线。
 **遗留 / 待定**：
 - [ ] **PTS 驱动的播放调度层（待用户拍板）**：播放侧当前无调度层——帧进即解即出，延迟随缘。方案：抖动缓冲 + 目标延迟 ~150-200ms + 本地播放时钟按 `pts` 相对间距调度；过水位视频丢帧追平到实时（复用 `try_send` 丢帧语义，改按 pts 判定）、欠水位补帧/插静音、大 PTS 跳变重置缓冲。视频不采用倍速追平（WebRTC 同款结论）；倍速仅留给音频 NetEq 式时间伸缩（LAN 场景暂不需要）。
 - [ ] flake 修复备注：`decoded_pixels_match_native_ffmpeg` 根因是测试「先推完再读」= 推流期零消费，32 槽有界通道被解码瞬时超前顶满 → 修复为推流期并发排空（等价真实渲染循环）；产品侧丢帧语义不变（第九轮提交后单独修复，待提交）。
+
+---
+
+## 第十轮（播放体验：低延迟调参 + PTS 调度层 + 延迟回归固化，2026-08-29）
+
+**目标**（用户拍板：播放体验/延迟优先）：P0 SRT 低延迟调参 → P1 PTS 驱动播放
+调度层 → P2 延迟/节奏回归固化（验证：全量测试 + 实测）。
+
+**变更**：
+| 项 | 落点 |
+|---|---|
+| SRT 低延迟调参（P0） | `stross-transport/src/srt.rs`：`DEFAULT_SRT_LATENCY_MS` 120→**20**（40 实测 min 149-181ms 随负载漂移，20 稳定 ~143ms）；`srt_options()` 统一 bind/connect 两端；`STROSS_SRT_LATENCY_MS` 环境覆盖 + 回退单测 |
+| PTS 驱动播放调度层（P1） | `stross-endpoint/src/playback/schedule.rs`（新建）：`PlaybackScheduler` 纯逻辑 + 时间注入；锚定 `play(pts) = anchor + (pts−pts0)`；过水位按**队尾判据**丢最新帧钳制显示延迟；PTS 大跳变重置重锚；迟到帧立即发。`VideoPacing{target_delay:150ms, jump_reset:500ms}`，仅实时显示路径启用（headless/录制直通）；pacer 线程 std `sync_channel` + `recv_timeout` |
+| **ffmpeg 解码帧线程延迟（本轮回溯根因，-threads 1）** | `playback/ffmpeg.rs` 视频解码参数新增 `-threads 1`：h264 解码器默认帧线程数 = CPU 核数（本机 16），输出被管线延迟 (threads−1) 帧 —— **绝对延迟 566ms 的元凶**（隔离复现：30fps 喂流首帧延迟 = 16×33ms≈530ms + 解析 ~40ms）。单线程 720p30 解码余量充足，低延迟优先 |
+| 绝对延迟测量口径修正 | `latency-stability-test.sh`：期望帧/音频块按接收接入时移（~2s）折算（拓扑时移 ≠ 丢帧，10s 轮实测 241/300 帧 = 8.0s×30 ✓）；`MAX_ABS_MIN` 重校为**含解码管线**口径（B4 QUIC min≈0.9ms 是不含解码的传输层口径）：WS/SRT ≤200ms、QUIC ≤120ms，仅作回归保护 |
+
+**验证**：
+- `latency-stability-test.sh 10 ws srt quic` **三传输全达标**：WS min=99.9 / SRT min=145.4 / QUIC min=100.4 ms（修复前三传输均 ~566ms，-5.6x）；60s 长跑 srt/quic 亦达标（SRT min=171.3 为并发测试负载下，p99−min=71ms ≤250 尾延迟上界）；
+- workspace 全量测试 ✅（endpoint 58 / kernel 85 / transport 20 / 其余全绿）；clippy 0 告警；fmt 干净；前端 tsc + jsdom ✅；
+- 探针回放实证（隔离 + 真机同参数）：raw h264 demuxer 管道输入首帧延迟与解码帧线程数严格线性（threads N → 延迟 (N−1)×帧间隔），`-threads 1` 后 30fps 喂流首帧 ~73ms；
+- 中继补发语义确认：观看端接入 = 最近关键帧 + **实时帧**（非历史突发重放），无 burst 污染。
+
+**遗留 / 待定**：
+- [ ] 真机（手机→PC / PC→手机）延迟复测：本机双开已达标，跨设备路径（弱网/多跳）待用户环境实测；
+- [ ] QUIC ≤30ms 的传输层口径如需保留，需把延迟测量拆成「传输层」（不含解码）与「端到端含解码」两个指标；
+- [ ] 调度层（P1）的播放节奏在 GUI 实时显示路径的实测节奏回归（headless 直通不经过 pacer，本轮未覆盖 GUI 侧节奏）。

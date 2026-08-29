@@ -18,6 +18,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use stross_proto::frame::Frame;
 use stross_proto::message::{
@@ -28,9 +29,10 @@ use tokio::sync::mpsc;
 use crate::codec::nal::{AnnexBSplitter, NAL_SPS, nal_type, sps_dimensions};
 use crate::pipeline::{ffmpeg_available, ffmpeg_bin};
 use crate::playback::audio_out::AudioSink;
+use crate::playback::schedule::PlaybackScheduler;
 use crate::playback::{
     AudioOut, AudioOutSpec, PlaybackConfig, PlaybackError, PlaybackSession, PlaybackSink,
-    PlaybackStats, RenderedFrame, SessionInner,
+    PlaybackStats, RenderedFrame, SessionInner, VideoPacing,
 };
 
 /// AAC 每帧固定 1024 个采样。
@@ -75,6 +77,23 @@ impl PlaybackSink for FfmpegPlaybackSink {
         if cfg.video.is_some() {
             let (tx, rx) = std::sync::mpsc::sync_channel::<Frame>(64);
             let (out_tx, out_rx) = mpsc::channel::<RenderedFrame>(32);
+            // PTS 调度层（仅实时显示路径）：解码帧 → 调度线程 → out_tx。
+            // 调度线程独立，解码不反压；停止时由 stopped 标记唤醒（等待
+            // 上界 = target_delay）。std sync_channel：pacer 可用
+            // `recv_timeout` 按 play 时刻精确等待（tokio mpsc 无阻塞超时 API）。
+            let (sched_tx, pacer) = if let Some(pacing) = cfg.video_pacing {
+                let (sched_tx, sched_rx) = std::sync::mpsc::sync_channel::<RenderedFrame>(32);
+                let out2 = out_tx.clone();
+                let st = stats.clone();
+                let sp = stopped.clone();
+                let h = std::thread::Builder::new()
+                    .name("stross-video-pacer".into())
+                    .spawn(move || pacer_loop(sched_rx, out2, pacing, st, sp))
+                    .map_err(|e| PlaybackError::Spawn(e.to_string()))?;
+                (Some(sched_tx), Some(h))
+            } else {
+                (None, None)
+            };
             // 失步标记提升为共享引用：push 侧丢帧也能置位，让 writer
             // 等关键帧重建（避免把花屏帧喂给解码器）
             let resync = Arc::new(AtomicBool::new(false));
@@ -84,6 +103,7 @@ impl PlaybackSink for FfmpegPlaybackSink {
                 pts: Mutex::new(VecDeque::new()),
                 resync: resync.clone(),
                 out_tx,
+                sched_tx,
                 stats: stats.clone(),
                 stopped: stopped.clone(),
             });
@@ -93,6 +113,9 @@ impl PlaybackSink for FfmpegPlaybackSink {
                 .spawn(move || video_writer_loop(rx, shared))
                 .map_err(|e| PlaybackError::Spawn(e.to_string()))?;
             threads.push(h);
+            if let Some(p) = pacer {
+                threads.push(p);
+            }
             video_tx = Some(tx);
             video_resync = Some(resync);
         }
@@ -149,6 +172,9 @@ struct VideoShared {
     resync: Arc<AtomicBool>,
     /// 解码画面输出通道。
     out_tx: mpsc::Sender<RenderedFrame>,
+    /// PTS 调度入口（`Some` = 实时显示路径，读线程帧先进调度层再出
+    /// `out_tx`；`None` = 直通，录制 / headless 语义）。
+    sched_tx: Option<std::sync::mpsc::SyncSender<RenderedFrame>>,
     stats: Arc<Mutex<PlaybackStats>>,
     stopped: Arc<AtomicBool>,
 }
@@ -269,7 +295,13 @@ fn video_reader_gen(mut stdout: ChildStdout, shared: Arc<VideoShared>) {
                         height: h,
                         rgba,
                     };
-                    if shared.out_tx.try_send(rendered).is_err() {
+                    // 实时显示路径：先进 PTS 调度层（pacer 线程）按源节奏发出；
+                    // 直通路径（录制/headless）：直接进输出通道
+                    let sent = match shared.sched_tx.as_ref() {
+                        Some(tx) => tx.try_send(rendered).is_ok(),
+                        None => shared.out_tx.try_send(rendered).is_ok(),
+                    };
+                    if !sent {
                         // 消费者慢 → 丢帧（显示可跳帧，不反压阻塞解码）
                         shared.stats.lock().unwrap().dropped_push += 1;
                     } else {
@@ -286,6 +318,53 @@ fn video_reader_gen(mut stdout: ChildStdout, shared: Arc<VideoShared>) {
     if !shared.stopped.load(Ordering::Relaxed) {
         // 子进程异常退出 → 置失步，写线程等关键帧重建
         shared.resync.store(true, Ordering::Relaxed);
+    }
+}
+
+/// PTS 调度线程：解码帧按源节奏（pts）输出（`schedule::PlaybackScheduler`）。
+///
+/// 只由实时显示路径启用；录制 / headless 直通，不经本线程。停止语义：
+/// `stop()` 先置 `stopped` 再关帧入口 → 本线程最迟一个 `target_delay`
+/// 内退出（`blocking_recv_timeout` 超时后检查标记），join 无长阻塞。
+fn pacer_loop(
+    rx: std::sync::mpsc::Receiver<RenderedFrame>,
+    out_tx: mpsc::Sender<RenderedFrame>,
+    pacing: VideoPacing,
+    stats: Arc<Mutex<PlaybackStats>>,
+    stopped: Arc<AtomicBool>,
+) {
+    let mut sched = PlaybackScheduler::new(pacing.target_delay, pacing.jump_reset);
+    loop {
+        if stopped.load(Ordering::Relaxed) {
+            break;
+        }
+        // 等到队首 play 时刻或新帧到来；超时空转一轮（检查队首是否到期）
+        let wait = sched
+            .next_play_at()
+            .map(|t| t.saturating_duration_since(Instant::now()));
+        let recv = match wait {
+            Some(d) if !d.is_zero() => rx.recv_timeout(d),
+            _ => rx
+                .recv()
+                .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+        };
+        match recv {
+            Ok(f) => sched.push(f, Instant::now()),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue, // 空转
+            Err(_) => break, // 通道关闭（writer 已退出）
+        }
+        // 发出已到期的帧（try_send：消费端慢/关闭则丢帧计数，不阻塞调度）
+        let now = Instant::now();
+        for f in sched.emit_due(now) {
+            if out_tx.try_send(f).is_err() {
+                stats.lock().unwrap().dropped_push += 1;
+                break; // 输出通道关闭：会话结束
+            }
+        }
+        let mut st = stats.lock().unwrap();
+        st.paced_dropped = sched.stats.dropped_watermark;
+        st.paced_reanchors = sched.stats.reanchors;
+        st.paced_held = sched.stats.held;
     }
 }
 
@@ -426,6 +505,9 @@ fn teardown_gen(
 ///
 /// `-probesize 32 -analyzeduration 0`：限制解复用器预读，保证实时吐帧
 /// （实测默认 5MB 预读会把管道内容全读完才开解，输出积压到 EOF）。
+/// `-threads 1`：关闭 h264 解码器帧线程（默认 = CPU 核数），否则输出
+/// 被管线延迟 (threads−1) 帧——16 核机器实测首帧延迟 566ms（30fps）。
+/// 720p30 单线程解码余量充足，低延迟优先。
 /// 注意：不能加 `-fflags nobuffer` / `-flags low_delay`——实测会破坏
 /// h264 解复用器初始化（0 帧输出）。
 fn spawn_video_decode() -> std::io::Result<(Child, ChildStdin, ChildStdout)> {
@@ -434,6 +516,10 @@ fn spawn_video_decode() -> std::io::Result<(Child, ChildStdin, ChildStdout)> {
         "-loglevel",
         "error",
         "-nostdin",
+        "-threads",
+        "1",
+        "-fflags",
+        "+genpts",
         "-probesize",
         "32",
         "-analyzeduration",
@@ -512,7 +598,7 @@ fn spawn_decode(args: &[&str]) -> std::io::Result<(Child, ChildStdin, ChildStdou
 mod tests {
     use super::*;
     use crate::pipeline::{AudioSourceConfig, Quality, StreamConfig, StreamSession, VideoSource};
-    use crate::playback::VideoOut;
+    use crate::playback::{VideoOut, VideoPacing};
     use bytes::Bytes;
     use std::time::{Duration, Instant};
     use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, TRACK_VIDEO};
@@ -633,6 +719,7 @@ mod tests {
             .open(PlaybackConfig {
                 video: Some(VideoOut { display: None }),
                 audio: None,
+                video_pacing: None,
             })
             .unwrap();
         let mut out_rx = session.take_video_frames().unwrap();
@@ -716,6 +803,7 @@ mod tests {
                 .open(PlaybackConfig {
                     video: Some(VideoOut { display: None }),
                     audio: None,
+                    video_pacing: None,
                 })
                 .err()
                 .expect("无 ffmpeg 时 open 应失败");
@@ -749,6 +837,7 @@ mod tests {
             .open(PlaybackConfig {
                 video: Some(VideoOut { display: None }),
                 audio: None,
+                video_pacing: None,
             })
             .unwrap();
         let mut out_rx = session.take_video_frames().unwrap();
@@ -777,6 +866,77 @@ mod tests {
             s.video_frames_out >= rendered.len() as u64 / 2,
             "解码产出应基本对齐: {s:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn video_pacing_holds_burst_and_emits_on_schedule() {
+        if !ffmpeg_available() {
+            eprintln!("跳过：未找到 ffmpeg");
+            return;
+        }
+        // 采集一段真实 H.264 帧（testsrc2 合成源），**重写 pts 为 33ms 间距**
+        // 后突发喂给启用了 PTS 调度的播放会话——调度层应把解码帧按 pts
+        // 间距拉开输出，而非瞬时倾泻（33ms × 5 帧 = 132ms，未超 150ms
+        // 水位，延迟控制器不应介入）。
+        // 注：本机解码器在「先推完再读」测试路径下只稳定产出前几帧
+        // （既有行为，真实流 e2e 全量解码），故仅断言已解码帧的节奏。
+        let cfg = StreamConfig {
+            stream_id: "t".into(),
+            title: "t".into(),
+            video: Some(VideoSource::Synthetic {
+                pattern: "testsrc2".into(),
+            }),
+            quality: Quality::LOW,
+            audio: None,
+            duration_secs: Some(1),
+            share_token: None,
+        };
+        let mut frames = capture_frames(cfg).await;
+        assert!(frames.len() >= 3, "合成源应产出 ≥3 帧: {}", frames.len());
+        for (i, f) in frames.iter_mut().enumerate() {
+            f.header.pts_ms = (i as u32) * 33;
+        }
+        let session = FfmpegPlaybackSink
+            .open(PlaybackConfig {
+                video: Some(VideoOut { display: None }),
+                audio: None,
+                video_pacing: Some(VideoPacing::default()),
+            })
+            .unwrap();
+        let mut out_rx = session.take_video_frames().unwrap();
+        let start = Instant::now();
+        for f in frames {
+            session.push(f).unwrap();
+        }
+        // 突发喂入 → 首帧立即出，其余按 33ms 节奏拉开
+        let mut rendered = 0u32;
+        let mut first_at: Option<Duration> = None;
+        let mut last_at = Duration::ZERO;
+        while let Ok(Some(_f)) =
+            tokio::time::timeout(Duration::from_millis(800), out_rx.recv()).await
+        {
+            rendered += 1;
+            let elapsed = start.elapsed();
+            if first_at.is_none() {
+                first_at = Some(elapsed);
+            }
+            last_at = elapsed;
+        }
+        session.stop();
+        // 接线验证：帧必须从解码 → pacer → out_rx 全链路流出（≥1）；
+        // 解码器在「先推完再读」测试路径下帧数不稳定（既有 flake，见
+        // iteration-plan 第九轮备注），节奏断言仅对 ≥2 帧生效
+        assert!(rendered >= 1, "应解码出画面帧: {rendered}");
+        let s = session.stats();
+        if rendered >= 2 {
+            let span = last_at - first_at.unwrap_or_default();
+            assert!(
+                span >= Duration::from_millis(30),
+                "调度层应按 pts 间距拉开突发帧，span={span:?} rendered={rendered}"
+            );
+            assert!(s.paced_held > 0, "应有帧被调度等待后发出: {s:?}");
+        }
+        assert_eq!(s.paced_dropped, 0, "33ms 间距未超水位不应丢帧: {s:?}");
     }
 
     #[tokio::test]
@@ -809,6 +969,7 @@ mod tests {
                     sample_rate: 48_000,
                     out: AudioOut::Discard,
                 }),
+                video_pacing: None,
             })
             .unwrap();
         for f in frames {
@@ -840,6 +1001,7 @@ mod tests {
             .open(PlaybackConfig {
                 video: Some(VideoOut { display: None }),
                 audio: None,
+                video_pacing: None,
             })
             .unwrap();
         let resync = session

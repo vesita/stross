@@ -137,10 +137,15 @@ async function pollReceiveStatus() {
             status.textContent = '等待流数据…';
             $('recv-dot').className = 'dot starting';
         }
+        const pacing = s.pacedDropped > 0 || s.pacedReanchors > 0
+            ? ` · 调度 ${s.pacedHeld} 帧等待` +
+                (s.pacedDropped > 0 ? ` · 丢 ${s.pacedDropped}` : '') +
+                (s.pacedReanchors > 0 ? ` · 重锚 ${s.pacedReanchors}` : '')
+            : '';
         $('recv-meta').textContent = s.error
             ? '错误：' + s.error
             : `收到 ${s.received} 帧 · 解码 ${s.decodedVideo} 帧 · 音频 ${s.audioBlocks} 块`
-                + (recvFrameCount ? ` · 已绘制 ${recvFrameCount} 帧` : '');
+                + (recvFrameCount ? ` · 已绘制 ${recvFrameCount} 帧` : '') + pacing;
     }
     catch (_) { /* ignore */ }
     if (receiving)

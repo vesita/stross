@@ -22,7 +22,7 @@ use stross_endpoint::playback::RenderedFrame;
 #[cfg(not(target_os = "android"))]
 use stross_endpoint::playback::{
     AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackSession, PlaybackSink,
-    VideoOut,
+    VideoOut, VideoPacing,
 };
 use stross_proto::frame::Frame;
 use tokio::sync::mpsc;
@@ -47,6 +47,12 @@ pub struct ReceiveStats {
     pub audio_blocks_in: u64,
     /// 帧通道满被丢弃的帧数（消费者慢）。
     pub dropped: u64,
+    /// 调度层：过水位丢帧数（PTS 调度追平实时）。
+    pub paced_dropped: u64,
+    /// 调度层：大 PTS 跳变重置锚点次数（流切换 / 重连）。
+    pub paced_reanchors: u64,
+    /// 调度层：等待到 play 时刻后按时发出的帧数。
+    pub paced_held: u64,
     /// 失败原因（连接失败 / 流不存在等）。
     pub error: Option<String>,
 }
@@ -266,6 +272,8 @@ impl Receiver {
                     sample_rate: 48_000,
                     out: audio_out,
                 }),
+                // 实时显示路径：PTS 驱动调度（显示节奏平滑；录制路径不启用）
+                video_pacing: Some(VideoPacing::default()),
             })
             .map_err(|e| Error::Message(format!("播放会话打开失败: {e}")))?;
         tokio::spawn(receive_loop(
@@ -388,6 +396,9 @@ async fn receive_loop(
             st.audio_blocks = s.audio_blocks_out;
             st.audio_blocks_in = s.audio_blocks_in;
             st.dropped = s.dropped_push;
+            st.paced_dropped = s.paced_dropped;
+            st.paced_reanchors = s.paced_reanchors;
+            st.paced_held = s.paced_held;
             st.running = true;
         },
     )
@@ -422,6 +433,8 @@ async fn receive_loop_recording(
             sample_rate: 48_000,
             out: audio_out,
         }),
+        // headless 录制/统计：全量直通，不经过 PTS 调度层
+        video_pacing: None,
     }) {
         Ok(s) => s,
         Err(e) => {
@@ -463,6 +476,9 @@ async fn receive_loop_recording(
             st.audio_blocks = s.audio_blocks_out;
             st.audio_blocks_in = s.audio_blocks_in;
             st.dropped = s.dropped_push;
+            st.paced_dropped = s.paced_dropped;
+            st.paced_reanchors = s.paced_reanchors;
+            st.paced_held = s.paced_held;
             st.running = true;
         },
     )

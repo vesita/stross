@@ -52,10 +52,11 @@ function renderLocalDevices(): void {
     name.textContent = ep.name;
     const meta = document.createElement('span');
     meta.className = 'ep-meta';
-    const kindLabel = labelOf(DEVICE_KIND_LABELS, ep.kind);
+    // meta 不再重复端点类别（name 已是「麦克风/系统声音」）：可用 → 实时，
+    // 不可用 → 原因；已通告状态由右侧徽标承载
     meta.textContent = ep.available
-      ? kindLabel
-      : `${kindLabel} · 不可用（${ep.lastError || '未知原因'}）`;
+      ? '实时'
+      : '不可用（' + (ep.lastError || '未知原因') + '）';
     body.appendChild(name);
     body.appendChild(meta);
     row.appendChild(ic);
@@ -66,6 +67,8 @@ function renderLocalDevices(): void {
       hint.textContent = '不可挂载';
       row.appendChild(hint);
     } else if (ep.published) {
+      const ops = document.createElement('span');
+      ops.className = 'ep-actions';
       const badge = document.createElement('span');
       badge.className = 'badge ep-badge' + (ep.state === 'active' ? ' live' : '');
       badge.textContent =
@@ -74,7 +77,7 @@ function renderLocalDevices(): void {
         (ep.state === 'active'
           ? (ep.subscribers ? ` · ${ep.subscribers} 订阅中` : ' · 正在共享')
           : '');
-      row.appendChild(badge);
+      ops.appendChild(badge);
       if (ep.state === 'active') {
         // 运行中共享可停止（生命周期治理：停流 + 拆会话，保留通告）
         const stop = document.createElement('button');
@@ -83,7 +86,7 @@ function renderLocalDevices(): void {
         stop.innerHTML = icon('stop') + '<span>停止共享</span>';
         stop.dataset.act = 'stop-share';
         stop.dataset.endpoint = ep.endpointId;
-        row.appendChild(stop);
+        ops.appendChild(stop);
       }
       const unpub = document.createElement('button');
       unpub.type = 'button';
@@ -91,7 +94,8 @@ function renderLocalDevices(): void {
       unpub.innerHTML = icon('x') + '<span>取消通告</span>';
       unpub.dataset.act = 'unpublish-endpoint';
       unpub.dataset.endpoint = ep.endpointId;
-      row.appendChild(unpub);
+      ops.appendChild(unpub);
+      row.appendChild(ops);
     } else {
       const pub = document.createElement('button');
       pub.type = 'button';

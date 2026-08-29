@@ -487,3 +487,37 @@ startReceive 防重入+失败回滚、轮询边界修复、drawReceiveFrame 热�
 - [ ] 协商层复用/拒绝的 HTTP 状态码暂用 500 承载业务错误（消息可读），协议优化阶段改 409；
 - [ ] 协议优化阶段：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕（closed-loop-plan.md §5）。
 
+
+---
+
+## 第十三轮（实机打包 + 真机验证 + UI 优化，2026-09）
+
+**起因**：用户「打包新版本上手机实机验证 P0-1 闭环 + 随手优化 UI」。
+
+**Android 打包修复**（此前 Android target 无法编译，三处 cfg 错误）：
+| 问题 | 修复 |
+|---|---|
+| `factory.rs` Android 分支误引用不存在的 `screen::linux::audio_probe`（Android 下该模块被 `cfg(not(target_os="linux"))` 掉） | 新增 `android_audio_probe()`（恒可用的 `Probe`：Android 音频采集走原生 MediaRecorder/AAudio，**不依赖 ffmpeg**）；desktop 分支保持 `screen::*::audio_probe` |
+| `lib.rs` 无条件 re-export `playback::FfmpegPlaybackSink`（Android 下被 `cfg(not(target_os="android"))` gate 掉） | 该 re-export 单独 `#[cfg(not(target_os="android"))]` |
+| 中途曾把 `audio::audio_probe`（ffmpeg 检查）用作 Android 探测，导致真机端点「不可用（ffmpeg 不可用）」 | 撤回（改恒可用 probe），避免 dead_code |
+
+**打包链环境**：项目 `build.gradle.kts` 钉 `compileSdk=36/buildToolsVersion=36.0.0`，但当前 `/opt/android-sdk` 仅装 build-tools 37 / platform android-37，且 SDK 目录 root 所有、不可写、license 未接受。AGP 8.11 对 compileSdk 37 仅警告（非阻断），但切 37 触发的其它组件（build-tools 35）仍因 license/写权限失败。**经用户 sudo 安装** build-tools 35/36 + platform android-36 + 接受 license 后构建成功（`cargo tauri android build --debug`，JDK 17）。
+
+**真机结果**（OPPO PLC110，Android 16，WiFi 192.168.11.60，WebView CDP 驱动）：
+- debug APK 构建成功并安装（旧包为 release 签名不一致 → 卸载重装）；App 启动中继 8777 在线、WebView 远程调试通道可用；
+- 真机 UI 冒烟 ✓：端点可用、通告弹窗（可见性/delivery 选择）、通告后徽标「已通告·公开·拉取」+「取消通告」均工作；
+- **跨设备订阅受限**（非 P0-1 bug，实测发现）：手机监听端口**无 18779 协商服务**（仅 8777），PC `stross devices` 扫描**发现 0 台**（mDNS 隔离/多网卡）→「手机作公开方→PC 协商订阅」在当前网络/代码下不可行；P0-1 核心收尾已由集成测试覆盖。
+
+**UI 优化**（基于真机截图，修实机抓到的缺陷）：
+- **端点行竖排 bug**（P0-1 新增「已通告徽标 + 取消通告按钮」与文本同排，窄屏下名称/meta 被挤压成逐字竖排）→ `.ep-row` 允许 `flex-wrap` + `.ep-name/.ep-meta` `white-space:nowrap` + ellipsis；
+- **meta 类别去重**（名称「系统声音」+ meta「系统声」重复）→ 可用端点 meta 显示「实时」，不可用显示原因；
+- **`.ep-actions` 右对齐操作组**：徽标 + 通告/取消通告按钮包进右对齐容器，避免「取消通告」按钮孤行，紧凑美观；
+- jsdom [11]/[12] 回归保持全绿。
+
+**用户诉求**：手机端点太少（Android 仅麦克风/系统声音两个音频端点）——属 P1 明确范围（屏幕需 MediaProjection 前台服务、摄像头 CameraX，均后置，见 factory.rs 注释）。用户拍板「先完成 P0-1 + UI 优化」，扩充端点记入后续。
+
+**遗留 / 待定**（新增）：
+- [ ] **扩充 Android 端点集**：屏幕（MediaProjection 前台服务采集 + Rust 端点 + 授权）、摄像头（Camera2/CameraX + 文件/剪贴板等）；Android GUI 缺协商服务（18779）→ 手机无法被自动协商订阅，需评估是否补；
+- [ ] P0-2 断线自动重连（承接第十二轮，见 closed-loop-plan.md §3）；
+- [ ] 跨设备端到端真机回归：当前 mDNS 隔离 + 手机无协商服务，需网络/配置支持才能跑通「通告→订阅→断开→收尾」；
+- [ ] 协议优化阶段：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕（closed-loop-plan.md §5）。

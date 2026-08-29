@@ -71,13 +71,13 @@ const invoke = async (cmd, args) => {
       if (!negGrant) throw new Error('协商端点不存在（HTTP 404）');
       return negGrant;
     case 'start_relay':
-      return { port: 8777, urls: ['http://192.168.1.50:8777/'], name: 'Stross 本机中继', kind: 'relay', roles: [], transports: [], ip: null };
+      return { port: 8777, urls: ['http://192.168.1.50:8777/'], name: '测试电脑', kind: 'relay', roles: [], transports: [], ip: null };
     // 扫描聚合在 Rust（scan_devices）；前端只消费 ScannedDevice[]（isSelf/探测已含）
     case 'scan_devices':
       if (scanReturnOverride) return scanReturnOverride; // [5] 场景：模拟空列表
       return [
         {
-          name: 'Stross 本机中继', ip: '192.168.1.50', port: 8777, isSelf: true, online: true,
+          name: '测试电脑', ip: '192.168.1.50', port: 8777, isSelf: true, online: true,
           roles: [], media: [], transports: [], endpoints: [], srtPort: 9001, quicPort: 9002,
           streams: streamRunning
             ? [{ streamId: 'sess-test', title: '我的屏幕', watchers: 0, video: true, audio: false }]

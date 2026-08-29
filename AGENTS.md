@@ -38,7 +38,7 @@ crates/
                     （端点构造委托 stross-endpoint factory，只产出参数，不持有状态）
   mdns              mdns-sd 0.21 的本地 fork（workspace crate；跨设备发现修复都在这里）
 apps/
-  stross-cli        CLI：serve/ctrl/devices/adb/push/receive/relay/scan
+  stross-cli        CLI：serve/ctrl/devices/adb/push/receive/relay/endpoint
                     （只做参数解析+展示，流程全部调 stross-kernel 库接口）
   stross-gui        Tauri GUI（桌面 + Android 共用一套 web 前端）
   stross-relay      独立中继 CLI
@@ -84,16 +84,18 @@ npx tsc -p apps/stross-gui/web/tsconfig.json
 - **Android 构建必须用 JDK 21**：系统默认 JDK 25 会让 Kotlin 1.9.25 的
   buildSrc 配置崩溃（`IllegalArgumentException: 25.0.4.1`）。
   ```bash
-  export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+  export JAVA_HOME=<JDK 21 路径>          # 如 Arch 系 /usr/lib/jvm/java-21-openjdk
   PATH="$JAVA_HOME/bin:$PATH" cargo tauri android build --debug -t aarch64
   # 产物: gen/android/app/build/outputs/apk/*/debug/app-*-debug.apk
   ```
-- Rust 目标：`rustup target add aarch64-linux-android`（SDK 在 /opt/android-sdk，
-  NDK /opt/android-ndk，均已配置）。
+- Rust 目标：`rustup target add aarch64-linux-android`。Android SDK/NDK 由
+  `ANDROID_HOME` / NDK 环境变量指定（本机为 /opt/android-sdk、/opt/android-ndk，
+  已配置）。
 
 ## 4. 测试工作流（真机）
 
-手机经 USB 连接（adb），OPPO PLC110 常见（serial `3B6F5ME8GCL4660T`）。
+手机经 USB 连接（adb），本仓验证真机为 OPPO PLC110（serial 以 `adb devices`
+输出为准）。
 
 ```bash
 ./target/debug/stross adb status        # 手机型号/系统/WiFi IP/中继三端口/在线共享
@@ -114,15 +116,16 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
 ```
 
 注意：uiautomator dump 中**滚动容器视口外的 WebView 节点 bounds 全为
-[0,0][0,0]**（如设备卡片里的「共享麦克风到 TA」），tap 按文本会失败——
+[0,0][0,0]**（如设备卡片展开后的端点订阅按钮），tap 按文本会失败——
 用 CDP 的 DOM 坐标直接点。
 
 **端到端链路（已真机验证）**：
-- 手机→PC：PC `stross ctrl create-session` + `share-token` 签发凭证 →
-  手机 GUI「共享麦克风到 TA」粘贴凭证推流 → PC `stross receive` 解码。
-- PC→手机：手机 GUI「接收手机麦克风」签发凭证 → PC
-  `stross push --share-token <token> --stream-id <凭证streamId>
-  --relay ws://<手机IP>:8777/ws/push --audio`。
+- 手机→PC：PC `stross ctrl create-session` + `share-token` 签发凭证（或
+  手机订阅电脑端点经 18779 自动协商免粘贴）→ 手机推流 → PC `stross receive`
+  解码。
+- PC→手机：手机通告「麦克风」端点 → PC 订阅（凭证式 push）→ 手机凭凭证
+  出站推流到 PC，或直接 `stross push --share-token <token> --stream-id
+  <凭证streamId> --relay ws://<手机IP>:8777/ws/push --audio`。
 
 ## 5. 回归脚本（scripts/）
 
@@ -131,6 +134,7 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
 | `quic-stale-stream-test.sh` | QUIC 硬断连（SIGKILL 推流端）→ 流 16s 内回收 |
 | `srt-push-silence-cleanup-test.sh` | SRT 静默看门狗 10s + 观看端自愈 |
 | `share-token-test.sh` | 受控中继凭证推流 |
+| `dual-node-file-test.sh` | 端点框架双节点文件互发（pull/push/pull 逐字节一致） |
 | `test-frontend.mjs` | 前端无头交互（stub `__TAURI__` + 覆写 fetch） |
 | `check.sh` / `check-frontend.sh` | 构建 + 单测门禁 |
 | `dual-device-test.sh` / `weaknet-test.sh` / `latency-stability-test.sh` | 双机/弱网/延迟 |

@@ -1,5 +1,11 @@
 # Stross 压力测试记录（2026-08-26）
 
+> ⚠️ **后续更新**：本文 SRT 绝对延迟 ~240ms 为**调参前**基线（默认
+> `rcv_latency` 120ms × 两级链路）。第十轮（2026-08-29，见
+> [iteration-plan.md](iteration-plan.md) 第十轮）已把 SRT 延迟调至 20ms，
+> 实测 SRT min≈145ms 达标（WS/SRT ≤200ms、QUIC ≤120ms 口径）；弱网
+> 「10% 丢包是 SRT 临界点」的结论仍有效。本页其余为当时的实测记录。
+
 > 输入：`requirements.md` 非功能硬指标（流畅运行：端到端低延迟、稳定帧率、内存有界、弱网不崩，指标按场景可测）+ `iteration-plan.md` 阶段 C（弱网/长跑稳定性）。
 > 配套脚本：`scripts/latency-stability-test.sh`（长跑 + 绝对/相对延迟 + RSS 采样）、`scripts/weaknet-test.sh`（`unshare -rn` + `tc netem` 弱网注入）。
 > 被测二进制：`target/debug/stross` @ commit `ebfc5bd`（含 SRT 跨轨 seq 抖动缓冲丢帧回归修复）。

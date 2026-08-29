@@ -70,7 +70,7 @@ check_frontend() {
   rm -rf "$tmp"
 
   if [ "$RUN_FULL" = "1" ]; then
-    step "前端交互无头测试（jsdom，24 项断言）"
+    step "前端交互无头测试（jsdom）"
     node scripts/test-frontend.mjs > /dev/null 2>&1 \
       && ok "jsdom" || fail "前端无头测试失败（node scripts/test-frontend.mjs 看详情）"
   fi

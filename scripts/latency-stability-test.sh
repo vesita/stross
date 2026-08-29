@@ -20,8 +20,8 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="${CLI:-$REPO/target/debug/stross}"
 OUT="${OUT:-/tmp/stross-latency}"
-PORT=18777
-CTRL=18778
+PORT="${PORT:-18777}"
+CTRL="${CTRL:-18778}"
 SECS="${1:-60}"
 shift 1 || true
 TRANS="${*:-srt quic}"   # 变参：300 srt quic ws 与 300 "srt quic ws" 等价
@@ -37,7 +37,12 @@ MAX_TAIL_JITTER=250       # abs p99 − min ≤ 250ms（传输/缓冲尾延迟�
 # （帧线程管线延迟 +~500ms）都会显著超标。
 declare -A MAX_ABS_MIN=( [srt]=200 [quic]=120 [ws]=200 )
 
-LAN_IP=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+# 推流地址按传输取 /api/info（SRT/QUIC 端口以实际监听为准，被占用回退随机时
+# 也能用）。局域网地址取第一个全局 IPv4，过滤 fake-IP（Clash TUN 198.18/15）
+# 与 link-local，避免挑中 VPN/TUN 地址。
+LAN_IP=$(ip -4 -o addr show scope global 2>/dev/null \
+  | awk '{print $4}' | cut -d/ -f1 \
+  | awk '!/^(198\.18\.|169\.254\.|127\.)/ {print; exit}')
 [ -n "$LAN_IP" ] || LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -n "$LAN_IP" ] || LAN_IP=127.0.0.1
 

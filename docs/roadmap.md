@@ -1,7 +1,8 @@
 # Stross 路线图（下一阶段）
 
-> 汇总自实测反馈与架构讨论，按优先级排序。当前版本（0.1.0）已完成五层架构重构
-> （proto / core / media / app / sender）与 Android 端到端推流验证。
+> 汇总自实测反馈与架构讨论，按优先级排序。已完成的分层架构为
+> proto → transport → types → endpoint → kernel → bridge → 壳层（单一
+> `Kernel` 门面，见 [layering-architecture.md](layering-architecture.md)）。
 > 本路线图中「设备路由 / 流解耦 / WebRTC」的统一抽象见
 > [plugin-architecture.md](plugin-architecture.md)（内核 + 可插拔传输，三阶段实施）。
 
@@ -21,34 +22,15 @@
 
 ## TODO（按优先级）
 
-### P0 设备网格拓扑（进行中）
+### P0 设备网格拓扑（已完成，剩三设备实测）
 
-- [x] relay 级联代理（c6263f4）：`POST /api/proxy {upstream, streamId, info?}`
-      把上游中继的流拉到本地作虚拟流广播，观看端零改动（复用
-      StreamEntry/forward/handle_watch）；`GET /api/proxies` 列出；
-      上游断开/失败自动清理；同名冲突 409；修复 handle_watch 悬挂 bug
-- [x] 观看端直连失败自动降级（7cc5e41）：`start_receive`/`start_receive_raw`
-      直连锚点失败时，自动经本机中继 `start_proxy` 建代理再观看
-      （跨网段/防火墙兜底；进程内调用不经 HTTP；无本机中继时直连失败即报错）
-- [x] 免先连进入网格：打开应用即自动锚定本机（受控中继 + mDNS 广播）并进入
-      「网格」页——本机锚点 / 局域网设备 / 全网串流聚合（含手动添加地址）；
-      点设备卡片只看该设备串流；点流卡片 = 按需建立（直连锚点，失败自动
-      经本机级联）；推流锚定本机，无需先连接任何设备
-- [x] 修复关键帧自愈：`AccessUnitBuilder` 把配置 NAL（SPS/PPS）配给上一帧，
-      后续关键帧变"光杆 IDR"——**任何中途接入的观看端（含级联代理）无法解析
-      分辨率，解码 0 帧**（本地双设备验证发现：直连早接入 77 帧 vs 中途/级联 0 帧）。
-      修复：配置 NAL 归随后的关键帧；回归测试 = `nal.rs` 单测 +
-      `tests/nal_ffmpeg_integration.rs`（真实 ffmpeg repeat_headers 流断言
-      每个关键帧含 SPS/PPS）
-- [x] 修复 CLI 音频链路：`--audio` 此前用 `AudioSourceConfig::default()`
-      （synthetic/mic/system_audio 全 None）→ ffmpeg 无音频轨，推流实际无声。
-      新增 `AudioSourceConfig::synthetic_test()`（440Hz sine），push/ctrl 两处
-      使用；双设备脚本新增音频断言（直连/中途/级联音频块 ≥ 阈值）——
-      D3 反向音频的音频链路首次被真实数据验证（sine→AAC→传输→ADTS 解码）
-- [x] 本地开发自动化（基础设施）：`scripts/check.sh`（本地 CI：fmt/clippy -D
-      warnings/测试/前端类型+同步+jsdom，full|quick|e2e 三档）、
-      `scripts/install-hooks.sh`（pre-commit 快速检查）、
-      `scripts/build.sh cli|relay|gui|android`（参数化构建）
+- [x] 免先连进入网格：打开即自动锚定本机（受控中继 + mDNS 广播），全网设备/串流
+      聚合（含手动添加地址），点流即看（直连锚点，失败自动经本机中继级联代理兜底）
+- [x] relay 级联代理：`POST /api/proxy` 拉上游流作虚拟流广播，观看端零改动
+- [x] 关键帧自愈（配置 NAL 归随后的关键帧，中途接入可解码）+ CLI 音频链路修复
+      （合成测试音 440Hz）——实现与回归细节见 iteration-plan.md 对应轮次
+- [x] 本地开发自动化：`scripts/check.sh`（full|quick|e2e）/ `install-hooks.sh` /
+      `scripts/build.sh cli|relay|gui|android`
 - [ ] 验证：三设备实测「A 推流 → B 直连看；C 跨网段经 B 中继级联看」
       （单机双实例已覆盖；跨网段需真机，另发现跨设备 SRT/QUIC 拨号格式 bug
       已修：`srt://<ip>:<srtPort>` 不能带 http 端口）
@@ -65,9 +47,8 @@
 > Android「点流即看」已通（MediaCodec 解码 + AudioTrack 播放 + Rust 侧
 > YUV→RGBA/事件规整，见 iteration-plan B7）。
 
-- [x] Android GUI 原生接收：网格页点流即看（MediaCodec 解码 + AudioTrack 播放），
-      播放链路 Rust 化（B7）：解码与事件处理不再受 Java 逐像素转换/JSON 数组
-      拖累，JNI 直传 Rust 完成 YUV→RGBA 缩放与 base64 事件
+- [x] Android GUI 原生接收：点流即看（MediaCodec 解码 + AudioTrack 播放），
+      播放链路 Rust 化（B7）：JNI 直传 Rust 完成 YUV→RGBA 缩放与 base64 事件
 - [ ] 播放器可配置：选流、画质、缓冲策略、断线重连
 - [ ] 为独立接收 App（stross-viewer）打基础
 
@@ -75,23 +56,13 @@
 
 - [x] 发送/接收角色解耦（随 P0 免先连落地）：推流端与观看端各自独立启动、
       通过发现机制互相找到，不再绑定在「连接 → 推/看」流程里
-- [x] 跨设备推流（反向外设：手机麦克风 → 电脑）——**凭证式协商已落地
-      （B1）+ GUI 闭环（B2）+ 自动协商免粘贴（B2.5）**：接收端内核建会话
-      并签发一次性 `ShareToken`（`ctrl share-token`；GUI 本机卡片「接收
-      手机麦克风」→ `issue_share_token` 签发展示 PIN/凭证 + 轮询自动接收），
-      推流端 `push --share-token` 或 GUI「共享麦克风到 TA」出示即接入对方
-      受控中继；**B2.5 免粘贴**：手机对设备点共享 → `POST
-      /api/negotiator/request` 自动申请凭证（设备身份 + 首次人工确认 +
-      「记住此设备」信任记忆，免确认自动签发；手动粘贴兜底）；来源感知门控
-      （回环=本机预授权，非回环=必须凭证）杜绝远程冒用预授权；凭证推流跳过
-      `ensure_session` 会话改写（stream_id 必须为接收端签发）；Android 纯
-      音频采集走 `micOnly`（跳过屏幕授权，只 AudioRecord→AAC）。
-      真机（OPPO PLC110 ↔ 本机）：手机「共享麦克风到 TA」→ 电脑弹窗允许 →
-      自动 QUIC 推流（`推流开始: sess-1`）→ 电脑 GUI 自动接收（watchers:1），
-      `trusted_devices.json` 持久化生效（二次共享免确认）。
-      双 PC 端到端验证脚本 `scripts/share-token-test.sh` 全绿。
-      剩余（B3/B4 真机）：电脑扬声器播放手机声音的真机闭环、
-      反向音频 ≤200ms 低延迟路径实测
+- [x] 跨设备推流（反向外设：手机麦克风 → 电脑）：凭证式协商（B1）+ GUI 闭环
+      （B2）+ 自动协商免粘贴（B2.5），真机闭环（OPPO PLC110 ↔ 本机）：
+      接收端建会话签发一次性 `ShareToken`（`ctrl share-token`；GUI 通告「麦克风」
+      端点 → 对端订阅）；推流端 `push --share-token` 或订阅端点经 18779 自动申请
+      凭证（首次人工确认 + 信任记忆，免确认自动签发）接入对方受控中继；来源感知
+      门控（非回环必须凭证）防远程冒用；Android 纯音频走 `micOnly`。
+      回归 = `scripts/share-token-test.sh`；细节见 iteration-plan.md 阶段 B。
 - [x] 防火墙自动放行（权限自动化，B2.5）：SRT/QUIC 固定端口 33462/33464 +
       `firewall_status` 自检 + `firewall_allow` polkit 一键放行（精确端口 ×
       局域网子网，不再手敲 sudo、不放行整个网段）
@@ -117,11 +88,10 @@
 
 ## 已完成的架构基础（2026-08/09）
 
-- [x] 分层模块化：`stross-proto`（协议）/ `stross-transport`（传输）/ `stross-kernel`（内核）/
-      `stross-media`（能力）/ `stross-bridge`（平台适应）/ `stross-gui`（UI）
+- [x] 分层模块化：`stross-proto`（协议）/ `stross-transport`（传输）/ `stross-types`（应用契约）/
+      `stross-endpoint`（端点）/ `stross-kernel`（内核）/ `stross-bridge`（平台适应）/ `stross-gui`（UI）
 - [x] `CaptureBackend` trait：桌面 ffmpeg 与 Android 原生采集统一抽象，
       命令面两边一致（`start_stream` / `capture_status`）
 - [x] Android 端到端验证：屏幕+麦克风推流 → 电脑观看（166 视频帧 + 260 音频帧/5s）
 - [x] 修复：前端 `VideoSource` serde 契约（小写 variant）—— 统一命令面后
       桌面与 Android 共用一个 `buildConfig()`
-- [x] relay 级联代理（c6263f4）：转发链/树拓扑，详见「P0 设备网格拓扑」

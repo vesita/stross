@@ -15,9 +15,9 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="${CLI:-$REPO/target/debug/stross}"
 OUT="${OUT:-/tmp/stross-quic-stale}"
-PORT=18777
-CTRL=18778
-QUIC=33464
+PORT="${PORT:-18777}"
+CTRL="${CTRL:-18778}"
+QUIC="${QUIC:-33464}"
 IDLE_GRACE=25   # 断言窗口（秒）：idle 15s + poll 间隔 + 余量
 
 [ -x "$CLI" ] || cargo build -p stross-cli
@@ -31,7 +31,7 @@ cleanup() {
 trap cleanup EXIT
 
 log "设备 A：serve（受控中继 + QUIC $QUIC）"
-"$CLI" serve --port "$PORT" --ctrl-port "$CTRL" > "$OUT/serve.log" 2>&1 &
+"$CLI" serve --port "$PORT" --ctrl-port "$CTRL" --quic-port "$QUIC" > "$OUT/serve.log" 2>&1 &
 A_PID=$!
 sleep 1.2
 

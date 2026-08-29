@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stross 弱网稳定性测试（需求硬指标：弱网不崩）。
 #
-# 本机 sudo 需要密码，主机 lo 上不能直接 `tc qdisc`；改用 `unshare -rn`
+# 避免 sudo / 主机级 tc 权限（不同机器 sudo 策略不一）：用 `unshare -rn`
 # （用户 + 网络命名空间）在命名空间内的 lo 上注入 netem 规则，serve /
 # push / receive 全程跑在同一命名空间内、按 127.0.0.1 走回环，数据面
 # 流量因此真实经过 netem（丢包 / 延迟注入）。命名空间销毁即自动摘除规则。

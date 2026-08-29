@@ -7,7 +7,7 @@
 > 控制面鉴权（`AuthPolicy`/`PinAuthPolicy`）、`transport-srt`（rsrt 纯 Rust，
 > Adaptive）、`transport-quic`（quinn + rustls-ring，control/media 多路复用）——
 > 四种传输共用同一 `handle_push`/`handle_watch`（抽象价值四重证明）
-> · 决策推迟：WASM 策略插件、跨设备控制闭环、Sink 其余（见 §5.5 决策记录）
+> · 决策推迟：WASM 策略插件、跨设备控制闭环、Sink 其余（见 §5.3 决策记录）
 > 关联：[architecture.md](architecture.md)（分层架构）· [protocol.md](protocol.md)（线上协议）· [roadmap.md](roadmap.md)（P0 设备路由 / P2 流解耦 / WebRTC 低延迟）
 
 ## 1. 背景与目标
@@ -210,40 +210,16 @@ impl DataSession {
 
 ## 5. 协议演进（stross-proto v2）
 
-### 5.1 帧头 v2（24 字节）
+**线格式（24 字节 v2 帧头 + JSON 控制消息 + 协商握手）的字段级定义见
+[protocol.md](protocol.md)，此处只记录演进决策，不重复线格式。**
 
-```text
-+--------+---------+-------+-------+---------+---------+---------+----------+----------+----------+----------+
-| magic  | version | track | codec | flags   | pts_ms  | seq     | frag_idx | frag_cnt | len      | reserved |
-| "STR2" |  u8     |  u8   |  u8   |  u8     | u32 LE  | u32 LE  | u8       | u8       | u32 LE   | u8[2]    |
-+--------+---------+-------+-------+---------+---------+---------+----------+----------+----------+----------+
-| 4      | 1       | 1     | 1     | 1       | 4       | 4       | 1        | 1        | 4        | 2        |
-```
+- 向后兼容策略：接收端与服务端同源升级、整体替换；v2 帧头在 WS 上取
+  `seq=0, frag_cnt=0` 时语义等价 v1。不做线上双版本帧头转换（成本高、收益低）。
+- `ControlMessage` 扩展（能力协商 `Capabilities/Offer/Answer`、路由 `Route`、
+  会话事件 `SessionEvent`）与 `RoutePath` serde 表示（`{ kind: "direct"|"viaRelay"|"mesh" }`）
+  已落入 stross-proto 与 protocol.md。
 
-- `seq`：会话内单调递增帧序号——有损传输乱序检测与丢包统计；无损传输可忽略；
-- `frag_idx / frag_cnt`：分片位置/总数，`frag_cnt == 0` 表示未分片（WS 上的语义与 v1 完全一致）；
-- `reserved`：留作 flags 扩展（如未来 SVC 层标识）。
-
-**向后兼容策略**：接收端与服务端同源升级，整体替换；
-v2 帧头在 WS 上取 `seq=0, frag_cnt=0` 时语义等价 v1，旧版本接收端升级后即兼容。
-不做线上双版本帧头转换（成本高、收益低）。
-
-### 5.2 控制消息扩展
-
-```rust
-pub enum ControlMessage {
-    // ... 现有：Hello / Bye / Welcome / Ready / Error / Info
-    Capabilities { caps: Vec<CapabilityDescriptor> },       // 能力上报（握手后）
-    Offer { session_id: String, transports: Vec<TransportOffer>, codecs: Vec<CodecId>, profile: ReliabilityProfile },
-    Answer { session_id: String, transport: TransportOffer, ok: bool, reason: Option<String> },
-    Route { session_id: String, path: RoutePath },          // 控制传输方向
-    SessionEvent { session_id: String, event: SessionEventKind }, // started / ended / lost
-}
-```
-
-`RoutePath` 的 serde 表示（camelCase，与现有约定一致）：`{ kind: "direct"|"viaRelay"|"mesh", nodes: [...] }`。
-
-### 5.3 序列化格式选型（决策记录）
+### 5.1 序列化格式选型（决策记录）
 
 控制消息目前用 JSON（`serde_json`），媒体帧用定长二进制头。评估过 protobuf3，结论：
 
@@ -255,7 +231,7 @@ pub enum ControlMessage {
 
 **决策**：
 
-1. 媒体路径保持定长二进制头（§5.1），不引入 protobuf；
+1. 媒体路径保持定长二进制头（见 protocol.md），不引入 protobuf；
 2. 控制路径保持 JSON——可读性（日志可直接排查）> 体积；`ControlMessage` 已是 serde
    枚举，若未来需要二进制化，换 `postcard`（或 `rmp-serde`）只改一行
    （`serde_json::to_string` → `postcard::to_alloc_vec`），零 codegen；
@@ -263,7 +239,7 @@ pub enum ControlMessage {
    那是**契约管理**决策（`.proto` 机器可读、跨语言前后兼容），不是效率决策；
 4. 阶段一不引入任何序列化框架改动。
 
-### 5.4 前端 TypeScript（决策记录，2026-08 更新）
+### 5.2 前端 TypeScript（决策记录，2026-08 更新）
 
 浏览器观看端（`stross-core/assets/viewer/`）已随 D1 移除；剩余一个前端
 `apps/stross-gui/web/`（Tauri 壳），已从手写 JS 迁移为 **TypeScript 真源**
@@ -277,7 +253,7 @@ pub enum ControlMessage {
 - **约束边界**：emitted JS 必须保持纯 JS 语法（不得出现 `!` 等 TS 专属运行时语法——
   使用 JSDoc 类型断言 `/** @type {T} */ (expr)` 或显式 `as` 表达式规避）；
 
-### 5.5 阶段 2 决策记录（2026-08 更新）
+### 5.3 阶段 2 决策记录（2026-08 更新）
 
 阶段 2 的核心闭环（crate 拆分、Sink、控制面鉴权）已落地，以下按决策推迟：
 
@@ -331,62 +307,13 @@ pub trait Sink: Send + Sync {
 - 鉴权策略做成内核接口（`AuthPolicy` trait），阶段 1 内置 PIN 实现，
   远期可换成 Extism/WASM 策略插件而不动内核。
 
-## 8. 迁移路线（三阶段）
+## 8. 迁移路线（三阶段，已全部落地）
 
-### 阶段 0 —— 接口化（不新增 crate，最小侵入，行为不变）
-
-| 改动 | 文件 |
-|---|---|
-| v2 帧头（seq/frag/reserved）+ 协商/路由控制消息 | `stross-proto/src/frame.rs`、`message.rs` |
-| `Transport` trait + `transport-ws` 实现（把现有 `/ws/push`、`/ws/watch` handler 包成 Transport；axum 路由保留 HTTP 部分） | `stross-kernel/src/relay/` |
-| relay 数据面转发改为消费 `Transport` trait（单一 ws 实现，行为不变） | `stross-kernel/src/relay/` |
-| `CaptureBackend` 增加 `descriptor()` | `stross-endpoint/src/capture.rs`、`mobile.rs` |
-| Kernel 骨架：`DeviceGraph` + `SessionManager` + `Router`（先支持 Direct / ViaRelay 两种 path）+ `route()` 命令 | `stross-kernel/src/kernel/` |
-| Tauri 命令面加 `route_session` / 内核事件（`KernelEvent` 订阅替代/补充 `stream_status` 轮询） | `apps/stross-gui/src-tauri/src/lib.rs` |
-| 测试：`transport-memory` 假实现 + Transport 层单测 | `stross-kernel/tests/` |
-
-**验收**：现有 150 个测试全绿；桌面端到端推流→接收行为与体验不变；帧头 v2 在 WS 上等价 v1。
-
-### 阶段 1 —— 第二个传输验证抽象（WebRTC）
-
-- `transport-webrtc`（str0m 或 webrtc-rs）：接收端 WebRTC 低延迟路径（原生播放器；
-  浏览器观看端已随 D1 移除，不再与 MSE 并列）；
-- 能力协商落地：mDNS TXT 能力广播 + `Offer/Answer`；接收端按能力自动选传输；
-- 同一套会话逻辑分别跑 ws 与 webrtc 的集成测试（**抽象价值的证明**）；
-- `InputSink` 原型（可选，验证 Lossless 会话上的非媒体能力）。
-
-**验收**：桌面推流 → 手机原生 WebRTC 接收延迟 <300ms；WS 路径回归无损；
-A/B 两条传输共享同一内核测试套件。
-
-### 阶段 2 —— 按需拆分与能力扩展（核心闭环已完成）
-
-**已落地**：
-
-- ✅ 拆 `stross-transport` crate：`Transport`/`DataSession` 抽象 + ws/webrtc/srt/quic/memory
-  实现 + `net` 迁入独立 crate；`stross-kernel` re-export 保持路径兼容
-  （`stross_kernel::transport` / `stross_kernel::net`）；feature 传递（`discovery`
-  同时启用传输层 mDNS 候选解析）；
-- ✅ Sink 扩展第一步：`Sink` trait + `RecordingSink`（录制，原始 ES 输出，
-  无外部依赖，可测）；
-- ✅ 控制面鉴权：`AuthPolicy` trait + 内置 `PinAuthPolicy`（会话级访问码，
-  控制操作 route/teardown 前强制校验），Tauri 命令 `authorize_session`；
-- ✅ `transport-srt`：rsrt 纯 Rust（TSBPD/ARQ/HaiCrypt，零 C 依赖），补上
-  `Adaptive` 契约；线格式 1B 类型前缀 + v2 帧头 `frag_*` 分片/重组（SRT 单
-  消息 ≤ MSS−44）；relay 开独立 UDP 端口（`RelayHandle::srt_port`），
-  `RelayClient` 按 `srt://` scheme 选传输；集成测试证明同一 `handle_push`
-  驱动 ws/srt（SRT 分片推流 → relay 重组 → WS 接收端逐字节一致）；
-- ✅ `transport-quic`：quinn 0.11 + rustls-ring（接受 ring 构建依赖）；
-  control/media 双 stream 多路复用（stream 即类型）+ 长度前缀分帧 + 空消息
-  就绪信号（QUIC 流 lazy）；自签名证书 + 客户端接受任意证书（局域网可信
-  模型）；relay 开独立 UDP 端口（`RelayHandle::quic_port`），`RelayClient`
-  按 `quic://` scheme 选传输；集成测试证明同一 `handle_push` 驱动 ws/quic；
-- ✅ 测试：54 全绿（传输拆分回归、Sink、Kernel 鉴权、SRT/QUIC 单测 + 集成）。
-
-**决策推迟**（详见 §5.5 决策记录）：
-
-- ⏸ 控制面 WASM 策略插件（Extism，远期可选；`AuthPolicy` 接口已留好）；
-- ⏸ 跨设备控制闭环（roadmap P0 级独立功能，另立阶段）；
-- ⏸ Sink 其余：原生播放器（Tauri 侧）、键鼠注入/剪贴板（Deskflow 方向，平台适配重）。
+设计曾按三阶段推进（阶段 0 接口化 → 阶段 1 WebRTC 验证传输抽象 → 阶段 2 拆分与
+能力扩展），**均已落地**：`stross-transport` crate 拆分、四传输
+（ws/webrtc/srt/quic/memory）共用同一 `handle_push`/`handle_watch`、
+`AuthPolicy`/`PinAuthPolicy` 控制面鉴权、`Sink` + `RecordingSink`。
+各传输落地状态见 §4.4，决策记录见 §5.3，本页不再展开历史实施明细。
 
 ## 9. 明确不做的事（YAGNI 边界）
 

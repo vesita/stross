@@ -72,8 +72,9 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk ANDROID_HOME=/opt/android-sdk \
 
 ## 5. 真机验证锚点
 
-- 手机 GUI 打开即自动锚定 + mDNS 扫描（main.ts/grid.ts）；点设备卡片 → 点流卡片 → 观看。
-- 屏显统计（watch.ts 轮询 receive_status）：「收到 N 帧 · 解码 N 帧 · 音频 N 块 · 已绘制 N 帧」。
+- 手机 GUI 打开即自动锚定 + mDNS 扫描（`web/app/discovery.ts` 锚定/设备图 +
+  `endpoints.ts` 目录）；点设备卡片 → 点可订阅端点 → 订阅观看。
+- 屏显统计（`web/app/subscribe.ts` 轮询 receive_status）：「收到 N 帧 · 解码 N 帧 · 音频 N 块 · 已绘制 N 帧」。
 - Rust tracing 打到 logcat：`adb logcat -d | grep stross`。
 - 反向验证：手机锚点 /api/info、/api/peers 从 PC 可 curl（手机中继绑定 0.0.0.0）。
 - CDP 驱动（无头自动化）：debug 构建的 WebView 暴露 `@webview_devtools_remote_<pid>`

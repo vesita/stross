@@ -14,9 +14,9 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="${CLI:-$REPO/target/debug/stross}"
 OUT="${OUT:-/tmp/stross-dual}"
-PORT=18777
-CTRL=18778
-RELAY_C=19003
+PORT="${PORT:-18777}"
+CTRL="${CTRL:-18778}"
+RELAY_C="${RELAY_C:-19003}"
 SECS=24          # 推流时长（覆盖直连+中途+级联三段接收窗口）
 RECV_SECS=3      # 每次接收时长
 MIN_FRAMES=15    # 每段视频解码帧数阈值

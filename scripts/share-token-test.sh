@@ -17,16 +17,20 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="${CLI:-$REPO/target/debug/stross}"
 OUT="${OUT:-/tmp/stross-token}"
-PORT=18777
-CTRL=18778
+PORT="${PORT:-18777}"
+CTRL="${CTRL:-18778}"
 SECS=14          # B 推流时长
 RECV_SECS=6      # A 接收时长（推流开始 1s 后接入）
 MIN_FRAMES=15
 MIN_AUDIO=40
 
 # 推流端经"局域网 IP"连接（非回环来源）——模拟另一台设备：
-# 受控中继对非回环来源强制凭证接入（预授权只服务本机回环流程）
-LAN_IP=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+# 受控中继对非回环来源强制凭证接入（预授权只服务本机回环流程）。
+# 取第一个全局 IPv4，过滤 fake-IP（Clash TUN 198.18/15）与 link-local，
+# 避免挑中 VPN/TUN 地址。
+LAN_IP=$(ip -4 -o addr show scope global 2>/dev/null \
+  | awk '{print $4}' | cut -d/ -f1 \
+  | awk '!/^(198\.18\.|169\.254\.|127\.)/ {print; exit}')
 [ -n "$LAN_IP" ] || LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -n "$LAN_IP" ] || LAN_IP=127.0.0.1
 PUSH_BASE="ws://$LAN_IP:$PORT/ws/push"

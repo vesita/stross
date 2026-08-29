@@ -2,82 +2,50 @@
 
 ## 0. 分层架构
 
-六层模块化设计，依赖方向自底向上、单向无环：
-
-```text
-┌──────────────────────────────────────────────────────────────────┐
-│ apps/stross-cli / stross-gui  ⑥ UI 壳层：参数解析 + 展示 + 平台适配      │
-├──────────────────────────────────────────────────────────────────┤
-│ crates/stross-bridge   ⑤ 平台适应桥接层：paths / hostname / 平台设备枚举 │
-├──────────────────────────────────────────────────────────────────┤
-│ crates/stross-kernel   ★ 内核：全部平台无关服务（单一 Kernel 门面）      │
-│   数据面 relay{srv,client} / sender / watch / jitter / discovery       │
-│   信令 control / negotiator / subscriber / file_xfer / bootstrap       │
-│   devices(扫描) / engine(推流) / receiver(接收) / kernel(会话·路由·端点)  │
-├───────────────────────────────┬──────────────────────────────────┤
-│ crates/stross-endpoint        │ （stross-transport / stross-proto  │
-│ ④ 端点层：数据源/宿插件区（端点 │   在其下，见 §0 依赖表）            │
-│   契约 + screen/audio/file +  │                                  │
-│   采集/播放/管线/设备枚举）     │                                  │
-├───────────────────────────────┴──────────────────────────────────┤
-│ crates/stross-transport ①½ 传输插件层：Transport/DataSession 抽象   │
-│   ws（无损）/ webrtc（有损）/ srt（自适应）/ quic（无损多路复用）    │
-├──────────────────────────────────────────────────────────────────┤
-│ crates/stross-proto   ① 协议模块：帧头 + 控制消息（serde）                │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-| 层 | crate | 职责 | 依赖 |
-|---|---|---|---|
-| ① 协议 | `stross-proto` | 线上契约：24 字节 v2 帧头（含 seq/分片）+ JSON 控制消息（含能力协商与路由）+ 协商握手/L2 目录 | 无内部依赖 |
-| ①½ 传输 | `stross-transport` | 可插拔传输层：`Transport`/`DataSession` 抽象 + ws/webrtc/srt/quic/memory 实现 + RelayUrl + 本机 IP | proto |
-| ④ 端点 | `stross-endpoint` | **数据源/宿插件区**：Endpoint 契约（端点化 + 数据还原）+ screen/（linux Wayland portal+pipewire / X11）、audio/、file/ + 采集播放机制（CaptureBackend/FfmpegBackend、管线 StreamConfig、PlaybackSink、H.264/AAC 切帧 codec/、设备枚举） | proto + types |
-| ② 内核 | `stross-kernel` | **纯管理调度**：中继 server+client、发现、控制面、协商、订阅、文件传输、引导、端点注册表/会话/路由/鉴权、推流/接收编排；单一门面 `Kernel` | proto + transport + endpoint + types |
-| ⑤ 桥接 | `stross-bridge` | 平台适应：数据目录解析 / 主机名 / 平台判定（端点构造委托 endpoint factory，只产出参数，注入内核） | kernel + endpoint |
-| ⑥ UI | `stross-cli` / `stross-gui` / `stross-relay` | 参数解析 + 展示 + 平台适配（adb/ufw/采集播放后端选择） | kernel + bridge + endpoint |
-
-> 协议为何保持独立小 crate：能力层与内核**都**要使用 `Frame`/`ControlMessage`，
-> 独立成 crate 才能让 media 只依赖协议、而不反向依赖内核（否则 media 会拉进 axum 等中继依赖）。
+分层（自底向上）：`stross-proto` → `stross-transport` → `stross-endpoint` →
+`stross-types` → `stross-kernel` → `stross-bridge` → 壳层（cli / gui / relay）。
+**分层判据、各层职责/依赖表与红线见 [layering-architecture.md](layering-architecture.md)**
+（本页不再重复）；本章节只讲本页特有的交互模型。
 
 ### 交互模型
 
-桌面/Android 应用采用「**设备 × 共享流 组合管理**」（P0 免先连 + 界面改版落地）：
-打开即自动锚定本机（受控中继 + mDNS 广播）；**设备是实体，共享流是设备之间
-的连接实例**。界面为双栏：左「设备」（本机 + 局域网设备卡片，点设备展开 →
-发起共享与该设备在线共享），右「共享流」（本机全部活动共享统一管理：
+桌面/Android 应用采用「**本机通告 + 对端订阅**」两极模型（第八轮 UI 收敛）：
+打开即自动锚定本机（受控中继 + mDNS 广播）；**任何可共享能力都是端点**，
+统一走「通告 / 订阅」，不再有独立于端点的广播/凭证/共享流面板：
 
 ```text
-设备（实体）                         共享流（连接实例，统一管理）
-┌─────────────────────┐   ┌──────────────────────────────┐
-│ 本机（我）            │   │ ↑ 屏幕 → 局域网广播    [停止] │
-│  · 共享屏幕/麦克风(广播)│   │ ↑ 麦克风 → 电脑B(凭证)[停止] │
-│  · 接收手机麦克风(凭证)│   │ ↓ 麦克风 ← 手机A      [停止] │
-│ 电脑B / 手机A …       │   └──────────────────────────────┘
-│  · 共享麦克风到 TA     │
-│  · TA 的在线共享(点即看)│
-└─────────────────────┘
+本机（能力提供方）                    对端节点（被发现设备）
+┌───────────────────────┐   ┌──────────────────────────────┐
+│ 设备树（local_catalog） │   │ 设备卡片（名称 + 端点目录）       │
+│  · 屏幕 / 麦克风 / 文件 …│   │  · 展开拉目录（endpoint_ls）    │
+│  · 通告（可见性/delivery）│   │  · 可订阅端点 → 订阅握手        │
+│  · 已通告徽标 / 取消通告   │   │  · 端点自驱动推流（点即收）      │
+└───────────────────────┘   └──────────────────────────────┘
+右栏「接收」面板：订阅流播放 / 停止（接收端主动权）
 ```
 
 - 「锚定本机」：`start_relay` 启动常驻受控中继（接收与推流共用）+ mDNS 广播，
   内核签发会话 id（D4），中继只接受内核授权会话（F2.2）。
-- 「共享（出站）」：广播（本机 → 局域网任意接收方，锚定本机中继自动选传输：
-  视频 SRT>QUIC>WS、纯音频 QUIC>WS）与定向（凭证式 B2：出示接收端签发的
-  `ShareToken` 直推对方受控中继，`ensure_session` 对凭证推流跳过会话改写）。
-- 「接收（入站）」：点设备在线共享条目即收（直连锚点，失败自动经本机中继
-  级联代理），原生播放（`PlaybackSink`，D6），**无浏览器观看端**（D1）。
-- 反向（D3 核心验收）：电脑「接收手机麦克风」→ `issue_share_token` 建会话
-  签凭证 → 手机出示凭证推流 → 电脑自动原生接收播放（B2/B3）。
+- 「通告（出站）」：本机端点（屏幕/麦克风/文件…）通告为可订阅——选可见性
+  （Public 免确认 / Confirm 首次人工确认可记住 / Private 白名单）与交付方向
+  （pull 连公开方中继 watch / push 公开方凭订阅方凭证出站推流），进入本机与
+  对端目录；端点自维护「可挂载性」（load 探测），不可用灰显 + 原因。
+- 「订阅（入站）」：点对端端点条目 → 协商端点 `POST /api/negotiator/request`
+  订阅握手 → 端点 `share` 自动启动推流 → 本机 `start_receive` 原生播放
+  （`PlaybackSink`，D6），**无浏览器观看端**（D1）。
+- 反向（D3 核心验收）：电脑「接收手机麦克风」= 订阅对端麦克风端点；push 方向
+  由公开方凭订阅方自签凭证出站推流 → 电脑自动原生接收播放（B2/B3）。
 - **凭证自动协商（权限自动化，B2.5）**：同网设备首次**不需要复制粘贴**
-  凭证——手机对设备点「共享麦克风到 TA」→ `POST /api/negotiator/request`
+  凭证——手机对设备端点发起订阅 → `POST /api/negotiator/request`
   向对方申请凭证（携带本机 `device_id`/`device_name`）→ 电脑 GUI 首次
   **人工确认**（可勾选“记住此设备”）→ 签发一次性短时凭证 → 手机自动
   推流、电脑自动接收；已信任设备再申请**免确认自动签发**；手动粘贴
   保留为兜底（对方版本不支持协商时自动回退）。
 
   ```text
-  手机（申请方）                       电脑（接收方，凭证柜台）
+  手机（订阅方）                         电脑（接收方，凭证柜台）
   ┌──────────────────────┐   POST    ┌──────────────────────────┐
-  │ 共享麦克风到 TA ───────┼─────────▶│ /api/negotiator/request  │
+  │ 订阅「麦克风」端点 ─────┼─────────▶│ /api/negotiator/request  │
   │ (device_id+name+media)│  Json     │  · 信任清单命中 → 自动签发│
   │                      │  ◀────────┼  · 未知设备 → GUI 人工确认│
   │ 自动推流(QUIC) ───────▶│ token    │  · 签发 ShareToken(短时)  │
@@ -114,26 +82,11 @@
 
 ## 2. 协议（crates/stross-proto）
 
-### 媒体帧（二进制 WebSocket 消息）
-
-```
-+--------+---------+-------+-------+---------+---------+---------+----------+----------+----------+----------+
-| magic  | version | track | codec | flags   | pts_ms  | seq     | frag_idx | frag_cnt | len      | reserved |
-| "STR2" |  u8     |  u8   |  u8   |  u8     | u32 LE  | u32 LE  | u8       | u8       | u32 LE   | u8[2]    |
-+--------+---------+-------+-------+---------+---------+---------+----------+----------+----------+----------+
-```
-
-- `track`：0 视频 / 1 音频
-- `codec`：1 H.264(Annex-B) / 2 AAC(ADTS)
-- `flags`：`0x01` 关键帧 / `0x02` 配置数据 / `0x04` 开始 / `0x08` 结束
-- `pts_ms`：相对会话起点的演示时间戳
-- `seq`：会话内帧序号（有损传输乱序检测；无损传输取 0）
-- `frag_idx` / `frag_cnt`：分片位置/总数（`0` = 未分片）
-
-### 控制消息（JSON 文本帧）
-
-`Hello`（推流端声明）→ `Welcome`（中继确认）；接收端连上即收 `Ready`；
-`Bye` 结束；`Error` 携带错误。
+线上协议 = 24 字节 v2 帧头（media 帧：magic `"STR2"` / track / codec / flags /
+pts_ms / seq / frag_* / len）+ JSON 控制消息（`Hello`→`Welcome`、`Ready`、`Bye`、
+`Error`，能力协商 `capabilities/offer/answer`、路由 `route`）+ 协商握手与 L2
+目录（`message/negotiator.rs`）。**字段级定义与 HTTP/WS 端点见
+[protocol.md](protocol.md)，此处不重复。**
 
 ## 3. 端点层/系统适配模块（crates/stross-endpoint）
 
@@ -246,15 +199,17 @@ AudioTrack 系统 API 薄壳**，`feedVideo` 入队立即返回 + 独立解码�
 | 方法 | 说明 |
 |---|---|
 | `start_relay_fixed(port, srt, quic, hostname)` | 以固定端口启动常驻受控中继（含 SRT/QUIC；防火墙放行前提；hostname 由桥接层注入） |
-| `scan_relays()` | mDNS 扫描局域网中继 |
-| `issue_share_token_for(title, media, ttl)` | 建会话 + 签发一次性凭证（手动路径与协商端点共用） |
+| `scan_relays()` / `devices::scan_lan()` | mDNS 扫描局域网中继 / 设备扫描聚合（发现 + 探测 + 手动地址去重；GUI `scan_devices` 命令与 CLI `devices` 共用） |
 | `create_session / route / authorize / teardown` | 会话生命周期（受控中继只接受内核会话 id） |
-| `start_stream(cfg, relay_url)` | 组合引擎：外部中继 / 本机中继 / 内嵌中继 |
-| `stop_stream()` / `stream_status()` | 推流生命周期 |
+| `issue_share_token / verify_share_token` | 建会话 + 签发/校验一次性凭证（手动路径与协商端点共用） |
+| `publish_endpoint / unpublish_endpoint / publish_file_endpoint` | 端点通告（可见性/delivery；文件 = 动态端点） |
+| `endpoint_catalog / published_endpoints / local_catalog` | 目录（本机已通告 / 对端可订阅端点清单） |
+| `on_endpoint_subscribed(app, id, ctx)` | 订阅达成 → 端点自驱动 `share`（内核不分派） |
+| `start_stream(cfg, relay_url)` / `stop_stream()` / `stream_status()` | 推流生命周期 |
+| `start_receive / start_receive_raw / stop_receive / receive_status` | 接收编排（原生播放 / 原始帧） |
 | `capture_status()` | 采集真实状态（Android 异步回报） |
 | `app_info()` / `list_devices()` | 信息与设备 |
 | `relay_ports()` | 本机中继实际监听端口（WS/SRT/QUIC；防火墙放行按实际端口） |
-| `publish_endpoint / endpoint_catalog / …` | 端点框架（节点 → 设备 → 端点） |
 | `subscribe()` | 内核事件广播（会话/路由/数据面流生命周期） |
 
 UI 层（桌面 / Android）只把 `invoke` 命令转发到这里，因此命令面两边完全一致：
@@ -280,8 +235,8 @@ UI 层（桌面 / Android）只把 `invoke` 命令转发到这里，因此命令
 | WebSocket 优先，SRT/QUIC 按场景 | 实现简单、穿透局域网无压力；低延迟场景走 UDP 传输（视频 SRT、纯音频 QUIC） |
 | 每帧一个 WS 消息 | 接收端按帧统计、按帧对齐，无需解析容器 |
 | 内核独立于能力与传输 | 会话/路由/鉴权/凭证在 kernel，采集/播放能力经 trait 注入，传输可插拔（F2.2 受控中继只接受内核授权会话） |
-| 协议独立 crate | media 与 core 都要用 `Frame`，独立成 crate 让适配层不反向依赖共享层 |
-| 传输层独立 crate（阶段 2） | 传输实现（str0m/未来 quic/srt）的重依赖不进入 kernel/media 的依赖树；kernel re-export 保持路径兼容 |
+| 协议独立 crate | endpoint 与 kernel 都要用 `Frame`，独立成 crate 让适配层不反向依赖共享层 |
+| 传输层独立 crate（阶段 2） | 传输实现（str0m/未来 quic/srt）的重依赖不进入 kernel/endpoint 的依赖树；kernel re-export 保持路径兼容 |
 | `CaptureBackend` trait | 桌面 ffmpeg 与 Android 原生采集统一抽象，UI 命令面两边一致 |
 | `Sink` trait（阶段 2） | 录制/渲染/注入统一为接收侧能力，与 Source 共用能力描述与协商 |
 | 凭证协商端点 = 凭证柜台（B2.5） | LAN 端点只签发一次性短时凭证，不暴露控制操作；首次人工确认 + 信任记忆（持久化 identity/trusted_devices.json）；手动粘贴兜底 |

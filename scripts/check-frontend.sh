@@ -3,7 +3,7 @@
 #
 # 推流端 app.js 是构建产物（提交进仓库，被 Tauri index.html 直接加载）；
 # cargo 构建零 node 依赖，因此产物必须与 app.ts 保持同步提交。
-# （D1 已移除浏览器观看端，crates/stross-core/assets/viewer 不再存在。）
+# （D1 已移除浏览器观看端，无独立 viewer 前端。）
 #
 # 用法（提交前 / CI）：
 #   scripts/check-frontend.sh

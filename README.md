@@ -12,8 +12,7 @@ MediaCodec），**无需浏览器**。
 
 > 借鉴的开源项目：媒体管线与中继模型参考 [OBS](https://github.com/obsproject/obs-studio) 和
 > [MediaMTX](https://github.com/bluenviron/mediamtx)；Android 屏幕采集参考
-> [scrcpy](https://github.com/Genymobile/scrcpy)；浏览器端 H.264/AAC 封包复用
-> [jmuxer](https://github.com/webstream-labs/jmuxer)；mDNS 发现使用 [mdns-sd](https://crates.io/crates/mdns-sd)。
+> [scrcpy](https://github.com/Genymobile/scrcpy)；mDNS 发现使用 [mdns-sd](https://crates.io/crates/mdns-sd)（本地 fork：`crates/mdns`）。
 
 ## 快速开始（桌面）
 
@@ -63,99 +62,46 @@ cargo run -p stross-relay -- -p 8777 --advertise   # 需要 discovery feature，
 
 ## 架构
 
-分层模块化设计（依赖方向自底向上，单向无环）：
+分层模块化设计（依赖方向自底向上、单向无环）；分层判据与红线见
+[docs/layering-architecture.md](docs/layering-architecture.md)：
 
-```
-┌────────────────────────────────────────────────────────────┐
-│ apps/stross-cli / stross-gui  ⑥ UI 壳层：参数解析 + 展示 + 平台适配 │
-├────────────────────────────────────────────────────────────┤
-│ crates/stross-bridge    ⑤ 平台适应桥接层：paths / hostname / 平台设备枚举 │
-├────────────────────────────────────────────────────────────┤
-│ crates/stross-kernel   ★ 内核：全部平台无关服务（单一 Kernel 门面）   │
-│   数据面 relay{srv,client}/sender/watch/jitter/discovery       │
-│   信令 control/negotiator/subscriber/file_xfer/bootstrap       │
-│   devices(扫描)/engine(推流)/receiver(接收)/kernel(会话·路由·端点) │
-├──────────────────────────────┬─────────────────────────────┤
-│ crates/stross-media          │ （transport/proto 在下方）    │
-│ ④ 能力层：采集/播放/管线/设备枚举 │                             │
-├──────────────────────────────┴─────────────────────────────┤
-│ crates/stross-transport   ①½ 传输插件层：Transport/DataSession 抽象      │
-│            ws / webrtc / srt / quic 实现                      │
-├────────────────────────────────────────────────────────────┤
-│ crates/stross-proto        ① 协议模块：帧头 + 控制消息（serde）        │
-└────────────────────────────────────────────────────────────┘
-```
+| crate | 职责 |
+|---|---|
+| `stross-proto` | 线协议类型（24 字节 v2 帧头 + JSON 控制消息 + 协商握手/L2 目录） |
+| `stross-transport` | 可插拔传输抽象（`Transport`/`DataSession`）+ ws / webrtc / srt / quic 实现 |
+| `stross-endpoint` | 数据源/宿插件区：Endpoint 契约（load/share）+ screen/audio/file + 采集/播放机制 |
+| `stross-types` | 应用契约单一真源（展示视图 / 控制面载荷 / DTO；依赖只到 proto） |
+| `stross-kernel` | ★ 全部平台无关服务，单一 [`Kernel`](crates/stross-kernel/src/kernel/mod.rs) 门面 |
+| `stross-bridge` | 平台适应：paths / hostname / 平台端点构造（只产出参数，不持状态） |
+| `apps/*` | 壳层：参数解析 + 展示 + 平台适配（cli / gui / relay） |
 
-- **① 协议模块**（`stross-proto`）：线上契约（24 字节 v2 帧头 + JSON 控制消息，
-  含能力协商与路由控制），保持独立小 crate —— 能力层与内核都依赖它，但互不依赖。
-- **①½ 传输插件层**（`stross-transport`）：可插拔传输抽象（`Transport`/`DataSession`）
-  与实现 —— ws（无损，现状）、webrtc（有损低延迟，str0m datachannel）、
-  srt（自适应，rsrt 纯 Rust）、quic（无损多路复用，quinn）。
-  `stross-kernel` re-export 保持路径兼容。
-- **② 内核**（`stross-kernel`）：**全部平台无关服务**，单一门面
-  [`Kernel`](crates/stross-kernel/src/kernel/mod.rs) —— 中继服务器 + 中继 HTTP
-  客户端（契约单一真源）、mDNS 发现、控制面、凭证协商、订阅/文件传输、引导、
-  端点框架（会话/路由/鉴权）、推流引擎与接收编排。不含任何路径/OS/平台代码。
-- **④ 能力层**（`stross-media`）：把"本机媒体源变成协议帧"的能力抽象 ——
-  ffmpeg 采集管线、设备枚举、H.264/AAC 流切帧，以及统一的
-  [`CaptureBackend`](crates/stross-media/src/capture.rs) trait（Source）与
-  [`Sink`](crates/stross-media/src/sink.rs) trait（录制/注入）。
-- **⑤ 平台适应桥接层**（`stross-bridge`）：数据目录解析 / 主机名 / 平台设备
-  静态枚举 —— 只产出**参数**注入内核（base_dir / hostname / 设备清单），
-  不持有状态、不定义协议。
-- **⑥ UI 壳层**（`apps/stross-gui` / `apps/stross-cli`）：Tauri 壳只做两件事 ——
-  把 `Kernel` 注入托管状态、把前端命令转发给它；Android 原生采集以
-  `CaptureBackend` 实现（`mobile.rs`）藏在能力层后面，命令面与桌面完全一致。
+数据流：推流端采集（桌面 ffmpeg / Android MediaProjection+MediaCodec）→ 逐帧打
+时间戳经 WS/SRT/QUIC push 进中继（tokio+axum：关键帧对齐 + 最近关键帧缓存）→
+观看端 watch 收流 → 抖动缓冲 → 原生解码播放（桌面 ffmpeg+cpal / Android
+MediaCodec+AudioTrack）；直连锚点失败自动经本机中继级联代理兜底。
+链路细节见 [docs/architecture.md](docs/architecture.md) §1。
 
-数据流：
-
-```
-┌──────────────┐   H.264/AAC 原始流    ┌─────────┐   H.264/AAC      ┌────────────────┐
-│ 推流端        │ ── WebSocket push ──▶ │ 中继     │ ── broadcast ─▶ │ 接收端（原生）    │
-│ (CaptureBackend)│  (逐帧 + 时间戳)    │ (Rust)  │   (关键帧对齐)  │ (ffmpeg/MediaCodec)│
-└──────────────┘                       └─────────┘                  └────────────────┘
-```
-
-- **推流端**：桌面 = `FfmpegBackend`（ffmpeg 子进程：视频 H.264 Annex-B、音频 AAC ADTS）；
-  Android = `AndroidCapture`（Kotlin 插件 MediaProjection + MediaCodec 经 Channel 回传帧）。
-- **中继**：tokio + axum，`/ws/push` 收流、`/ws/watch` 广播、`/api/streams` 列流、
-  `/api/proxy` 级联代理。新观众**先收到最近关键帧**再对齐播放。
-- **接收端**：WS/SRT/QUIC watch → 抖动缓冲（SessionDataManager）→ 原生解码播放
-  （桌面 ffmpeg PlaybackSink；Android Kotlin MediaCodec）；直连锚点失败时自动经
-  本机中继级联代理兜底。
-
-详细设计见 [docs/architecture.md](docs/architecture.md)、[docs/protocol.md](docs/protocol.md)。
-下一阶段规划（设备路由 / 原生播放器 / AV 同步）见 [docs/roadmap.md](docs/roadmap.md)。
-内核 + 可插拔传输的插件化架构设计见 [docs/plugin-architecture.md](docs/plugin-architecture.md)；
-分层判据见 [docs/layering-architecture.md](docs/layering-architecture.md)。
+详细设计：线上协议见 [docs/protocol.md](docs/protocol.md)；
+端点框架规格（节点→端点、load/share 契约）见 [docs/endpoint-model.md](docs/endpoint-model.md)；
+可插拔传输设计见 [docs/plugin-architecture.md](docs/plugin-architecture.md)；
+下一阶段规划见 [docs/roadmap.md](docs/roadmap.md)。
 
 ## 目录结构
 
 ```
 crates/
-  stross-proto/      ① 协议：帧头 + 控制消息（serde）
-  stross-transport/  ①½ 传输插件层：Transport/DataSession + ws/webrtc/srt/quic 实现
-  stross-kernel/     ② 内核：全部平台无关服务（单一 Kernel 门面）
-    src/relay/        中继：mod（转发）/ http（路由·API·信令）/ client / peers
-    src/kernel/       门面：mod（Kernel）/ graph / session / auth / endpoint / data_plane
-    src/              控制面 control / 协商 negotiator / 订阅 subscriber / 引导 bootstrap …
-  stross-media/      ④ 能力层：ffmpeg 管线 / 设备枚举 / NAL·ADTS / CaptureBackend / Sink
-    src/pipeline/     管线：mod（配置·会话）/ args（ffmpeg 命令构建）
-  stross-bridge/     ⑤ 平台适应：paths（数据目录）/ hostname / 平台设备枚举
+  stross-proto / stross-transport / stross-types / stross-endpoint /
+  stross-kernel / stross-bridge / mdns（mdns-sd 本地 fork）
 apps/
-  stross-relay/      独立中继二进制（纯 Rust，薄壳）
-  stross-gui/     ⑤ UI：Tauri 客户端（桌面 + Android）
-    src-tauri/
-      android/       Kotlin 插件源码（MediaProjection + MediaCodec）
-      src/mobile.rs  Android 采集后端桥（CaptureBackend 实现）
-    web/             客户端界面（TS 真源 → app.js 构建产物）
-scripts/
-  setup-android.sh   Android 工程装配脚本
-  check-frontend.sh  前端 app.js 防漂移检查
+  stross-cli        命令行（serve/ctrl/devices/adb/push/receive/relay/endpoint）
+  stross-gui        Tauri GUI（桌面 + Android 共用 web 前端）
+  stross-relay      独立中继
+scripts/            构建 / 测试 / 真机回归脚本
+docs/               设计文档（docs/README.md 是索引）
 ```
 
-> 命名约定：`apps/` 放二进制（`stross-relay` 中继、`stross-gui` 客户端），
-> `crates/` 放库；大模块超过约 500 行时拆为目录（`mod.rs` + 领域子文件）。
+> 命名约定：`apps/` 放二进制，`crates/` 放库；大模块超过约 500 行时拆为目录
+> （`mod.rs` + 领域子文件）。各 crate 内部结构见 [AGENTS.md](AGENTS.md) §1。
 
 ## 平台指南
 
@@ -166,18 +112,13 @@ scripts/
 ## 测试
 
 ```bash
-cargo test --workspace          # 单元 + 集成测试
-cargo test -p stross-kernel --test sender_e2e -- --nocapture   # 真实 ffmpeg 端到端
-npx -y -p "typescript@5.9.3" tsc -p apps/stross-gui/web/tsconfig.json  # 前端类型检查（改 app.ts 后）
-
-scripts/check.sh                # 本地全量检查：fmt + clippy(-D warnings) + 测试 + 前端
-scripts/check.sh --quick        # 提交前快速检查（秒级）
-scripts/check.sh --e2e          # 追加双设备端到端（直连/中途/级联）
-scripts/install-hooks.sh        # 安装 pre-commit 钩子（每次提交自动快速检查；--remove 卸载）
-scripts/build.sh cli|relay|gui|android   # 参数化构建（可选 --release）
-node scripts/test-frontend.mjs  # 前端网格交互无头测试（jsdom，24 项断言，自动拉依赖）
-scripts/dual-device-test.sh     # 本地双设备端到端：直连 / 中途接入 / 级联代理 三段接收全解码
+scripts/check.sh [--quick|--e2e]   # 本地全量 / 提交前快速 / 双设备端到端检查
+cargo test --workspace             # 单元 + 集成测试（含真实 ffmpeg 端到端）
 ```
+
+回归脚本清单（双设备 / 弱网 / 延迟 / 凭证 / 断连回收 / 前端无头）见
+[AGENTS.md](AGENTS.md) §5；`scripts/install-hooks.sh` 可装 pre-commit 钩子
+（每次提交自动跑快速检查，`--remove` 卸载）。
 
 ## 路线图
 
@@ -185,11 +126,13 @@ scripts/dual-device-test.sh     # 本地双设备端到端：直连 / 中途接�
 - [x] Android 屏幕 + 麦克风推流（Kotlin 插件）
 - [x] 原生接收播放（D1 去浏览器观看端；桌面 ffmpeg / Android MediaCodec）
 - [x] 免先连设备网格：打开即见全网设备/流，点流即看，级联代理兜底
-- [ ] 跨设备推流（反向外设：手机麦克风 → 电脑，需跨机会话协商）
-- [ ] WebRTC 低延迟（<300ms）通道
+- [x] 跨设备推流（反向外设：手机麦克风 → 电脑，凭证式协商 B1/B2 + 免粘贴 B2.5 真机闭环）
+- [x] WebRTC 低延迟通道（transport-webrtc 已落地；局域网端到端延迟 SRT/QUIC 已实测 ≤200ms）
+- [x] 推流鉴权（受控中继 + 一次性 ShareToken 凭证 + 来源感知门控）
+- [x] 文件端点（确定目标端点，订阅→推送联动；`dual-node-file-test.sh` 本地双端验证）
 - [ ] 摄像头推流（Android，nokhwa/Camera2）
-- [ ] 无损共享（文件/剪贴板，二期）
-- [ ] 推流鉴权 / 多流房间
+- [ ] 剪贴板同步（二期无损共享剩余项）
+- [ ] 多流房间 / 命名空间（一期后评估）
 
 ## License
 

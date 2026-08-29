@@ -19,9 +19,9 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="${CLI:-$REPO/target/debug/stross}"
 OUT="${OUT:-/tmp/stross-srt-silence}"
-PORT=18787         # 独立端口，避免干扰常驻 serve
-CTRL=18788
-SRT=33472
+PORT="${PORT:-18787}"    # 独立端口，避免干扰常驻 serve
+CTRL="${CTRL:-18788}"
+SRT="${SRT:-33472}"
 IDLE_GRACE=15      # 断言窗口（秒）：看门狗 10s + 轮询间隔 + 余量
 
 [ -x "$CLI" ] || cargo build -p stross-cli

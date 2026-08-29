@@ -15,7 +15,9 @@
 #   cd apps/stross-gui/src-tauri
 #   cargo tauri android build --apk        # 或 --apk --debug
 #
-# 前置条件: Android SDK + NDK、JDK 17+、Rust Android 目标
+# 前置条件: Android SDK + NDK、JDK 21（构建必须；系统默认 JDK 25 会让
+#   Kotlin 1.9.25 的 buildSrc 崩溃，需 export JAVA_HOME=<JDK 21 路径>）、
+#   Rust Android 目标
 #   rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 # =============================================================================
 set -euo pipefail

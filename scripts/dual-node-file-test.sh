@@ -22,8 +22,10 @@ D="$(mktemp -d /tmp/stross-dual-XXXXXX)"
 DIR_A="$D/a"   # 节点 A 数据目录 + 文件
 DIR_B="$D/b"   # 节点 B 数据目录 + 文件
 RECV="$D/recv"
-PORT_A=18777; CTRL_A=18778; NEG_A=18779
-PORT_B=28777; CTRL_B=28778; NEG_B=28779
+PORT_A="${PORT_A:-18777}"; CTRL_A="${CTRL_A:-18778}"; NEG_A="${NEG_A:-18779}"
+PORT_B="${PORT_B:-28777}"; CTRL_B="${CTRL_B:-28778}"; NEG_B="${NEG_B:-28779}"
+SRT_A="${SRT_A:-33462}"; QUIC_A="${QUIC_A:-33464}"
+SRT_B="${SRT_B:-33463}"; QUIC_B="${QUIC_B:-33465}"
 SIZE_A=800     # file-a.txt 大小（KiB）
 SIZE_C=3       # file-c.bin 大小（小文件，覆盖"非整块"末帧路径）
 
@@ -47,11 +49,11 @@ printf '世界，你好。跨节点文件互发。\n' >> "$DIR_B/file-b.txt"
 
 log "启动节点 A（默认端口，数据目录 $DIR_A）"
 "$CLI" serve --port "$PORT_A" --ctrl-port "$CTRL_A" --negotiator-port "$NEG_A" \
-  --srt-port 33462 --quic-port 33464 --data-dir "$DIR_A" >"$D/a.log" 2>&1 &
+  --srt-port "$SRT_A" --quic-port "$QUIC_A" --data-dir "$DIR_A" >"$D/a.log" 2>&1 &
 PIDS+=($!)
 log "启动节点 B（自定义端口 2877x，数据目录 $DIR_B）"
 "$CLI" serve --port "$PORT_B" --ctrl-port "$CTRL_B" --negotiator-port "$NEG_B" \
-  --srt-port 33463 --quic-port 33465 --data-dir "$DIR_B" >"$D/b.log" 2>&1 &
+  --srt-port "$SRT_B" --quic-port "$QUIC_B" --data-dir "$DIR_B" >"$D/b.log" 2>&1 &
 PIDS+=($!)
 trap cleanup EXIT
 

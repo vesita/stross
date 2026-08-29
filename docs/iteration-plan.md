@@ -548,3 +548,58 @@ startReceive 防重入+失败回滚、轮询边界修复、drawReceiveFrame 热�
 - [ ] mDNS 跨设备发现修复（PC 扫 0 台；疑 Mihomo TUN 干扰组播；或用手动添加兜底已验证）——接入「设备卡」自动发现仍依赖它；
 - [ ] 系统声音端点真机验证（需 MediaProjection 录屏授权 + 前台）；Android 后台保持协商服务的可行性评估（FGS）；
 - [ ] P0-2 断线自动重连（承接前轮）；协议优化阶段（watch 鉴权/保活/pts 回绕）。
+
+---
+
+## 第十五轮（mDNS 复盘 + 「可被发现」显式开关，2026-09）
+
+**起因**：第十四轮真机闭环虽已跑通，但 PC `stross devices` 扫仍 0 台（mDNS 自动发现失败）。复盘发现前后共修了两层，且最初的方向判断有误；最终把「发现」改为**用户显式开关**。
+
+**对既有 mDNS 修复思路的复盘**（用户要求审阅）：
+- **已做**：fork `mdns/src/service_daemon.rs` 的 `process_packet`——把「query-with-answer（手机周期公告）」误当查询忽略 answer 的分支，改为也走 `handle_response` 喂缓存。**方向对但分析片面**。
+- **走偏处**：以为是「浏览端 resolve 不补全」，反复调 4s/12s 窗口。实测发现**根子在手机端**：
+  1. `Discovery::start`（mDNS 注册）只在锚定中继时调（`relay/server.rs`、`kernel/mod.rs`），**端点通告/取消通告不触发重注册** → TXT `ep.*.published` 停在锚定时刻旧值（「手机广播不更新」，与用户判断一致）；
+  2. 手机 App 经多次 install/`am start` 后 mDNS 状态退化（只发 PTR、不响应 SRV/TXT/A 补查）——**重启 App 重新锚定后 avahi 即能看到完整记录**（TXT 全端点、地址/端口齐全），证明手机端本可发完整记录，只是当时状态异常。
+- **回退**：`process_packet` 的 patch 因破坏 mdns-sd 上游 3 个集成测试（`known-answer-suppression` 等依赖 query-with-answer 走查询语义）而**回退**——它并非正确修复，反而污染了标准的已知应答抑制。
+
+**本轮改动：可被发现 = 用户显式开关（默认关）**
+- **内核**：`Kernel` 增 `discoverable`（`AtomicBool`，默认关）；`set_discoverable`/`discoverable`；锚定中继时**仅当开启才广播**；新增 `Discovery::redefine`——**保持同 fullname 覆盖重注册**（mdns-sd `my_services` 按全名小写 `HashMap::insert`，TXT 更新即生效，避免先注销再注册空窗）。
+- **立即刷新**：`publish_endpoint` / `unpublish_endpoint` / `publish_file_endpoint` 在 registry 锁**外**调 `apply_discoverable()`，通告状态一变化就重注册刷新 TXT `published`。
+- **持久化**：`Settings`（`settings.json` 与 identity 同目录，`discoverable` 默认 false）；内核 `load_settings`/`save_settings`。
+- **CLI**：`serve --discoverable`（显式开启；不传读 settings.json）。`relay` 独立进程维持各自 `--no-advertise`（不同制品，不并入）。
+- **GUI**：header 右上「可被发现」开关；`set_discoverable`/`discoverable_status` 命令；setup 读 settings 注入。
+
+**自测验证（`devices` 跨进程扫描）**：
+- `--discoverable` 起 serve → 独立 `devices` 扫到该服务（设备名 pico）；
+- 不传 `--discoverable` → 扫 0 台（默认不可被发现 ✓）；
+- 通告 `screen:0` 后重扫 → TXT 显示「屏幕（已通告）」→ **通告即刷新生效** ✓；
+- settings.json `discoverable:true` 不传 flag → 仍广播（持久化✓）。
+- 静态门禁：`cargo build --workspace`、`cargo test -p stross-kernel`（settings/discovery/全部 93+ 用例）、clippy、fmt 全绿；前端 `tsc` 通过、`app/*.js` 再生成。
+
+**遗留 / 待定**：
+- [ ] Android GUI 端点通告 → 手机 mDNS TXT `published` 即时刷新，需真机复核（本轮只验了 CLI 路径）；
+- [ ] 手动添加设备（`devices` 已有 `--extra`？/GUI manual-addr）作为 mDNS 兜底，跨设备发现仍依赖网络组播健康；
+- [ ] 手机端手机 App 状态退化（只发 PTR 不响应查询）的**根因**仍需追（疑 App 重启后 daemon 未正确重建）；与本轮开关配套后，建议真机「重启 App 重新锚定」再验 mDNS。
+
+---
+
+## 第十六轮（mDNS 真机「手机收不到下行多播 / PC 扫不到手机」根因定论，2026-09）
+
+**起因**：真机上 PC 用 `stross devices` 扫不到手机（手机能发现 / 曾发现电脑）。经多轮（地址匹配→探测闸门→发送接口→接口归属→TUN→网络加速）逐一排除后，最终定论在**环境侧（WiFi AP 下行多播被拦）**，而非 Stross 代码。
+
+**排除链（每步都有日志/抓包证据）**：
+1. ~~地址匹配失败~~：诊断证明 `wlan0` 的 `intf_addrs=["192.168.11.60"]` 非空，`prepare_announce` 能构造 `answers_count=4`。
+2. ~~探测闸门 `probing_count>0`~~：`set_requires_probe(false)` 生效，不再 reject 整个 QR=1。
+3. ~~发送接口/接口归属/`handle_read` 家族检查丢弃~~：加全量入包诊断（`recvPkt`）后，PC 的单播能到手机（`from=192.168.11.61:48779 if_index=40 intf=wlan0`），但多播从未到达手机 socket。
+4. ~~PC 的 TUN / 网络加速开关~~：TUN 关闭、网络加速/双通道关闭后仍同症状；PC 出网多播计数正常（enp6s0 TX +24）。
+
+**定论**：**手机能发上行多播、能收单播、能收自己 socket 的回环多播，唯独收不到「从 AP 下来的多播」**（`Su` 路由下行多播被 IGMP snooping/客户端隔离拦截）。同一套代码在**多播通畅的网络**（手机↔PC 经 USB 共享，同网段 10.159.157.0/24）上**双向发现均成功**：PC 扫到手机 `10.159.157.104:8777`（完整 SRV+TXT+A/端点/SRT/QUIC），手机列表出现 PC `10.159.157.158:18777`。→ **mDNS 代码无 bug，纯环境问题。**
+
+**处理 / 结论**：
+- **排查诊断日志已全部清理**（`crates/mdns/src/service_daemon.rs`、`crates/stross-kernel/src/discovery.rs` 的 `DIAG` 移除），恢复干净 `trace!`/`debug!`；`cargo test -p mdns` 全绿。
+- mdns fork 保留的**功能性改动**：`set_requires_probe(false)`、`handle_read` 接口 fallback、`ingest_records`（query-with-answer 入库）、`apply_multicast_rate_limit`。
+- **解决办法（任选）**：①改 `Su` 路由器（关 IGMP snooping / 关客户端隔离 / 开多播转发）；②用多播通畅网络（如 USB 共享）跑真机闭环；③可选代码兜底（mDNS 加单播下发/单播应答），让手机在收不到下行多播时仍可被发现/发现对端。
+
+**遗留 / 待定**：
+- [ ] P0-1 真机闭环走 USB 网络已可发现；如需 WiFi 也稳定，实施「mDNS 单播兜底」或修复路由器多播；
+- [ ] 手机 App mDNS「只发 PTR 不响应补查」（状态退化）隐患仍存，建议配合重启 App 重新锚定核验（本轮已另作记录）。

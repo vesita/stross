@@ -10,6 +10,7 @@ use stross_proto::message::{MediaKind, Platform};
 
 use crate::audio::{MicEndpoint, SystemAudioEndpoint};
 use crate::contract::Endpoint;
+#[cfg(not(target_os = "android"))]
 use crate::screen::ScreenEndpoint;
 
 /// 端点注入目标（内核实现）：登记端点 + 查询平台。端点层不依赖内核类型。
@@ -18,6 +19,13 @@ pub trait EndpointSeeder {
     fn seed_endpoint(&self, ep: Box<dyn Endpoint>) -> bool;
     /// 当前运行平台（内核经 bridge 注入判定）。
     fn platform(&self) -> Platform;
+}
+
+/// Android 音频端点探测：采集走原生（MediaRecorder / AAudio），不依赖 ffmpeg，
+/// 恒可用（音频采集能力由实际设备决定，load 不额外门控）。
+#[cfg(target_os = "android")]
+fn android_audio_probe() -> crate::contract::Probe {
+    std::sync::Arc::new(|| Ok(()))
 }
 
 /// 平台端点构造（camera 按采集能力后置；Android P1 不构造屏幕端点——
@@ -43,9 +51,10 @@ pub fn platform_endpoints(platform: Platform) -> Vec<Box<dyn Endpoint>> {
     );
     #[cfg(target_os = "android")]
     let probes = (
-        // Android 屏幕端点不构造（见函数头注释）；音频探测仅 ffmpeg 依赖
-        crate::screen::linux::audio_probe("麦克风"),
-        crate::screen::linux::audio_probe("系统声音"),
+        // Android 屏幕端点不构造（见函数头注释）；音频采集走原生
+        // （MediaRecorder / AAudio），不依赖 ffmpeg → 探测恒可用
+        android_audio_probe(),
+        android_audio_probe(),
     );
 
     #[cfg(not(target_os = "android"))]

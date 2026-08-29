@@ -36,7 +36,8 @@ pub fn init(app: &tauri::AppHandle) {
     let _ = APP.set(app.clone());
 }
 
-/// YUV 帧的最大回传宽度（与桌面 `scale_rgba(480)` 一致，控制事件流量）。
+/// YUV 帧的最大回传宽度：Android 小屏 + WebView IPC 弱，480 足够
+/// （桌面 `receive.rs::RECV_MAX_W = 720`，权衡见该处注释）。
 const MAX_FRAME_W: u32 = 480;
 
 /// Kotlin 播放线程直调：YUV420 → RGBA（缩放）→ base64 事件 → 解码统计。

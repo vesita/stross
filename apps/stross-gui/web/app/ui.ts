@@ -181,6 +181,47 @@ function drawReceiveFrame(w: number, h: number, data: string): void {
   for (let i = 0; i < bin.length; i++) rgba[i] = bin.charCodeAt(i);
   const img = new ImageData(rgba, w, h);
   ctx.putImageData(img, 0, 0);
+  // 控制条信息区：帧显示尺寸（仅变化时写 DOM）
+  const info = $('recv-controls-info');
+  const label = w + '×' + h;
+  if (info.textContent !== label) info.textContent = label;
+}
+
+// ---------------------------------------------------------------- 播放器全屏
+
+/** 把窗口级全屏状态应用到 UI：画布容器悬浮层 + 全屏按钮图标/标题。 */
+function setPlayerFullscreen(fs: boolean): void {
+  fsActive = fs;
+  $('recv-canvas-wrap').classList.toggle('fs', fs);
+  const btn = $('recv-fs-btn');
+  btn.title = fs ? '退出全屏' : '全屏';
+  btn.innerHTML = icon(fs ? 'minimize' : 'maximize');
+}
+
+/** 切换播放器全屏：先查询窗口实际全屏态再取反（状态校准，防失配）。
+ *  Tauri 窗口级全屏（桌面/Android 一致；Web 层 Fullscreen API 在
+ *  Android WebView 不可靠）。非 Tauri 环境安全 no-op。 */
+async function togglePlayerFullscreen(): Promise<void> {
+  const win = (window as any).__TAURI__?.window?.getCurrentWindow();
+  if (!win) return;
+  let fs = fsActive;
+  try {
+    fs = await win.isFullscreen();
+  } catch (_) { /* 查询失败：沿用本地状态 */ }
+  const next = !fs;
+  try {
+    await win.setFullscreen(next);
+  } catch (_) { return; }
+  setPlayerFullscreen(next);
+}
+
+/** 退出播放器全屏（ESC / 停止接收时调用）。 */
+async function exitPlayerFullscreen(): Promise<void> {
+  if (!fsActive) return;
+  const win = (window as any).__TAURI__?.window?.getCurrentWindow();
+  if (!win) return;
+  try { await win.setFullscreen(false); } catch (_) { /* ignore */ }
+  setPlayerFullscreen(false);
 }
 
 // ---------------------------------------------------------------- 提示

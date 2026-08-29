@@ -12,6 +12,12 @@ use base64::Engine as _;
 #[cfg(not(target_os = "android"))]
 use tauri::Emitter;
 
+/// 桌面回传帧最大宽度。双线性缩放下 720p 显示够用（全屏放大仍清晰），
+/// 且 720×405 RGBA ≈ 1.2MB/帧（≈ 2.5× 原 480 上限）控制 IPC 流量；
+/// Android 走 `mobile_jni::MAX_FRAME_W = 480`（小屏 + WebView IPC 弱）。
+#[cfg(not(target_os = "android"))]
+const RECV_MAX_W: u32 = 720;
+
 /// 开始接收 `relay` 上的 `stream`，解码帧缩放后经 `receive-frame` 事件推到前端。
 /// `audio` 决定音频去向：`device` 扬声器播放 / `discard` 静音。
 ///
@@ -49,13 +55,18 @@ pub async fn start_receive(
             Some(r) => r,
             None => return Err("接收会话已启动但没有帧通道".into()),
         };
-        // 帧转发：RGBA 最近邻缩放到宽度 ≤ 480 → 事件（显示可跳帧，不反压）。
+        // 帧转发：RGBA 双线性缩放（端点层 `rgba_scaled`，计算在 Rust）到
+        // 宽度 ≤ 720 → 事件（显示可跳帧，不反压）。
         // 载荷统一为 base64 字符串（桌面/Android 同格式）：serde 直序列化
-        // Vec<u8> 会输出每字节一个数字的 JSON 数组（480×270×4 ≈ 51.8 万元素，
-        // ~2.5MB/帧），base64 字符串 ~4 倍紧凑且前端 atob 原生解码。
+        // Vec<u8> 会输出每字节一个数字的 JSON 数组（720×405×4 ≈ 116 万元素，
+        // ~5.7MB/帧），base64 字符串 ~4 倍紧凑且前端 atob 原生解码。
         tokio::spawn(async move {
             while let Some(f) = frames.recv().await {
-                let (w, h, data) = scale_rgba(&f.rgba, f.width, f.height, 480);
+                let Some((w, h, data)) =
+                    stross_endpoint::rgba_scaled(&f.rgba, f.width, f.height, RECV_MAX_W)
+                else {
+                    continue;
+                };
                 let data = base64::engine::general_purpose::STANDARD.encode(data);
                 let _ = app.emit(
                     "receive-frame",
@@ -77,43 +88,4 @@ pub fn stop_receive(state: State<'_, Arc<Kernel>>) {
 #[tauri::command]
 pub fn receive_status(state: State<'_, Arc<Kernel>>) -> stross_kernel::ReceiveStats {
     state.receive_status()
-}
-
-/// RGBA 最近邻缩放（显示用；保持宽高比，宽度 ≤ `max_w`）。
-#[cfg(not(target_os = "android"))]
-fn scale_rgba(src: &[u8], w: u32, h: u32, max_w: u32) -> (u32, u32, Vec<u8>) {
-    let tw = w.min(max_w);
-    let th = (h * tw / w).max(1);
-    let mut out = Vec::with_capacity((tw * th * 4) as usize);
-    for y in 0..th {
-        let sy = (y * h / th) as usize;
-        for x in 0..tw {
-            let sx = (x * w / tw) as usize;
-            let si = (sy * w as usize + sx) * 4;
-            out.extend_from_slice(&src[si..si + 4]);
-        }
-    }
-    (tw, th, out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::scale_rgba;
-
-    #[test]
-    fn scale_rgba_keeps_aspect_and_size() {
-        // 1280x720 → 宽度上限 480 → 480x270
-        let src = vec![0u8; 1280 * 720 * 4];
-        let (w, h, out) = scale_rgba(&src, 1280, 720, 480);
-        assert_eq!((w, h), (480, 270));
-        assert_eq!(out.len(), 480 * 270 * 4);
-        // 不超过上限时原样
-        let (w2, h2, out2) = scale_rgba(&src, 320, 240, 480);
-        assert_eq!((w2, h2), (320, 240));
-        assert_eq!(out2.len(), 320 * 240 * 4);
-        // 像素值按最近邻拷贝（抽查四角）
-        let tiny = vec![0u8; 2 * 2 * 4];
-        let (_, _, out3) = scale_rgba(&tiny, 2, 2, 4);
-        assert_eq!(out3, tiny);
-    }
 }

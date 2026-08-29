@@ -4,7 +4,8 @@
 //! I420 平面），此前由 Kotlin `PlaybackPlugin` 逐像素 Java 循环转换 + 缩放
 //! （~60 行、无 SIMD、每像素多次边界检查 ByteBuffer.get）——是"解码跟不上
 //! 接收"的 CPU 大头。本模块把转换下沉 Rust：纯函数、可单测，桌面与 Android
-//! 共用语义（与桌面 [`crate::playback`] 的 scale_rgba 最近邻算法一致）。
+//! 共用语义（Y 亮度双线性插值 + 色度 2×2 块最近邻，与
+//! [`crate::convert::rgba::rgba_scaled`] 同一中心对齐采样约定）。
 
 /// YUV420 颜色排布（MediaCodec `KEY_COLOR_FORMAT` 的两种常见取值）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,7 +16,7 @@ pub enum Yuv420Layout {
     SemiPlanar,
 }
 
-/// YUV420 → RGBA（最近邻缩放到宽度 ≤ `max_w`，保持宽高比）。
+/// YUV420 → RGBA（双线性缩放到宽度 ≤ `max_w`，保持宽高比）。
 ///
 /// 输入 `buf` 是一整块输出缓冲区：Y 平面起始于 `buf[0]`，其行跨度为
 /// `stride_y`、行数为 `slice_h`；UV 平面接在 `stride_y * slice_h` 之后
@@ -66,20 +67,37 @@ pub fn yuv420_to_rgba_scaled(
         uv_size
     };
 
+    let scale_x = w as f64 / tw as f64;
+    let scale_y = h as f64 / th as f64;
     let mut out = Vec::with_capacity(tw as usize * th as usize * 4);
     for oy in 0..th {
-        let sy = (oy * h / th) as usize;
+        // 中心对齐采样（与 rgba::rgba_scaled 同约定）；越界 clamp 防负权重外插
+        let sy = ((oy as f64 + 0.5) * scale_y - 0.5).clamp(0.0, (h - 1) as f64);
+        let y0 = sy.floor() as usize;
+        let y1 = (y0 + 1).min(h as usize - 1);
+        let ty = (sy - y0 as f64) as f32;
+        let row0 = y_base + y0 * stride_y;
+        let row1 = y_base + y1 * stride_y;
         for ox in 0..tw {
-            let sx = (ox * w / tw) as usize;
-            let y = buf[y_base + sy * stride_y + sx] as i32;
-            // 色度按 2x2 块采样（YUV420 语义）
-            let (uy, ux) = (sy / 2, sx / 2);
+            let sx = ((ox as f64 + 0.5) * scale_x - 0.5).clamp(0.0, (w - 1) as f64);
+            let x0 = sx.floor() as usize;
+            let x1 = (x0 + 1).min(w as usize - 1);
+            let tx = (sx - x0 as f64) as f32;
+            // 亮度对细节敏感：Y 双线性插值
+            let y00 = buf[row0 + x0] as f32;
+            let y01 = buf[row0 + x1] as f32;
+            let y10 = buf[row1 + x0] as f32;
+            let y11 = buf[row1 + x1] as f32;
+            let yf =
+                (y00 * (1.0 - tx) + y01 * tx) * (1.0 - ty) + (y10 * (1.0 - tx) + y11 * tx) * ty;
+            // 色度按 2x2 块采样（YUV420 语义；块坐标取插值格点左下）
+            let (uy, ux) = (y0 / 2, x0 / 2);
             let u_off = uv_base + uy * uv_stride + ux;
             let (u, v) = match layout {
                 Yuv420Layout::SemiPlanar => (buf[u_off] as i32, buf[u_off + 1] as i32),
                 Yuv420Layout::Planar => (buf[u_off] as i32, buf[u_off + uv_row_gap] as i32),
             };
-            let c = y - 16;
+            let c = yf.round() as i32 - 16;
             let d = u - 128;
             let e = v - 128;
             let r = clamp_u8((298 * c + 409 * e + 128) >> 8);

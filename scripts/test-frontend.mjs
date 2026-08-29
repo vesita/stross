@@ -189,6 +189,7 @@ const invoke = async (cmd, args) => {
 };
 // —— mock：Tauri 事件（negotiator-request 等）触发句柄 ——
 const eventHandlers = {};
+let winFullscreen = false; // 播放器全屏 mock：setFullscreen 写入，isFullscreen 读取
 window.__TAURI__ = {
   core: { invoke },
   event: {
@@ -196,6 +197,14 @@ window.__TAURI__ = {
       eventHandlers[evt] = cb;
       return Promise.resolve(() => {});
     },
+  },
+  window: {
+    getCurrentWindow: () => ({
+      isFullscreen: async () => winFullscreen,
+      setFullscreen: async (v) => {
+        winFullscreen = v;
+      },
+    }),
   },
 };
 
@@ -289,6 +298,33 @@ console.log('\n[3b] 断流自愈：流结束后接收 UI 自动回到空闲态')
   check('B6: 等待浮层隐藏', $('recv-overlay').classList.contains('hidden'));
   check('B6: 停止按钮隐藏', $('recv-stop-btn').classList.contains('hidden'));
   mockRecvEnded = false;
+}
+
+console.log('\n[3c] 播放器全屏：按钮切换窗口全屏态 + 画布容器悬浮层 + ESC 退出');
+{
+  const fsBtn = $('recv-fs-btn');
+  const stopBtn = $('recv-fs-stop-btn');
+  const wrap = $('recv-canvas-wrap');
+  check('控制条渲染（全屏/停止按钮 + 信息区）', !!fsBtn && !!stopBtn && !!$('recv-controls-info'));
+  check('初始非全屏（图标 = 进入全屏）', fsBtn.innerHTML.includes('i-maximize'));
+  fsBtn.click();
+  await sleep(60);
+  check('全屏：setFullscreen(true) 生效', winFullscreen === true, `winFullscreen=${winFullscreen}`);
+  check('全屏：画布容器加 fs 悬浮层', wrap.classList.contains('fs'));
+  check('全屏：按钮图标切换为退出（minimize）', fsBtn.innerHTML.includes('i-minimize'));
+  window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+  await sleep(60);
+  check('ESC 退出全屏（窗口态还原）', winFullscreen === false, `winFullscreen=${winFullscreen}`);
+  check('ESC 退出：fs 悬浮层移除', !wrap.classList.contains('fs'));
+  check('ESC 退出：按钮图标还原为进入全屏', fsBtn.innerHTML.includes('i-maximize'));
+  // 全屏中停止接收 → 也应退出全屏（setReceiving(false) 兜底）
+  fsBtn.click();
+  await sleep(60);
+  check('再次进入全屏', winFullscreen === true);
+  stopBtn.click();
+  await sleep(60);
+  check('全屏中停止接收 → 退出全屏', winFullscreen === false, `winFullscreen=${winFullscreen}`);
+  check('停止按钮走 stop_receive', calls.filter((c) => c.cmd === 'stop_receive').length >= 2);
 }
 
 console.log('\n[4] 遗留广播/凭证/共享流 UI 已移除（统一走通告/订阅）');

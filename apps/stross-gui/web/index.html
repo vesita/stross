@@ -134,6 +134,18 @@
     <symbol id="i-activity" viewBox="0 0 24 24">
       <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
     </symbol>
+    <symbol id="i-maximize" viewBox="0 0 24 24">
+      <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+      <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+      <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+    </symbol>
+    <symbol id="i-minimize" viewBox="0 0 24 24">
+      <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+      <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+      <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+      <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+    </symbol>
   </svg>
 
   <header>
@@ -210,6 +222,17 @@
           <div class="canvas-overlay hidden" id="recv-overlay">
             <span class="spinner"></span>
             <span>等待流数据…</span>
+          </div>
+          <!-- 播放器控制条：悬停显示；全屏时叠加在画面底部 -->
+          <div class="recv-controls" id="recv-controls">
+            <span class="recv-controls-info" id="recv-controls-info"></span>
+            <span class="spacer"></span>
+            <button id="recv-fs-btn" class="ctrl-btn" type="button" title="全屏">
+              <svg class="ic"><use href="#i-maximize" /></svg>
+            </button>
+            <button id="recv-fs-stop-btn" class="ctrl-btn danger" type="button" title="停止接收">
+              <svg class="ic"><use href="#i-stop" /></svg>
+            </button>
           </div>
         </div>
         <div class="status-line hidden" id="recv-status-line">

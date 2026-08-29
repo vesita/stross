@@ -46,6 +46,10 @@ let recvUnlisten: (() => void) | null = null;
 /** 当前接收目标中继（点选设备的锚点；null = 本机锚点）。 */
 let targetRelay: TargetRelay | null = null;
 
+// —— 播放器（接收画面）状态 ——
+/** 播放器全屏状态（Tauri 窗口级全屏；前端自维护，切换前经 isFullscreen 校准）。 */
+let fsActive = false;
+
 // —— 协商 / 授权状态 ——
 /** 当前等待人工确认的协商请求（negotiator-request 事件送达；null = 无）。 */
 let pendingApprove: PendingRequest | null = null;

@@ -57,6 +57,7 @@ pub use capture::{CaptureBackend, CaptureStatus};
 pub use codec::adts::AdtsSplitter;
 pub use codec::nal::{AccessUnitBuilder, AnnexBSplitter, extract_avc_csd};
 pub use contract::{Endpoint, EndpointApp, EndpointBase, Probe, SubscribeCtx, TargetKind};
+pub use convert::rgba::rgba_scaled;
 pub use convert::yuv::{Yuv420Layout, yuv420_to_rgba_scaled};
 pub use devices::{CameraDevice, list_audio_inputs, list_cameras, list_system_audio};
 pub use factory::{platform_endpoints, seed_platform_endpoints};

@@ -85,6 +85,8 @@ function setReceiving(r) {
     if (!r) {
         recvAudioBlocks = 0;
         recvStreamId = null;
+        // 停止接收时退出播放器全屏（若在）
+        void exitPlayerFullscreen();
     }
     const line = $('recv-status-line');
     line.classList.toggle('hidden', !r);

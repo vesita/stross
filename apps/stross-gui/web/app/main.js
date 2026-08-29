@@ -155,6 +155,16 @@ $('sub-modal').addEventListener('click', (e) => {
 });
 // 接收面板：停止接收
 $btn('recv-stop-btn').onclick = () => void stopReceive();
+// 播放器控制条：全屏 / 停止
+$btn('recv-fs-btn').onclick = () => void togglePlayerFullscreen();
+$btn('recv-fs-stop-btn').onclick = () => void stopReceive();
+// 双击画面切换全屏
+$('recv-canvas').addEventListener('dblclick', () => void togglePlayerFullscreen());
+// ESC 退出全屏（Tauri 窗口全屏不拦截 ESC，需前端处理）
+window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape')
+        void exitPlayerFullscreen();
+});
 // 防火墙一键放行
 $btn('fw-allow-btn').onclick = () => void allowFirewall();
 $btn('fw-close-btn').onclick = () => $('fw-banner').classList.add('hidden');

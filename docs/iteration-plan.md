@@ -521,3 +521,30 @@ startReceive 防重入+失败回滚、轮询边界修复、drawReceiveFrame 热�
 - [ ] P0-2 断线自动重连（承接第十二轮，见 closed-loop-plan.md §3）；
 - [ ] 跨设备端到端真机回归：当前 mDNS 隔离 + 手机无协商服务，需网络/配置支持才能跑通「通告→订阅→断开→收尾」；
 - [ ] 协议优化阶段：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕（closed-loop-plan.md §5）。
+
+---
+
+## 第十四轮（真机端到端闭环跑通：P0-1 生命周期，2026-09）
+
+**目标**：跨设备真机跑通「端点通告→订阅→断开→自动收尾」，解决上轮发现的跨设备阻塞。
+
+**两大堵点与修复**：
+| 堵点 | 根因 | 修复 |
+|---|---|---|
+| 手机无 18779 协商服务 | `lib.rs` 刻意「Android 仅作客户端不启动协商服务」（`#[cfg(mobile)]` 只 manage 空 handle） | 解除限制：`start_handshake` 所有平台启动；`NegotiatorUiBridge` 去掉 `#[cfg(not(mobile))]` gate（Android 前端同样订阅 `negotiator-request`）。手机 App 前台时监听 0.0.0.0:18779 |
+| 无法订阅实时媒体端点 | CLI `endpoint subscribe` 只走 `subscribe_file`（文件落盘），对实时「系统声音」报「实收 0 字节」 | 新增库接口 `subscribe_media_and_watch`（`subscribe_media` 握手 → `connect_watch` 连对端中继建 watcher → 读帧保持）；CLI 按端点 kind 分派：File→落盘，其余→媒体观看保持（Ctrl-C 断开触发收尾）；导出到 `stross_kernel`。对「流尚未出现」做 `STREAM_APPEAR_WINDOW`(9s) 重试（watcher 接入与公开方泵建流竞态） |
+
+**真机结果**（OPPO PLC110，Android 16，PC+手机同网段 192.168.11.x）：
+- 手机通告麦克风（public/pull）→ PC `stross endpoint subscribe --host <手机> --endpoint mic:builtin --delivery pull`；
+- **订阅达成**：手机 UI「已通告 · 公开 · 拉取 · 1 订阅中」+「停止共享」（active）；手机中继 `/api/streams` 出现 `sess-3「麦克风」watchers=1`；
+- **断开自动收尾**：终止 PC 订阅进程 → 手机 watchers→0 延迟复查（4s）→ UI 回「已通告 · 公开 · 拉取」（无订阅中/停止共享）+ `/api/streams` 清空 → **P0-1 闭环真机验证成功**。
+
+**关键发现（实测）**：
+- **Android 前台约束**：手机 Stross 必须在**前台**协商服务才响应（App 后台被冻结，18779 虽监听但拉目录超时）；切前台即恢复。真机闭环需保持 Stross 前台。
+- 系统声音端点 share 依赖 MediaProjection（录屏授权）较繁琐；**麦克风**（RECORD_AUDIO）更易跑通——本次用麦克风验证。
+- mDNS 扫描仍 0 台（PC 侧 Mihomo TUN/fake-IP 疑似干扰组播），但**直连协商（不经 mDNS）已足够跑通闭环**——设备发现可后续借手动添加/修复 mDNS browse 接口。
+
+**遗留 / 待定**（新增）：
+- [ ] mDNS 跨设备发现修复（PC 扫 0 台；疑 Mihomo TUN 干扰组播；或用手动添加兜底已验证）——接入「设备卡」自动发现仍依赖它；
+- [ ] 系统声音端点真机验证（需 MediaProjection 录屏授权 + 前台）；Android 后台保持协商服务的可行性评估（FGS）；
+- [ ] P0-2 断线自动重连（承接前轮）；协议优化阶段（watch 鉴权/保活/pts 回绕）。

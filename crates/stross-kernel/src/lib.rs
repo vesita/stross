@@ -98,6 +98,7 @@ pub use stross_types::{
 };
 pub use subscriber::{
     MediaSubscribeOutcome, SubscribeOutcome, fetch_directory, subscribe_file, subscribe_media,
+    subscribe_media_and_watch,
 };
 /// 展示视图构造帮助函数（`relay_info` / `watch_urls`；兼容重导出见 [`view`]）。
 pub use view::{relay_info, watch_urls};

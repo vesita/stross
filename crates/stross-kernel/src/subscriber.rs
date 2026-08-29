@@ -25,6 +25,7 @@ use crate::Kernel;
 use crate::bootstrap;
 use crate::file_xfer::{ReceivedFile, receive_file};
 use crate::negotiator_client;
+use crate::watch::connect_watch;
 
 /// 「流尚未出现」重试窗口：订阅方 watch 与公开方泵建流存在竞态
 /// （授予响应先于流注册到达；pump 侧同样在等观看者，docs §5），
@@ -103,6 +104,52 @@ pub async fn subscribe_media(
         relay_url,
         stream_id,
     })
+}
+
+/// 订阅远端媒体端点并**作为观看者保持连接**（CLI 无头：连中继建立 watcher，
+/// 循环读帧丢弃），直到对端断开 / 用户中断（Ctrl-C 断连即触发公开方
+/// watchers→0 自动收尾）。P0-1 生命周期收尾的真机验证路径。
+pub async fn subscribe_media_and_watch(
+    app: &Arc<Kernel>,
+    base: &Path,
+    host: &str,
+    port: u16,
+    endpoint_id: &str,
+    delivery_wish: Option<Delivery>,
+) -> anyhow::Result<()> {
+    let outcome = subscribe_media(app, base, host, port, endpoint_id, delivery_wish).await?;
+    // 对「流尚未出现」重试（watcher 接入与公开方泵建流存在竞态，docs §5），
+    // 其余错误（中途断开 / 采集失败）是真实失败，直接上报。
+    let deadline = Instant::now() + STREAM_APPEAR_WINDOW;
+    let session = loop {
+        match connect_watch(&outcome.relay_url, &outcome.stream_id).await {
+            Ok(s) => break s,
+            Err(e) => {
+                let msg = format!("{e}");
+                if msg.contains("不存在") && Instant::now() < deadline {
+                    tokio::time::sleep(RETRY_INTERVAL).await;
+                    continue;
+                }
+                return Err(anyhow::anyhow!(e)
+                    .context(format!("连接中继观看失败（流 {}）", outcome.stream_id)));
+            }
+        }
+    };
+    tracing::info!(
+        "已订阅媒体端点（delivery={:?} relay={} stream={}）——Ctrl-C 断开即触发对方收尾",
+        outcome.delivery,
+        outcome.relay_url,
+        outcome.stream_id,
+    );
+    // 保持 watcher：CLI 无显示，读帧丢弃；对端断开（Ok(None)）或异常（Err）即退出
+    loop {
+        match session.recv().await {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }
 
 /// 订阅握手结果（[`request_endpoint_grant`] 的公共形态）：

@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Args, Subcommand};
-use stross_kernel::{Kernel, Platform, fetch_directory, subscribe_file};
-use stross_proto::message::Delivery;
+use stross_kernel::{Kernel, Platform, fetch_directory, subscribe_file, subscribe_media_and_watch};
+use stross_proto::message::{Delivery, MediaKind};
 
 #[derive(Args, Debug)]
 pub struct EndpointArgs {
@@ -139,16 +139,34 @@ async fn run_subscribe(
     let app = Arc::new(Kernel::new(Platform::Desktop));
     let wanted = delivery_wish.map_or_else(|| "按端点声明".into(), |d| format!("{d:?}"));
     tracing::info!("订阅端点 {endpoint_id}（delivery={wanted}，对端 {host}:{port}）");
-    let outcome = subscribe_file(&app, base, host, port, endpoint_id, delivery_wish, out)
+    // 端点类型决定订阅语义：文件落盘 --out；实时媒体作为观看者保持连接
+    // （Ctrl-C 断开即触发公开方 watchers→0 自动收尾）。
+    let dir = fetch_directory(host, port)
         .await
-        .with_context(|| format!("订阅端点 {endpoint_id} 失败"))?;
-    println!(
-        "✅ 已接收文件: {}（{} 字节）→ {}（delivery={:?} stream={}）",
-        outcome.received.name,
-        outcome.received.size,
-        outcome.received.path.display(),
-        outcome.delivery,
-        outcome.stream_id,
-    );
+        .context("拉取目录失败（对端 serve --negotiator-port 是否一致？）")?;
+    let kind = dir
+        .endpoints
+        .iter()
+        .find(|e| e.endpoint_id == endpoint_id)
+        .map(|e| e.kind)
+        .ok_or_else(|| anyhow::anyhow!("目录中未找到端点 {endpoint_id}（是否已通告？）"))?;
+    if kind == MediaKind::File {
+        let outcome = subscribe_file(&app, base, host, port, endpoint_id, delivery_wish, out)
+            .await
+            .with_context(|| format!("订阅文件端点 {endpoint_id} 失败"))?;
+        println!(
+            "✅ 已接收文件: {}（{} 字节）→ {}（delivery={:?} stream={}）",
+            outcome.received.name,
+            outcome.received.size,
+            outcome.received.path.display(),
+            outcome.delivery,
+            outcome.stream_id,
+        );
+    } else {
+        subscribe_media_and_watch(&app, base, host, port, endpoint_id, delivery_wish)
+            .await
+            .with_context(|| format!("订阅媒体端点 {endpoint_id} 失败"))?;
+        println!("观看结束（对端断开或 Ctrl-C）。");
+    }
     Ok(())
 }

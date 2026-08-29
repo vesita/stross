@@ -43,13 +43,11 @@ pub(crate) struct NegotiatorHandle(
     pub(crate) Arc<std::sync::Mutex<Option<Arc<stross_kernel::ShareNegotiator>>>>,
 );
 
-/// 协商事件 → Tauri 事件桥（电脑端 GUI 弹授权确认）。
-#[cfg(not(mobile))]
+/// 协商事件 → Tauri 事件桥（GUI 弹授权确认；Android 前端同样订阅）。
 struct NegotiatorUiBridge {
     app: tauri::AppHandle,
 }
 
-#[cfg(not(mobile))]
 impl stross_kernel::NegotiatorUi for NegotiatorUiBridge {
     fn request_pending(&self, req: &stross_kernel::PendingRequest) {
         let _ = self.app.emit("negotiator-request", req);
@@ -137,8 +135,9 @@ pub fn run() {
                 let id = stross_kernel::load_or_create_identity(&base, &name);
                 app.state::<Arc<Kernel>>().set_identity(id);
             }
-            // 凭证协商服务（权限自动化）：桌面启动；Android 仅作客户端不启动
-            #[cfg(not(mobile))]
+            // 凭证协商服务（权限自动化）：所有平台都启动。此前仅桌面启动、
+            // Android 只作客户端；为支持「手机通告端点 → 对端订阅」的真机闭环，
+            // 解除该限制（Android 也作为公开方被订阅）。
             {
                 let handle_arc = Arc::new(std::sync::Mutex::new(None));
                 app.manage(NegotiatorHandle(handle_arc.clone()));
@@ -153,7 +152,6 @@ pub fn run() {
                     };
                     let app_state = app_handle.state::<Arc<Kernel>>().inner().clone();
                     // 引导层（docs/endpoint-model.md §0）：目录（L2）与订阅握手端点
-                    // （锚定由前端触发；Android 不起协商端点、仅作客户端）
                     match stross_kernel::bootstrap::start_handshake(app_state, Arc::new(ui), &base)
                         .await
                     {
@@ -164,10 +162,6 @@ pub fn run() {
                         Err(e) => tracing::error!("凭证协商端点启动失败: {e}"),
                     }
                 });
-            }
-            #[cfg(mobile)]
-            {
-                app.manage(NegotiatorHandle(Arc::new(std::sync::Mutex::new(None))));
             }
             // 内核事件桥：订阅 KernelEvent，转发为 Tauri 事件「kernel-event」
             // （前端可订阅替代轮询；设计文档 §3.2）

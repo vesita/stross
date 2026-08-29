@@ -217,11 +217,11 @@ fn test_shutdown_multiple_services() {
     // Register multiple services
     let mut fullnames = Vec::new();
     for i in 0..3 {
-        let instance_name = format!("multi-test-{}-{}", now, i);
+        let instance_name = format!("multi-test-{now}-{i}");
         let my_service = ServiceInfo::new(
             ty_domain,
             &instance_name,
-            &format!("multi-host-{}.local.", i),
+            &format!("multi-host-{i}.local."),
             "",
             5302 + i,
             None,

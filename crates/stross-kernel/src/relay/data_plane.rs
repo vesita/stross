@@ -113,8 +113,7 @@ pub(super) async fn handle_watch(
     drop(rx);
     let watchers = state
         .get(&stream_id)
-        .map(|e| e.tx.receiver_count() as u32)
-        .unwrap_or(0);
+        .map_or(0, |e| e.tx.receiver_count() as u32);
     state.emit(RelayEvent::WatchersChanged {
         stream_id: stream_id.clone(),
         watchers,
@@ -257,10 +256,7 @@ async fn handle_push_loop(
                 // 回环来源（本机流程）走内核预授权；非回环 / 未知来源
                 // （跨设备，如手机 → 电脑）必须出示有效接入凭证。
                 if state.is_controlled() {
-                    let local = session
-                        .peer_addr()
-                        .map(|a| a.ip().is_loopback())
-                        .unwrap_or(false);
+                    let local = session.peer_addr().is_some_and(|a| a.ip().is_loopback());
                     if !state.is_allowed(&id, share_token.as_deref(), local) {
                         tracing::warn!(
                             "推流被拒绝: 流 {id} 来源 {} 未授权（本机需先建会话，跨设备需出示接入凭证）",

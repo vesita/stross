@@ -51,7 +51,7 @@ pub struct SessionPrefs {
 
 impl Session {
     /// 控制操作前的鉴权门禁：启用访问码且未通过 [`crate::kernel::Kernel::authorize`] → 拒绝。
-    pub(super) fn require_authorized(&self) -> Result<()> {
+    pub(super) const fn require_authorized(&self) -> Result<()> {
         if self.requires_pin && !self.authorized {
             return Err(Error::PinRequired);
         }
@@ -59,7 +59,7 @@ impl Session {
     }
 
     /// 标记已鉴权（仅 [`crate::kernel::Kernel::authorize`] 调用）。
-    pub(super) fn mark_authorized(&mut self) {
+    pub(super) const fn mark_authorized(&mut self) {
         self.authorized = true;
     }
 }

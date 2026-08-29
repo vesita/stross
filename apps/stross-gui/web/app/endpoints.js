@@ -130,7 +130,7 @@ async function confirmPublish() {
         await refreshLocalCatalog();
     }
     catch (e) {
-        $('pub-error').textContent = '通告失败：' + e.message;
+        $('pub-error').textContent = '通告失败：' + errMsg(e);
         $('pub-error').classList.remove('hidden');
     }
     finally {
@@ -144,7 +144,7 @@ async function unpublishEndpoint(endpointId) {
         await refreshLocalCatalog();
     }
     catch (e) {
-        showGridError('取消通告失败：' + e.message);
+        showGridError('取消通告失败：' + errMsg(e));
     }
 }
 // ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ async function loadRemoteDir(dev) {
     }
     catch (e) {
         if (box) {
-            box.textContent = '目录不可用（' + e.message + '）';
+            box.textContent = '目录不可用（' + errMsg(e) + '）';
             box.classList.add('hint');
         }
     }
@@ -304,7 +304,7 @@ async function confirmSubscribe() {
         await startReceive(r.streamId);
     }
     catch (e) {
-        $('sub-error').textContent = '订阅失败：' + e.message;
+        $('sub-error').textContent = '订阅失败：' + errMsg(e);
         $('sub-error').classList.remove('hidden');
     }
     finally {

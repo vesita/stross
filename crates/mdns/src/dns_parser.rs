@@ -57,7 +57,7 @@ impl fmt::Display for InterfaceId {
 
 impl From<&Interface> for InterfaceId {
     fn from(interface: &Interface) -> Self {
-        InterfaceId {
+        Self {
             name: interface.name.clone(),
             index: interface.index.unwrap_or_default(),
         }
@@ -132,23 +132,23 @@ pub enum ScopedIp {
 impl ScopedIp {
     pub const fn to_ip_addr(&self) -> IpAddr {
         match self {
-            ScopedIp::V4(v4) => IpAddr::V4(v4.addr),
-            ScopedIp::V6(v6) => IpAddr::V6(v6.addr),
+            Self::V4(v4) => IpAddr::V4(v4.addr),
+            Self::V6(v6) => IpAddr::V6(v6.addr),
         }
     }
 
     pub const fn is_ipv4(&self) -> bool {
-        matches!(self, ScopedIp::V4(_))
+        matches!(self, Self::V4(_))
     }
 
     pub const fn is_ipv6(&self) -> bool {
-        matches!(self, ScopedIp::V6(_))
+        matches!(self, Self::V6(_))
     }
 
     pub const fn is_loopback(&self) -> bool {
         match self {
-            ScopedIp::V4(v4) => v4.addr.is_loopback(),
-            ScopedIp::V6(v6) => v6.addr.is_loopback(),
+            Self::V4(v4) => v4.addr.is_loopback(),
+            Self::V6(v6) => v6.addr.is_loopback(),
         }
     }
 }
@@ -156,11 +156,11 @@ impl ScopedIp {
 impl From<IpAddr> for ScopedIp {
     fn from(ip: IpAddr) -> Self {
         match ip {
-            IpAddr::V4(v4) => ScopedIp::V4(ScopedIpV4 {
+            IpAddr::V4(v4) => Self::V4(ScopedIpV4 {
                 addr: v4,
                 interface_ids: vec![],
             }),
-            IpAddr::V6(v6) => ScopedIp::V6(ScopedIpV6 {
+            IpAddr::V6(v6) => Self::V6(ScopedIpV6 {
                 addr: v6,
                 scope_id: InterfaceId::default(),
             }),
@@ -171,11 +171,11 @@ impl From<IpAddr> for ScopedIp {
 impl From<&Interface> for ScopedIp {
     fn from(interface: &Interface) -> Self {
         match interface.ip() {
-            IpAddr::V4(v4) => ScopedIp::V4(ScopedIpV4 {
+            IpAddr::V4(v4) => Self::V4(ScopedIpV4 {
                 addr: v4,
                 interface_ids: vec![InterfaceId::from(interface)],
             }),
-            IpAddr::V6(v6) => ScopedIp::V6(ScopedIpV6 {
+            IpAddr::V6(v6) => Self::V6(ScopedIpV6 {
                 addr: v6,
                 scope_id: InterfaceId::from(interface),
             }),
@@ -186,8 +186,8 @@ impl From<&Interface> for ScopedIp {
 impl fmt::Display for ScopedIp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ScopedIp::V4(v4) => write!(f, "{}", v4.addr),
-            ScopedIp::V6(v6) => {
+            Self::V4(v4) => write!(f, "{}", v4.addr),
+            Self::V6(v6) => {
                 if v6.scope_id.index != 0 && is_unicast_link_local(&v6.addr) {
                     #[cfg(windows)]
                     {
@@ -244,15 +244,15 @@ impl RRType {
     /// Converts `u16` into `RRType` if possible.
     pub const fn from_u16(value: u16) -> Option<Self> {
         match value {
-            1 => Some(RRType::A),
-            5 => Some(RRType::CNAME),
-            12 => Some(RRType::PTR),
-            13 => Some(RRType::HINFO),
-            16 => Some(RRType::TXT),
-            28 => Some(RRType::AAAA),
-            33 => Some(RRType::SRV),
-            47 => Some(RRType::NSEC),
-            255 => Some(RRType::ANY),
+            1 => Some(Self::A),
+            5 => Some(Self::CNAME),
+            12 => Some(Self::PTR),
+            13 => Some(Self::HINFO),
+            16 => Some(Self::TXT),
+            28 => Some(Self::AAAA),
+            33 => Some(Self::SRV),
+            47 => Some(Self::NSEC),
+            255 => Some(Self::ANY),
             _ => None,
         }
     }
@@ -261,15 +261,15 @@ impl RRType {
 impl fmt::Display for RRType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RRType::A => write!(f, "TYPE_A"),
-            RRType::CNAME => write!(f, "TYPE_CNAME"),
-            RRType::PTR => write!(f, "TYPE_PTR"),
-            RRType::HINFO => write!(f, "TYPE_HINFO"),
-            RRType::TXT => write!(f, "TYPE_TXT"),
-            RRType::AAAA => write!(f, "TYPE_AAAA"),
-            RRType::SRV => write!(f, "TYPE_SRV"),
-            RRType::NSEC => write!(f, "TYPE_NSEC"),
-            RRType::ANY => write!(f, "TYPE_ANY"),
+            Self::A => write!(f, "TYPE_A"),
+            Self::CNAME => write!(f, "TYPE_CNAME"),
+            Self::PTR => write!(f, "TYPE_PTR"),
+            Self::HINFO => write!(f, "TYPE_HINFO"),
+            Self::TXT => write!(f, "TYPE_TXT"),
+            Self::AAAA => write!(f, "TYPE_AAAA"),
+            Self::SRV => write!(f, "TYPE_SRV"),
+            Self::NSEC => write!(f, "TYPE_NSEC"),
+            Self::ANY => write!(f, "TYPE_ANY"),
         }
     }
 }
@@ -496,18 +496,18 @@ impl DnsRecord {
     }
 
     /// Returns whether `now` (in millis) has passed half of TTL.
-    pub fn halflife_passed(&self, now: u64) -> bool {
+    pub const fn halflife_passed(&self, now: u64) -> bool {
         let halflife = get_expiration_time(self.created, self.ttl, 50);
         now > halflife
     }
 
-    pub fn is_unique(&self) -> bool {
+    pub const fn is_unique(&self) -> bool {
         self.entry.cache_flush
     }
 
     /// Updates the refresh time to be the same as the expire time so that
     /// this record will not refresh again and will just expire.
-    pub fn refresh_no_more(&mut self) {
+    pub const fn refresh_no_more(&mut self) {
         self.refresh = get_expiration_time(self.created, self.ttl, 100);
     }
 
@@ -553,11 +553,11 @@ impl DnsRecord {
     }
 
     /// Set the absolute expiration time in millis
-    fn set_expire(&mut self, expire_at: u64) {
+    const fn set_expire(&mut self, expire_at: u64) {
         self.expires = expire_at;
     }
 
-    fn reset_ttl(&mut self, other: &Self) {
+    const fn reset_ttl(&mut self, other: &Self) {
         self.ttl = other.ttl;
         self.created = other.created;
         self.expires = get_expiration_time(self.created, self.ttl, 100);
@@ -571,7 +571,7 @@ impl DnsRecord {
     }
 
     /// Modify TTL to reflect the remaining life time from `now`.
-    pub fn update_ttl(&mut self, now: u64) {
+    pub const fn update_ttl(&mut self, now: u64) {
         if now > self.created {
             let elapsed = now - self.created;
             self.ttl -= (elapsed / 1000) as u32;
@@ -931,7 +931,7 @@ impl DnsSrv {
         &self.host
     }
 
-    pub fn port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         self.port
     }
 
@@ -1511,7 +1511,7 @@ impl DnsOutPacket {
         }
     }
 
-    pub fn size(&self) -> usize {
+    pub const fn size(&self) -> usize {
         self.data.len()
     }
 
@@ -1520,7 +1520,7 @@ impl DnsOutPacket {
     }
 
     /// True if nothing has been written into this packet yet.
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.question_count == 0
             && self.answer_count == 0
             && self.auth_count == 0
@@ -1528,7 +1528,7 @@ impl DnsOutPacket {
     }
 
     /// Counts one more item in `section`.
-    fn bump(&mut self, section: Section) {
+    const fn bump(&mut self, section: Section) {
         match section {
             Section::Question => self.question_count += 1,
             Section::Answer => self.answer_count += 1,
@@ -1965,11 +1965,11 @@ impl DnsOutgoing {
         &self.additionals
     }
 
-    pub fn known_answer_count(&self) -> i64 {
+    pub const fn known_answer_count(&self) -> i64 {
         self.known_answer_count
     }
 
-    pub fn set_id(&mut self, id: u16) {
+    pub const fn set_id(&mut self, id: u16) {
         self.id = id;
     }
 
@@ -2217,8 +2217,7 @@ impl DnsOutgoing {
     pub fn to_packets(&self, max_size: usize, is_ipv4: bool) -> Vec<DnsOutPacket> {
         debug_assert!(
             max_size <= MAX_PKT_ABSOLUTE_IPV6,
-            "max_size {} exceeds the RFC 6762 section 17 ceiling",
-            max_size
+            "max_size {max_size} exceeds the RFC 6762 section 17 ceiling"
         );
         let mut builder = PacketBuilder::new(self, max_size, is_ipv4);
 
@@ -2312,7 +2311,7 @@ impl DnsIncoming {
         Ok(incoming)
     }
 
-    pub fn id(&self) -> u16 {
+    pub const fn id(&self) -> u16 {
         self.id
     }
 
@@ -2351,15 +2350,15 @@ impl DnsIncoming {
             .chain(self.additional)
     }
 
-    pub fn num_additionals(&self) -> u16 {
+    pub const fn num_additionals(&self) -> u16 {
         self.num_additionals
     }
 
-    pub fn num_authorities(&self) -> u16 {
+    pub const fn num_authorities(&self) -> u16 {
         self.num_authorities
     }
 
-    pub fn num_questions(&self) -> u16 {
+    pub const fn num_questions(&self) -> u16 {
         self.num_questions
     }
 
@@ -2794,8 +2793,7 @@ impl DnsIncoming {
                     if pointer >= start_offset {
                         // Error: could trigger an infinite loop.
                         return Err(Error::Msg(format!(
-                            "Invalid name compression: pointer {} must be less than the start offset {}",
-                            pointer, start_offset
+                            "Invalid name compression: pointer {pointer} must be less than the start offset {start_offset}"
                         )));
                     }
 
@@ -3179,8 +3177,7 @@ mod tests {
         let packets = out.to_packets(MAX_PKT_DEFAULT, IPV6);
         assert!(
             packets.len() > 1,
-            "{} answers should not fit in one packet",
-            ANSWER_COUNT
+            "{ANSWER_COUNT} answers should not fit in one packet"
         );
 
         for packet in &packets {

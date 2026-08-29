@@ -14,13 +14,15 @@ pub fn data_dir(data_dir: Option<PathBuf>) -> PathBuf {
     if let Some(d) = data_dir {
         return d;
     }
-    std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| std::path::Path::new(&h).join(".local/share/stross"))
-                .unwrap_or_else(|_| PathBuf::from("stross-data"))
-        })
+    std::env::var("XDG_DATA_HOME").map_or_else(
+        |_| {
+            std::env::var("HOME").map_or_else(
+                |_| PathBuf::from("stross-data"),
+                |h| std::path::Path::new(&h).join(".local/share/stross"),
+            )
+        },
+        PathBuf::from,
+    )
 }
 
 #[cfg(test)]

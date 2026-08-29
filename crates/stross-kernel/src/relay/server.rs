@@ -97,7 +97,7 @@ impl RelayHandle {
     }
 
     /// 是否受控模式（仅授权 id 可推流）。
-    pub fn is_controlled(&self) -> bool {
+    pub const fn is_controlled(&self) -> bool {
         self.state.is_controlled()
     }
 

@@ -119,7 +119,7 @@ impl AccessUnit {
 
     /// 载荷总字节数（不含起始码）。
     pub fn payload_len(&self) -> usize {
-        self.nals.iter().map(|n| n.len()).sum()
+        self.nals.iter().map(std::vec::Vec::len).sum()
     }
 }
 
@@ -176,7 +176,7 @@ fn first_mb_in_slice(nal: &[u8]) -> Option<u64> {
     p += 1; // 跳过 1
     let mut value = 0u64;
     for _ in 0..m {
-        value = (value << 1) | bit(p)? as u64;
+        value = (value << 1) | u64::from(bit(p)?);
         p += 1;
     }
     Some((1u64 << m) - 1 + value)
@@ -407,7 +407,7 @@ struct BitReader<'a> {
 }
 
 impl<'a> BitReader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
+    const fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
     }
 
@@ -416,11 +416,11 @@ impl<'a> BitReader<'a> {
         let byte = *self.buf.get(self.pos / 8)?;
         let b = (byte >> (7 - (self.pos % 8))) & 1;
         self.pos += 1;
-        Some(b as u32)
+        Some(u32::from(b))
     }
 
     /// 跳过 n 位。
-    fn skip(&mut self, n: usize) -> Option<()> {
+    const fn skip(&mut self, n: usize) -> Option<()> {
         if self.pos + n > self.buf.len() * 8 {
             return None;
         }

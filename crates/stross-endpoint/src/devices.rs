@@ -44,12 +44,11 @@ pub fn list_cameras() -> Vec<CameraDevice> {
         let mut out = Vec::new();
         if let Ok(entries) = std::fs::read_dir("/dev") {
             let mut paths: Vec<_> = entries
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .map(|e| e.path())
                 .filter(|p| {
                     p.file_name()
-                        .map(|n| n.to_string_lossy().starts_with("video"))
-                        .unwrap_or(false)
+                        .is_some_and(|n| n.to_string_lossy().starts_with("video"))
                 })
                 .collect();
             paths.sort();
@@ -250,7 +249,11 @@ fn pulse_sources() -> Vec<String> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     text.lines()
-        .filter_map(|line| line.split_whitespace().nth(1).map(|s| s.to_string()))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .nth(1)
+                .map(std::string::ToString::to_string)
+        })
         .collect()
 }
 

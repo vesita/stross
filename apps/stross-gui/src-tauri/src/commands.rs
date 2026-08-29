@@ -435,7 +435,11 @@ pub async fn firewall_status(
     let subnet = crate::firewall::lan_subnet(&ips);
     let mut status = crate::firewall::parse_ufw_verbose(&text);
     let (tcp, udp) = required_firewall_ports(&state);
-    let required: Vec<&str> = tcp.iter().chain(udp.iter()).map(|s| s.as_str()).collect();
+    let required: Vec<&str> = tcp
+        .iter()
+        .chain(udp.iter())
+        .map(std::string::String::as_str)
+        .collect();
     status.missing = match subnet {
         Some(sub) => crate::firewall::missing_rules(
             &required,
@@ -468,7 +472,6 @@ pub async fn firewall_allow(state: State<'_, Arc<Kernel>>) -> Result<(), String>
     if status.missing.is_empty() {
         return Ok(()); // 已就绪
     }
-    let (_, _) = required_firewall_ports(&state);
     // missing 形如 "18777/tcp" / "33462/udp"，按协议分组
     let tcp: Vec<String> = status
         .missing

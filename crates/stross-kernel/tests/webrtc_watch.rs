@@ -88,9 +88,9 @@ async fn client_loop(udp: Arc<UdpSocket>, mut rtc: Rtc, tx: mpsc::Sender<Vec<u8>
     let mut buf = vec![0u8; 64 * 1024];
     let mut next_timeout: Option<Instant> = None;
     loop {
-        let wait = next_timeout
-            .map(|t| t.saturating_duration_since(Instant::now()))
-            .unwrap_or(Duration::from_secs(1));
+        let wait = next_timeout.map_or(Duration::from_secs(1), |t| {
+            t.saturating_duration_since(Instant::now())
+        });
         tokio::select! {
             res = udp.recv_from(&mut buf) => {
                 let Ok((n, from)) = res else { break };

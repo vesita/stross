@@ -92,7 +92,7 @@ async function respondApprove(allow: boolean): Promise<void> {
       remember: remember.checked,
     })) as ShareGrant | null;
   } catch (e) {
-    $('approve-error').textContent = '应答失败：' + (e as Error).message;
+    $('approve-error').textContent = '应答失败：' + errMsg(e);
     $('approve-error').classList.remove('hidden');
     return;
   }

@@ -22,7 +22,7 @@ async function allowFirewall(): Promise<void> {
     $('fw-banner').classList.add('hidden');
   } catch (e) {
     const box = $('grid-error');
-    box.textContent = '防火墙放行失败：' + (e as Error).message;
+    box.textContent = '防火墙放行失败：' + errMsg(e);
     box.classList.remove('hidden');
   } finally {
     btn.disabled = false;

@@ -9,7 +9,7 @@ use stross_kernel::Kernel;
 use stross_proto::message::Platform;
 
 /// 当前运行平台（`cfg(target_os="android")` 判定只允许出现在这里）。
-pub fn platform() -> Platform {
+pub const fn platform() -> Platform {
     if cfg!(target_os = "android") {
         Platform::Android
     } else {

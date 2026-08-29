@@ -107,7 +107,7 @@ pub enum CtrlResponse {
 }
 
 impl CtrlResponse {
-    pub fn ok(payload: serde_json::Value) -> Self {
+    pub const fn ok(payload: serde_json::Value) -> Self {
         Self::Ok { payload }
     }
     pub fn err(message: impl Into<String>) -> Self {
@@ -269,7 +269,7 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             delivery,
         } => match app.publish_file_endpoint(std::path::Path::new(&path), visibility, delivery) {
             Ok(m) => CtrlResponse::ok_json(stross_types::FilePublishedView {
-                size: app.file_source(&m.endpoint_id).map(|s| s.size).unwrap_or(0),
+                size: app.file_source(&m.endpoint_id).map_or(0, |s| s.size),
                 endpoint_id: m.endpoint_id,
                 name: m.name,
                 delivery: m.delivery,

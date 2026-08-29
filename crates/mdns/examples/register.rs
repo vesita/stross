@@ -50,7 +50,7 @@ fn main() {
         let log_filename = format!("mdns-register-{}.log", duration.as_secs());
         let file = File::create(&log_filename).unwrap();
         builder.target(env_logger::Target::Pipe(Box::new(file)));
-        println!("Logging to file: {}\n", log_filename);
+        println!("Logging to file: {log_filename}\n");
     }
 
     // more precise timestamp.
@@ -67,32 +67,29 @@ fn main() {
         mdns.include_apple_p2p(true).unwrap();
     }
 
-    let service_type = match args.get(1) {
-        Some(arg) => format!("{}.local.", arg),
-        None => {
-            print_usage();
-            return;
-        }
+    let service_type = if let Some(arg) = args.get(1) {
+        format!("{arg}.local.")
+    } else {
+        print_usage();
+        return;
     };
-    let instance_name = match args.get(2) {
-        Some(arg) => arg,
-        None => {
-            print_usage();
-            return;
-        }
+    let instance_name = if let Some(arg) = args.get(2) {
+        arg
+    } else {
+        print_usage();
+        return;
     };
-    let hostname = match args.get(3) {
-        Some(arg) => arg,
-        None => {
-            print_usage();
-            return;
-        }
+    let hostname = if let Some(arg) = args.get(3) {
+        arg
+    } else {
+        print_usage();
+        return;
     };
 
     // With `enable_addr_auto()`, we can give empty addrs and let the lib find them.
     // If the caller knows specific addrs to use, then assign the addrs here.
     let my_addrs = "";
-    let service_hostname = format!("{}.local.", hostname);
+    let service_hostname = format!("{hostname}.local.");
     let port = 3456;
 
     // The key string in TXT properties is case insensitive. Only the first
@@ -117,23 +114,23 @@ fn main() {
     mdns.register(service_info)
         .expect("Failed to register mDNS service");
 
-    println!("Registered service {}.{}", instance_name, service_type);
+    println!("Registered service {instance_name}.{service_type}");
 
     if should_unreg {
         let wait_in_secs = 2;
-        println!("Sleeping {} seconds before unregister", wait_in_secs);
+        println!("Sleeping {wait_in_secs} seconds before unregister");
         thread::sleep(Duration::from_secs(wait_in_secs));
 
         let receiver = mdns.unregister(&service_fullname).unwrap();
         while let Ok(event) = receiver.recv() {
-            println!("unregister result: {:?}", event);
+            println!("unregister result: {event:?}");
         }
     } else {
         // Monitor the daemon events.
         while let Ok(event) = monitor.recv() {
-            println!("Daemon event: {:?}", event);
+            println!("Daemon event: {event:?}");
             if let DaemonEvent::Error(e) = event {
-                println!("Failed: {}", e);
+                println!("Failed: {e}");
                 break;
             }
         }

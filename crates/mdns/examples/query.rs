@@ -18,12 +18,11 @@ use mdns::{ServiceDaemon, ServiceEvent};
 fn main() {
     env_logger::builder().format_timestamp_millis().init();
 
-    let mut service_type = match std::env::args().nth(1) {
-        Some(arg) => arg,
-        None => {
-            print_usage();
-            return;
-        }
+    let mut service_type = if let Some(arg) = std::env::args().nth(1) {
+        arg
+    } else {
+        print_usage();
+        return;
     };
     service_type.push_str(".local.");
 
@@ -55,7 +54,7 @@ fn main() {
                     }
                 }
                 for prop in info.txt_properties.iter() {
-                    println!(" Property: {}", prop);
+                    println!(" Property: {prop}");
                 }
 
                 if should_verify && found_ipv4 {
@@ -65,7 +64,7 @@ fn main() {
                     let instance_fullname = info.fullname;
                     let timeout = std::time::Duration::from_secs(2);
                     if let Err(e) = mdns.verify(instance_fullname, timeout) {
-                        println!("Verify failed: {}", e);
+                        println!("Verify failed: {e}");
                     } else {
                         println!("Verify started");
                     }

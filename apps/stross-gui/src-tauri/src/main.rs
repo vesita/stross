@@ -15,7 +15,7 @@ fn main() {
     }
     #[cfg(all(not(mobile), target_os = "linux"))]
     apply_linux_webkit_workarounds();
-    stross_gui_lib::run()
+    stross_gui_lib::run();
 }
 
 /// NVIDIA 闭源驱动 + Wayland 下，webkit2gtk 的 DMA-BUF 渲染器与合成器

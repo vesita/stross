@@ -47,6 +47,7 @@ const calls = [];
 let streamRunning = false; // 与 start_stream/stop_stream 联动（真实行为）
 let mockRecvEnded = false; // B6 测试：流结束 → receive_status 返回 running=false 且已收帧
 let fwMissing = ['18779/tcp', '33464/udp']; // 防火墙自检回放（缺 SRT? 实际缺两个）
+let scanReturnOverride = null; // [5] 手动添加场景：scan_devices 返回空列表
 // —— 端点框架状态（本机通告：deviceId → {visibility, delivery}，供 local_catalog 回放） ——
 const localEpState = new Map();
 const invoke = async (cmd, args) => {
@@ -73,6 +74,7 @@ const invoke = async (cmd, args) => {
       return { port: 8777, urls: ['http://192.168.1.50:8777/'], name: 'Stross 本机中继', kind: 'relay', roles: [], transports: [], ip: null };
     // 扫描聚合在 Rust（scan_devices）；前端只消费 ScannedDevice[]（isSelf/探测已含）
     case 'scan_devices':
+      if (scanReturnOverride) return scanReturnOverride; // [5] 场景：模拟空列表
       return [
         {
           name: 'Stross 本机中继', ip: '192.168.1.50', port: 8777, isSelf: true, online: true,
@@ -85,8 +87,7 @@ const invoke = async (cmd, args) => {
           name: '手机A', ip: '192.168.1.51', port: 9001, isSelf: false, online: true,
           roles: ['sender'], media: [], transports: [], endpoints: [], srtPort: null, quicPort: 9002,
           streams: [{ streamId: 's1', title: '手机麦克风', watchers: 0, video: false, audio: true }],
-        },
-        {
+        },        {
           name: '电脑B', ip: '192.168.1.52', port: 9002, isSelf: false, online: true,
           roles: ['relay'], media: [], transports: [], endpoints: [], srtPort: null, quicPort: 9002,
           streams: [{ streamId: 's2', title: '电脑屏幕', watchers: 1, video: true, audio: false }],
@@ -338,13 +339,9 @@ check('右栏为「接收」面板（无共享流列表）', !!$('recv-pane') &&
 
 console.log('\n[5] 手动添加设备（免 mDNS 路径）');
 window.localStorage.clear();
-const origInvoke = window.__TAURI__.core.invoke;
-window.__TAURI__.core.invoke = async (cmd, args) => {
-  if (cmd === 'start_relay') return { port: 8777, urls: ['http://192.168.1.50:8777/'], name: 'x', kind: 'relay', roles: [], transports: [], ip: null };
-  if (cmd === 'scan_devices') return []; // 无 mDNS 设备；手动列表独立渲染
-  if (cmd === 'stream_status') return { running: false, streamId: null, title: null, relayPort: null, startedAt: null };
-  return origInvoke(cmd, args);
-};
+// 注：不能替换 window.__TAURI__.core.invoke —— ui.ts 的 call() 在 eval 时已
+// 捕获 invoke 引用，属性替换无效。用 mock 内可变开关控制 scan_devices 返回。
+scanReturnOverride = []; // 无 mDNS 设备；手动列表独立渲染
 $('manual-addr').value = 'http://192.168.1.77:8777';
 $('manual-add-btn').click();
 await sleep(900);
@@ -352,8 +349,8 @@ const devCards2 = document.querySelectorAll('#device-list .dev-card');
 check('手动设备卡片出现', Array.from(devCards2).some((c) => c.textContent.includes('192.168.1.77')));
 check('手动设备标记（手动）', Array.from(devCards2).some((c) => c.textContent.includes('（手动')), '未标记（手动）');
 check('手动添加历史持久化', !$('recent-block').classList.contains('hidden') && $('recent-block').textContent.includes('192.168.1.77'));
-// 恢复原 mock 并点击「扫描」重建设备列表（含手机A/电脑B，供后续使用）
-window.__TAURI__.core.invoke = origInvoke;
+// 恢复扫描结果并点击「扫描」重建设备列表（含手机A/电脑B，供后续使用）
+scanReturnOverride = null;
 $('scan-btn').click();
 await sleep(900);
 

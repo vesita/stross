@@ -311,6 +311,11 @@ async fn write_msg(tx: &mut quinn::SendStream, payload: &[u8]) -> Result<(), Tra
     Ok(())
 }
 
+/// 单条 QUIC 消息长度上限：读侧长度由对端声明，无上限会按对端声明的
+/// 4GiB 分配（局域网内任意能完成 TLS 握手的对端可打挂 Android 中继）。
+/// 与 WS 的 64MB 限制对齐；写侧另有 4GiB 上限（长度前缀 u32 语义）。
+const MAX_MSG_LEN: usize = 64 * 1024 * 1024;
+
 /// 读一条长度前缀消息；`Ok(None)` = 流干净结束（对端关闭该 stream）。
 async fn read_msg(rx: &mut quinn::RecvStream) -> Result<Option<Bytes>, TransportError> {
     let mut len_buf = [0u8; LEN_BYTES];
@@ -318,6 +323,11 @@ async fn read_msg(rx: &mut quinn::RecvStream) -> Result<Option<Bytes>, Transport
         return map_read_err(e).map(|_| None);
     }
     let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_MSG_LEN {
+        return Err(TransportError::Protocol(format!(
+            "QUIC 消息长度超限（{len} > {MAX_MSG_LEN} 字节）"
+        )));
+    }
     let mut buf = vec![0u8; len];
     if let Err(e) = rx.read_exact(&mut buf).await {
         return map_read_err(e).map(|_| None);

@@ -159,8 +159,7 @@ impl CaptureBackend for FfmpegBackend {
             .unwrap_or(s.started_wall);
         Some(
             wall.duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_millis() as u64),
         )
     }
 
@@ -172,8 +171,7 @@ impl CaptureBackend for FfmpegBackend {
         let (wall, _) = guard.as_ref()?;
         Some(
             wall.duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_millis() as u64),
         )
     }
 

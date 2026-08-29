@@ -115,7 +115,7 @@ impl FrameHeader {
         if version != VERSION {
             return Err(FrameError::BadVersion(version));
         }
-        Ok(FrameHeader {
+        Ok(Self {
             track: buf[5],
             codec: buf[6],
             flags: buf[7],
@@ -127,20 +127,20 @@ impl FrameHeader {
         })
     }
 
-    pub fn is_keyframe(&self) -> bool {
+    pub const fn is_keyframe(&self) -> bool {
         self.flags & FLAG_KEYFRAME != 0
     }
-    pub fn is_config(&self) -> bool {
+    pub const fn is_config(&self) -> bool {
         self.flags & FLAG_CONFIG != 0
     }
-    pub fn is_start(&self) -> bool {
+    pub const fn is_start(&self) -> bool {
         self.flags & FLAG_START != 0
     }
-    pub fn is_end(&self) -> bool {
+    pub const fn is_end(&self) -> bool {
         self.flags & FLAG_END != 0
     }
     /// 是否未分片（`frag_cnt == 0`）。
-    pub fn is_whole(&self) -> bool {
+    pub const fn is_whole(&self) -> bool {
         self.frag_cnt == 0
     }
 }
@@ -156,7 +156,7 @@ impl Frame {
     /// 构造未分片帧（`seq = 0`，`frag_cnt = 0`）。
     pub fn new(track: u8, codec: u8, flags: u8, pts_ms: u32, payload: impl Into<Bytes>) -> Self {
         let payload = payload.into();
-        Frame {
+        Self {
             header: FrameHeader {
                 track,
                 codec,
@@ -181,7 +181,7 @@ impl Frame {
         payload: impl Into<Bytes>,
     ) -> Self {
         let payload = payload.into();
-        Frame {
+        Self {
             header: FrameHeader {
                 track,
                 codec,
@@ -214,7 +214,7 @@ impl Frame {
         if buf.len() < total {
             return Err(FrameError::TooShort(buf.len()));
         }
-        Ok(Frame {
+        Ok(Self {
             header,
             payload: Bytes::copy_from_slice(&buf[HEADER_LEN..total]),
         })
@@ -230,7 +230,7 @@ impl Frame {
         if buf.len() < total {
             return Err(FrameError::TooShort(buf.len()));
         }
-        Ok(Frame {
+        Ok(Self {
             header,
             payload: buf.slice(HEADER_LEN..total),
         })

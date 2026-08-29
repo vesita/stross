@@ -51,8 +51,7 @@ impl AudioSink {
                         for s in out.iter_mut() {
                             *s = q
                                 .pop_front()
-                                .map(T::from_sample)
-                                .unwrap_or_else(|| T::from_sample(0.0f32));
+                                .map_or_else(|| T::from_sample(0.0f32), T::from_sample);
                         }
                     }
                 },

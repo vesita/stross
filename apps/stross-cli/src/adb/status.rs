@@ -75,20 +75,17 @@ pub(crate) async fn phone_status(ports_arg: &str) -> anyhow::Result<PhoneStatus>
             continue; // forward 失败，换下一个候选端口
         }
         let probe = Duration::from_millis(1500);
-        match relay_http::info("127.0.0.1", local_port, probe).await {
-            Ok(info) => {
-                status.online = true;
-                status.relay_port = Some(*relay_port);
-                status.srt_port = info.srt_port;
-                status.quic_port = info.quic_port;
-                // /api/streams（同一 forward 会话）
-                if let Ok(list) = relay_http::streams("127.0.0.1", local_port, probe).await {
-                    status.streams = stross_kernel::devices::to_views(list);
-                }
+        if let Ok(info) = relay_http::info("127.0.0.1", local_port, probe).await {
+            status.online = true;
+            status.relay_port = Some(*relay_port);
+            status.srt_port = info.srt_port;
+            status.quic_port = info.quic_port;
+            // /api/streams（同一 forward 会话）
+            if let Ok(list) = relay_http::streams("127.0.0.1", local_port, probe).await {
+                status.streams = stross_kernel::devices::to_views(list);
             }
-            Err(_) => {
-                // 该端口不是中继（或无 HTTP），清理后试下一个
-            }
+        } else {
+            // 该端口不是中继（或无 HTTP），清理后试下一个
         }
         let _ = adb_forward_remove(&serial, local_port).await;
         if status.online {
@@ -120,14 +117,8 @@ pub(crate) fn print_status(s: &PhoneStatus) {
         println!("  中继      未探测到（手机未运行 Stross？或中继端口非 8777/18777）");
         return;
     }
-    let srt = s
-        .srt_port
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| "-".into());
-    let quic = s
-        .quic_port
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| "-".into());
+    let srt = s.srt_port.map_or_else(|| "-".into(), |p| p.to_string());
+    let quic = s.quic_port.map_or_else(|| "-".into(), |p| p.to_string());
     println!(
         "  中继      ws://{}:{}（SRT {srt} · QUIC {quic}）",
         s.wifi_ip.as_deref().unwrap_or("<ip>"),

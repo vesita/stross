@@ -24,7 +24,7 @@ pub struct CapabilityDescriptor {
 
 impl CapabilityDescriptor {
     /// 未知能力（默认实现用）。
-    pub fn unknown() -> Self {
+    pub const fn unknown() -> Self {
         Self {
             kind: CapabilityKind::Source,
             media: Vec::new(),

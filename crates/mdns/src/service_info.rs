@@ -51,7 +51,7 @@ impl MyIntf {
     }
 
     /// Max byte size of a packet generated for the given address family.
-    pub(crate) fn max_packet_size(&self, is_ipv4: bool) -> usize {
+    pub(crate) const fn max_packet_size(&self, is_ipv4: bool) -> usize {
         if is_ipv4 {
             self.max_packet_size_v4
         } else {
@@ -62,7 +62,7 @@ impl MyIntf {
 
 impl From<&MyIntf> for InterfaceId {
     fn from(my_intf: &MyIntf) -> Self {
-        InterfaceId {
+        Self {
             name: my_intf.name.clone(),
             index: my_intf.index,
         }
@@ -219,8 +219,7 @@ impl ServiceInfo {
             let prop_len = key.len() + prop.val().map_or(0, |v| v.len() + 1);
             if prop_len > u8::MAX as usize {
                 return Err(Error::Msg(format!(
-                    "TXT property '{}' has length {} bytes, exceeding the 255-byte limit",
-                    key, prop_len
+                    "TXT property '{key}' has length {prop_len} bytes, exceeding the 255-byte limit"
                 )));
             }
         }
@@ -265,14 +264,14 @@ impl ServiceInfo {
     ///
     /// By default, it is true (i.e. requires probing) for every service info. You
     /// set it to `false` only when you are sure there are no conflicts, or for testing purposes.
-    pub fn set_requires_probe(&mut self, enable: bool) {
+    pub const fn set_requires_probe(&mut self, enable: bool) {
         self.requires_probe = enable;
     }
 
     /// Set whether the service is restricted to link-local addresses.
     ///
     /// By default, it is false.
-    pub fn set_link_local_only(&mut self, is_link_local_only: bool) {
+    pub const fn set_link_local_only(&mut self, is_link_local_only: bool) {
         self.is_link_local_only = is_link_local_only;
     }
 
@@ -453,7 +452,7 @@ impl ServiceInfo {
         encode_txt(self.get_properties().iter())
     }
 
-    pub(crate) fn _set_port(&mut self, port: u16) {
+    pub(crate) const fn _set_port(&mut self, port: u16) {
         self.port = port;
     }
 
@@ -478,12 +477,12 @@ impl ServiceInfo {
 
     /// host_ttl is for SRV and address records
     /// currently only used for testing.
-    pub(crate) fn _set_host_ttl(&mut self, ttl: u32) {
+    pub(crate) const fn _set_host_ttl(&mut self, ttl: u32) {
         self.host_ttl = ttl;
     }
 
     /// other_ttl is for PTR and TXT records.
-    pub(crate) fn _set_other_ttl(&mut self, ttl: u32) {
+    pub(crate) const fn _set_other_ttl(&mut self, ttl: u32) {
         self.other_ttl = ttl;
     }
 
@@ -507,7 +506,11 @@ impl ServiceInfo {
 
     /// Consumes self and returns a resolved service, i.e. a lite version of `ServiceInfo`.
     pub fn as_resolved_service(self) -> ResolvedService {
-        let addresses: HashSet<ScopedIp> = self.addresses.into_iter().map(|a| a.into()).collect();
+        let addresses: HashSet<ScopedIp> = self
+            .addresses
+            .into_iter()
+            .map(std::convert::Into::into)
+            .collect();
         ResolvedService {
             ty_domain: self.ty_domain,
             sub_ty_domain: self.sub_domain,
@@ -634,13 +637,13 @@ pub struct TxtProperties {
 
 impl Default for TxtProperties {
     fn default() -> Self {
-        TxtProperties::new()
+        Self::new()
     }
 }
 
 impl TxtProperties {
-    pub fn new() -> Self {
-        TxtProperties {
+    pub const fn new() -> Self {
+        Self {
             properties: Vec::new(),
         }
     }
@@ -651,12 +654,12 @@ impl TxtProperties {
     }
 
     /// Returns the number of properties.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.properties.len()
     }
 
     /// Returns if the properties are empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.properties.is_empty()
     }
 
@@ -684,7 +687,7 @@ impl TxtProperties {
     /// Returns `None` if `key` does not exist.
     /// Returns `Some("")` if its value is `None` or is empty.
     pub fn get_property_val_str(&self, key: &str) -> Option<&str> {
-        self.get(key).map(|x| x.val_str())
+        self.get(key).map(TxtProperty::val_str)
     }
 
     /// Consumes properties and returns a hashmap, where the keys are the properties keys.
@@ -711,7 +714,11 @@ impl TxtProperties {
 impl fmt::Display for TxtProperties {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let delimiter = ", ";
-        let props: Vec<String> = self.properties.iter().map(|p| p.to_string()).collect();
+        let props: Vec<String> = self
+            .properties
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         write!(f, "({})", props.join(delimiter))
     }
 }
@@ -719,7 +726,7 @@ impl fmt::Display for TxtProperties {
 impl From<&[u8]> for TxtProperties {
     fn from(txt: &[u8]) -> Self {
         let properties = decode_txt_unique(txt);
-        TxtProperties { properties }
+        Self { properties }
     }
 }
 
@@ -866,7 +873,7 @@ impl IntoTxtProperties for Option<HashMap<String, String>> {
             || TxtProperties {
                 properties: Vec::new(),
             },
-            |h| h.into_txt_properties(),
+            IntoTxtProperties::into_txt_properties,
         )
     }
 }
@@ -1126,12 +1133,12 @@ impl Probe {
         }
     }
 
-    pub(crate) fn update_next_send(&mut self, now: u64) {
+    pub(crate) const fn update_next_send(&mut self, now: u64) {
         self.next_send = now + 250;
     }
 
     /// Returns whether this probe is finished.
-    pub(crate) fn expired(&self, now: u64) -> bool {
+    pub(crate) const fn expired(&self, now: u64) -> bool {
         // The 2nd query is T + 250ms, the 3rd query is T + 500ms,
         // The expire time is T + 750ms
         now >= self.start_time + 750
@@ -1333,19 +1340,16 @@ impl DnsRegistry {
         }
 
         for record in found_records {
-            let probe = match self.probing.get_mut(record.get_name()) {
-                Some(p) => {
-                    p.start_time = probe_time; // restart this probe.
-                    p
-                }
-                None => {
-                    let new_probe = self
-                        .probing
-                        .entry(record.get_name().to_string())
-                        .or_insert_with(|| Probe::new(probe_time));
-                    new_timer_added = true;
-                    new_probe
-                }
+            let probe = if let Some(p) = self.probing.get_mut(record.get_name()) {
+                p.start_time = probe_time; // restart this probe.
+                p
+            } else {
+                let new_probe = self
+                    .probing
+                    .entry(record.get_name().to_string())
+                    .or_insert_with(|| Probe::new(probe_time));
+                new_timer_added = true;
+                new_probe
             };
 
             debug!(
@@ -1409,7 +1413,7 @@ pub(crate) fn split_sub_domain(domain: &str) -> (&str, Option<&str>) {
 /// stable on the current mdns-sd Rust version (1.71.0).
 ///
 /// https://github.com/rust-lang/rust/blob/9fc6b43126469e3858e2fe86cafb4f0fd5068869/library/core/src/net/ip_addr.rs#L1684
-pub(crate) fn is_unicast_link_local(addr: &Ipv6Addr) -> bool {
+pub(crate) const fn is_unicast_link_local(addr: &Ipv6Addr) -> bool {
     (addr.segments()[0] & 0xffc0) == 0xfe80
 }
 
@@ -1471,12 +1475,12 @@ impl ResolvedService {
     }
 
     #[inline]
-    pub fn get_port(&self) -> u16 {
+    pub const fn get_port(&self) -> u16 {
         self.port
     }
 
     #[inline]
-    pub fn get_addresses(&self) -> &HashSet<ScopedIp> {
+    pub const fn get_addresses(&self) -> &HashSet<ScopedIp> {
         &self.addresses
     }
 
@@ -1491,7 +1495,7 @@ impl ResolvedService {
     }
 
     #[inline]
-    pub fn get_properties(&self) -> &TxtProperties {
+    pub const fn get_properties(&self) -> &TxtProperties {
         &self.txt_properties
     }
 
@@ -1811,7 +1815,7 @@ mod tests {
             key: "key1".to_string(),
             val: Some("val1".to_string().into()),
         };
-        let prop_1_debug = format!("{:?}", prop_1);
+        let prop_1_debug = format!("{prop_1:?}");
         assert_eq!(
             prop_1_debug,
             "TxtProperty {key: \"key1\", val: Some(\"val1\")}"
@@ -1822,7 +1826,7 @@ mod tests {
             key: "key2".to_string(),
             val: Some(vec![150u8, 151u8, 152u8]),
         };
-        let prop_2_debug = format!("{:?}", prop_2);
+        let prop_2_debug = format!("{prop_2:?}");
         assert_eq!(
             prop_2_debug,
             "TxtProperty {key: \"key2\", val: Some(0x969798)}"

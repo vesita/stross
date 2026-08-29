@@ -118,9 +118,8 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
     // 不会污染延迟样本（长跑 QUIC 轮曾测得整体 +467ms 假偏移）。
     let wall_0 = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-    let wall_mono_offset = wall_0 - start.elapsed().as_secs_f64() * 1000.0;
+        .map_or(0.0, |d| d.as_secs_f64() * 1000.0);
+    let wall_mono_offset = start.elapsed().as_secs_f64().mul_add(-1000.0, wall_0);
     let (session_start_ms, first_pts): (Option<u64>, f64) = match &args.calibrate {
         Some(path) => {
             let raw = std::fs::read_to_string(path)
@@ -129,7 +128,7 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("校准文件 JSON 非法: {e}"))?;
             let s = v["sessionStartUnixMs"].as_u64().or_else(|| {
                 v.get("sessionStartUnixMs")
-                    .and_then(|x| x.as_i64())
+                    .and_then(serde_json::Value::as_i64)
                     .map(|x| x as u64)
             });
             let p = v["firstPtsMs"].as_u64().unwrap_or(0) as f64;
@@ -154,7 +153,7 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
                 // 不进样本（见 --latency 说明）
                 let pts = f.pts_ms;
                 video_seen += 1;
-                if video_seen > 1 && max_pts.map(|m| pts >= m).unwrap_or(true) {
+                if video_seen > 1 && max_pts.is_none_or(|m| pts >= m) {
                     max_pts = Some(pts);
                     let arrival_ms = start.elapsed().as_secs_f64() * 1000.0;
                     if args.latency {
@@ -162,8 +161,11 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
                     }
                     // 绝对端到端延迟（校准模式）：到达墙上时刻 − (会话起点 + pts)
                     if let Some(s0) = session_start_ms {
-                        let now_ms = wall_mono_offset + start.elapsed().as_secs_f64() * 1000.0;
-                        abs_latency.push(now_ms - (s0 as f64 + pts as f64 - first_pts));
+                        let now_ms = start
+                            .elapsed()
+                            .as_secs_f64()
+                            .mul_add(1000.0, wall_mono_offset);
+                        abs_latency.push(now_ms - (s0 as f64 + f64::from(pts) - first_pts));
                     }
                 }
                 // 转发落盘（写盘失败/通道关闭即停止采样）
@@ -220,7 +222,7 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
         std::fs::write(format!("{}/latency.csv", args.out), csv)?;
         let mut ds: Vec<f64> = latency_samples
             .iter()
-            .map(|(pts, arr)| arr - *pts as f64)
+            .map(|(pts, arr)| arr - f64::from(*pts))
             .collect();
         ds.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median = ds[ds.len() / 2];

@@ -84,17 +84,14 @@ impl StreamChannel {
                 let mut frame = frame;
                 // 轨内序号归一化（见 [`Self::video_seq`] 注释）；输出帧沿用
                 // 轨内序号，消费方（解码/延迟统计）依赖 pts 而非全局 seq。
-                let seq = match frame.header.track {
-                    TRACK_VIDEO => {
-                        let s = self.video_seq;
-                        self.video_seq = self.video_seq.wrapping_add(1);
-                        s
-                    }
-                    _ => {
-                        let s = self.audio_seq;
-                        self.audio_seq = self.audio_seq.wrapping_add(1);
-                        s
-                    }
+                let seq = if frame.header.track == TRACK_VIDEO {
+                    let s = self.video_seq;
+                    self.video_seq = self.video_seq.wrapping_add(1);
+                    s
+                } else {
+                    let s = self.audio_seq;
+                    self.audio_seq = self.audio_seq.wrapping_add(1);
+                    s
                 };
                 frame.header.seq = seq;
                 match frame.header.track {
@@ -118,7 +115,7 @@ impl StreamChannel {
     }
 
     /// 两轨抖动缓冲统计（有损路径有效；诊断用）。
-    pub fn stats(&self) -> (crate::jitter::JitterStats, crate::jitter::JitterStats) {
+    pub const fn stats(&self) -> (crate::jitter::JitterStats, crate::jitter::JitterStats) {
         (self.video.stats, self.audio.stats)
     }
 }

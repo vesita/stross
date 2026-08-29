@@ -167,9 +167,7 @@ pub(crate) async fn adb_forward_remove(serial: &str, local: u16) -> anyhow::Resu
 
 /// 占一个空闲本地端口号（bind 0 后丢弃；竞争窗口极小，够用）。
 pub(crate) fn free_local_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .map(|l| l.local_addr().map(|a| a.port()).unwrap_or(0))
-        .unwrap_or(0)
+    std::net::TcpListener::bind("127.0.0.1:0").map_or(0, |l| l.local_addr().map_or(0, |a| a.port()))
 }
 
 #[cfg(test)]

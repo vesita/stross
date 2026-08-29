@@ -74,15 +74,15 @@ impl MediaKind {
     /// wire 字符串（camelCase；与 serde 序列化一致，单一真源）。
     pub const fn as_str(&self) -> &'static str {
         match self {
-            MediaKind::Screen => "screen",
-            MediaKind::Window => "window",
-            MediaKind::Camera => "camera",
-            MediaKind::Mic => "mic",
-            MediaKind::SystemAudio => "systemAudio",
-            MediaKind::Input => "input",
-            MediaKind::Clipboard => "clipboard",
-            MediaKind::File => "file",
-            MediaKind::Service => "service",
+            Self::Screen => "screen",
+            Self::Window => "window",
+            Self::Camera => "camera",
+            Self::Mic => "mic",
+            Self::SystemAudio => "systemAudio",
+            Self::Input => "input",
+            Self::Clipboard => "clipboard",
+            Self::File => "file",
+            Self::Service => "service",
         }
     }
 }

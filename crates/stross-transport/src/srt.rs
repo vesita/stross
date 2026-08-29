@@ -60,8 +60,10 @@ const DEFAULT_SRT_LATENCY_MS: u64 = 20;
 fn srt_latency_from_env(env: Option<&str>) -> Duration {
     env.and_then(|v| v.parse::<u64>().ok())
         .filter(|ms| *ms > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(Duration::from_millis(DEFAULT_SRT_LATENCY_MS))
+        .map_or(
+            Duration::from_millis(DEFAULT_SRT_LATENCY_MS),
+            Duration::from_millis,
+        )
 }
 
 /// 统一的 SRT 套接字选项（bind 与 connect 共用，保证两端一致的低延迟窗口）。
@@ -131,9 +133,10 @@ impl Transport for SrtTransport {
         _params: &SessionParams,
     ) -> Result<Box<dyn DataSession>, TransportError> {
         // rsrt 拨号需要 `host:port`（无 scheme）；解析收口在 RelayUrl
-        let addr = super::RelayUrl::parse(&peer.addr)
-            .map(|u| format!("{}:{}", u.host(), u.port()))
-            .unwrap_or_else(|| peer.addr.clone());
+        let addr = super::RelayUrl::parse(&peer.addr).map_or_else(
+            || peer.addr.clone(),
+            |u| format!("{}:{}", u.host(), u.port()),
+        );
         let sock = rsrt::SrtSocket::connect(&addr, srt_options())
             .await
             .map_err(|e| TransportError::Connect(format!("SRT 连接失败: {e}")))?;
@@ -267,6 +270,17 @@ impl DataSession for SrtDataSession {
                 } else {
                     // 分片：每片 = 1B 类型 + 帧头（frag_* 标记）+ 片载荷
                     // （1080p 关键帧可达数百片）
+                    // frag_cnt/frag_idx 是 u8：载荷超过 255×FRAGMENT_LEN 时
+                    // 分片计数回绕（如 256 片 → 0），接收端把每条消息当未分片
+                    // 整帧逐片吐出 → 码流被切碎（花屏直至下一关键帧）。
+                    // 显式拒绝超限载荷，静默损坏优于协议违规。
+                    if payload.len() > u8::MAX as usize * FRAGMENT_LEN {
+                        return Err(TransportError::Protocol(format!(
+                            "媒体帧过大无法分片（{} > {} 字节）",
+                            payload.len(),
+                            u8::MAX as usize * FRAGMENT_LEN
+                        )));
+                    }
                     let frag_cnt = (payload.len().div_ceil(FRAGMENT_LEN)) as u8;
                     for (i, chunk) in payload.chunks(FRAGMENT_LEN).enumerate() {
                         let mut header = frame.header;
@@ -353,7 +367,7 @@ impl RxState {
                 p.next += 1;
                 if p.next == header.frag_cnt {
                     let p = self.pending.take().unwrap();
-                    let total: usize = p.frags.iter().map(|b| b.len()).sum();
+                    let total: usize = p.frags.iter().map(bytes::Bytes::len).sum();
                     let mut h = p.header;
                     h.frag_idx = 0;
                     h.frag_cnt = 0;
@@ -484,6 +498,42 @@ mod tests {
 
         client.close().await.unwrap();
         assert!(server.recv().await.unwrap().is_none());
+    }
+
+    /// 分片计数上限：载荷超过 255×FRAGMENT_LEN 时 send 必须显式拒绝。
+    /// （u8 frag_cnt 回绕会让接收端把每条消息当未分片整帧逐片吐出，
+    /// 码流被切碎 → 花屏直至下一关键帧；宁可拒绝也不静默损坏。）
+    #[tokio::test]
+    async fn srt_rejects_fragment_overflow() {
+        let transport = SrtTransport::new();
+        let mut handle = transport.bind("127.0.0.1:0").await.unwrap();
+        let addr = handle.local_addr();
+        let _accept_task = tokio::spawn(async move {
+            let _ = handle.accept().await;
+        });
+
+        let peer = PeerAddr {
+            transport: TransportId::Srt,
+            addr: format!("srt://127.0.0.1:{}", addr.port()),
+        };
+        let params = SessionParams {
+            session_id: "s1".into(),
+            profile: ReliabilityProfile::Adaptive,
+        };
+        let client = transport.connect(&peer, &params).await.unwrap();
+
+        let oversized = vec![0u8; u8::MAX as usize * FRAGMENT_LEN + 1];
+        let err = client
+            .send(SessionPacket::Media(Frame::new(
+                TRACK_VIDEO,
+                CODEC_H264,
+                FLAG_KEYFRAME,
+                1,
+                oversized,
+            )))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TransportError::Protocol(_)), "{err:?}");
     }
 
     #[test]

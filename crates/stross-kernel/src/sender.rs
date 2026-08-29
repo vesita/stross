@@ -121,24 +121,21 @@ async fn client_loop(
     loop {
         tokio::select! {
             frame = rx.recv() => {
-                match frame {
-                    Some(mut f) => {
-                        f.header.seq = next_seq;
-                        next_seq = next_seq.wrapping_add(1);
-                        if session.send(SessionPacket::Media(f)).await.is_err() {
-                            tracing::warn!("推流连接断开");
-                            let _ = connected.send(false);
-                            break;
-                        }
-                    }
-                    None => {
-                        // 会话结束：优雅 Bye
-                        let _ = session
-                            .send(SessionPacket::Control(ControlMessage::Bye))
-                            .await;
-                        let _ = session.close().await;
+                if let Some(mut f) = frame {
+                    f.header.seq = next_seq;
+                    next_seq = next_seq.wrapping_add(1);
+                    if session.send(SessionPacket::Media(f)).await.is_err() {
+                        tracing::warn!("推流连接断开");
+                        let _ = connected.send(false);
                         break;
                     }
+                } else {
+                    // 会话结束：优雅 Bye
+                    let _ = session
+                        .send(SessionPacket::Control(ControlMessage::Bye))
+                        .await;
+                    let _ = session.close().await;
+                    break;
                 }
             }
             _ = shutdown.changed() => {

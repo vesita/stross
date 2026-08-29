@@ -67,35 +67,40 @@ pub fn yuv420_to_rgba_scaled(
         uv_size
     };
 
-    let scale_x = w as f64 / tw as f64;
-    let scale_y = h as f64 / th as f64;
+    let scale_x = f64::from(w) / f64::from(tw);
+    let scale_y = f64::from(h) / f64::from(th);
     let mut out = Vec::with_capacity(tw as usize * th as usize * 4);
     for oy in 0..th {
         // 中心对齐采样（与 rgba::rgba_scaled 同约定）；越界 clamp 防负权重外插
-        let sy = ((oy as f64 + 0.5) * scale_y - 0.5).clamp(0.0, (h - 1) as f64);
+        let sy = (f64::from(oy) + 0.5)
+            .mul_add(scale_y, -0.5)
+            .clamp(0.0, f64::from(h - 1));
         let y0 = sy.floor() as usize;
         let y1 = (y0 + 1).min(h as usize - 1);
         let ty = (sy - y0 as f64) as f32;
         let row0 = y_base + y0 * stride_y;
         let row1 = y_base + y1 * stride_y;
         for ox in 0..tw {
-            let sx = ((ox as f64 + 0.5) * scale_x - 0.5).clamp(0.0, (w - 1) as f64);
+            let sx = (f64::from(ox) + 0.5)
+                .mul_add(scale_x, -0.5)
+                .clamp(0.0, f64::from(w - 1));
             let x0 = sx.floor() as usize;
             let x1 = (x0 + 1).min(w as usize - 1);
             let tx = (sx - x0 as f64) as f32;
             // 亮度对细节敏感：Y 双线性插值
-            let y00 = buf[row0 + x0] as f32;
-            let y01 = buf[row0 + x1] as f32;
-            let y10 = buf[row1 + x0] as f32;
-            let y11 = buf[row1 + x1] as f32;
-            let yf =
-                (y00 * (1.0 - tx) + y01 * tx) * (1.0 - ty) + (y10 * (1.0 - tx) + y11 * tx) * ty;
+            let y00 = f32::from(buf[row0 + x0]);
+            let y01 = f32::from(buf[row0 + x1]);
+            let y10 = f32::from(buf[row1 + x0]);
+            let y11 = f32::from(buf[row1 + x1]);
+            let yf = y11
+                .mul_add(tx, y10 * (1.0 - tx))
+                .mul_add(ty, y01.mul_add(tx, y00 * (1.0 - tx)) * (1.0 - ty));
             // 色度按 2x2 块采样（YUV420 语义；块坐标取插值格点左下）
             let (uy, ux) = (y0 / 2, x0 / 2);
             let u_off = uv_base + uy * uv_stride + ux;
             let (u, v) = match layout {
-                Yuv420Layout::SemiPlanar => (buf[u_off] as i32, buf[u_off + 1] as i32),
-                Yuv420Layout::Planar => (buf[u_off] as i32, buf[u_off + uv_row_gap] as i32),
+                Yuv420Layout::SemiPlanar => (i32::from(buf[u_off]), i32::from(buf[u_off + 1])),
+                Yuv420Layout::Planar => (i32::from(buf[u_off]), i32::from(buf[u_off + uv_row_gap])),
             };
             let c = yf.round() as i32 - 16;
             let d = u - 128;
@@ -109,7 +114,7 @@ pub fn yuv420_to_rgba_scaled(
     Some((tw, th, out))
 }
 
-fn clamp_u8(v: i32) -> u8 {
+const fn clamp_u8(v: i32) -> u8 {
     if v < 0 {
         0
     } else if v > 255 {
@@ -246,7 +251,11 @@ pub fn bgra_to_yuv420p(
         let yrow = &mut y_plane[j * w..(j + 1) * w];
         for (i, ypx) in yrow.iter_mut().enumerate() {
             let px = i * 4;
-            let (b, g, r) = (row[px] as i32, row[px + 1] as i32, row[px + 2] as i32);
+            let (b, g, r) = (
+                i32::from(row[px]),
+                i32::from(row[px + 1]),
+                i32::from(row[px + 2]),
+            );
             *ypx = ((77 * r + 150 * g + 29 * b) >> 8).clamp(0, 255) as u8;
         }
         // 偶数行时累计色度（2x2 平均）
@@ -261,9 +270,9 @@ pub fn bgra_to_yuv420p(
                 for (di, dj) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                     let px = (i + di) * 4;
                     let row_sel = if dj == 0 { row } else { row2 };
-                    b_sum += row_sel[px] as i32;
-                    g_sum += row_sel[px + 1] as i32;
-                    r_sum += row_sel[px + 2] as i32;
+                    b_sum += i32::from(row_sel[px]);
+                    g_sum += i32::from(row_sel[px + 1]);
+                    r_sum += i32::from(row_sel[px + 2]);
                 }
                 // 平均后换算（/4 得像素均值，再 /256 得系数缩放）
                 let u = ((-43 * r_sum - 85 * g_sum + 128 * b_sum) / (4 * 256) + 128).clamp(0, 255);
@@ -300,9 +309,9 @@ mod bgra_tests {
         let u0 = out[w * h];
         let v0 = out[w * h + w * h / 4];
         assert!(out[..w * h].iter().all(|&x| x == y0));
-        assert!((y0 as i32 - 77).abs() <= 2, "Y={y0}");
-        assert!((u0 as i32 - 85).abs() <= 4, "U={u0}");
-        assert!((v0 as i32 - 255).abs() <= 2, "V={v0}");
+        assert!((i32::from(y0) - 77).abs() <= 2, "Y={y0}");
+        assert!((i32::from(u0) - 85).abs() <= 4, "U={u0}");
+        assert!((i32::from(v0) - 255).abs() <= 2, "V={v0}");
     }
 
     #[test]
@@ -344,18 +353,33 @@ pub fn bgra_to_yuv420p_scaled(
     if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
         return Err("尺寸非法".into());
     }
-    // 目标分辨率 BGRA 缓冲 → 复用 bgra_to_yuv420p（其内做 2×2 色度）
+    // 目标分辨率 BGRA 缓冲 → 复用 bgra_to_yuv420p（其内做 2×2 色度）。
+    // 双线性插值（中心对齐 + 越界 clamp，与 rgba::rgba_scaled 同约定）：
+    // 屏幕文本/UI 是屏幕共享的常态内容，最近邻缩放锯齿明显。
     let mut scaled = vec![0u8; dst_w * dst_h * 4];
     let dst_stride = dst_w * 4;
+    let scale_x = src_w as f64 / dst_w as f64;
+    let scale_y = src_h as f64 / dst_h as f64;
     for j in 0..dst_h {
-        let src_y = (j as f64 * (src_h as f64 / dst_h as f64)) as usize;
-        let src_y = src_y.min(src_h.saturating_sub(1));
+        let sy = ((j as f64 + 0.5) * scale_y - 0.5).clamp(0.0, (src_h - 1) as f64);
+        let y0 = sy.floor() as usize;
+        let y1 = (y0 + 1).min(src_h - 1);
+        let ty = (sy - y0 as f64) as f32;
+        let r0 = y0 * src_stride;
+        let r1 = y1 * src_stride;
         for i in 0..dst_w {
-            let src_x = (i as f64 * (src_w as f64 / dst_w as f64)) as usize;
-            let src_x = src_x.min(src_w.saturating_sub(1));
-            let s = src_y * src_stride + src_x * 4;
+            let sx = ((i as f64 + 0.5) * scale_x - 0.5).clamp(0.0, (src_w - 1) as f64);
+            let x0 = sx.floor() as usize;
+            let x1 = (x0 + 1).min(src_w - 1);
+            let tx = (sx - x0 as f64) as f32;
             let d = j * dst_stride + i * 4;
-            scaled[d..d + 4].copy_from_slice(&bgra[s..s + 4]);
+            for c in 0..4 {
+                let top =
+                    bgra[r0 + x0 * 4 + c] as f32 * (1.0 - tx) + bgra[r0 + x1 * 4 + c] as f32 * tx;
+                let bot =
+                    bgra[r1 + x0 * 4 + c] as f32 * (1.0 - tx) + bgra[r1 + x1 * 4 + c] as f32 * tx;
+                scaled[d + c] = (top * (1.0 - ty) + bot * ty + 0.5) as u8;
+            }
         }
     }
     bgra_to_yuv420p(&scaled, dst_stride, dst_w, dst_h, out)
@@ -378,10 +402,10 @@ mod scaled_tests {
         let (dw, dh) = (640usize, 360usize);
         let mut out = vec![0u8; dw * dh + dw * dh / 2];
         bgra_to_yuv420p_scaled(&bgra, stride, sw, sh, dw, dh, &mut out).unwrap();
-        assert!((out[0] as i32 - 77).abs() <= 2, "Y={}", out[0]);
+        assert!((i32::from(out[0]) - 77).abs() <= 2, "Y={}", out[0]);
         let u = out[dw * dh];
         let v = out[dw * dh + dw * dh / 4];
-        assert!((u as i32 - 85).abs() <= 4, "U={u}");
-        assert!((v as i32 - 255).abs() <= 2, "V={v}");
+        assert!((i32::from(u) - 85).abs() <= 4, "U={u}");
+        assert!((i32::from(v) - 255).abs() <= 2, "V={v}");
     }
 }

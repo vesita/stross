@@ -24,7 +24,7 @@ async function allowFirewall() {
     }
     catch (e) {
         const box = $('grid-error');
-        box.textContent = '防火墙放行失败：' + e.message;
+        box.textContent = '防火墙放行失败：' + errMsg(e);
         box.classList.remove('hidden');
     }
     finally {

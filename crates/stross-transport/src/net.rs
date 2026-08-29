@@ -22,7 +22,7 @@ pub fn local_ip() -> Option<IpAddr> {
 /// IP 是否「不可对外广告」：Clash/Mihomo TUN 的 fake-IP 段（198.18.0.0/15，
 /// 路由表占位、连不通）与链路本地（169.254/16）。IPv6 一律视为可广告
 /// （子网前缀未知，交给对端选址判断）。
-pub fn is_fake_or_link_local(ip: &IpAddr) -> bool {
+pub const fn is_fake_or_link_local(ip: &IpAddr) -> bool {
     let IpAddr::V4(v4) = ip else {
         return false;
     };

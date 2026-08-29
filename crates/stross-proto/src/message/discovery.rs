@@ -103,7 +103,7 @@ impl DiscoveryInfo {
     /// 从 mDNS TXT 条目解码（多 key 合并 + 单 key 兼容）；缺失 / 非法返回 `None`
     /// （调用方回退默认值）。
     pub fn from_txt(txt: &[(String, String)]) -> Option<Self> {
-        let mut info: DiscoveryInfo =
+        let mut info: Self =
             serde_json::from_str(txt.iter().find(|(k, _)| k == TXT_KEY_DISCOVERY)?.1.as_str())
                 .ok()?;
         // 多 key 形态：`ep.<n>` → 按序号合并进 endpoints（单 key 旧广播无此键，

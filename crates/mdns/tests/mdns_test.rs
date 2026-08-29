@@ -48,12 +48,12 @@ fn integration_success() {
     }
     let unique_intf_idx_ip_ver_count = unique_intf_idx_ip_ver_set.len() + non_idx_count;
 
-    let ifaddrs_set: HashSet<_> = all_interfaces.iter().map(|intf| intf.ip()).collect();
+    let ifaddrs_set: HashSet<_> = all_interfaces.iter().map(if_addrs::Interface::ip).collect();
     let my_ifaddrs: Vec<_> = ifaddrs_set.into_iter().collect();
     let my_addrs_count = my_ifaddrs.len();
     println!("My IP {} addr(s):", my_ifaddrs.len());
     for item in my_ifaddrs.iter() {
-        println!("{}", item);
+        println!("{item}");
     }
 
     let host_name = "INTEGRATION_host.local.";
@@ -85,16 +85,16 @@ fn integration_success() {
     while let Ok(event) = browse_chan.recv_timeout(timeout) {
         match event {
             ServiceEvent::SearchStarted(ty_domain) => {
-                println!("Search started for {}", ty_domain);
+                println!("Search started for {ty_domain}");
             }
             ServiceEvent::ServiceFound(_ty_domain, fullname) => {
-                println!("Found a new service: {}", fullname);
+                println!("Found a new service: {fullname}");
             }
             ServiceEvent::ServiceResolved(info) => {
                 let addrs: HashSet<_> = info
                     .get_addresses()
                     .iter()
-                    .map(|a| a.to_ip_addr())
+                    .map(mdns::ScopedIp::to_ip_addr)
                     .collect();
                 addr_count = addrs.len();
 
@@ -104,7 +104,7 @@ fn integration_success() {
                     addrs.len()
                 );
                 for a in addrs.iter() {
-                    println!("{}", a);
+                    println!("{a}");
                 }
                 if info.get_fullname().contains(&instance_name) {
                     resolved_ips.extend(addrs);
@@ -151,7 +151,7 @@ fn integration_success() {
     while let Ok(event) = browse_chan.recv_timeout(timeout) {
         match event {
             ServiceEvent::ServiceRemoved(_ty_domain, fullname) => {
-                println!("Removed service: {}", fullname);
+                println!("Removed service: {fullname}");
                 if fullname.contains(&instance_name) {
                     remove_count += 1;
                 }
@@ -178,7 +178,7 @@ fn integration_success() {
 
     while let Ok(event) = browse_chan.recv_timeout(timeout) {
         if let ServiceEvent::SearchStopped(ty) = event {
-            println!("Search stopped for {}", ty);
+            println!("Search stopped for {ty}");
             stopped_count += 1;
             break;
         }
@@ -189,12 +189,12 @@ fn integration_success() {
     // Verify metrics.
     let metrics_receiver = d.get_metrics().unwrap();
     let metrics = metrics_receiver.recv().unwrap();
-    println!("metrics: {:?}", metrics);
+    println!("metrics: {metrics:?}");
     assert_eq!(metrics["register"], 1);
     assert_eq!(metrics["unregister"], 1);
     assert!(metrics["register-resend"] >= 1);
 
-    println!("unique interface set: {:?}", unique_intf_idx_ip_ver_set);
+    println!("unique interface set: {unique_intf_idx_ip_ver_set:?}");
     assert_eq!(
         metrics["unregister-resend"],
         unique_intf_idx_ip_ver_count as i64
@@ -230,19 +230,19 @@ fn integration_success() {
         match browse_chan.recv_timeout(timeout) {
             Ok(event) => match event {
                 ServiceEvent::ServiceFound(ty_domain, fullname) => {
-                    println!("Found a service of {}: {}", ty_domain, fullname);
+                    println!("Found a service of {ty_domain}: {fullname}");
                     // Among all services found, should have our 2nd service.
                     if fullname == service2_type {
                         break;
                     }
                 }
                 e => {
-                    println!("Received event {:?}", e);
+                    println!("Received event {e:?}");
                     sleep(Duration::from_millis(100));
                 }
             },
             Err(e) => {
-                panic!("browse error: {}", e);
+                panic!("browse error: {e}");
             }
         }
     }
@@ -283,7 +283,7 @@ fn service_without_properties_with_alter_net_v4() {
     let fullname = my_service.get_fullname().to_string();
     d.register(my_service)
         .expect("Failed to register our service");
-    println!("Registered service with host_ip: {:?}", host_ip);
+    println!("Registered service with host_ip: {host_ip:?}");
 
     // Browse for a service
     let browse_chan = d.browse(ty_domain).unwrap();
@@ -311,11 +311,11 @@ fn service_without_properties_with_alter_net_v4() {
                     }
                 }
                 e => {
-                    println!("Received event {:?}", e);
+                    println!("Received event {e:?}");
                 }
             },
             Err(e) => {
-                panic!("browse error: {}", e);
+                panic!("browse error: {e}");
             }
         }
     }
@@ -356,7 +356,7 @@ fn service_without_properties_with_alter_net_v6() {
     let fullname = my_service.get_fullname().to_string();
     d.register(my_service)
         .expect("Failed to register our service");
-    println!("Registered service with host_ip: {:?}", host_ip);
+    println!("Registered service with host_ip: {host_ip:?}");
 
     // Browse for a service
     let browse_chan = d.browse(ty_domain).unwrap();
@@ -388,11 +388,11 @@ fn service_without_properties_with_alter_net_v6() {
                     }
                 }
                 e => {
-                    println!("Received event {:?}", e);
+                    println!("Received event {e:?}");
                 }
             },
             Err(e) => {
-                panic!("browse error: {}", e);
+                panic!("browse error: {e}");
             }
         }
     }
@@ -445,7 +445,7 @@ fn service_txt_properties_key_ascii() {
     let my_service = ServiceInfo::new(domain, instance, "myhost", "", port, &properties[..]);
     assert!(my_service.is_err());
     if let Err(e) = my_service {
-        let msg = format!("ERROR: {}", e);
+        let msg = format!("ERROR: {e}");
         assert!(msg.contains("not ASCII"));
     }
 
@@ -454,7 +454,7 @@ fn service_txt_properties_key_ascii() {
     let my_service = ServiceInfo::new(domain, instance, "myhost", "", port, &properties[..]);
     assert!(my_service.is_err());
     if let Err(e) = my_service {
-        let msg = format!("ERROR: {}", e);
+        let msg = format!("ERROR: {e}");
         assert!(msg.contains('='));
     }
 
@@ -469,7 +469,7 @@ fn test_txt_properties_into_hashmap_str() {
     // Test valid UTF-8 properties
     let properties = [("key1", "val1"), ("key2", "val2")].into_txt_properties();
     let property_map = properties.into_property_map_str();
-    println!("property_map: {:?}", property_map);
+    println!("property_map: {property_map:?}");
     assert_eq!(property_map.len(), 2);
     assert_eq!(property_map.get("key1"), Some(&"val1".to_string()));
     assert_eq!(property_map.get("key2"), Some(&"val2".to_string()));
@@ -581,7 +581,7 @@ fn service_with_named_interface_only() {
                 break;
             }
             e => {
-                println!("Received event {:?}", e);
+                println!("Received event {e:?}");
             }
         }
     }
@@ -596,7 +596,7 @@ fn service_with_named_interface_only() {
     let if_name = if_addrs[0].name.clone();
 
     // Enable the named interface.
-    println!("Enable interface with name {}", if_name);
+    println!("Enable interface with name {if_name}");
     d.enable_interface(&if_name).unwrap();
 
     // Browse again.
@@ -617,7 +617,7 @@ fn service_with_named_interface_only() {
                 break;
             }
             e => {
-                println!("Received event {:?}", e);
+                println!("Received event {e:?}");
             }
         }
     }
@@ -677,7 +677,7 @@ fn service_with_ipv4_only() {
                 // We don't break here, as there could be more addresses coming.
             }
             e => {
-                println!("Received event {:?}", e);
+                println!("Received event {e:?}");
             }
         }
     }
@@ -736,7 +736,7 @@ fn service_ipv6_link_local_only() {
                 // We don't break here, as there could be more addresses coming.
             }
             e => {
-                println!("Received event {:?}", e);
+                println!("Received event {e:?}");
             }
         }
     }
@@ -758,7 +758,7 @@ fn test_disable_interface_cache() {
     let instance_name = now.as_micros().to_string();
     let ipv4_list: Vec<_> = my_ip_interfaces()
         .iter()
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .filter(|ip| ip.is_ipv4() && !ip.is_loopback())
         .collect();
 
@@ -784,7 +784,7 @@ fn test_disable_interface_cache() {
     sleep(Duration::from_secs(1));
 
     // Disable the interface for the client.
-    println!("Disabling interface with IP: {:?}", ipv4_list);
+    println!("Disabling interface with IP: {ipv4_list:?}");
     client.disable_interface(ipv4_list).unwrap();
 
     // Browse for the service.
@@ -853,11 +853,11 @@ fn service_with_invalid_addr_v4() {
                     break;
                 }
                 e => {
-                    println!("Received event {:?}", e);
+                    println!("Received event {e:?}");
                 }
             },
             Err(e) => {
-                println!("browse error: {}", e);
+                println!("browse error: {e}");
                 break;
             }
         }
@@ -910,11 +910,11 @@ fn service_with_invalid_addr_v6() {
                     break;
                 }
                 e => {
-                    println!("Received event {:?}", e);
+                    println!("Received event {e:?}");
                 }
             },
             Err(e) => {
-                println!("browse error: {}", e);
+                println!("browse error: {e}");
                 break;
             }
         }
@@ -972,17 +972,17 @@ fn service_with_loopback_addr() {
                         info.get_addresses()
                     );
                     // Check that at least one of the addresses is a loopback address.
-                    if info.get_addresses().iter().any(|ip| ip.is_loopback()) {
+                    if info.get_addresses().iter().any(mdns::ScopedIp::is_loopback) {
                         found_loopback = true;
                     }
                     break;
                 }
                 e => {
-                    println!("Received event {:?}", e);
+                    println!("Received event {e:?}");
                 }
             },
             Err(e) => {
-                println!("browse error: {}", e);
+                println!("browse error: {e}");
                 break;
             }
         }
@@ -1043,11 +1043,11 @@ fn subtype() {
                         break;
                     }
                     e => {
-                        println!("Received event {:?}", e);
+                        println!("Received event {e:?}");
                     }
                 },
                 Err(e) => {
-                    panic!("browse error: {}", e);
+                    panic!("browse error: {e}");
                 }
             }
         }
@@ -1087,7 +1087,7 @@ fn test_service_name_check() {
     let event = monitor.recv_timeout(Duration::from_millis(500)).unwrap();
     assert!(matches!(event, DaemonEvent::Error(_)));
     if let DaemonEvent::Error(e) = event {
-        println!("Daemon error: {}", e)
+        println!("Daemon error: {e}");
     }
 
     // Verify that we can increase the service name length max.
@@ -1105,7 +1105,7 @@ fn test_service_name_check() {
                 break;
             }
             other => {
-                println!("other daemon events: {:?}", other);
+                println!("other daemon events: {other:?}");
             }
         }
     }
@@ -1160,11 +1160,11 @@ fn service_new_publish_after_browser() {
                     break;
                 }
                 e => {
-                    println!("Received event {:?}", e);
+                    println!("Received event {e:?}");
                 }
             },
             Err(e) => {
-                println!("browse error: {}", e);
+                println!("browse error: {e}");
                 break;
             }
         }
@@ -1261,7 +1261,7 @@ fn ipv6_alter_net(if_addrs: &[Interface]) -> IpAddr {
             _ => panic!(),
         }
     }
-    Ipv6Addr::new(net_max as u16 + 1, 1, 1, 1, 1, 1, 1, 1).into()
+    Ipv6Addr::new(u16::from(net_max) + 1, 1, 1, 1, 1, 1, 1, 1).into()
 }
 
 #[test]
@@ -1276,7 +1276,7 @@ fn test_shutdown() {
     // Shutdown the daemon immediately.
     let receiver = mdns.shutdown().unwrap();
     let status = receiver.recv().unwrap();
-    println!("daemon status: {:?}", status);
+    println!("daemon status: {status:?}");
 
     // Try to register and it should fail.
     let service_type = "_mdns-sd-my-test._udp.local.";
@@ -1312,7 +1312,7 @@ fn test_hostname_resolution() {
     let service_ip_addr: ScopedIp = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.into())
+        .map(std::convert::Into::into)
         .unwrap();
 
     let my_service = ServiceInfo::new(
@@ -1335,7 +1335,7 @@ fn test_hostname_resolution() {
                 break true;
             }
             Ok(HostnameResolutionEvent::SearchStopped(_)) => break false,
-            Ok(event) => println!("Received event {:?}", event),
+            Ok(event) => println!("Received event {event:?}"),
             Err(_) => break false,
         }
     };
@@ -1351,7 +1351,7 @@ fn test_hostname_resolution_case_insensitive() {
     let service_ip_addr: ScopedIp = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.into())
+        .map(std::convert::Into::into)
         .unwrap();
 
     let my_service = ServiceInfo::new(
@@ -1421,7 +1421,7 @@ fn hostname_resolution_timeout() {
                 break true;
             }
             Ok(HostnameResolutionEvent::SearchTimeout(_)) => break false,
-            Ok(event) => println!("Received event {:?}", event),
+            Ok(event) => println!("Received event {event:?}"),
             Err(_) => break false,
         }
     };
@@ -1456,8 +1456,8 @@ fn test_cross_browse_cache_persists() {
     let port = 5203;
     let ipv4: Vec<_> = my_ip_interfaces()
         .iter()
-        .map(|i| i.ip())
-        .filter(|ip| ip.is_ipv4())
+        .map(if_addrs::Interface::ip)
+        .filter(std::net::IpAddr::is_ipv4)
         .collect();
     let my_service = ServiceInfo::new(service, &instance_name, host_name, &ipv4[..], port, None)
         .expect("valid service info");
@@ -1486,7 +1486,7 @@ fn test_cross_browse_cache_persists() {
     // The cache must survive stop_browse.
     let metrics_receiver = d.get_metrics().unwrap();
     let metrics = metrics_receiver.recv().unwrap();
-    println!("metrics after stop_browse: {:?}", metrics);
+    println!("metrics after stop_browse: {metrics:?}");
     assert!(
         metrics.get("cached-ptr").copied().unwrap_or(0) >= 1,
         "PTR cache should be kept across stop_browse"
@@ -1529,7 +1529,7 @@ fn test_cache_flush_record() {
     let mut service_ip_addr = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .unwrap();
 
     let port = 5201;
@@ -1557,11 +1557,11 @@ fn test_cache_flush_record() {
             ServiceEvent::ServiceResolved(info) => {
                 resolved = true;
                 timed_println(format!("Resolved a service of {}", info.get_fullname()));
-                timed_println(format!("JLN service: {:?}", info));
+                timed_println(format!("JLN service: {info:?}"));
                 break;
             }
             e => {
-                println!("Received event {:?}", e);
+                println!("Received event {e:?}");
             }
         }
     }
@@ -1594,8 +1594,7 @@ fn test_cache_flush_record() {
     assert!(result.is_ok());
 
     timed_println(format!(
-        "Re-registered with updated IPv4 addr: {}",
-        service_ip_addr
+        "Re-registered with updated IPv4 addr: {service_ip_addr}"
     ));
 
     // Wait for the new registration sent out and cache flushed.
@@ -1609,7 +1608,7 @@ fn test_cache_flush_record() {
             ServiceEvent::ServiceResolved(info) => {
                 // Verify the address flushed and updated.
                 let new_addrs = info.get_addresses();
-                timed_println(format!("new address resolved: {:?}", new_addrs));
+                timed_println(format!("new address resolved: {new_addrs:?}"));
                 // The cache is KEPT across stop_browse (cross-browse cache), so
                 // the first resolve of the re-browse may still serve the stale
                 // pre-flush address; the cache-flush A record then replaces it
@@ -1629,7 +1628,7 @@ fn test_cache_flush_record() {
                 }
             }
             e => {
-                timed_println(format!("Received event {:?}", e));
+                timed_println(format!("Received event {e:?}"));
             }
         }
     }
@@ -1650,7 +1649,7 @@ fn test_cache_flush_remove_one_addr() {
     let ip_addr1 = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .unwrap();
 
     // Make 2nd IPv4 address for the service.
@@ -1691,7 +1690,7 @@ fn test_cache_flush_remove_one_addr() {
                 break;
             }
             e => {
-                println!("Received event {:?}", e);
+                println!("Received event {e:?}");
             }
         }
     }
@@ -1728,7 +1727,7 @@ fn test_cache_flush_remove_one_addr() {
                 }
             }
             e => {
-                println!("Received event {:?}", e);
+                println!("Received event {e:?}");
             }
         }
     }
@@ -1752,7 +1751,7 @@ fn test_cache_flush_srv() {
     let service_ip_addr = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .unwrap();
 
     let port = 5201;
@@ -1783,7 +1782,7 @@ fn test_cache_flush_srv() {
                 break;
             }
             e => {
-                println!("Received event {:?}", e);
+                println!("Received event {e:?}");
             }
         }
     }
@@ -1805,7 +1804,7 @@ fn test_cache_flush_srv() {
     let result = server.register(my_service);
     assert!(result.is_ok());
 
-    println!("Re-registered with updated SRV host: {}", new_host_name);
+    println!("Re-registered with updated SRV host: {new_host_name}");
 
     // Wait for the new registration to be sent out and cache flushed
     sleep(Duration::from_secs(2));
@@ -1814,7 +1813,7 @@ fn test_cache_flush_srv() {
     let timeout = Duration::from_secs(2);
     let mut removed = false;
     while let Ok(event) = browse_chan.recv_timeout(timeout) {
-        println!("Received event {:?}", event);
+        println!("Received event {event:?}");
 
         match event {
             ServiceEvent::ServiceRemoved(ty_domain, instance_name) => {
@@ -1853,7 +1852,7 @@ fn test_known_answer_suppression() {
     let ip_addr1 = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .unwrap();
 
     let host_name = "known_answer_server.local.";
@@ -1880,7 +1879,7 @@ fn test_known_answer_suppression() {
                 break;
             }
             other => {
-                println!("Received event {:?}", other);
+                println!("Received event {other:?}");
             }
         }
     }
@@ -1905,7 +1904,7 @@ fn test_known_answer_suppression() {
     // Verify Known Answer Suppression happened.
     let metrics_receiver = mdns_server.get_metrics().unwrap();
     let metrics = metrics_receiver.recv().unwrap();
-    println!("metrics: {:?}", metrics);
+    println!("metrics: {metrics:?}");
     assert!(metrics["known-answer-suppression"] > 0);
 }
 
@@ -1935,7 +1934,7 @@ fn test_name_conflict_resolution() {
     let ip_addr1 = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .unwrap();
 
     // Publish the service on server1
@@ -1971,11 +1970,11 @@ fn test_name_conflict_resolution() {
     while let Ok(event) = server2_monitor.recv_timeout(timeout) {
         match event {
             DaemonEvent::NameChange(change) => {
-                println!("server2 daemon event: {:?}", change);
+                println!("server2 daemon event: {change:?}");
                 name_changed = true;
                 break;
             }
-            other => println!("server2 other event: {:?}", other),
+            other => println!("server2 other event: {other:?}"),
         }
     }
     assert!(name_changed);
@@ -2035,7 +2034,7 @@ fn test_name_tiebreaking() {
     let ip_addr1 = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .unwrap();
 
     // Publish the service on server1
@@ -2074,11 +2073,11 @@ fn test_name_tiebreaking() {
     while let Ok(event) = server1_monitor.recv_timeout(timeout) {
         match event {
             DaemonEvent::NameChange(change) => {
-                println!("server1 daemon event: {:?}", change);
+                println!("server1 daemon event: {change:?}");
                 name_changed = true;
                 break;
             }
-            other => println!("server1 other event: {:?}", other),
+            other => println!("server1 other event: {other:?}"),
         }
     }
     assert!(name_changed);
@@ -2137,7 +2136,7 @@ fn test_name_conflict_3() {
     let ip_addr1 = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .unwrap();
 
     // Publish the service on server1
@@ -2173,10 +2172,10 @@ fn test_name_conflict_3() {
     while let Ok(event) = server2_monitor.recv_timeout(timeout) {
         match event {
             DaemonEvent::NameChange(change) => {
-                println!("server2 daemon event: {:?}", change);
+                println!("server2 daemon event: {change:?}");
                 name_changed = true;
             }
-            other => println!("server2 other event: {:?}", other),
+            other => println!("server2 other event: {other:?}"),
         }
     }
     assert!(name_changed);
@@ -2200,11 +2199,11 @@ fn test_name_conflict_3() {
     while let Ok(event) = server3_monitor.recv_timeout(timeout) {
         match event {
             DaemonEvent::NameChange(change) => {
-                println!("server3 daemon event: {:?}", change);
+                println!("server3 daemon event: {change:?}");
                 name_changed = true;
                 break;
             }
-            other => println!("server3 other event: {:?}", other),
+            other => println!("server3 other event: {other:?}"),
         }
     }
     assert!(name_changed);
@@ -2251,7 +2250,7 @@ fn test_verify_srv() {
     let ip_addr1 = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .unwrap();
 
     // Register the service.
@@ -2274,7 +2273,7 @@ fn test_verify_srv() {
 
     while let Ok(event) = receiver.recv_timeout(timeout) {
         if let ServiceEvent::ServiceResolved(info) = event {
-            println!("service resolved: {:?}", info);
+            println!("service resolved: {info:?}");
             break;
         }
     }
@@ -2317,7 +2316,7 @@ fn test_multicast_loop_v4() {
     let ip_addr1 = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .unwrap();
 
     // Publish the service on server
@@ -2394,7 +2393,7 @@ fn test_multicast_loop_v6() {
     let ip_addr1 = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv6())
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .unwrap();
 
     // Publish the service on server
@@ -2465,7 +2464,7 @@ fn test_set_ip_check_interval() {
     let service_ip_addr = my_ip_interfaces()
         .iter()
         .find(|iface| iface.ip().is_ipv4())
-        .map(|iface| iface.ip())
+        .map(if_addrs::Interface::ip)
         .unwrap();
 
     let port = 5201;
@@ -2515,7 +2514,7 @@ fn test_rfc6763_escaping() {
 
     // Verify escaping: dots become \. and backslashes become \\
     let fullname = service.get_fullname();
-    println!("Escaping test: {}", fullname);
+    println!("Escaping test: {fullname}");
     assert!(
         fullname.contains("My\\.Path\\\\Service"),
         "Dots and backslashes should be escaped"
@@ -2550,7 +2549,7 @@ fn test_rfc6763_utf8_support() {
     .expect("Failed to create service with UTF-8 and escapes");
 
     let fullname = service2.get_fullname();
-    println!("UTF-8 + escaping fullname: {}", fullname);
+    println!("UTF-8 + escaping fullname: {fullname}");
     assert!(
         fullname.contains("Café €\\.v1\\\\2024"),
         "UTF-8 preserved, dots and backslashes escaped"
@@ -2573,7 +2572,7 @@ fn test_rfc6763_utf8_network_integration() {
     let instance_base = now.as_micros().to_string();
 
     // Instance name with UTF-8 characters (emoji, accents), dots, and backslashes
-    let instance_name = format!("Café.Service\\{} 🌐", instance_base);
+    let instance_name = format!("Café.Service\\{instance_base} 🌐");
 
     let host_name = "utf8_network_host.local.";
     let port = 5203;
@@ -2583,7 +2582,7 @@ fn test_rfc6763_utf8_network_integration() {
         .enable_addr_auto();
 
     let fullname = my_service.get_fullname().to_string();
-    println!("Registered service fullname: {}", fullname);
+    println!("Registered service fullname: {fullname}");
 
     // Verify the fullname has proper escaping
     assert!(fullname.contains("Café\\.Service\\\\"));
@@ -2601,7 +2600,7 @@ fn test_rfc6763_utf8_network_integration() {
         match event {
             ServiceEvent::ServiceResolved(info) => {
                 let resolved_fullname = info.get_fullname();
-                println!("Resolved service: {}", resolved_fullname);
+                println!("Resolved service: {resolved_fullname}");
 
                 // Compare by checking if the resolved fullname contains our instance base
                 // and UTF-8 characters (network returns decoded names without escaping)
@@ -2624,10 +2623,10 @@ fn test_rfc6763_utf8_network_integration() {
                 }
             }
             ServiceEvent::SearchStarted(_) => {
-                println!("Search started for {}", ty_domain);
+                println!("Search started for {ty_domain}");
             }
             ServiceEvent::ServiceFound(_, found_fullname) => {
-                println!("Service found: {}", found_fullname);
+                println!("Service found: {found_fullname}");
             }
             _ => {}
         }
@@ -2665,5 +2664,5 @@ fn test_interface_id_get_addrs() {
 fn timed_println(msg: String) {
     let now = SystemTime::now();
     let formatted_time = humantime::format_rfc3339(now);
-    println!("[{}] {}", formatted_time, msg);
+    println!("[{formatted_time}] {msg}");
 }

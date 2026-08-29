@@ -41,21 +41,19 @@ impl SenderEngine {
             Some(_) => None,
             None => {
                 // 优先指定端口；被占用时回退随机端口，保证内嵌中继必然可用
-                match RelayServer::start(bind_port).await {
-                    Ok(h) => Some(h),
-                    Err(_) => {
-                        tracing::warn!("端口 {bind_port} 被占用，内嵌中继回退到随机端口");
-                        Some(RelayServer::start(0).await?)
-                    }
+                if let Ok(h) = RelayServer::start(bind_port).await {
+                    Some(h)
+                } else {
+                    tracing::warn!("端口 {bind_port} 被占用，内嵌中继回退到随机端口");
+                    Some(RelayServer::start(0).await?)
                 }
             }
         };
-        let url = match &relay_url {
-            Some(u) => u.clone(),
-            None => {
-                let relay = relay.as_ref().expect("内嵌中继必然存在");
-                relay.auto_push_url(cfg.video.is_some())
-            }
+        let url = if let Some(u) = &relay_url {
+            u.clone()
+        } else {
+            let relay = relay.as_ref().expect("内嵌中继必然存在");
+            relay.auto_push_url(cfg.video.is_some())
         };
         let (client, tx) = RelayClient::connect(&url, cfg.hello()).await?;
         // 采集启动失败时回滚已建立的推流连接，避免留下半开会话

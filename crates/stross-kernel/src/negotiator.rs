@@ -683,8 +683,7 @@ fn notify_subscribed(
     };
     let stream_id = match (delivery, share_token) {
         (Delivery::Push, Some(tok)) => ShareToken::from_token_string(tok)
-            .map(|t| t.stream_id)
-            .unwrap_or_else(|| grant.view.stream_id.clone()),
+            .map_or_else(|| grant.view.stream_id.clone(), |t| t.stream_id),
         _ => grant.view.stream_id.clone(),
     };
     let ctx = SubscribeCtx {
@@ -714,11 +713,10 @@ async fn handle_endpoints(State(state): State<Arc<ServerState>>) -> Json<serde_j
         .into_iter()
         .filter(|e| !matches!(e.visibility, Visibility::Private { .. }))
         .collect();
-    let (device_id, device_name) = state
-        .app
-        .device_identity()
-        .map(|i| (i.device_id, i.device_name))
-        .unwrap_or_else(|| ("".into(), "本机".into()));
+    let (device_id, device_name) = state.app.device_identity().map_or_else(
+        || ("".into(), "本机".into()),
+        |i| (i.device_id, i.device_name),
+    );
     // 类型化构造（stross-proto EndpointDir）：序列化与旧 json! 逐字节一致
     // （node/deviceId/deviceName、endpoints，全 camelCase）
     let dir = EndpointDir {

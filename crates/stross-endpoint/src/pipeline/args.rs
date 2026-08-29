@@ -11,9 +11,7 @@ use super::{AudioSourceConfig, Quality, StreamConfig, VideoSource};
 
 /// ffmpeg 可执行文件：优先 `STROSS_FFMPEG` 环境变量，否则 PATH 中的 `ffmpeg`。
 pub fn ffmpeg_bin() -> PathBuf {
-    std::env::var_os("STROSS_FFMPEG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
+    std::env::var_os("STROSS_FFMPEG").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from)
 }
 
 /// ffmpeg 是否可用。
@@ -21,8 +19,7 @@ pub fn ffmpeg_available() -> bool {
     std::process::Command::new(ffmpeg_bin())
         .arg("-version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// 视频输入参数。
@@ -80,9 +77,7 @@ fn screen_input_args(_q: &Quality) -> Result<Vec<String>> {
 
 #[cfg(target_os = "linux")]
 fn camera_input_args(device: Option<&str>, q: &Quality) -> Result<Vec<String>> {
-    let dev = device
-        .map(|d| d.to_string())
-        .unwrap_or_else(|| "/dev/video0".into());
+    let dev = device.map_or_else(|| "/dev/video0".into(), std::string::ToString::to_string);
     Ok(vec![
         "-f".into(),
         "v4l2".into(),

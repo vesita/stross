@@ -98,7 +98,7 @@ fn ewma(cur: Duration, sample: Duration) -> Duration {
 }
 
 /// `seq` 序比较（u32 回绕安全）：`a < b` 当且仅当 `a` 落后于 `b` 不超过半个序号空间。
-fn seq_lt(a: u32, b: u32) -> bool {
+const fn seq_lt(a: u32, b: u32) -> bool {
     a.wrapping_sub(b) >= (1 << 31)
 }
 

@@ -45,7 +45,7 @@ async function ensureAnchor(): Promise<void> {
     anchor = null;
     setAnchorBadge('err');
     const box = $('grid-error');
-    box.textContent = '本机锚定失败：' + (e as Error).message + '（仍可接收局域网共享）';
+    box.textContent = '本机锚定失败：' + errMsg(e) + '（仍可接收局域网共享）';
     box.classList.remove('hidden');
     const retry = document.createElement('button');
     retry.type = 'button';
@@ -71,7 +71,7 @@ async function addManualRelay(): Promise<void> {
     const ok = (await call('probe_relay', { base: addr })) as boolean;
     if (!ok) throw new Error('中继不可达（无 /api/streams）');
   } catch (e) {
-    showGridError('无法访问 ' + addr + '：' + (e as Error).message);
+    showGridError('无法访问 ' + addr + '：' + errMsg(e));
     return;
   }
   manualRelays = [addr, ...manualRelays.filter((u) => u !== addr)];
@@ -230,7 +230,7 @@ async function refreshDevices(force = false): Promise<void> {
       renderDeviceList();
     }
   } catch (e) {
-    showGridError('扫描失败：' + (e as Error).message);
+    showGridError('扫描失败：' + errMsg(e));
   } finally {
     scanInFlight = false;
     discoverCacheAt = Date.now();

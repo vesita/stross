@@ -82,8 +82,7 @@ async fn receive_decodes_live_stream() {
     assert!(s.decoded_video > 0, "应解码出视频帧: {s:?}");
     let drawn = tokio::time::timeout(Duration::from_secs(3), frame_task)
         .await
-        .map(|r| r.unwrap_or(0))
-        .unwrap_or(0);
+        .map_or(0, |r| r.unwrap_or(0));
     assert!(drawn > 0, "解码帧通道应有帧流出");
     app.stop_stream().await.ok();
 }
@@ -176,8 +175,7 @@ async fn receive_over_srt_decodes_live_stream() {
     assert!(s.decoded_video > 0, "应解码出视频帧: {s:?}");
     let drawn = tokio::time::timeout(Duration::from_secs(3), frame_task)
         .await
-        .map(|r| r.unwrap_or(0))
-        .unwrap_or(0);
+        .map_or(0, |r| r.unwrap_or(0));
     assert!(drawn > 0, "解码帧通道应有帧流出");
 
     drop(cap);

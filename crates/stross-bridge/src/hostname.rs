@@ -6,9 +6,7 @@
 
 /// 本机主机名；失败时回退 `fallback`（调用方按用途给默认值）。
 pub fn hostname_or(fallback: &str) -> String {
-    hostname::get()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_else(|_| fallback.into())
+    hostname::get().map_or_else(|_| fallback.into(), |h| h.to_string_lossy().to_string())
 }
 
 /// 占位主机名（无标识意义）：空 / `localhost` / `android`。

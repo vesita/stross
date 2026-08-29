@@ -72,10 +72,10 @@ pub enum DeliveryArg {
 }
 
 impl DeliveryArg {
-    fn to_delivery(self) -> Delivery {
+    const fn to_delivery(self) -> Delivery {
         match self {
-            DeliveryArg::Pull => Delivery::Pull,
-            DeliveryArg::Push => Delivery::Push,
+            Self::Pull => Delivery::Pull,
+            Self::Push => Delivery::Push,
         }
     }
 }
@@ -89,7 +89,7 @@ pub async fn run(args: EndpointArgs) -> anyhow::Result<()> {
             delivery,
             out,
         } => {
-            let delivery = delivery.map(|d| d.to_delivery());
+            let delivery = delivery.map(DeliveryArg::to_delivery);
             run_subscribe(&args.host, args.port, &endpoint, delivery, &out, &base).await
         }
     }
@@ -137,9 +137,7 @@ async fn run_subscribe(
     base: &std::path::Path,
 ) -> anyhow::Result<()> {
     let app = Arc::new(Kernel::new(Platform::Desktop));
-    let wanted = delivery_wish
-        .map(|d| format!("{d:?}"))
-        .unwrap_or_else(|| "按端点声明".into());
+    let wanted = delivery_wish.map_or_else(|| "按端点声明".into(), |d| format!("{d:?}"));
     tracing::info!("订阅端点 {endpoint_id}（delivery={wanted}，对端 {host}:{port}）");
     let outcome = subscribe_file(&app, base, host, port, endpoint_id, delivery_wish, out)
         .await

@@ -39,8 +39,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     // mDNS 广播主机名：壳层平台适配负责取本机名（core 零 OS 调用）
-    let hostname = hostname::get()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "stross".into());
+    let hostname =
+        hostname::get().map_or_else(|_| "stross".into(), |h| h.to_string_lossy().to_string());
     RelayServer::run_standalone(args.port, !args.no_advertise, "relay", &hostname).await
 }

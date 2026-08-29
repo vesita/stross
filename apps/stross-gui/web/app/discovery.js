@@ -43,7 +43,7 @@ async function ensureAnchor() {
         anchor = null;
         setAnchorBadge('err');
         const box = $('grid-error');
-        box.textContent = '本机锚定失败：' + e.message + '（仍可接收局域网共享）';
+        box.textContent = '本机锚定失败：' + errMsg(e) + '（仍可接收局域网共享）';
         box.classList.remove('hidden');
         const retry = document.createElement('button');
         retry.type = 'button';
@@ -70,7 +70,7 @@ async function addManualRelay() {
             throw new Error('中继不可达（无 /api/streams）');
     }
     catch (e) {
-        showGridError('无法访问 ' + addr + '：' + e.message);
+        showGridError('无法访问 ' + addr + '：' + errMsg(e));
         return;
     }
     manualRelays = [addr, ...manualRelays.filter((u) => u !== addr)];
@@ -226,7 +226,7 @@ async function refreshDevices(force = false) {
         }
     }
     catch (e) {
-        showGridError('扫描失败：' + e.message);
+        showGridError('扫描失败：' + errMsg(e));
     }
     finally {
         scanInFlight = false;

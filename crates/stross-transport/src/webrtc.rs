@@ -324,18 +324,17 @@ impl PeerLoop {
                             SessionPacket::Media(f) => (self.media_id, true, f.to_bytes().to_vec()),
                         };
                         // 注意：先写完再更新统计，避免跨 await 持有 Rtc 借用
-                        let sent = match self.rtc.channel(cid) {
-                            Some(mut ch) => match ch.write(binary, &bytes) {
+                        let sent = if let Some(mut ch) = self.rtc.channel(cid) {
+                            match ch.write(binary, &bytes) {
                                 Ok(_) => Some(bytes.len()),
                                 Err(e) => {
                                     tracing::warn!("webrtc 通道写失败: {e}");
                                     None
                                 }
-                            },
-                            None => {
-                                tracing::debug!("webrtc 通道未打开，丢弃 {} 字节", bytes.len());
-                                None
                             }
+                        } else {
+                            tracing::debug!("webrtc 通道未打开，丢弃 {} 字节", bytes.len());
+                            None
                         };
                         if let Some(n) = sent {
                             self.stats.add_sent(n);
@@ -352,9 +351,9 @@ impl PeerLoop {
             }
 
             // 2) 等待 UDP 数据或超时
-            let wait = next_timeout
-                .map(|t| t.saturating_duration_since(Instant::now()))
-                .unwrap_or(Duration::from_secs(1));
+            let wait = next_timeout.map_or(Duration::from_secs(1), |t| {
+                t.saturating_duration_since(Instant::now())
+            });
             tokio::select! {
                 res = self.udp.recv_from(&mut buf) => {
                     match res {
@@ -503,20 +502,20 @@ async fn resolve_mdns_candidates(sdp: &str) -> String {
                     None
                 }
             };
-            let rewritten = match ip {
-                Some(ip) => {
-                    let mut parts: Vec<String> = line.split(' ').map(|s| s.to_string()).collect();
-                    // a=candidate:foundation component protocol priority IP port ...
-                    // "a=candidate:1" "1" "udp" "2122260223" "<host>" "<port>" ...
-                    if parts.len() > 5 {
-                        parts[4] = ip.to_string();
-                    }
-                    parts.join(" ")
+            let rewritten = if let Some(ip) = ip {
+                let mut parts: Vec<String> = line
+                    .split(' ')
+                    .map(std::string::ToString::to_string)
+                    .collect();
+                // a=candidate:foundation component protocol priority IP port ...
+                // "a=candidate:1" "1" "udp" "2122260223" "<host>" "<port>" ...
+                if parts.len() > 5 {
+                    parts[4] = ip.to_string();
                 }
-                None => {
-                    tracing::warn!("mDNS 候选解析失败: {host}，保留原行");
-                    line.to_string()
-                }
+                parts.join(" ")
+            } else {
+                tracing::warn!("mDNS 候选解析失败: {host}，保留原行");
+                line.to_string()
             };
             out.push_str(&rewritten);
             out.push('\n');
@@ -536,7 +535,7 @@ fn pick_first(addrs: &HashSet<mdns::ScopedIp>) -> Option<std::net::IpAddr> {
         .iter()
         .find(|a| a.is_ipv4())
         .or_else(|| addrs.iter().next())
-        .map(|a| a.to_ip_addr())
+        .map(mdns::ScopedIp::to_ip_addr)
 }
 
 /// 若 `a=candidate:` 行第 5 个 token 是 `.local` 名则返回它，否则 None。

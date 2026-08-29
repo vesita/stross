@@ -156,7 +156,11 @@ impl Discovery {
                     }
                     tracing::debug!(
                         "mDNS 解析到服务 {fullname}，聚合地址 {:?}",
-                        entry.0.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+                        entry
+                            .0
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect::<Vec<_>>(),
                     );
                 }
                 Ok(ServiceEvent::ServiceRemoved(fullname, _)) => {
@@ -265,7 +269,7 @@ fn select_reachable_ip(reachable: &[IpAddr]) -> Option<&IpAddr> {
 }
 
 /// 两个 IPv4 是否同 /24 网段。
-fn ipv4_same_subnet(a: Ipv4Addr, b: Ipv4Addr) -> bool {
+const fn ipv4_same_subnet(a: Ipv4Addr, b: Ipv4Addr) -> bool {
     let a = u32::from_be_bytes(a.octets());
     let b = u32::from_be_bytes(b.octets());
     a & 0xffff_ff00 == b & 0xffff_ff00

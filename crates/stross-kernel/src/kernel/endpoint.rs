@@ -213,8 +213,7 @@ impl EndpointRegistry {
         }
         let name = path
             .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "未命名".into());
+            .map_or_else(|| "未命名".into(), |s| s.to_string_lossy().to_string());
         let mut endpoint_id = format!("file:{name}");
         let mut n = 2;
         while self.endpoints.contains_key(&endpoint_id) {

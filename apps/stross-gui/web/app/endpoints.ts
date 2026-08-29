@@ -128,7 +128,7 @@ async function confirmPublish(): Promise<void> {
     $('pub-modal').classList.add('hidden');
     await refreshLocalCatalog();
   } catch (e) {
-    $('pub-error').textContent = '通告失败：' + (e as Error).message;
+    $('pub-error').textContent = '通告失败：' + errMsg(e);
     $('pub-error').classList.remove('hidden');
   } finally {
     setBtnLoading(btn, false);
@@ -141,7 +141,7 @@ async function unpublishEndpoint(endpointId: string): Promise<void> {
     await call('endpoint_unpublish', { endpointId });
     await refreshLocalCatalog();
   } catch (e) {
-    showGridError('取消通告失败：' + (e as Error).message);
+    showGridError('取消通告失败：' + errMsg(e));
   }
 }
 
@@ -173,7 +173,7 @@ async function loadRemoteDir(dev: DeviceView): Promise<void> {
     renderRemoteDir(dev, dir);
   } catch (e) {
     if (box) {
-      box.textContent = '目录不可用（' + (e as Error).message + '）';
+      box.textContent = '目录不可用（' + errMsg(e) + '）';
       box.classList.add('hint');
     }
   } finally {
@@ -297,7 +297,7 @@ async function confirmSubscribe(): Promise<void> {
     targetRelay = { wsBase: r.relayUrl, srtUrl: null, quicUrl: null };
     await startReceive(r.streamId);
   } catch (e) {
-    $('sub-error').textContent = '订阅失败：' + (e as Error).message;
+    $('sub-error').textContent = '订阅失败：' + errMsg(e);
     $('sub-error').classList.remove('hidden');
   } finally {
     setBtnLoading(btn, false);

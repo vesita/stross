@@ -209,7 +209,7 @@ enum InternalError {
 impl fmt::Display for InternalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            InternalError::IntfAddrInvalid(iface) => write!(f, "interface addr invalid: {iface:?}"),
+            Self::IntfAddrInvalid(iface) => write!(f, "interface addr invalid: {iface:?}"),
         }
     }
 }
@@ -367,7 +367,7 @@ impl ServiceDaemon {
         thread::Builder::new()
             .name("mDNS_daemon".to_string())
             .spawn(move || {
-                Self::daemon_thread(mio_sock, poller, receiver, port, cmd_sender, signal_addr)
+                Self::daemon_thread(mio_sock, poller, receiver, port, cmd_sender, signal_addr);
             })
             .map_err(|e| e_fmt!("thread builder failed to spawn: {}", e))?;
 
@@ -681,7 +681,7 @@ impl ServiceDaemon {
     ///
     /// See [`IP_CHECK_INTERVAL_IN_SECS_DEFAULT`] for the default interval.
     pub fn set_ip_check_interval(&self, interval_in_secs: u32) -> Result<()> {
-        let interval_in_millis = interval_in_secs as u64 * 1000;
+        let interval_in_millis = u64::from(interval_in_secs) * 1000;
         self.send_cmd(Command::SetOption(DaemonOption::IpCheckInterval(
             interval_in_millis,
         )))
@@ -1059,7 +1059,7 @@ impl<T: Into<IfKind>> IntoIfKindVec for T {
 
 impl<T: Into<IfKind>> IntoIfKindVec for Vec<T> {
     fn into_vec(self) -> IfKindVec {
-        let kinds: Vec<IfKind> = self.into_iter().map(|x| x.into()).collect();
+        let kinds: Vec<IfKind> = self.into_iter().map(std::convert::Into::into).collect();
         IfKindVec { kinds }
     }
 }
@@ -1342,7 +1342,7 @@ impl Zeroconf {
 
         let monitors = Vec::new();
         let service_name_len_max = SERVICE_NAME_LEN_MAX_DEFAULT;
-        let ip_check_interval = IP_CHECK_INTERVAL_IN_SECS_DEFAULT as u64 * 1000;
+        let ip_check_interval = u64::from(IP_CHECK_INTERVAL_IN_SECS_DEFAULT) * 1000;
 
         let timers = BinaryHeap::new();
 
@@ -1566,7 +1566,7 @@ impl Zeroconf {
                 .hostname_resolvers
                 .clone()
                 .into_iter()
-                .filter(|(_, (_, timeout))| timeout.map(|t| now >= t).unwrap_or(false))
+                .filter(|(_, (_, timeout))| timeout.is_some_and(|t| now >= t))
                 .map(|(hostname, _)| hostname)
             {
                 trace!("hostname resolver timeout for {}", &hostname);
@@ -1775,7 +1775,7 @@ impl Zeroconf {
             .unwrap();
     }
 
-    fn set_accept_unsolicited(&mut self, accept: bool) {
+    const fn set_accept_unsolicited(&mut self, accept: bool) {
         self.accept_unsolicited = accept;
     }
 
@@ -1934,7 +1934,7 @@ impl Zeroconf {
                     }
                 });
                 if my_intf.addrs.is_empty() {
-                    deleted_intfs.push((*if_index, last_ipv4, last_ipv6))
+                    deleted_intfs.push((*if_index, last_ipv4, last_ipv6));
                 }
             } else {
                 // If it does not exist, remove the interface.
@@ -1947,7 +1947,7 @@ impl Zeroconf {
                         IpAddr::V4(ipv4) => last_ipv4 = Some(ipv4),
                         IpAddr::V6(ipv6) => last_ipv6 = Some(ipv6),
                     }
-                    deleted_ips.push(addr.ip())
+                    deleted_ips.push(addr.ip());
                 }
                 deleted_intfs.push((*if_index, last_ipv4, last_ipv6));
             }
@@ -2230,7 +2230,7 @@ impl Zeroconf {
         if !outgoing_addrs.is_empty() {
             self.notify_monitors(DaemonEvent::Announce(
                 info.get_fullname().to_string(),
-                format!("{:?}", outgoing_addrs),
+                format!("{outgoing_addrs:?}"),
             ));
         }
 
@@ -3119,7 +3119,7 @@ impl Zeroconf {
                     &self.hostname_resolvers,
                     &change.name,
                     HostnameResolutionEvent::AddressesFound(name, addresses),
-                )
+                );
             }
         }
 
@@ -3232,19 +3232,18 @@ impl Zeroconf {
                     record.get_name().to_string(),
                 );
 
-                let new_probe = match dns_registry.probing.get_mut(record.get_name()) {
-                    Some(p) => p,
-                    None => {
-                        let new_probe = dns_registry
-                            .probing
-                            .entry(record.get_name().to_string())
-                            .or_insert_with(|| {
-                                debug!("conflict handler: new probe of {}", record.get_name());
-                                Probe::new(create_time)
-                            });
-                        self.timers.push(Reverse(new_probe.next_send));
-                        new_probe
-                    }
+                let new_probe = if let Some(p) = dns_registry.probing.get_mut(record.get_name()) {
+                    p
+                } else {
+                    let new_probe = dns_registry
+                        .probing
+                        .entry(record.get_name().to_string())
+                        .or_insert_with(|| {
+                            debug!("conflict handler: new probe of {}", record.get_name());
+                            Probe::new(create_time)
+                        });
+                    self.timers.push(Reverse(new_probe.next_send));
+                    new_probe
                 };
 
                 debug!(
@@ -3721,7 +3720,7 @@ impl Zeroconf {
             Command::StopBrowse(ty_domain) => self.exec_command_stop_browse(ty_domain),
 
             Command::StopResolveHostname(hostname) => {
-                self.exec_command_stop_resolve_hostname(hostname.to_lowercase())
+                self.exec_command_stop_resolve_hostname(hostname.to_lowercase());
             }
 
             Command::Resolve(instance, try_count) => self.exec_command_resolve(instance, try_count),
@@ -3788,7 +3787,7 @@ impl Zeroconf {
         let dns_registry_active_count: usize = self
             .dns_registry_map
             .values()
-            .map(|r| r.active.values().map(|a| a.len()).sum::<usize>())
+            .map(|r| r.active.values().map(std::vec::Vec::len).sum::<usize>())
             .sum();
         self.set_counter(Counter::DnsRegistryActive, dns_registry_active_count as i64);
 
@@ -3872,7 +3871,7 @@ impl Zeroconf {
         self.send_query(&ty, RRType::PTR);
         self.increase_counter(Counter::Browse, 1);
 
-        let next_time = now + (next_delay * 1000) as u64;
+        let next_time = now + u64::from(next_delay * 1000);
         let max_delay = 60 * 60;
         let delay = cmp::min(next_delay * 2, max_delay);
         self.add_retransmission(next_time, Command::Browse(ty, delay, cache_only, listener));
@@ -3888,8 +3887,7 @@ impl Zeroconf {
     ) {
         let addr_list: Vec<_> = self.my_intfs.iter().collect();
         if let Err(e) = listener.send(HostnameResolutionEvent::SearchStarted(format!(
-            "{} on addrs {:?}",
-            hostname, addr_list
+            "{hostname} on addrs {addr_list:?}"
         ))) {
             debug!(
                 "Failed to send ResolveStarted({})(repeating:{}): {}",
@@ -3925,8 +3923,7 @@ impl Zeroconf {
             .hostname_resolvers
             .get(&hostname)
             .and_then(|(_sender, timeout)| *timeout)
-            .map(|timeout| next_time < timeout)
-            .unwrap_or(true)
+            .is_none_or(|timeout| next_time < timeout)
         {
             self.add_retransmission(
                 next_time,
@@ -4597,7 +4594,7 @@ fn check_service_name(fullname: &str) -> Result<()> {
         return Err(e_fmt!("Service name (%s) may not start or end with '-'"));
     }
 
-    let ascii_count = name.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    let ascii_count = name.chars().filter(char::is_ascii_alphabetic).count();
     if ascii_count < 1 {
         return Err(e_fmt!(
             "Service name must contain at least one letter (eg: 'A-Za-z')"
@@ -5093,7 +5090,7 @@ fn name_change(original: &str) -> String {
                 // Try to parse the number between parentheses
                 if let Ok(number) = first_part[num_start..absolute_end_pos].parse::<u32>() {
                     let base_name = &first_part[..paren_pos];
-                    new_name = format!("{} ({})", base_name, number + 1)
+                    new_name = format!("{} ({})", base_name, number + 1);
                 }
             }
         }
@@ -5501,17 +5498,17 @@ mod tests {
         // to the mDNS multicast group, so a multicast-only reply would never
         // reach it — simply receiving the response proves it was unicast.
 
-        let intf_ip = match my_ip_interfaces(false)
-            .into_iter()
-            .find_map(|intf| match intf.ip() {
-                IpAddr::V4(ip) => Some(ip),
-                IpAddr::V6(_) => None,
-            }) {
-            Some(ip) => ip,
-            None => {
-                println!("No IPv4 interface available; skipping test.");
-                return;
-            }
+        let intf_ip = if let Some(ip) =
+            my_ip_interfaces(false)
+                .into_iter()
+                .find_map(|intf| match intf.ip() {
+                    IpAddr::V4(ip) => Some(ip),
+                    IpAddr::V6(_) => None,
+                }) {
+            ip
+        } else {
+            println!("No IPv4 interface available; skipping test.");
+            return;
         };
 
         // Register a service with a unique hostname on this host.
@@ -5642,10 +5639,7 @@ mod tests {
                 fastrand::u64(SHARED_RESPONSE_DELAY_MIN_MILLIS..SHARED_RESPONSE_DELAY_MAX_MILLIS);
             assert!(
                 (SHARED_RESPONSE_DELAY_MIN_MILLIS..SHARED_RESPONSE_DELAY_MAX_MILLIS).contains(&d),
-                "delay {} ms is outside the configured {}-{} ms range",
-                d,
-                SHARED_RESPONSE_DELAY_MIN_MILLIS,
-                SHARED_RESPONSE_DELAY_MAX_MILLIS
+                "delay {d} ms is outside the configured {SHARED_RESPONSE_DELAY_MIN_MILLIS}-{SHARED_RESPONSE_DELAY_MAX_MILLIS} ms range"
             );
         }
     }
@@ -5660,17 +5654,17 @@ mod tests {
         // immediately.
         use socket2::{Domain, Protocol, Socket, Type};
 
-        let (intf, intf_ip) = match my_ip_interfaces(false)
-            .into_iter()
-            .find_map(|intf| match intf.ip() {
-                IpAddr::V4(ip) if !ip.is_loopback() => Some((intf, ip)),
-                _ => None,
-            }) {
-            Some(pair) => pair,
-            None => {
-                println!("No IPv4 interface available; skipping test.");
-                return;
-            }
+        let (intf, intf_ip) = if let Some(pair) =
+            my_ip_interfaces(false)
+                .into_iter()
+                .find_map(|intf| match intf.ip() {
+                    IpAddr::V4(ip) if !ip.is_loopback() => Some((intf, ip)),
+                    _ => None,
+                }) {
+            pair
+        } else {
+            println!("No IPv4 interface available; skipping test.");
+            return;
         };
         let interface_id = InterfaceId::from(&intf);
 
@@ -5731,9 +5725,8 @@ mod tests {
         let tolerance = Duration::from_millis(2);
         assert!(
             elapsed + tolerance >= Duration::from_millis(INITIAL_QUERY_DELAY_MIN_MILLIS),
-            "first browse query was sent after only {:?}; the first query of a series must be \
-             delayed (10-50 ms window), not sent immediately",
-            elapsed
+            "first browse query was sent after only {elapsed:?}; the first query of a series must be \
+             delayed (10-50 ms window), not sent immediately"
         );
 
         // Upper bound: the query must fall within the jitter window. Allow
@@ -5743,10 +5736,7 @@ mod tests {
         let scheduling_slack = Duration::from_millis(50);
         assert!(
             elapsed <= Duration::from_millis(INITIAL_QUERY_DELAY_MAX_MILLIS) + scheduling_slack,
-            "first browse query was sent after {:?}, beyond the {}-{} ms jitter window (plus slack)",
-            elapsed,
-            INITIAL_QUERY_DELAY_MIN_MILLIS,
-            INITIAL_QUERY_DELAY_MAX_MILLIS
+            "first browse query was sent after {elapsed:?}, beyond the {INITIAL_QUERY_DELAY_MIN_MILLIS}-{INITIAL_QUERY_DELAY_MAX_MILLIS} ms jitter window (plus slack)"
         );
     }
 
@@ -5760,17 +5750,17 @@ mod tests {
         // instead; see `test_legacy_unicast_response`.)
         use socket2::{Domain, Protocol, Socket, Type};
 
-        let intf_ip = match my_ip_interfaces(false)
-            .into_iter()
-            .find_map(|intf| match intf.ip() {
-                IpAddr::V4(ip) if !ip.is_loopback() => Some(ip),
-                _ => None,
-            }) {
-            Some(ip) => ip,
-            None => {
-                println!("No IPv4 interface available; skipping test.");
-                return;
-            }
+        let intf_ip = if let Some(ip) =
+            my_ip_interfaces(false)
+                .into_iter()
+                .find_map(|intf| match intf.ip() {
+                    IpAddr::V4(ip) if !ip.is_loopback() => Some(ip),
+                    _ => None,
+                }) {
+            ip
+        } else {
+            println!("No IPv4 interface available; skipping test.");
+            return;
         };
 
         let daemon = ServiceDaemon::new().expect("Failed to create daemon");
@@ -5863,14 +5853,12 @@ mod tests {
             measured.expect("expected the daemon to respond to our PTR query within the deadline");
         assert!(
             elapsed >= Duration::from_millis(8),
-            "PTR response was sent after only {:?}; a shared-record response must be \
-             delayed (10-50 ms window), not sent immediately",
-            elapsed
+            "PTR response was sent after only {elapsed:?}; a shared-record response must be \
+             delayed (10-50 ms window), not sent immediately"
         );
         assert!(
             elapsed <= Duration::from_millis(600),
-            "PTR response was sent after {:?}; expected within the 10-50 ms delay window",
-            elapsed
+            "PTR response was sent after {elapsed:?}; expected within the 10-50 ms delay window"
         );
 
         daemon.shutdown().unwrap();
@@ -5881,7 +5869,7 @@ mod tests {
         let result = check_service_name_length("_tcp", 100);
         assert!(result.is_err());
         if let Err(e) = result {
-            println!("{}", e);
+            println!("{e}");
         }
     }
 
@@ -5905,7 +5893,7 @@ mod tests {
             let result = check_hostname(hostname);
             assert!(result.is_err());
             if let Err(e) = result {
-                println!("{}", e);
+                println!("{e}");
             }
         }
     }
@@ -5928,7 +5916,7 @@ mod tests {
         let service = "_test_inval_ptr._udp.local.";
         let host_name = "my_host_tmp_invalidated_ptr.local.";
         let intfs: Vec<_> = my_ip_interfaces(false);
-        let intf_ips: Vec<_> = intfs.iter().map(|intf| intf.ip()).collect();
+        let intf_ips: Vec<_> = intfs.iter().map(if_addrs::Interface::ip).collect();
         let port = 5201;
         let my_service =
             ServiceInfo::new(service, "my_instance", host_name, &intf_ips[..], port, None)
@@ -5950,14 +5938,14 @@ mod tests {
                     break;
                 }
                 e => {
-                    println!("Received event {:?}", e);
+                    println!("Received event {e:?}");
                 }
             }
         }
 
         assert!(resolved);
 
-        println!("Stopping browse of {}", service);
+        println!("Stopping browse of {service}");
         // Pause browsing so restarting will cause a new immediate query.
         // Unregistering will not work here, it will invalidate all the records.
         d.stop_browse(service).unwrap();
@@ -5978,7 +5966,7 @@ mod tests {
                 // here as they come from different interfaces.
                 // That's fine for this test.
                 e => {
-                    println!("Received event {:?}", e);
+                    println!("Received event {e:?}");
                 }
             }
         }
@@ -6015,10 +6003,7 @@ mod tests {
             .unwrap();
         }
 
-        println!(
-            "Sent PTR record invalidation. Starting second browse for {}",
-            service
-        );
+        println!("Sent PTR record invalidation. Starting second browse for {service}");
 
         // Restart the browse to force the sender to re-send the announcements.
         let browse_chan = d.browse(service).unwrap();
@@ -6032,7 +6017,7 @@ mod tests {
                     break;
                 }
                 e => {
-                    println!("Received event {:?}", e);
+                    println!("Received event {e:?}");
                 }
             }
         }
@@ -6080,10 +6065,10 @@ mod tests {
         mdns_server.shutdown().unwrap();
 
         // SRV record in the client cache will expire.
-        let expire_timeout = Duration::from_secs(new_ttl as u64);
+        let expire_timeout = Duration::from_secs(u64::from(new_ttl));
         while let Ok(event) = browse_chan.recv_timeout(expire_timeout) {
             if let ServiceEvent::ServiceRemoved(service_type, full_name) = event {
-                println!("Service removed: {}: {}", service_type, full_name);
+                println!("Service removed: {service_type}: {full_name}");
                 break;
             }
         }
@@ -6097,7 +6082,7 @@ mod tests {
         let service_ip_addr: ScopedIp = my_ip_interfaces(false)
             .iter()
             .find(|iface| iface.ip().is_ipv4())
-            .map(|iface| iface.into())
+            .map(std::convert::Into::into)
             .unwrap();
 
         let mut my_service = ServiceInfo::new(
@@ -6124,7 +6109,7 @@ mod tests {
                 Ok(HostnameResolutionEvent::AddressesFound(found_hostname, addresses)) => {
                     assert!(found_hostname == hostname);
                     assert!(addresses.contains(&service_ip_addr));
-                    println!("address found: {:?}", addresses);
+                    println!("address found: {addresses:?}");
                     break true;
                 }
                 Ok(HostnameResolutionEvent::SearchStopped(_)) => break false,
@@ -6139,17 +6124,14 @@ mod tests {
         server.shutdown().unwrap();
 
         // Wait till hostname address record expires, with 1 second grace period.
-        let timeout = Duration::from_secs(addr_ttl as u64 + 1);
+        let timeout = Duration::from_secs(u64::from(addr_ttl) + 1);
         let removed = loop {
             match event_receiver.recv_timeout(timeout) {
                 Ok(HostnameResolutionEvent::AddressesRemoved(removed_host, addresses)) => {
                     assert!(removed_host == hostname);
                     assert!(addresses.contains(&service_ip_addr));
 
-                    println!(
-                        "address removed: hostname: {} addresses: {:?}",
-                        hostname, addresses
-                    );
+                    println!("address removed: hostname: {hostname} addresses: {addresses:?}");
                     break true;
                 }
                 Ok(_event) => {}
@@ -6173,7 +6155,7 @@ mod tests {
         let service_ip_addr = my_ip_interfaces(false)
             .iter()
             .find(|iface| iface.ip().is_ipv4())
-            .map(|iface| iface.ip())
+            .map(if_addrs::Interface::ip)
             .unwrap();
 
         let mut my_service = ServiceInfo::new(
@@ -6211,9 +6193,9 @@ mod tests {
         assert!(resolved);
 
         // wait over 80% of TTL, and refresh PTR should be sent out.
-        let timeout = Duration::from_millis(new_ttl as u64 * 1000 * 90 / 100);
+        let timeout = Duration::from_millis(u64::from(new_ttl) * 1000 * 90 / 100);
         while let Ok(event) = browse_chan.recv_timeout(timeout) {
-            println!("event: {:?}", event);
+            println!("event: {event:?}");
         }
 
         // verify refresh counter.
@@ -6389,7 +6371,7 @@ mod tests {
             .map(|iface| (iface.ip(), iface.name.clone()))
             .unwrap();
 
-        println!("Using interface {} with IP {}", intf_name, ip_addr1);
+        println!("Using interface {intf_name} with IP {ip_addr1}");
 
         // Register the service.
         let service1 = ServiceInfo::new(ty_domain, &instance_name, host_name, ip_addr1, port, None)
@@ -6424,7 +6406,7 @@ mod tests {
         client.set_ip_check_interval(1).unwrap();
 
         // Now shutdown the interface and expect the client to lose the service.
-        println!("Shutting down interface {}", intf_name);
+        println!("Shutting down interface {intf_name}");
         client.test_down_interface(&intf_name).unwrap();
 
         let mut got_removed = false;
@@ -6438,13 +6420,13 @@ mod tests {
         }
         assert!(got_removed, "Should receive ServiceRemoved event");
 
-        println!("Bringing up interface {}", intf_name);
+        println!("Bringing up interface {intf_name}");
         client.test_up_interface(&intf_name).unwrap();
         let mut got_data = false;
         while let Ok(event) = receiver.recv_timeout(timeout) {
             if let ServiceEvent::ServiceResolved(resolved) = event {
                 got_data = true;
-                println!("Received ServiceResolved: {:?}", resolved);
+                println!("Received ServiceResolved: {resolved:?}");
                 break;
             }
         }
@@ -6466,7 +6448,7 @@ mod tests {
         let service_ip_addr = my_ip_interfaces(false)
             .iter()
             .find(|iface| iface.ip().is_ipv4())
-            .map(|iface| iface.ip())
+            .map(if_addrs::Interface::ip)
             .unwrap();
 
         let mut my_service = ServiceInfo::new(
@@ -6521,7 +6503,7 @@ mod tests {
         let service_ip_addr = my_ip_interfaces(false)
             .iter()
             .find(|iface| iface.ip().is_ipv4())
-            .map(|iface| iface.ip())
+            .map(if_addrs::Interface::ip)
             .unwrap();
 
         let my_service = ServiceInfo::new(
@@ -6579,7 +6561,7 @@ mod tests {
         let service_ip_addr = my_ip_interfaces(false)
             .iter()
             .find(|iface| iface.ip().is_ipv4())
-            .map(|iface| iface.ip())
+            .map(if_addrs::Interface::ip)
             .expect("Test requires an IPv4 interface");
 
         // Create service info for custom port (5454)

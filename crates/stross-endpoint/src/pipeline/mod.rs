@@ -50,19 +50,19 @@ pub struct Quality {
 }
 
 impl Quality {
-    pub const LOW: Quality = Quality {
+    pub const LOW: Self = Self {
         width: 640,
         height: 360,
         fps: 24,
         bitrate_kbps: 800,
     };
-    pub const MEDIUM: Quality = Quality {
+    pub const MEDIUM: Self = Self {
         width: 1280,
         height: 720,
         fps: 30,
         bitrate_kbps: 2500,
     };
-    pub const HIGH: Quality = Quality {
+    pub const HIGH: Self = Self {
         width: 1920,
         height: 1080,
         fps: 30,
@@ -70,11 +70,11 @@ impl Quality {
     };
 
     /// 预设列表 `(显示名, 配置)`。
-    pub fn presets() -> [(&'static str, Quality); 3] {
+    pub const fn presets() -> [(&'static str, Self); 3] {
         [
-            ("低 (640×360@24)", Quality::LOW),
-            ("中 (1280×720@30)", Quality::MEDIUM),
-            ("高 (1920×1080@30)", Quality::HIGH),
+            ("低 (640×360@24)", Self::LOW),
+            ("中 (1280×720@30)", Self::MEDIUM),
+            ("高 (1920×1080@30)", Self::HIGH),
         ]
     }
 
@@ -86,7 +86,7 @@ impl Quality {
 
 impl Default for Quality {
     fn default() -> Self {
-        Quality::MEDIUM
+        Self::MEDIUM
     }
 }
 
@@ -122,13 +122,13 @@ pub struct AudioSourceConfig {
     pub bitrate_kbps: u32,
 }
 
-fn default_sample_rate() -> u32 {
+const fn default_sample_rate() -> u32 {
     48_000
 }
-fn default_channels() -> u8 {
+const fn default_channels() -> u8 {
     2
 }
-fn default_audio_bitrate() -> u32 {
+const fn default_audio_bitrate() -> u32 {
     128
 }
 
@@ -366,7 +366,7 @@ impl StreamSession {
     }
 
     /// 取走采集侧错误通道（一次性；无 Wayland 采集时为 `None`）。
-    pub fn take_error_rx(&mut self) -> Option<mpsc::Receiver<String>> {
+    pub const fn take_error_rx(&mut self) -> Option<mpsc::Receiver<String>> {
         self.error_rx.take()
     }
 

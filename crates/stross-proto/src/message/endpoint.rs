@@ -47,9 +47,9 @@ impl Visibility {
     /// wire 字符串（camelCase；与 serde 序列化一致，单一真源）。
     pub const fn as_str(&self) -> &'static str {
         match self {
-            Visibility::Public => "public",
-            Visibility::Confirm => "confirm",
-            Visibility::Private { .. } => "private",
+            Self::Public => "public",
+            Self::Confirm => "confirm",
+            Self::Private { .. } => "private",
         }
     }
 
@@ -80,9 +80,9 @@ impl Delivery {
     /// wire 字符串（camelCase；与 serde 序列化一致，单一真源）。
     pub const fn as_str(&self) -> &'static str {
         match self {
-            Delivery::Pull => "pull",
-            Delivery::Push => "push",
-            Delivery::Both => "both",
+            Self::Pull => "pull",
+            Self::Push => "push",
+            Self::Both => "both",
         }
     }
 
@@ -121,9 +121,9 @@ impl EndpointState {
     /// wire 字符串（camelCase；与 serde 序列化一致，单一真源）。
     pub const fn as_str(&self) -> &'static str {
         match self {
-            EndpointState::Idle => "idle",
-            EndpointState::Active => "active",
-            EndpointState::Suspended => "suspended",
+            Self::Idle => "idle",
+            Self::Active => "active",
+            Self::Suspended => "suspended",
         }
     }
 }

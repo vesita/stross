@@ -18,8 +18,7 @@ pub struct RelayArgs {
 }
 
 pub async fn run(args: RelayArgs) -> anyhow::Result<()> {
-    let hostname = hostname::get()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "stross".into());
+    let hostname =
+        hostname::get().map_or_else(|_| "stross".into(), |h| h.to_string_lossy().to_string());
     RelayServer::run_standalone(args.port, !args.no_advertise, "relay", &hostname).await
 }

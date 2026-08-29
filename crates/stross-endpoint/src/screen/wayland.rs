@@ -134,7 +134,7 @@ async fn capture_loop(quality: Quality, stdin: &mut ChildStdin) -> Result<(), St
     let yuv_len = dst_w * dst_h + dst_w * dst_h / 2;
     let mut yuv = vec![0u8; yuv_len];
     let mut last_frame: Option<Vec<u8>> = None;
-    let interval = Duration::from_secs_f64(1.0 / quality.fps.max(1) as f64);
+    let interval = Duration::from_secs_f64(1.0 / f64::from(quality.fps.max(1)));
     let mut next_write = Instant::now();
     let mut sent = 0u32;
 

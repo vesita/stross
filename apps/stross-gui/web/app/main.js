@@ -91,7 +91,7 @@ async function respondApprove(allow) {
         }));
     }
     catch (e) {
-        $('approve-error').textContent = '应答失败：' + e.message;
+        $('approve-error').textContent = '应答失败：' + errMsg(e);
         $('approve-error').classList.remove('hidden');
         return;
     }

@@ -196,12 +196,12 @@ impl Kernel {
     // -----------------------------------------------------------------------
 
     /// 运行平台标签（"desktop" / "android"；控制面 Status 与 app_info 展示）。
-    pub fn platform(&self) -> Platform {
+    pub const fn platform(&self) -> Platform {
         self.platform
     }
 
     /// 运行平台字符串。
-    pub fn platform_str(&self) -> &'static str {
+    pub const fn platform_str(&self) -> &'static str {
         self.platform.as_str()
     }
 
@@ -309,7 +309,7 @@ impl Kernel {
     /// 内核不做类型分派）。
     ///
     /// share 在注册表锁**外**调用（端点实现会再次访问内核），持锁回调会死锁。
-    pub fn on_endpoint_subscribed(&self, app: Arc<Kernel>, endpoint_id: &str, ctx: &SubscribeCtx) {
+    pub fn on_endpoint_subscribed(&self, app: Arc<Self>, endpoint_id: &str, ctx: &SubscribeCtx) {
         self.registry
             .lock_poisoned()
             .on_subscribed(&app, endpoint_id, ctx);
@@ -672,13 +672,13 @@ impl Kernel {
                 ));
             }
         } // 优先指定端口；被占用时回退随机端口（本机中继"能用就行"，不因端口冲突失败）
-        let handle = match RelayServer::start_controlled_with(port, srt_port, quic_port).await {
-            Ok(h) => h,
-            Err(_) => {
+        let handle =
+            if let Ok(h) = RelayServer::start_controlled_with(port, srt_port, quic_port).await {
+                h
+            } else {
                 tracing::warn!("端口 {port} 被占用，本机中继回退到随机端口");
                 RelayServer::start_controlled(0).await?
-            }
-        };
+            };
         let port = handle.port;
         // 中继接入内核（数据面后端）：订阅流事件、会话预授权
         self.attach_data_plane(Arc::new(RelayDataPlane::new(&handle)));
@@ -816,14 +816,13 @@ impl Kernel {
         self.ensure_session(&mut cfg)?;
         // 未指定中继时，推到已连接（常驻）的本机中继；
         // 推流地址按媒体类型自动选传输（视频→SRT>QUIC>WS，纯音频→QUIC>WS）
-        let relay_url = match relay_url {
-            Some(u) => Some(u),
-            None => {
-                let guard = self.anchor.lock_poisoned();
-                guard
-                    .as_ref()
-                    .map(|a| a.handle.auto_push_url(cfg.video.is_some()))
-            }
+        let relay_url = if let Some(u) = relay_url {
+            Some(u)
+        } else {
+            let guard = self.anchor.lock_poisoned();
+            guard
+                .as_ref()
+                .map(|a| a.handle.auto_push_url(cfg.video.is_some()))
         };
         let engine =
             SenderEngine::start(cfg.clone(), backend, relay_url.clone(), DEFAULT_PORT).await?;
@@ -934,8 +933,7 @@ impl Kernel {
         self.engine
             .lock_poisoned()
             .as_ref()
-            .map(|s| s.relay_port)
-            .unwrap_or(DEFAULT_PORT)
+            .map_or(DEFAULT_PORT, |s| s.relay_port)
     }
 
     /// 本机主中继端口（`start_relay` / `start_relay_on` 启动的那个）。
@@ -1096,7 +1094,7 @@ impl stross_endpoint::factory::EndpointSeeder for Kernel {
         true
     }
     fn platform(&self) -> Platform {
-        Kernel::platform(self)
+        Self::platform(self)
     }
 }
 
@@ -1109,13 +1107,13 @@ impl EndpointApp for Kernel {
         cfg: StreamConfig,
         relay_url: Option<String>,
     ) -> anyhow::Result<stross_types::StartResult> {
-        Kernel::start_stream(self, cfg, relay_url)
+        Self::start_stream(self, cfg, relay_url)
             .await
             .map_err(anyhow::Error::msg)
     }
 
     fn relay_port(&self) -> Option<u16> {
-        Kernel::relay_port(self)
+        Self::relay_port(self)
     }
 
     async fn push_file(&self, path: PathBuf, opts: FilePushOptions) -> anyhow::Result<u64> {

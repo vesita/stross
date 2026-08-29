@@ -88,7 +88,7 @@ impl RelayUrl {
     }
 
     /// 传输 id（由 scheme 唯一决定）。
-    pub fn transport(&self) -> TransportId {
+    pub const fn transport(&self) -> TransportId {
         self.transport
     }
 
@@ -98,7 +98,7 @@ impl RelayUrl {
     }
 
     /// 端口。
-    pub fn port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         self.port
     }
 
@@ -113,8 +113,7 @@ impl RelayUrl {
             || self
                 .host
                 .parse::<std::net::IpAddr>()
-                .map(|ip| ip.is_loopback())
-                .unwrap_or(false)
+                .is_ok_and(|ip| ip.is_loopback())
     }
 
     /// 推流拨号地址：ws 无路径时补 `/ws/push`；srt/quic 原样。

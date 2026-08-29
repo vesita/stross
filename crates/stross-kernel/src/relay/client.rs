@@ -44,8 +44,8 @@ impl StreamsResp {
     /// 展开为流信息列表（两种形态统一）。
     pub fn list(self) -> Vec<StreamInfo> {
         match self {
-            StreamsResp::Array(list) => list,
-            StreamsResp::Object { streams } => streams,
+            Self::Array(list) => list,
+            Self::Object { streams } => streams,
         }
     }
 }

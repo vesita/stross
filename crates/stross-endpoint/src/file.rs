@@ -34,7 +34,7 @@ pub struct FileEndpoint {
 }
 
 impl FileEndpoint {
-    pub fn new(endpoint_id: String, name: String, path: PathBuf) -> Self {
+    pub const fn new(endpoint_id: String, name: String, path: PathBuf) -> Self {
         Self {
             base: EndpointBase {
                 id: endpoint_id,

@@ -94,8 +94,7 @@ pub async fn scan(
         let mut dev = ScannedDevice {
             name: info
                 .as_ref()
-                .map(|i| i.name.clone())
-                .unwrap_or_else(|| d.instance.clone()),
+                .map_or_else(|| d.instance.clone(), |i| i.name.clone()),
             port: d.port,
             ip: ip.clone(),
             is_self: self_ips.contains(&ip),

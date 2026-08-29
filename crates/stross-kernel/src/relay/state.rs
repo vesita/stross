@@ -10,6 +10,7 @@ use stross_proto::frame::{Frame, TRACK_VIDEO};
 use stross_proto::message::{ShareToken, StreamInfo};
 
 use super::peers::PeerInfo;
+use crate::lock::MutexExt;
 
 /// 中继数据面事件（内核订阅，用于控制面追踪流生命周期）。
 ///
@@ -135,7 +136,7 @@ impl RelayState {
     fn shard_for(id: &str) -> usize {
         let mut h = 0x811c_9dc5u64;
         for b in id.bytes() {
-            h ^= b as u64;
+            h ^= u64::from(b);
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
         (h as usize) & (STREAM_SHARDS - 1)
@@ -145,7 +146,7 @@ impl RelayState {
     pub fn streams(&self) -> Vec<StreamInfo> {
         let mut v: Vec<StreamInfo> = Vec::new();
         for shard in self.streams.iter() {
-            let guard = shard.lock().unwrap();
+            let guard = shard.lock_poisoned();
             v.extend(guard.values().map(|e| {
                 let mut info = e.info.clone();
                 info.watchers = e.tx.receiver_count() as u32;
@@ -176,7 +177,7 @@ impl RelayState {
     /// 热路径：单次加锁（本流分片）完成「缓存更新 + 广播」，
     /// 避免逐帧整体 clone `StreamEntry`；不同流走不同分片锁，互不阻塞。
     pub(crate) fn forward(&self, id: &str, frame: Frame) {
-        let mut guard = self.streams[Self::shard_for(id)].lock().unwrap();
+        let mut guard = self.streams[Self::shard_for(id)].lock_poisoned();
         if let Some(entry) = guard.get_mut(id) {
             if frame.header.track == TRACK_VIDEO && frame.header.is_keyframe() {
                 entry.last_keyframe = Some(frame.clone());
@@ -195,24 +196,24 @@ impl RelayState {
 
     /// 局域网设备列表（按名称排序）。
     pub fn peers(&self) -> Vec<PeerInfo> {
-        let mut v: Vec<_> = self.peers.lock().unwrap().values().cloned().collect();
+        let mut v: Vec<_> = self.peers.lock_poisoned().values().cloned().collect();
         v.sort_by(|a, b| a.name.cmp(&b.name).then(a.port.cmp(&b.port)));
         v
     }
 
     /// 整体替换局域网设备表（mDNS 周期浏览结果）。
     pub fn set_peers(&self, peers: HashMap<String, PeerInfo>) {
-        *self.peers.lock().unwrap() = peers;
+        *self.peers.lock_poisoned() = peers;
     }
 
     /// 手动注册一台中继（调试 / 测试 / 手动补充跨网段设备）。
     pub fn insert_peer(&self, peer: PeerInfo) {
-        self.peers.lock().unwrap().insert(peer.id.clone(), peer);
+        self.peers.lock_poisoned().insert(peer.id.clone(), peer);
     }
 
     /// 预授权一个 stream id 接入（受控模式下 Hello 校验；非受控模式无效果）。
     pub fn authorize_stream(&self, id: &str) {
-        self.allowed.lock().unwrap().insert(id.to_string());
+        self.allowed.lock_poisoned().insert(id.to_string());
     }
 
     /// 撤销预授权（会话拆除时调用）。
@@ -220,7 +221,7 @@ impl RelayState {
     /// 除移除授权外，**同步拆除仍在推送的流**（推流端下次 send 失败即断开）：
     /// 会话拆除 = 数据面流停止，避免"会话已删、媒体仍流转"的泄漏。
     pub fn revoke_stream(&self, id: &str) {
-        self.allowed.lock().unwrap().remove(id);
+        self.allowed.lock_poisoned().remove(id);
         if self.remove(id) {
             self.emit(RelayEvent::StreamEnded {
                 stream_id: id.to_string(),
@@ -229,17 +230,17 @@ impl RelayState {
     }
 
     /// 是否受控模式。
-    pub fn is_controlled(&self) -> bool {
+    pub const fn is_controlled(&self) -> bool {
         self.controlled
     }
 
     /// 注入接入凭证校验器（内核调用；`None` 关闭凭证接入，行为与现状一致）。
     pub fn set_token_validator(&self, validator: Option<Arc<dyn ShareTokenValidator>>) {
-        *self.token_validator.lock().unwrap() = validator;
+        *self.token_validator.lock_poisoned() = validator;
     }
 
     fn is_authorized(&self, id: &str) -> bool {
-        self.allowed.lock().unwrap().contains(id)
+        self.allowed.lock_poisoned().contains(id)
     }
 
     /// 凭证接入判定（跨设备推流）：只做凭证校验，**不含预授权**——
@@ -249,7 +250,7 @@ impl RelayState {
             return false;
         };
         // 凭证解析失败 / 缺失校验器 → 拒绝
-        let validator = self.token_validator.lock().unwrap().clone();
+        let validator = self.token_validator.lock_poisoned().clone();
         let Some(validator) = validator else {
             return false;
         };
@@ -296,7 +297,7 @@ impl RelayState {
         info: Option<StreamInfo>,
     ) -> Result<String, crate::error::RelayOpError> {
         {
-            let mut guards = self.proxies.lock().unwrap();
+            let mut guards = self.proxies.lock_poisoned();
             if guards.contains_key(stream_id) {
                 return Err(crate::error::RelayOpError::ProxyExists(
                     stream_id.to_string(),
@@ -344,7 +345,7 @@ impl RelayState {
 
     /// 拆除代理流（上游断开 / 手动调用）：删流 + 上报事件 + 移除任务记录。
     pub fn remove_proxy(&self, id: &str) {
-        let removed = self.proxies.lock().unwrap().remove(id).is_some();
+        let removed = self.proxies.lock_poisoned().remove(id).is_some();
         if removed && self.remove(id) {
             self.emit(RelayEvent::StreamEnded {
                 stream_id: id.to_string(),

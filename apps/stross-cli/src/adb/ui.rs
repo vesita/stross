@@ -96,7 +96,7 @@ pub(crate) fn bounds_center(s: &str) -> Option<(u32, u32)> {
         x2.parse().ok()?,
         y2.parse().ok()?,
     );
-    Some(((x1 + x2) / 2, (y1 + y2) / 2))
+    Some((u32::midpoint(x1, x2), u32::midpoint(y1, y2)))
 }
 
 /// bounds "[x1,y1][x2,y2]" 面积；无/畸形返回 0（零面积节点不可点）。

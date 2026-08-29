@@ -15,24 +15,10 @@ let scanInFlight = false; // 「扫描设备」in-flight
 let discoverInFlight = false; // 设备流聚合 in-flight
 let discoverCacheAt = 0;
 const DISCOVER_TTL_MS = 5000;
-// —— 发布（出站共享）状态 ——
-/** 本机共享是否进行中（流层：广播/定向共用同一推流引擎）。 */
-let publishing = false;
-/** Android 采集启动中（等待 capture_status 真实回报）。 */
-let publishStarting = false;
-let publishStartingSince = 0;
-const START_TIMEOUT_MS = 60000;
-/** 当前共享的媒体类型（屏幕/麦克风）。 */
-let shareKind = null;
-/** 当前共享的流元信息。 */
-let publishInfo = null;
-/** B2 定向共享（手机麦克风 → 目标设备；null = 未打开弹窗）。 */
-let micShare = null;
-/** 最近一次凭证共享的目标设备基址（重开弹窗时恢复进行中状态用）。 */
-let micShareLastBase = null;
-/** 电脑端「接收手机麦克风」凭证与接入轮询状态（null = 未签发）。 */
-let micRecv = null;
 // —— 订阅（入站接收）状态 ——
+/** 电脑端「接收手机麦克风」凭证与接入轮询状态（null = 未签发）。
+ *  `until`：凭证到期 Unix 秒（0 = 无到期，靠 attempts 兜底）。 */
+let micRecv = null;
 /** 本机是否正在接收（订阅）流。 */
 let receiving = false;
 /** 当前订阅中的流 id（供共享面板定位流信息）。 */
@@ -77,5 +63,3 @@ let deviceViews = [];
 let expandedDevice = null;
 /** 流 id → 流信息缓存（接收传输自动选择按 video/audio 类型决策）。 */
 const remoteStreams = new Map();
-/** 本机在线共享缓存（供本机卡片流区渲染）。 */
-let localStreams = [];

@@ -22,7 +22,7 @@ impl IpType {
     pub const V6: Self = Self(0b10);
     pub const BOTH: Self = Self(0b11);
 
-    fn contains(self, other: Self) -> bool {
+    const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 }
@@ -82,29 +82,29 @@ impl DnsCache {
         }
     }
 
-    pub(crate) fn all_ptr(&self) -> &HashMap<String, Vec<DnsRecordIntf>> {
+    pub(crate) const fn all_ptr(&self) -> &HashMap<String, Vec<DnsRecordIntf>> {
         &self.ptr
     }
 
     /// Count all PTR records in the cache.
     pub(crate) fn ptr_count(&self) -> usize {
-        self.ptr.values().map(|v| v.len()).sum()
+        self.ptr.values().map(std::vec::Vec::len).sum()
     }
 
     pub(crate) fn srv_count(&self) -> usize {
-        self.srv.values().map(|v| v.len()).sum()
+        self.srv.values().map(std::vec::Vec::len).sum()
     }
 
     pub(crate) fn txt_count(&self) -> usize {
-        self.txt.values().map(|v| v.len()).sum()
+        self.txt.values().map(std::vec::Vec::len).sum()
     }
 
     pub(crate) fn addr_count(&self) -> usize {
-        self.addr.values().map(|v| v.len()).sum()
+        self.addr.values().map(std::vec::Vec::len).sum()
     }
 
     pub(crate) fn nsec_count(&self) -> usize {
-        self.nsec.values().map(|v| v.len()).sum()
+        self.nsec.values().map(std::vec::Vec::len).sum()
     }
 
     pub(crate) fn subtype_count(&self) -> usize {
@@ -252,7 +252,7 @@ impl DnsCache {
             RRType::NSEC => self.nsec.get(&entry_name),
             _ => return None,
         }
-        .is_none_or(|records| records.is_empty());
+        .is_none_or(std::vec::Vec::is_empty);
 
         // No existing records for this name and type, and not for us.
         if empty_records && !is_for_us {
@@ -276,25 +276,22 @@ impl DnsCache {
         }
 
         // update TTL for existing record or create a new record.
-        let (idx, updated) = match record_vec
+        let (idx, updated) = if let Some((i, r)) = record_vec
             .iter_mut()
             .enumerate()
             .find(|(_idx, r)| r.record.matches(incoming.as_ref()))
         {
-            Some((i, r)) => {
-                // It is possible that this record was just updated in cache_flush
-                // processing. That's okay. We can still reset here.
-                r.record.reset_ttl(incoming.as_ref());
-                (i, false)
-            }
-            None => {
-                let new_record = DnsRecordIntf {
-                    record: incoming,
-                    src_intf: intf.into(),
-                };
-                record_vec.insert(0, new_record); // A new record.
-                (0, true)
-            }
+            // It is possible that this record was just updated in cache_flush
+            // processing. That's okay. We can still reset here.
+            r.record.reset_ttl(incoming.as_ref());
+            (i, false)
+        } else {
+            let new_record = DnsRecordIntf {
+                record: incoming,
+                src_intf: intf.into(),
+            };
+            record_vec.insert(0, new_record); // A new record.
+            (0, true)
         };
 
         Some((record_vec.get(idx).unwrap(), updated))
@@ -383,7 +380,7 @@ impl DnsCache {
 
                     // evict expired TXT records of this instance
                     if let Some(txt_records) = self.txt.get_mut(instance_name) {
-                        txt_records.retain(|txt| !txt.record.get_record().is_expired(now))
+                        txt_records.retain(|txt| !txt.record.get_record().is_expired(now));
                     }
                 }
             }
@@ -440,7 +437,7 @@ impl DnsCache {
                     .record
                     .any()
                     .downcast_ref::<DnsPointer>()
-                    .map(|ptr| ptr.alias())
+                    .map(super::dns_parser::DnsPointer::alias)
             })
             .collect();
 
@@ -501,7 +498,7 @@ impl DnsCache {
                     .record
                     .any()
                     .downcast_ref::<DnsPointer>()
-                    .map(|ptr| ptr.alias())
+                    .map(super::dns_parser::DnsPointer::alias)
             })
             .collect();
 
@@ -903,7 +900,7 @@ mod tests {
         let all_ips: HashSet<IpAddr> = addrs
             .values()
             .flatten()
-            .map(|scoped| scoped.to_ip_addr())
+            .map(super::super::dns_parser::ScopedIp::to_ip_addr)
             .collect();
         assert_eq!(all_ips, HashSet::from([addr_b]));
     }

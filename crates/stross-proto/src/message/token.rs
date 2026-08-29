@@ -47,7 +47,7 @@ impl ShareToken {
     }
 
     /// 是否已过期（`now_secs` 为当前 Unix 秒）。
-    pub fn is_expired(&self, now_secs: u64) -> bool {
+    pub const fn is_expired(&self, now_secs: u64) -> bool {
         self.expires_at <= now_secs
     }
 }

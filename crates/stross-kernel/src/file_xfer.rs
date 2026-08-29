@@ -41,8 +41,7 @@ pub async fn push_file(path: &Path, opts: &FilePushOptions) -> anyhow::Result<u6
     let size = meta.len();
     let name = path
         .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "未命名".into());
+        .map_or_else(|| "未命名".into(), |s| s.to_string_lossy().to_string());
     let file_meta = FileMeta {
         name,
         size,
@@ -203,10 +202,10 @@ pub async fn receive_file_session(
                         bail!("文件不完整：期望 {} 字节，实收 {}", m.size, buf.len());
                     }
                     // 净化文件名：拒绝路径穿越（只取 basename）
-                    let name = Path::new(&m.name)
-                        .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "received.bin".into());
+                    let name = Path::new(&m.name).file_name().map_or_else(
+                        || "received.bin".into(),
+                        |s| s.to_string_lossy().to_string(),
+                    );
                     tokio::fs::create_dir_all(out_dir)
                         .await
                         .with_context(|| format!("创建输出目录失败 {}", out_dir.display()))?;

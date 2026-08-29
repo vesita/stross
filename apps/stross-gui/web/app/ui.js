@@ -11,6 +11,16 @@ function call(cmd, args) {
         return Promise.reject(new Error('当前页面未运行在 Stross 桌面应用中'));
     return invoke(cmd, args);
 }
+/** 统一错误消息提取：Tauri 命令失败时 rejection 是命令 Err 序列化的**字符串**
+ *  （非 Error 对象），直接 `(e as Error).message` 会得到 undefined。
+ *  覆盖 字符串 / Error / 其它（fallback String()）三种 rejection 形态。 */
+function errMsg(e) {
+    if (typeof e === 'string')
+        return e;
+    if (e instanceof Error)
+        return e.message;
+    return String(e);
+}
 /** 内联 SVG 图标（引用 index.html 雪碧图中的 <symbol>）。 */
 function icon(name, cls = '') {
     return `<svg class="ic${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
@@ -59,13 +69,6 @@ function setBtnLoading(btn, loading) {
         btn.disabled = false;
     }
 }
-/** 显示视图/面板并播放淡入动画（重进时重启动画）。 */
-function showView(el) {
-    el.classList.remove('hidden');
-    el.classList.remove('view-enter');
-    void el.offsetWidth; // 强制 reflow，重启动画
-    el.classList.add('view-enter');
-}
 /** 给错误框挂上「关闭」按钮并滚动到可见处。 */
 function attachErrClose(box) {
     if (box.querySelector('.err-close'))
@@ -112,40 +115,6 @@ function chipEl(kind, label) {
     c.innerHTML = icon(kind === 'audio' ? 'music' : 'video') + '<span>' + label + '</span>';
     return c;
 }
-/** 可复制的 URL 列表项（点击复制，1.5s 反馈「已复制」）。 */
-function urlListItem(u) {
-    const li = document.createElement('li');
-    const tag = document.createElement('span');
-    tag.className = 'tag';
-    tag.innerHTML = icon('play');
-    li.appendChild(tag);
-    li.appendChild(document.createTextNode(u));
-    li.title = '点击复制';
-    makeClickable(li, () => {
-        navigator.clipboard?.writeText(u).then(() => {
-            li.style.borderColor = 'var(--ok)';
-            li.innerHTML = '<span class="tag ok">' + icon('check') + '</span>已复制';
-            setTimeout(() => {
-                li.style.borderColor = '';
-                li.innerHTML = '';
-                li.appendChild(tag);
-                li.appendChild(document.createTextNode(u));
-            }, 1500);
-        });
-    });
-    return li;
-}
-function renderUrls(urls) {
-    const ul = $('url-list');
-    ul.innerHTML = '';
-    urls.forEach((u) => ul.appendChild(urlListItem(u)));
-}
-/** 秒数 → "X 分 Y 秒"（推流时长展示）。 */
-function fmtElapsed(totalSecs) {
-    const s = Math.max(0, Math.floor(totalSecs));
-    const m = Math.floor(s / 60);
-    return m > 0 ? `${m} 分 ${s % 60} 秒` : `${s} 秒`;
-}
 /** Tauri 事件监听（__TAURI__.event.listen）。 */
 function listen(event, cb) {
     const api = window.__TAURI__?.event;
@@ -157,6 +126,10 @@ function canvasCtx() {
     const c = $('recv-canvas');
     return c.getContext('2d');
 }
+/** 绘制热路径缓存：RGBA 缓冲与 ImageData 复用（尺寸不变时零重复分配）。
+ *  `ImageData` 构造引用传入的 Uint8ClampedArray（不拷贝），两者同内存。 */
+let recvRgbaBuf = null;
+let recvImg = null;
 /** 把 RGBA 帧画到 canvas（宽度自适应，等比缩放）。
  *  `data` 为 base64 字符串（Rust 侧编码，桌面/Android 统一；atob 原生解码）。 */
 function drawReceiveFrame(w, h, data) {
@@ -169,11 +142,19 @@ function drawReceiveFrame(w, h, data) {
     if (canvas.height !== h)
         canvas.height = h;
     const bin = atob(data);
-    const rgba = new Uint8ClampedArray(bin.length);
+    // 尺寸突变帧防御：字节数不符则跳过（否则 ImageData 构造抛 RangeError，
+    // 且发生在事件回调内无捕获，会中断整帧处理）
+    if (bin.length !== w * h * 4)
+        return;
+    if (!recvRgbaBuf || recvRgbaBuf.length !== bin.length) {
+        recvRgbaBuf = new Uint8ClampedArray(bin.length);
+    }
     for (let i = 0; i < bin.length; i++)
-        rgba[i] = bin.charCodeAt(i);
-    const img = new ImageData(rgba, w, h);
-    ctx.putImageData(img, 0, 0);
+        recvRgbaBuf[i] = bin.charCodeAt(i);
+    if (!recvImg || recvImg.width !== w || recvImg.height !== h) {
+        recvImg = new ImageData(recvRgbaBuf, w, h);
+    }
+    ctx.putImageData(recvImg, 0, 0);
     // 控制条信息区：帧显示尺寸（仅变化时写 DOM）
     const info = $('recv-controls-info');
     const label = w + '×' + h;

@@ -47,7 +47,7 @@ pub struct FirewallStatus {
 impl FirewallStatus {
     /// 是否一切就绪（无缺失）。
     #[allow(dead_code)] // 前端经 missing 长度判断，Rust 侧暂无调用
-    pub fn ok(&self) -> bool {
+    pub const fn ok(&self) -> bool {
         self.missing.is_empty()
     }
 }
@@ -123,7 +123,7 @@ pub fn missing_rules(
                         || r.from == format!("{subnet} (v6)"))
             })
         })
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 
@@ -177,7 +177,7 @@ To                         Action      From
             format!("{}/udp", stross_kernel::DEFAULT_SRT_PORT),
             format!("{}/udp", stross_kernel::DEFAULT_QUIC_PORT),
         ];
-        let required_refs: Vec<&str> = required.iter().map(|s| s.as_str()).collect();
+        let required_refs: Vec<&str> = required.iter().map(std::string::String::as_str).collect();
         let missing = missing_rules(
             &required_refs,
             &s.rules,

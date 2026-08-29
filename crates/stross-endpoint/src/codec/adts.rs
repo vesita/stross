@@ -7,12 +7,12 @@
 pub const ADTS_MIN_HEADER: usize = 7;
 
 /// 判断缓冲区开头是否像 ADTS 帧（同步字 0xFFF）。
-pub fn is_adts_frame(buf: &[u8]) -> bool {
+pub const fn is_adts_frame(buf: &[u8]) -> bool {
     buf.len() >= 2 && buf[0] == 0xFF && (buf[1] & 0xF0) == 0xF0
 }
 
 /// 从 ADTS 头解析帧总长度（含头）。
-pub fn adts_frame_len(buf: &[u8]) -> Option<usize> {
+pub const fn adts_frame_len(buf: &[u8]) -> Option<usize> {
     if !is_adts_frame(buf) || buf.len() < ADTS_MIN_HEADER {
         return None;
     }

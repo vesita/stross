@@ -54,8 +54,8 @@ impl Error {
 impl From<AuthError> for Error {
     fn from(e: AuthError) -> Self {
         match e {
-            AuthError::CodeRequired => Error::PinRequired,
-            AuthError::CodeMismatch => Error::PinMismatch,
+            AuthError::CodeRequired => Self::PinRequired,
+            AuthError::CodeMismatch => Self::PinMismatch,
         }
     }
 }

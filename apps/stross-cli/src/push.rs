@@ -18,11 +18,11 @@ pub enum QualityArg {
 }
 
 impl QualityArg {
-    pub(crate) fn quality(self) -> Quality {
+    pub(crate) const fn quality(self) -> Quality {
         match self {
-            QualityArg::Low => Quality::LOW,
-            QualityArg::Medium => Quality::MEDIUM,
-            QualityArg::High => Quality::HIGH,
+            Self::Low => Quality::LOW,
+            Self::Medium => Quality::MEDIUM,
+            Self::High => Quality::HIGH,
         }
     }
 }
@@ -114,17 +114,14 @@ pub async fn run(args: PushArgs) -> anyhow::Result<()> {
         Err(e) => return Err(e),
     };
 
-    match engine.relay_port() {
-        Some(port) => {
-            tracing::info!(
-                "📡 推流中（{} 秒）: {stream_id} @ 内嵌中继 ws://<本机IP>:{port}（自动选传输）",
-                args.secs
-            );
-        }
-        None => {
-            let url = args.relay.as_deref().unwrap_or("<自动>");
-            tracing::info!("📡 推流中（{} 秒）: {stream_id} → {url}", args.secs);
-        }
+    if let Some(port) = engine.relay_port() {
+        tracing::info!(
+            "📡 推流中（{} 秒）: {stream_id} @ 内嵌中继 ws://<本机IP>:{port}（自动选传输）",
+            args.secs
+        );
+    } else {
+        let url = args.relay.as_deref().unwrap_or("<自动>");
+        tracing::info!("📡 推流中（{} 秒）: {stream_id} → {url}", args.secs);
     }
     // 延迟校准：等 ffmpeg 输出首帧（排除预热）后记录首帧墙时刻
     if let Some(path) = &args.report_start {

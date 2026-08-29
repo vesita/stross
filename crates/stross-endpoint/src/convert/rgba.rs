@@ -38,21 +38,27 @@ pub fn rgba_scaled(src: &[u8], w: u32, h: u32, max_w: u32) -> Option<(u32, u32, 
     let mut row = vec![0u8; tw * 4];
     for oy in 0..th {
         // 中心对齐采样；越界坐标 clamp 到 [0, h-1]（否则负权重外插、边缘过冲）
-        let sy = ((oy as f64 + 0.5) * scale_y - 0.5).clamp(0.0, (h - 1) as f64);
+        let sy = (oy as f64 + 0.5)
+            .mul_add(scale_y, -0.5)
+            .clamp(0.0, (h - 1) as f64);
         let y0 = sy.floor() as usize;
         let y1 = (y0 + 1).min(h - 1);
         let ty = (sy - y0 as f64) as f32;
         let (row00, row01) = (&src[y0 * w * 4..], &src[y1 * w * 4..]);
         for ox in 0..tw {
-            let sx = ((ox as f64 + 0.5) * scale_x - 0.5).clamp(0.0, (w - 1) as f64);
+            let sx = (ox as f64 + 0.5)
+                .mul_add(scale_x, -0.5)
+                .clamp(0.0, (w - 1) as f64);
             let x0 = sx.floor() as usize;
             let x1 = (x0 + 1).min(w - 1);
             let tx = (sx - x0 as f64) as f32;
             let i00 = x0 * 4;
             let i01 = x1 * 4;
             for c in 0..4 {
-                let top = row00[i00 + c] as f32 * (1.0 - tx) + row00[i01 + c] as f32 * tx;
-                let bot = row01[i00 + c] as f32 * (1.0 - tx) + row01[i01 + c] as f32 * tx;
+                let top =
+                    f32::from(row00[i01 + c]).mul_add(tx, f32::from(row00[i00 + c]) * (1.0 - tx));
+                let bot =
+                    f32::from(row01[i01 + c]).mul_add(tx, f32::from(row01[i00 + c]) * (1.0 - tx));
                 row[ox * 4 + c] = (top * (1.0 - ty) + bot * ty + 0.5) as u8;
             }
         }

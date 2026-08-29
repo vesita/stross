@@ -92,7 +92,11 @@ pub async fn subscribe_media(
                 l.stream_id.clone(),
             )
         }
-        Delivery::Both => unreachable!("公开方已定稿，授予不含 Both"),
+        Delivery::Both => {
+            return Err(anyhow::anyhow!(
+                "公开方授予了不支持的 delivery: Both（对端版本偏差？）"
+            ));
+        }
     };
     Ok(MediaSubscribeOutcome {
         delivery,
@@ -178,7 +182,11 @@ pub async fn subscribe_file(
             let watch_url = format!("ws://127.0.0.1:{}", l.relay_port);
             receive_file_retry(&watch_url, &l.stream_id, out).await?
         }
-        Delivery::Both => unreachable!("公开方已定稿，授予不含 Both"),
+        Delivery::Both => {
+            return Err(anyhow::anyhow!(
+                "公开方授予了不支持的 delivery: Both（对端版本偏差？）"
+            ));
+        }
     };
 
     Ok(SubscribeOutcome {

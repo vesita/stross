@@ -16,8 +16,8 @@ pub enum AuthError {
 impl std::fmt::Display for AuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AuthError::CodeRequired => write!(f, "会话需要访问码（PIN）"),
-            AuthError::CodeMismatch => write!(f, "访问码错误"),
+            Self::CodeRequired => write!(f, "会话需要访问码（PIN）"),
+            Self::CodeMismatch => write!(f, "访问码错误"),
         }
     }
 }

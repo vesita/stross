@@ -39,6 +39,8 @@ async function init(): Promise<void> {
     await ensureAnchor();
     startStatusPolling();
     void refreshDevices();
+    // 「可被发现」开关：启动读运行时状态 + 变更即提交内核
+    await refreshDiscoverable();
     // 权限自动化：防火墙自检（缺放行则提示一键放行）+ 协商授权事件桥
     void checkFirewall();
     void listen('negotiator-request', (req: PendingRequest) => onApproveRequest(req));
@@ -65,6 +67,25 @@ async function loadDevices(): Promise<void> {
   devices = (await call('list_devices')) as DeviceList;
 }
 
+// ---------------------------------------------------------------- 可被发现
+
+/** 读取运行时「可被发现」状态并同步开关 UI。 */
+async function refreshDiscoverable(): Promise<void> {
+  const s = (await call('discoverable_status')) as Settings;
+  $input('disco-toggle').checked = s.discoverable;
+}
+
+/** 设置「可被发现」（提交内核 + 持久化）。 */
+async function setDiscoverable(on: boolean): Promise<void> {
+  try {
+    await call('set_discoverable', { on });
+  } catch (e) {
+    showGridError('设置可被发现失败：' + errMsg(e));
+    // 回读还原开关（失败时以真实状态为准）
+    void refreshDiscoverable();
+  }
+}
+
 // ---------------------------------------------------------------- 权限自动化
 
 /** 电脑端收到设备接入请求：展示授权确认弹窗（首次人工确认，信任门控）。 */
@@ -79,32 +100,22 @@ function onApproveRequest(req: PendingRequest): void {
   $('approve-modal').classList.remove('hidden');
 }
 
-/** 应答协商请求：允许（可勾选记住）或拒绝。允许成功后自动监听接收该流。 */
+/** 应答协商请求：允许（可勾选记住）或拒绝。允许后服务端签发凭证并通知申请方。
+ *  公开方（发布方）在此仅放行订阅，流由公开方按端点 delivery 自动推送，
+ *  由订阅方（另一台设备）接收——本端不等待/不接收。 */
 async function respondApprove(allow: boolean): Promise<void> {
   if (!pendingApprove) return;
   const reqId = pendingApprove.id;
   const remember = $input('approve-remember') as HTMLInputElement;
-  let grant: ShareGrant | null = null;
   try {
-    grant = (await call('negotiator_respond', {
-      reqId,
-      allow,
-      remember: remember.checked,
-    })) as ShareGrant | null;
+    await call('negotiator_respond', { reqId, allow, remember: remember.checked });
   } catch (e) {
     $('approve-error').textContent = '应答失败：' + errMsg(e);
     $('approve-error').classList.remove('hidden');
     return;
   }
   pendingApprove = null;
-  if (allow && grant && grant.streamId) {
-    // 电脑端自动监听该会话流：出现在 /api/streams 即原生接收
-    // （与「接收手机麦克风」共用同一等待-订阅链路；手机随后自动推流进入）
-    beginAwaitMicStream(grant.streamId);
-    $('approve-status').textContent = '已允许，等待手机接入…';
-  } else {
-    $('approve-status').textContent = allow ? '已允许并通知设备' : '已拒绝';
-  }
+  $('approve-status').textContent = allow ? '已允许并通知设备' : '已拒绝';
   $('approve-modal').classList.add('hidden');
 }
 
@@ -172,6 +183,10 @@ $btn('fw-close-btn').onclick = () => $('fw-banner').classList.add('hidden');
 
 $btn('scan-btn').onclick = () => void scanRelays();
 $btn('manual-add-btn').onclick = () => void addManualRelay();
+// 「可被发现」开关：切换即提交内核（并让本机锚定广播/停止广播）
+$input('disco-toggle').addEventListener('change', (e) => {
+  void setDiscoverable((e.target as HTMLInputElement).checked);
+});
 // 手动地址输入框回车 = 添加设备
 $input('manual-addr').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {

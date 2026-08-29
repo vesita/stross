@@ -156,6 +156,45 @@ header {
 .badge.muted { color: var(--text-3); }
 .badge.muted::before { display: none; }
 
+/* 「可被发现」开关（header-right） */
+.disco-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.disco-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.disco-track {
+  display: inline-flex;
+  align-items: center;
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.disco-thumb {
+  width: 12px;
+  height: 12px;
+  margin-left: 2px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.disco-toggle input:checked ~ .disco-track {
+  background: rgba(52, 211, 153, 0.22);
+  border-color: rgba(52, 211, 153, 0.4);
+}
+.disco-toggle input:checked ~ .disco-track .disco-thumb {
+  transform: translateX(16px);
+  background: var(--ok);
+}
+
 /* ---------------- 布局 ---------------- */
 
 main {

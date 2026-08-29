@@ -59,12 +59,13 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
     // 防火墙命令仅 Linux 桌面编译注册
     tauri::generate_handler![
         app_info,
+        discoverable_status,
+        set_discoverable,
         list_devices,
         start_relay,
         scan_relays,
         scan_devices,
         probe_relay,
-        anchor_streams,
         endpoint_ls,
         endpoint_subscribe,
         endpoint_publish,
@@ -72,7 +73,6 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         endpoint_stop_share,
         endpoint_subscribe_media,
         local_catalog,
-        request_share_token,
         start_stream,
         stop_stream,
         stream_status,
@@ -80,7 +80,6 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         kernel_nodes,
         kernel_sessions,
         create_session,
-        issue_share_token,
         authorize_session,
         route_session,
         teardown_session,
@@ -134,6 +133,10 @@ pub fn run() {
                 let name = stross_bridge::hostname_or("Stross 设备");
                 let id = stross_kernel::load_or_create_identity(&base, &name);
                 app.state::<Arc<Kernel>>().set_identity(id);
+                // 「可被发现」（mDNS 广播本机）：读持久化设置并注入内核。
+                // 默认关——用户显式开启才被局域网扫描发现。
+                let discoverable = stross_kernel::load_settings(&base).discoverable;
+                app.state::<Arc<Kernel>>().set_discoverable(discoverable);
             }
             // 凭证协商服务（权限自动化）：所有平台都启动。此前仅桌面启动、
             // Android 只作客户端；为支持「手机通告端点 → 对端订阅」的真机闭环，

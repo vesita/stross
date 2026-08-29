@@ -38,7 +38,7 @@ pub use stross_endpoint::{
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -124,6 +124,10 @@ pub struct Kernel {
     engine: Arc<Mutex<Option<RunningStream>>>,
     /// 本机锚点：常驻受控中继 + mDNS 广播（免先连：一起启动、生命周期一致）。
     anchor: Mutex<Option<LocalAnchor>>,
+    /// 「可被发现」（mDNS 广播本机）：显式用户开关，默认**关**。
+    /// 开启时锚定中继才广播 mDNS、通告端点会即时刷新 TXT 摘要；
+    /// 关闭时本机不被局域网 mDNS 扫描发现（设备仍可直连协商）。
+    discoverable: AtomicBool,
     /// 采集后端（平台相关，UI 层注入；`Arc` 使其可被引擎复用）。
     backend: Mutex<Option<Arc<dyn CaptureBackend>>>,
     /// 端点框架：节点设备表 + 已公开端点表（P1 1:1）。
@@ -147,12 +151,14 @@ pub struct Kernel {
 /// 本机锚点（免先连：应用打开即自动建立；推流 / 观看 / 局域网发现共用）。
 struct LocalAnchor {
     handle: RelayHandle,
-    /// mDNS 广播句柄（启动失败时为 `None`：中继仍可用，仅局域网不可发现）。
-    /// 仅用于持有：drop 即停止广播（RAII），无需读取。
-    #[allow(dead_code)]
+    /// mDNS 广播句柄（`None` = 未广播：启动时未开可被发现，或广播失败）。
+    /// [`apply_discoverable`] 按开关收敛其生命周期（开启建 / 关闭停），
+    /// 不再当作常驻随手持有。
     discovery: Option<crate::discovery::Discovery>,
     /// 中继实际监听端口（绑定 0 自动分配时取实际值）。
     port: u16,
+    /// 广播主机名（重注册 / 刷新摘要需要；由锚定流程注入）。
+    hostname: String,
 }
 
 /// 运行中的推流。
@@ -197,6 +203,7 @@ impl Kernel {
             platform,
             engine: Arc::new(Mutex::new(None)),
             anchor: Mutex::new(None),
+            discoverable: AtomicBool::new(false),
             backend: Mutex::new(None),
             registry: Mutex::new(EndpointRegistry::new()),
             active_shares: Mutex::new(HashMap::new()),
@@ -246,6 +253,95 @@ impl Kernel {
     }
 
     // -----------------------------------------------------------------------
+    // 局域网可发现（mDNS 广播本机：显式用户开关）
+    // -----------------------------------------------------------------------
+
+    /// 当前是否可被发现（mDNS 广播本机）。默认关。
+    pub fn discoverable(&self) -> bool {
+        self.discoverable.load(Ordering::Relaxed)
+    }
+
+    /// 启用/关闭可被发现（mDNS 广播本机）。
+    ///
+    /// 开启时：若已锚定中继，立即广播本机（首次则新建句柄，已广播仅刷新
+    /// TXT 摘要——通告状态可能已变）；关闭时：停止本机广播。未锚定仅记状态，
+    /// 锚定流程按此状态生效。
+    pub fn set_discoverable(&self, on: bool) {
+        self.discoverable.store(on, Ordering::Relaxed);
+        self.apply_discoverable();
+    }
+
+    /// 按当前 `discoverable` 状态收敛 mDNS 广播（锚定 / 端点通告后调用）。
+    ///
+    /// **锁序**：先取 anchor 锁，再在 [`Self::mdns_info`] 里取 registry 锁。
+    /// 反向序（registry → anchor）不存在；锚定流程锚定时不持 registry 锁、
+    /// 通告流程只持 registry 锁并在锁外调本方法，故无死锁。
+    fn apply_discoverable(&self) {
+        let on = self.discoverable.load(Ordering::Relaxed);
+        let mut anchor = self.anchor.lock_poisoned();
+        let Some(a) = anchor.as_mut() else {
+            return; // 未锚定：仅记状态
+        };
+        if on {
+            // 开启：未广播则新建句柄（try_register_mdns 内部构建摘要）；
+            // 已广播则重注册刷新 TXT（端点摘要可能已变）。
+            if a.discovery.is_none() {
+                a.discovery = self.try_register_mdns(&a.hostname, a.port);
+            } else if let Some(d) = a.discovery.as_mut()
+                && let Err(e) = d.redefine(&self.mdns_info(&a.hostname))
+            {
+                tracing::warn!("mDNS 刷新失败: {e}");
+            }
+        } else {
+            // 关闭：停止本机广播（句柄 Drop 即反注册）
+            if let Some(mut d) = a.discovery.take() {
+                d.stop();
+            }
+        }
+    }
+
+    /// 构造本机 mDNS 能力描述（`DiscoveryInfo`；端点摘要取当前注册表快照）。
+    fn mdns_info(&self, hostname: &str) -> DiscoveryInfo {
+        DiscoveryInfo::relay_default(
+            hostname.to_string(),
+            vec![
+                MediaKind::Screen,
+                MediaKind::Camera,
+                MediaKind::Mic,
+                MediaKind::SystemAudio,
+            ],
+        )
+        .with_endpoints(self.registry.lock_poisoned().summaries())
+    }
+
+    /// 注册 mDNS 广播本机中继；失败告警并返回 `None`（中继仍可用）。
+    fn try_register_mdns(&self, hostname: &str, port: u16) -> Option<crate::discovery::Discovery> {
+        let instance = relay_mdns_instance(
+            self.identity
+                .lock_poisoned()
+                .as_ref()
+                .map(|id| id.device_id.as_str()),
+            port,
+        );
+        match crate::discovery::Discovery::start(
+            &instance,
+            &crate::net::local_ips(),
+            port,
+            &self.mdns_info(hostname),
+            hostname,
+        ) {
+            Ok(d) => {
+                tracing::info!("mDNS 广播已开启（可被发现）: {instance}");
+                Some(d)
+            }
+            Err(e) => {
+                tracing::warn!("mDNS 广播失败: {e}");
+                None
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // 信息与设备
     // -----------------------------------------------------------------------
 
@@ -289,11 +385,17 @@ impl Kernel {
         transports: Option<Vec<TransportPreference>>,
         codecs: Option<Vec<CodecId>>,
     ) -> Result<EndpointManifest> {
-        let mut reg = self.registry.lock_poisoned();
-        let target = reg.target(endpoint_id).unwrap_or(TargetKind::Live);
-        let transports = transports.unwrap_or_else(|| EndpointRegistry::default_transports(target));
-        let codecs = codecs.unwrap_or_else(|| vec![CodecId::H264, CodecId::Aac]);
-        reg.publish(endpoint_id, visibility, delivery, transports, codecs)
+        let manifest = {
+            let mut reg = self.registry.lock_poisoned();
+            let target = reg.target(endpoint_id).unwrap_or(TargetKind::Live);
+            let transports =
+                transports.unwrap_or_else(|| EndpointRegistry::default_transports(target));
+            let codecs = codecs.unwrap_or_else(|| vec![CodecId::H264, CodecId::Aac]);
+            reg.publish(endpoint_id, visibility, delivery, transports, codecs)?
+        };
+        // 通告 → 立即刷新 mDNS 端点摘要（可被发现时；锁外，避免 registry→anchor 反序）
+        self.apply_discoverable();
+        Ok(manifest)
     }
 
     /// 取消通告端点（端点保留在表里可再次通告；已订阅会话由上层决定宽限期）。
@@ -302,7 +404,10 @@ impl Kernel {
     /// （取消通告 = 不再共享，踢出当前订阅者）。
     pub async fn unpublish_endpoint(&self, endpoint_id: &str) -> Result<()> {
         self.stop_endpoint_share(endpoint_id)?;
-        self.registry.lock_poisoned().unpublish(endpoint_id)
+        self.registry.lock_poisoned().unpublish(endpoint_id)?;
+        // 取消通告 → 立即刷新 mDNS 端点摘要（锁外）
+        self.apply_discoverable();
+        Ok(())
     }
 
     /// 公开本地文件为文件端点（动态端点 `file:<名>`；本地路径登记但不出现在
@@ -313,9 +418,13 @@ impl Kernel {
         visibility: Visibility,
         delivery: Delivery,
     ) -> Result<EndpointManifest> {
-        self.registry
+        let manifest = self
+            .registry
             .lock_poisoned()
-            .publish_file(path, visibility, delivery)
+            .publish_file(path, visibility, delivery)?;
+        // 通告 → 立即刷新 mDNS 端点摘要（锁外）
+        self.apply_discoverable();
+        Ok(manifest)
     }
 
     /// 文件端点的本地文件源（control.rs 状态展示）。
@@ -873,57 +982,26 @@ impl Kernel {
         self.attach_data_plane(Arc::new(RelayDataPlane::new(&handle)));
         // 把本机注册进内核设备图（含采集能力，供会话协商）
         self.register_local_node(hostname);
-        // mDNS 广播本机中继，局域网内其它设备（如电脑端 Stross）可扫描发现。
-        // 能力描述统一走 DiscoveryInfo 单 key JSON（F1.2 / 1d）。
-        // 多网卡：广播全部局域网 IP（Discovery::start 内部处理空列表回退回环），
-        // 避免只广播第一个 IP 导致其它网卡网段扫描不到本机
-        let discovery = {
-            // mDNS 实例名唯一化：同名实例（LAN 内多设备同端口广播）会被
-            // mdns-sd browse 按键控互覆盖，导致扫不到对方（实测）。实例名携带
-            // 持久化 device_id（前 8 位）+ 端口，任何设备同端口广播也不碰撞；
-            // 未注入身份时回退旧格式。
-            let instance = relay_mdns_instance(
-                self.identity
-                    .lock_poisoned()
-                    .as_ref()
-                    .map(|id| id.device_id.as_str()),
-                port,
-            );
-            // 设备名 = 注入的主机名（壳层经 `bridge::device_name_or` 取值：
-            // 真实主机名，Android 回退品牌名）——对端看到的设备标识即设备自身
-            // 名字，避免「本机中继」式歧义。
-            let info = DiscoveryInfo::relay_default(
-                hostname,
-                vec![
-                    MediaKind::Screen,
-                    MediaKind::Camera,
-                    MediaKind::Mic,
-                    MediaKind::SystemAudio,
-                ],
-            )
-            .with_endpoints(self.registry.lock_poisoned().summaries());
-            match crate::discovery::Discovery::start(
-                &instance,
-                &crate::net::local_ips(),
-                port,
-                &info,
-                hostname,
-            ) {
-                Ok(d) => Some(d),
-                Err(e) => {
-                    tracing::warn!("mDNS 广播失败: {e}");
-                    None
-                }
-            }
+        // mDNS 广播本机中继：**仅当「可被发现」开启时**才广播（显式用户开关，
+        // 默认关）。开启由 `set_discoverable(true)` 触发（或锚定前已开）。
+        // 能力描述统一走 DiscoveryInfo 单 key JSON（F1.2 / 1d）；多网卡广播
+        // 全部局域网 IP（Discovery::start 内部处理空列表回退回环），避免只广播
+        // 第一个 IP 导致其它网卡网段扫描不到本机。
+        let hostname = hostname.to_string();
+        let discovery = if self.discoverable.load(Ordering::Relaxed) {
+            self.try_register_mdns(&hostname, port)
+        } else {
+            None
         };
         *self.anchor.lock_poisoned() = Some(LocalAnchor {
             handle,
             discovery,
             port,
+            hostname: hostname.clone(),
         });
         Ok(view::relay_info(
             port,
-            hostname,
+            &hostname,
             self.registry.lock_poisoned().summaries(),
         ))
     }

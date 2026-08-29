@@ -2677,12 +2677,29 @@ impl Zeroconf {
 
         // Find the interface that received the packet.
         let pkt_if_index = pktinfo.if_index as u32;
-        let Some(my_intf) = self.my_intfs.get(&pkt_if_index) else {
-            debug!(
-                "handle_read: no interface found for pktinfo if_index: {}",
-                pktinfo.if_index
-            );
-            return true; // We still return true to indicate that we read something.
+        // TUN/虚拟接口（如 Clash/Mihomo、「路由虚拟网卡」）的组播包会标注其
+        // if_index，而 `my_ip_interfaces_inner` 过滤掉 P2P/TUN 接口 → 找不到 →
+        // 直接丢弃，导致「PC 开了代理/TUN 时 mDNS 发现全部失效」。
+        // （真机：手机组播包落在 if_index=5（Mihomo）被丢，stross devices 0 台。）
+        // 浏览端只收不发应答，用任意可用 IPv4 接口的索引代理即可（唯一 socket）。
+        let (my_intf, eff_if_index) = match self.my_intfs.get(&pkt_if_index) {
+            Some(intf) => (intf, pkt_if_index),
+            None => {
+                let fallback = self
+                    .my_intfs
+                    .values()
+                    .find(|i| i.next_ifaddr_v4().is_some());
+                match fallback {
+                    Some(intf) => (intf, intf.index),
+                    None => {
+                        debug!(
+                            "handle_read: no interface found for pktinfo if_index: {} (no v4 fallback)",
+                            pktinfo.if_index
+                        );
+                        return true;
+                    }
+                }
+            }
         };
 
         // Drop packets for an IP version that has been disabled on this interface.
@@ -2705,19 +2722,20 @@ impl Zeroconf {
 
         match DnsIncoming::new(buf, my_intf.into()) {
             Ok(msg) => {
-                // TEMP-DIAG: 诊断跨设备发现（手机包 1问+1答 的路由）
-                debug!(
-                    "TEMP-DIAG process_packet: is_query={} is_response={} questions={} answers={} from={pktinfo:?}",
-                    msg.is_query(),
-                    msg.is_response(),
-                    msg.questions().len(),
-                    msg.answers().len(),
-                );
                 if msg.is_query() {
+                    // query-with-answer（真实设备周期公告 / 已知应答抑制）：answer 段
+                    // 也携带发送方已知的记录（如本机 PTR）。用 `handle_query` 只做
+                    // 应答（抑制），**不会**把 answer 记录喂进缓存 → 浏览端永远收不到
+                    // 对端服务（真机：手机周期公告 is_query=1&answers=1，仅 PTR，
+                    // stross browse 零结果）。这里在应答同时把 answer 记录入库，
+                    // 触发 ServiceFound → query_unresolved → ServiceResolved。
+                    if !msg.answers().is_empty() {
+                        self.ingest_records(&msg, eff_if_index);
+                    }
                     let querier_addr = pktinfo.addr_src;
-                    self.handle_query(msg, pkt_if_index, querier_addr);
+                    self.handle_query(msg, eff_if_index, querier_addr);
                 } else if msg.is_response() {
-                    self.handle_response(msg, pkt_if_index);
+                    self.handle_response(msg, eff_if_index);
                 } else {
                     debug!("Invalid message: not query and not response");
                 }
@@ -3138,6 +3156,124 @@ impl Zeroconf {
             }
         }
 
+        self.resolve_updated_instances(&updated_instances);
+    }
+
+    /// 把 query-with-answer 包里的 answer 记录喂进缓存（触发服务发现/解析）。
+    ///
+    /// 真实设备（含 Stross 手机）周期公告常以 **query-with-answer** 形式发出
+    /// （QR=0、answers 携带发送方已知记录，如本机 PTR）。mdns-sd 的
+    /// [`Self::handle_query`] 只做应答（已知应答抑制），**不会**把 answer 记录
+    /// 写入缓存 → 浏览端永远收不到对端服务（真机：手机周期公告
+    /// `is_query=true answers=1`（仅 PTR），stross browse 零结果）。
+    ///
+    /// 这里复用 [`Self::handle_response`] 的入库 + 事件 + 触发解析语义，但只处理
+    /// answer 段（不含 conflicts / 过期清理的应答逻辑），因此**不**影响
+    /// `handle_query` 的已知应答抑制（上游 `known-answer-suppression` 测试不受扰）。
+    fn ingest_records(&mut self, msg: &DnsIncoming, if_index: u32) {
+        let now = current_time_millis();
+        let Some(my_intf) = self.my_intfs.get(&if_index) else {
+            debug!("ingest_records: no intf found for index {if_index}");
+            return;
+        };
+
+        // answer 段记录视为「for us」：仅当 PTR 是我们在浏览的服务类型时入库，
+        // 否则（无关 type）忽略——避免把无关查询的已知应答误入本机服务表。
+        let mut is_for_us = self.accept_unsolicited;
+        for answer in msg.answers() {
+            if answer.get_type() == RRType::PTR {
+                if self.service_queriers.contains_key(answer.get_name()) {
+                    is_for_us = true;
+                    break;
+                }
+                is_for_us = false;
+            } else if (answer.get_type() == RRType::A || answer.get_type() == RRType::AAAA)
+                && self
+                    .hostname_resolvers
+                    .contains_key(&answer.get_name().to_lowercase())
+            {
+                is_for_us = true;
+                break;
+            }
+        }
+        if !is_for_us {
+            return;
+        }
+
+        struct InstanceChange {
+            ty: RRType,
+            name: String,
+        }
+        let mut changes = Vec::new();
+        let mut timers = Vec::new();
+        // query-with-answer 的记录在 answers 段（发送方已知的 PTR/SRV/TXT/A）。
+        // 逐个克隆入库（DnsIncoming::all_records 会消费 self，这里用引用遍历）。
+        let records: Vec<DnsRecordBox> = msg
+            .answers()
+            .iter()
+            .chain(msg.authorities())
+            .chain(msg.additionals())
+            .cloned()
+            .collect();
+        for record in records {
+            // 过期记录不入库（与 handle_response 一致）
+            if record.get_record().is_expired(now) {
+                continue;
+            }
+            match self.cache.add_or_update(my_intf, record, &mut timers, true) {
+                Some((dns_record, true)) => {
+                    timers.push(dns_record.record.get_record().get_expire_time());
+                    timers.push(dns_record.record.get_record().get_refresh_time());
+                    let ty = dns_record.record.get_type();
+                    let name = dns_record.record.get_name();
+                    if ty == RRType::PTR && dns_record.record.get_record().get_ttl() > 1 {
+                        if let Some(dns_ptr) = dns_record.record.any().downcast_ref::<DnsPointer>()
+                        {
+                            debug!("ingest_records: service found: {name}");
+                            call_service_listener(
+                                &self.service_queriers,
+                                name,
+                                ServiceEvent::ServiceFound(
+                                    name.to_string(),
+                                    dns_ptr.alias().to_string(),
+                                ),
+                            );
+                            changes.push(InstanceChange {
+                                ty,
+                                name: dns_ptr.alias().to_string(),
+                            });
+                        }
+                    } else {
+                        changes.push(InstanceChange {
+                            ty,
+                            name: name.to_string(),
+                        });
+                    }
+                }
+                Some((dns_record, false)) => {
+                    timers.push(dns_record.record.get_record().get_expire_time());
+                    timers.push(dns_record.record.get_record().get_refresh_time());
+                }
+                _ => {}
+            }
+        }
+        for t in timers {
+            self.add_timer(t);
+        }
+
+        // 新 PTR/SRV/TXT → 触发实例解析；A/AAAA → 按 host 反查实例
+        let mut updated_instances = HashSet::new();
+        for change in changes {
+            match change.ty {
+                RRType::PTR | RRType::SRV | RRType::TXT => {
+                    updated_instances.insert(change.name);
+                }
+                RRType::A | RRType::AAAA => {
+                    updated_instances.extend(self.cache.get_instances_on_host(&change.name));
+                }
+                _ => {}
+            }
+        }
         self.resolve_updated_instances(&updated_instances);
     }
 

@@ -120,6 +120,8 @@ interface Anchor {
   quicUrl: string | null;
 }
 interface AppInfo { version: string; platform: string; ffmpeg: boolean; ips: string[]; }
+/** 应用设置（`discoverable_status` / `set_discoverable`）。 */
+interface Settings { discoverable: boolean; }
 interface RelayInfo {
   port: number;
   urls: string[];
@@ -195,7 +197,7 @@ type VideoSource =
 interface StreamConfig {
   streamId: string;
   title: string;
-  /** null = 纯音频推流（B2 手机麦克风反向推流）。 */
+  /** null = 纯音频推流。 */
   video: VideoSource | null;
   quality: Quality;
   audio: { mic: string | null; systemAudio: string | null; sampleRate: number; channels: number; bitrateKbps: number } | null;
@@ -204,9 +206,9 @@ interface StreamConfig {
   shareToken: string | null;
 }
 
-/** 电脑端签发的手机麦克风接入凭证（Rust `issue_share_token` 返回值）。 */
+/** 协商接入凭证视图（Rust `ShareGrant` 的超集；端点订阅握手载荷/契约镜像）。 */
 interface ShareTokenView {
-  /** ShareToken JSON 字符串（手机端原样粘贴到「共享麦克风」）。 */
+  /** ShareToken JSON 字符串（推流端接入受控中继时出示）。 */
   token: string;
   streamId: string;
   pin: string;

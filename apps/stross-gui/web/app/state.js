@@ -16,9 +16,6 @@ let discoverInFlight = false; // 设备流聚合 in-flight
 let discoverCacheAt = 0;
 const DISCOVER_TTL_MS = 5000;
 // —— 订阅（入站接收）状态 ——
-/** 电脑端「接收手机麦克风」凭证与接入轮询状态（null = 未签发）。
- *  `until`：凭证到期 Unix 秒（0 = 无到期，靠 attempts 兜底）。 */
-let micRecv = null;
 /** 本机是否正在接收（订阅）流。 */
 let receiving = false;
 /** 当前订阅中的流 id（供共享面板定位流信息）。 */

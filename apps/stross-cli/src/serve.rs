@@ -32,6 +32,10 @@ pub struct ServeArgs {
     /// 两个节点用不同目录 → 不同 device_id）
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
+    /// 本机可被发现（mDNS 广播本机）。默认关——由用户显式开启；
+    /// 不传时读 settings.json（identity 同目录）；传 --discoverable 则开启。
+    #[arg(long)]
+    pub discoverable: bool,
 }
 
 /// 数据目录解析（identity.json / trusted_devices.json 所在）：
@@ -53,6 +57,17 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     // 与 GUI 桌面共用同一套启动原语（主机名经桥接层注入，内核零 OS 调用）。
     let base = base_dir(args.data_dir.clone());
     bootstrap::ensure_identity(&app, &base, &device_name_or("Stross 设备"));
+    // 「可被发现」：读持久化设置（默认关）；--discoverable 显式开启覆盖之。
+    // 锚定中继时内核按此状态决定是否 mDNS 广播本机。
+    let discoverable = if args.discoverable {
+        true
+    } else {
+        stross_kernel::load_settings(&base).discoverable
+    };
+    app.set_discoverable(discoverable);
+    if discoverable {
+        tracing::info!("本机可被发现（mDNS 广播已开启）");
+    }
     let bootstrap_handle = bootstrap::start(
         app.clone(),
         Arc::new(stross_kernel::CliUi),

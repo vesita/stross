@@ -52,9 +52,20 @@ fn daemon() -> &'static ServiceDaemon {
 }
 
 /// mDNS 广播句柄。
+///
+/// 保存注册时的完整参数，供 [`Discovery::redefine`] 保持同 fullname **覆盖更新**
+/// （TXT 摘要变化时重注册，避免先 unregister 再 register 的空窗）。
 pub struct Discovery {
     /// 本句柄注册的服务全名（Drop 时反注册，不关闭全局 daemon）。
     fullname: Option<String>,
+    /// 服务实例（redefine 保持同实例名 → 同 fullname → 覆盖更新）。
+    instance: String,
+    /// 广告主机名（`{hostname}.local.`）。
+    host: String,
+    /// 广播地址集（来自调用方 `local_ips()`，redefine 复用）。
+    addrs: Vec<IpAddr>,
+    /// 服务端口。
+    port: u16,
 }
 
 impl Discovery {
@@ -75,30 +86,74 @@ impl Discovery {
         hostname: &str,
     ) -> anyhow::Result<Self> {
         let host = format!("{hostname}.local.");
+        let addrs = broadcast_addrs(ips);
         // 能力描述由 DiscoveryInfo 单 key JSON 编码（新增字段零维护）
         let props: std::collections::HashMap<String, String> = info.to_txt().into_iter().collect();
         // 多网卡广播：ServiceInfo::new 支持 AsIpAddrs（&[IpAddr]），
         // 一次注册携带全部地址记录
-        let info = ServiceInfo::new(
-            SERVICE_TYPE,
-            instance,
-            &host,
-            broadcast_addrs(ips).as_slice(),
-            port,
-            props,
-        )
-        .map_err(|e| anyhow::anyhow!("ServiceInfo: {e}"))?;
+        let mut info =
+            ServiceInfo::new(SERVICE_TYPE, instance, &host, addrs.as_slice(), port, props)
+                .map_err(|e| anyhow::anyhow!("ServiceInfo: {e}"))?;
         // 显式地址为准：**不启用 enable_addr_auto()**。
         // 原因（Android 真机实测）：mdns 的 `if_addrs::get_if_addrs()` 会枚举到
         // dummy0/ifb0/ifb1 等虚拟接口及其 fe80 地址，auto 覆盖后把真实 wlan0 IPv4
         // （如 192.168.11.60）挤掉，导致对端扫到手机只有不可达的 fe80 地址。
         // 调用方 `local_ips()` 已返回真实局域网 IPv4，显式传入即可；
         // 代价：WiFi 切换时需重新 start_relay 再注册（本应用每次锚定都会重走）。
+        //
+        // **跳过探测（requires_probe=false）**：`prepare_announce` 的 `probing_count`
+        // 闸门在 SRV/TXT/A 任一记录 `is_probing_done` 为 false 时丢弃整条 QR=1 公告
+        // （连 PTR 一起）。而 `DnsAddress::matches` 要求 interface_id（name+index）
+        // 相等，Android 多网卡（wlan0/ifb0/ifb1/dummy0/ccmni0/ccmni1 均 `up && !p2p &&
+        // !lo` 进 `my_intfs`，同一 hostname 每接口一份 A 探针）重建记录与 active 记录
+        // 接口身份不匹配 → `is_probing_done` 恒 false → 无限重探测 → `probing_count`
+        // 恒 > 0 → 永不发 QR=1 完整公告（真机实测：手机只广播 QR=0 PTR，对 SRV/ANY
+        // 查询只回 PTR）。实例名由 deviceId 生成、本机唯一，跳过探测可接受。
+        info.set_requires_probe(false);
         let fullname = info.get_fullname().to_string();
         daemon().register(info)?;
         Ok(Self {
             fullname: Some(fullname),
+            instance: instance.to_string(),
+            host,
+            addrs,
+            port,
         })
+    }
+
+    /// 重注册本服务，更新 TXT 能力摘要（端点通告 / 取消通告后调用）。
+    ///
+    /// **保持同 fullname**：mdns-sd 的 `my_services` 按全名（小写）作 key，
+    /// 同 fullname 直接覆盖（`register_service` 里 `HashMap::insert`），并重新
+    /// 广播公告——对端收到的是**同一服务**的最新 TXT，而非「注销 + 重启」。
+    ///
+    /// `DiscoveryInfo` 不同处的字段（如端点 `published`）经 `to_txt` 编码后
+    /// 全部进 TXT，故本次仅重传新的能力描述即可。
+    pub fn redefine(&mut self, info: &DiscoveryInfo) -> anyhow::Result<()> {
+        let Some(fullname) = self.fullname.as_ref() else {
+            return Ok(());
+        };
+        let props: std::collections::HashMap<String, String> = info.to_txt().into_iter().collect();
+        let mut new_info = ServiceInfo::new(
+            SERVICE_TYPE,
+            &self.instance,
+            &self.host,
+            self.addrs.as_slice(),
+            self.port,
+            props,
+        )
+        .map_err(|e| anyhow::anyhow!("ServiceInfo: {e}"))?;
+        // 与 `start` 一致：跳过探测，重注册即立即发 QR=1 完整公告（见 `start` 注释）。
+        new_info.set_requires_probe(false);
+        // register_service 用全名（小写）覆盖同 key——TXT 更新即生效。
+        if fullname != new_info.get_fullname() {
+            tracing::warn!(
+                "mDNS 重注册 fullname 变化（{fullname} → {}）：对端会视为新服务",
+                new_info.get_fullname()
+            );
+        }
+        daemon().register(new_info)?;
+        Ok(())
     }
 
     /// 在 `timeout` 内浏览局域网内的 Stross 服务。

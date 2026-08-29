@@ -21,6 +21,32 @@ pub fn app_info(state: State<'_, Arc<Kernel>>) -> stross_kernel::AppInfo {
     state.app_info()
 }
 
+/// 当前「可被发现」状态（mDNS 广播本机；以运行时状态为准）。
+#[tauri::command]
+pub fn discoverable_status(state: State<'_, Arc<Kernel>>) -> stross_kernel::Settings {
+    stross_kernel::Settings {
+        discoverable: state.discoverable(),
+    }
+}
+
+/// 设置「可被发现」，并持久化到 settings.json（重启保持）。
+#[tauri::command]
+pub fn set_discoverable(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Kernel>>,
+    on: bool,
+) -> Result<(), String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let mut stored = stross_kernel::load_settings(&base);
+    stored.discoverable = on;
+    stross_kernel::save_settings(&base, &stored);
+    state.set_discoverable(on); // 立即生效（已锚定则开/停广播，未锚定记状态）
+    Ok(())
+}
+
 #[tauri::command]
 pub fn list_devices(state: State<'_, Arc<Kernel>>) -> stross_kernel::DeviceList {
     state.list_devices()
@@ -118,17 +144,6 @@ pub fn create_session(
         .map_err(|e| e.to_user_string())
 }
 
-/// 签发「接收手机麦克风」接入凭证（B2）：建会话 + 签发一次性 ShareToken。
-#[tauri::command]
-pub fn issue_share_token(
-    state: State<'_, Arc<Kernel>>,
-    ttl_secs: Option<u64>,
-) -> Result<stross_kernel::ShareTokenView, String> {
-    state
-        .issue_share_token(ttl_secs)
-        .map_err(|e| e.to_user_string())
-}
-
 /// 会话鉴权：校验访问码（PIN）；成功后该会话的控制操作放行。
 #[tauri::command]
 pub fn authorize_session(
@@ -180,18 +195,6 @@ pub async fn scan_devices(
     stross_kernel::devices::scan_lan(browse, probe, extra_base_urls)
         .await
         .map_err(|e| format!("局域网扫描失败: {e}"))
-}
-
-/// 本机锚点中继（127.0.0.1）在线共享列表——「等待流接入」轮询用
-/// （`beginAwaitMicStream` 等），不再由前端直接 fetch `/api/streams`。
-#[tauri::command]
-pub async fn anchor_streams(port: u16) -> Vec<stross_kernel::devices::StreamView> {
-    use stross_kernel::relay::client as relay_http;
-    stross_kernel::devices::to_views(
-        relay_http::streams("127.0.0.1", port, std::time::Duration::from_millis(1500))
-            .await
-            .unwrap_or_default(),
-    )
 }
 
 /// 手动地址可达性探测（`/api/streams` 是受控/普通中继都提供的只读端点；
@@ -325,41 +328,6 @@ pub async fn endpoint_subscribe(
         &endpoint_id,
         delivery,
         std::path::Path::new(&out_dir),
-    )
-    .await
-    .map_err(|e| format!("{e:#}"))
-}
-
-/// 向对端申请一次性接入凭证（B2.5 免粘贴：首次对端人工允许，之后信任免问）。
-/// 旧语义（无端点）：`media` 指定申请媒体；返回授予（token / streamId）。
-/// `port` 缺省 = 协议约定协商端口（`stross_kernel::DEFAULT_NEGOTIATOR_PORT`）——
-/// 前端不再持有端口常量。
-#[tauri::command]
-pub async fn request_share_token(
-    app: tauri::AppHandle,
-    host: String,
-    port: Option<u16>,
-    media: Vec<stross_proto::message::MediaKind>,
-) -> Result<stross_proto::message::ShareGrant, String> {
-    let base = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let name = stross_bridge::device_name_or("Stross 设备");
-    let ident = stross_kernel::load_or_create_identity(&base, &name);
-    let req = stross_proto::message::ShareRequest {
-        device_id: ident.device_id,
-        device_name: ident.device_name,
-        endpoint_id: None,
-        delivery_mode: None,
-        relay_addr: None,
-        share_token: None,
-        media,
-    };
-    stross_kernel::request_grant(
-        &host,
-        port.unwrap_or(stross_kernel::DEFAULT_NEGOTIATOR_PORT),
-        &req,
     )
     .await
     .map_err(|e| format!("{e:#}"))

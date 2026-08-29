@@ -47,6 +47,7 @@ pub mod receiver;
 pub mod relay;
 pub mod sender;
 pub mod session_channel;
+pub mod settings;
 pub mod subscriber;
 pub mod view;
 pub mod watch;
@@ -75,6 +76,7 @@ pub use negotiator_client::request_grant;
 pub use receiver::{ReceiveStats, Receiver};
 pub use relay::{DEFAULT_PORT, GUI_PORT, RelayHandle, RelayServer};
 pub use sender::RelayClient;
+pub use settings::{Settings, load_or_default as load_settings, save as save_settings};
 pub use stross_endpoint::contract::{
     resolve_file_url, resolve_media_url, resolve_watcher_base, spawn_media_share,
 };

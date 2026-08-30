@@ -61,7 +61,7 @@ async function addManualRelay(): Promise<void> {
   hideGridError();
   const addr = normAddr($input('manual-addr').value);
   if (!addr) {
-    showGridError('请输入设备地址，例如 http://192.168.1.100:8777');
+    showGridError('请输入设备 IP 或 IP:端口（无需 http://），例如 192.168.1.100 或 192.168.1.100:8777');
     return;
   }
   savePrefs();

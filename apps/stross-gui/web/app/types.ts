@@ -215,12 +215,6 @@ interface ShareTokenView {
   expiresAt: number;
 }
 
-/** 本机持久化身份（Rust `device_identity` 返回值）。 */
-interface DeviceIdentity {
-  deviceId: string;
-  deviceName: string;
-}
-
 /** 协商签发的接入凭证（Rust `ShareGrant`：ShareTokenView + trusted）。 */
 interface ShareGrant extends ShareTokenView {
   /** 是否因设备受信任而自动签发（未人工确认）。 */

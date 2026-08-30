@@ -6,8 +6,7 @@
 
 use std::sync::Arc;
 
-use stross_endpoint::pipeline::StreamConfig;
-use stross_kernel::{CaptureStatusView, Kernel};
+use stross_kernel::Kernel;
 use tauri::{Manager, State};
 
 use crate::NegotiatorHandle;
@@ -72,106 +71,6 @@ pub async fn start_relay(
         )
         .await
         .map_err(|e| e.to_user_string())
-}
-
-/// mDNS 扫描（仅发现；探测/聚合走 [`scan_devices`]——前端不再自写 HTTP 探测）。
-#[tauri::command]
-pub async fn scan_relays(
-    state: State<'_, Arc<Kernel>>,
-) -> Result<Vec<stross_kernel::RelayInfo>, String> {
-    state.scan_relays().await.map_err(|e| e.to_user_string())
-}
-
-#[tauri::command]
-pub async fn start_stream(
-    state: State<'_, Arc<Kernel>>,
-    cfg: StreamConfig,
-    relay_url: Option<String>,
-) -> Result<stross_kernel::StartResult, String> {
-    state
-        .start_stream(cfg, relay_url)
-        .await
-        .map_err(|e| e.to_user_string())
-}
-
-#[tauri::command]
-pub async fn stop_stream(state: State<'_, Arc<Kernel>>) -> Result<(), String> {
-    state.stop_stream().await.map_err(|e| e.to_user_string())
-}
-
-#[tauri::command]
-pub fn stream_status(state: State<'_, Arc<Kernel>>) -> stross_kernel::StreamStatus {
-    state.stream_status()
-}
-
-#[tauri::command]
-pub fn capture_status(state: State<'_, Arc<Kernel>>) -> CaptureStatusView {
-    state.capture_status()
-}
-
-// ---------------------------------------------------------------------------
-// 内核命令（控制面：设备图 / 会话 / 路由，设计文档 §3）
-// ---------------------------------------------------------------------------
-
-/// 设备图快照（本机能力 + 发现结果）。
-#[tauri::command]
-pub fn kernel_nodes(state: State<'_, Arc<Kernel>>) -> Vec<stross_kernel::kernel::NodeInfo> {
-    state.nodes()
-}
-
-/// 会话列表快照。
-#[tauri::command]
-pub fn kernel_sessions(state: State<'_, Arc<Kernel>>) -> Vec<stross_kernel::kernel::Session> {
-    state.sessions()
-}
-
-/// 创建会话（「从 `src` 推送到 `sinks`」）。
-#[tauri::command]
-pub fn create_session(
-    state: State<'_, Arc<Kernel>>,
-    src: String,
-    sinks: Vec<String>,
-    access_code: Option<String>,
-) -> Result<stross_kernel::kernel::Session, String> {
-    let prefs = stross_kernel::SessionPrefs {
-        profile: stross_proto::message::ReliabilityProfile::Lossy,
-        preferred_transport: None,
-        access_code,
-        title: String::new(),
-    };
-    state
-        .create_session(&src, &sinks, &prefs)
-        .map_err(|e| e.to_user_string())
-}
-
-/// 会话鉴权：校验访问码（PIN）；成功后该会话的控制操作放行。
-#[tauri::command]
-pub fn authorize_session(
-    state: State<'_, Arc<Kernel>>,
-    session_id: String,
-    access_code: Option<String>,
-) -> Result<(), String> {
-    state
-        .authorize(&session_id, access_code.as_deref())
-        .map_err(|e| e.to_user_string())
-}
-
-/// 控制传输方向（会话存续期间动态改道）。
-#[tauri::command]
-pub fn route_session(
-    state: State<'_, Arc<Kernel>>,
-    session_id: String,
-    path: stross_proto::message::RoutePath,
-) -> Result<(), String> {
-    state
-        .route(&session_id, path)
-        .map_err(|e| e.to_user_string())
-}
-
-/// 拆除会话。
-#[tauri::command]
-pub fn teardown_session(state: State<'_, Arc<Kernel>>, session_id: String) -> Result<(), String> {
-    state.teardown(&session_id).map_err(|e| e.to_user_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -300,53 +199,9 @@ pub async fn endpoint_subscribe_media(
     .map_err(|e| format!("{e:#}"))
 }
 
-/// 订阅远端文件端点并落盘到 `out_dir`（pull/push 全流程在库接口
-/// `stross_kernel::subscribe_file`）。
-#[tauri::command]
-pub async fn endpoint_subscribe(
-    app: tauri::AppHandle,
-    state: State<'_, Arc<Kernel>>,
-    host: String,
-    port: u16,
-    endpoint_id: String,
-    delivery: Option<String>,
-    out_dir: String,
-) -> Result<stross_kernel::SubscribeOutcome, String> {
-    let app_state = state.inner().clone();
-    let base = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let delivery = delivery
-        .as_deref()
-        .and_then(stross_proto::message::Delivery::from_wire);
-    stross_kernel::subscribe_file(
-        &app_state,
-        &base,
-        &host,
-        port,
-        &endpoint_id,
-        delivery,
-        std::path::Path::new(&out_dir),
-    )
-    .await
-    .map_err(|e| format!("{e:#}"))
-}
-
 // ---------------------------------------------------------------------------
-// 凭证自动协商（权限自动化）：应答挂起请求 + 本机身份
+// 凭证自动协商（权限自动化）：应答挂起请求
 // ---------------------------------------------------------------------------
-
-/// 本机持久化身份（device_id / device_name；首次运行生成，之后稳定）。
-#[tauri::command]
-pub fn device_identity(app: tauri::AppHandle) -> stross_kernel::DeviceIdentity {
-    let base = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let name = stross_bridge::device_name_or("Stross 设备");
-    stross_kernel::load_or_create_identity(&base, &name)
-}
 
 /// 应答凭证协商请求（电脑端授权确认弹窗操作后调用）。
 #[tauri::command]

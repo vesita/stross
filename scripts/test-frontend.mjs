@@ -187,6 +187,11 @@ const invoke = async (cmd, args) => {
       return undefined;
     case 'endpoint_subscribe_media':
       return { delivery: 'pull', relayUrl: 'ws://192.168.1.52:9002', streamId: 'sess-sub' };
+    case 'discoverable_status':
+      // 「可被发现」开关：refreshDiscoverable 依赖返回 Settings 对象
+      return { discoverable: false };
+    case 'set_discoverable':
+      return undefined;
     default:
       return undefined;
   }

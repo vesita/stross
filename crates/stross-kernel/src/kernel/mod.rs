@@ -949,7 +949,7 @@ impl Kernel {
     /// 在指定端口启动中继，并固定 SRT/QUIC 传输端口（`0` = 随机）。
     ///
     /// 固定端口便于防火墙只放行已知端口（权限自动化）；SRT/QUIC 被占用时
-    /// 各自回退随机端口（实际端口经 `scan_relays` / `/api/info` 可见）。
+    /// 各自回退随机端口（实际端口经 `/api/info` 可见）。
     ///
     /// `hostname`：mDNS 广播主机名（**调用方注入**——内核零 OS 调用；
     /// 壳层经 [`stross_bridge::hostname`] 取值）。
@@ -1018,39 +1018,6 @@ impl Kernel {
         if let Some(backend) = self.backend.lock_poisoned().as_ref() {
             self.register_capability("local", backend.descriptor());
         }
-    }
-
-    /// mDNS 扫描局域网内的其它中继。
-    ///
-    /// 返回的 [`RelayInfo`] 透传 mDNS 能力引导信息（设备名 / 角色 / 传输），
-    /// 供前端直接展示设备卡片，无需再手动输入地址。
-    pub async fn scan_relays(&self) -> Result<Vec<RelayInfo>> {
-        let found = crate::discovery::Discovery::browse(crate::discovery::BROWSE_TIMEOUT).await?;
-        tracing::debug!("scan_relays 发现 {} 台设备", found.len());
-        Ok(found
-            .into_iter()
-            .map(|d| {
-                // 单 key JSON 解码（F1.2）；旧设备 / 缺失时回退默认值
-                let info = DiscoveryInfo::from_txt(&d.txt);
-                let url = crate::transport::RelayUrl::http(&d.ip.to_string(), d.port);
-                RelayInfo {
-                    port: d.port,
-                    urls: vec![url],
-                    name: info.as_ref().map(|i| i.name.clone()),
-                    kind: info.as_ref().map(|_| "relay".into()),
-                    roles: info.as_ref().map(|i| i.roles.clone()).unwrap_or_default(),
-                    transports: info
-                        .as_ref()
-                        .map(|i| i.transports.clone())
-                        .unwrap_or_default(),
-                    ip: Some(d.ip.to_string()),
-                    endpoints: info
-                        .as_ref()
-                        .map(|i| i.endpoints.clone())
-                        .unwrap_or_default(),
-                }
-            })
-            .collect())
     }
 
     // -----------------------------------------------------------------------

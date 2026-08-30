@@ -209,7 +209,7 @@ pub async fn endpoint_subscribe_media(
 /// 应答凭证协商请求（电脑端授权确认弹窗操作后调用）。
 ///
 /// **必须 async**：`respond()` 会触发端点 `share()` → `spawn_media_share` 内部
-/// `tokio::spawn`，需要 Tokio runtime 上下文（Rust 核心契约，docs/endpoint-model.md §5 联动）。
+/// `tokio::spawn`，需要 Tokio runtime 上下文（Rust 核心契约，docs/endpoint-model-v2.md §4 联动）。
 /// 同步 `tauri::command` 在 GTK 主线程执行、无 reactor，会 panic
 /// 「there is no reactor running」；async 命令跑在 tokio runtime 上。
 #[tauri::command]

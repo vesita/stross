@@ -61,7 +61,7 @@ pub use convert::rgba::rgba_scaled;
 pub use convert::yuv::{Yuv420Layout, yuv420_to_rgba_scaled};
 pub use devices::{CameraDevice, list_audio_inputs, list_cameras, list_system_audio};
 pub use factory::{platform_endpoints, seed_platform_endpoints};
-pub use file::{FileEndpoint, FilePushOptions};
+pub use file::{FileEndpoint, FilePushOptions, FileReceiveEndpoint};
 pub use pipeline::{
     AudioSourceConfig, Quality, StreamConfig, StreamSession, VideoSource, ffmpeg_available,
     ffmpeg_bin,

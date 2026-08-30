@@ -1,8 +1,12 @@
-//! 订阅方编排（docs/endpoint-model.md §5 的**订阅侧库接口**）。
+//! 订阅方编排（docs/endpoint-model-v2.md §4 的**订阅侧库接口**）。
 //!
 //! 分层（docs/layering-architecture.md）：订阅流程（本地接收准备 + 握手 +
 //! watch/重试）是应用编排，收敛在 stross-app；壳层（CLI `endpoint` 子命令、
 //! 未来 GUI 命令）只解析参数、调这里并格式化输出。
+//!
+//! v2（三层注册表）：订阅先拉取目录（把互联节点映射进统一注册表
+//! 节点→端点→策略），再按 `(节点, 端点, 策略)` 解析策略组合、构建
+//! [`SubscribeSpec`]（订阅端点生成依据）——自订与订其它互联节点同一套逻辑。
 //!
 //! * [`fetch_directory`]：L2 目录拉取（`GET /api/endpoints`，类型化）；
 //! * [`subscribe_file`]：订阅一个文件端点并落盘（pull：连公开方中继 watch；
@@ -18,7 +22,7 @@ use std::time::{Duration, Instant};
 use crate::relay::client as relay_http;
 use anyhow::Context;
 use serde::Serialize;
-use stross_proto::message::{Delivery, EndpointDir, ShareGrant, ShareRequest};
+use stross_proto::message::{Delivery, EndpointDir, ShareGrant, ShareRequest, SubscribeSpec};
 
 use crate::Kernel;
 use crate::bootstrap;
@@ -62,7 +66,7 @@ pub use stross_types::MediaSubscribeOutcome;
 
 /// 订阅远端媒体端点并返回观看入口（订阅驱动：只走 pull——连公开方中继
 /// watch 取流，公开方在本地中继发布；无 push 出站路径）。
-/// 订阅达成后公开方经端点驱动自动开推（docs/endpoint-model.md §5：
+/// 订阅达成后公开方经端点驱动自动开推（docs/endpoint-model-v2.md §4：
 /// 媒体端点 pull 推本机中继）。
 pub async fn subscribe_media(
     app: &Arc<Kernel>,
@@ -72,9 +76,18 @@ pub async fn subscribe_media(
     endpoint_id: &str,
     _delivery_wish: Option<Delivery>,
 ) -> anyhow::Result<MediaSubscribeOutcome> {
-    let EndpointGrant { grant, .. } =
+    let EndpointGrant { grant, node_id } =
         request_endpoint_grant(app, base, host, port, endpoint_id, None).await?;
     let delivery = grant.delivery.unwrap_or(Delivery::Pull);
+    // v2：注册表 (节点, 端点, 策略) 解析策略组合（订阅端点生成依据；媒体
+    // 播放由接收链路承担，策略随日志可查）
+    let spec = build_subscribe_spec(app, host, port, endpoint_id, None, &grant, &node_id)?;
+    tracing::info!(
+        "订阅媒体端点 {endpoint_id}（节点 {node_id}，策略 {}: serialize={:?} pick={:?}）",
+        spec.strategy.strategy_id,
+        spec.strategy.serialize,
+        spec.strategy.pick,
+    );
     let (relay_url, stream_id) = match delivery {
         Delivery::Pull | Delivery::Both => {
             let relay = grant.relay.as_ref().ok_or_else(|| {
@@ -85,7 +98,7 @@ pub async fn subscribe_media(
                 grant.view.stream_id.clone(),
             )
         }
-        // 订阅驱动定稿（docs/endpoint-model.md §10）：只走 pull，无 push
+        // 订阅驱动定稿（docs/endpoint-model-v2.md §4）：只走 pull，无 push
         Delivery::Push => {
             return Err(anyhow::anyhow!(
                 "公开方授予了 push（对端版本偏差？——订阅驱动只走 pull）"
@@ -148,9 +161,11 @@ pub async fn subscribe_media_and_watch(
 /// 订阅握手结果（[`request_endpoint_grant`] 的公共形态）。
 struct EndpointGrant {
     grant: ShareGrant,
+    /// 公开方节点 id（目录拉取；统一注册表 `(节点, 端点, 策略)` 查表键）。
+    node_id: String,
 }
 
-/// 订阅握手：身份 →（push 意向先本机准备）→ POST 对端协商端点。
+/// 订阅握手：目录拉取（映射公开方入统一注册表）→ 身份 → POST 对端协商端点。
 ///
 /// `subscribe_file`（文件端点）与 `subscribe_media`（媒体端点）共用；
 /// 握手原语 [`negotiator_client::request_grant`]。
@@ -160,19 +175,27 @@ async fn request_endpoint_grant(
     host: &str,
     port: u16,
     endpoint_id: &str,
-    _delivery_wish: Option<Delivery>,
+    strategy_id: Option<String>,
 ) -> anyhow::Result<EndpointGrant> {
+    // 1) 目录拉取 → 映射进统一注册表（节点 → 端点 → 策略 三层；
+    //    docs/endpoint-model-v2.md §4「订阅分享注册表」）
+    let mut node_id = String::new();
+    if let Ok(dir) = fetch_directory(host, port).await {
+        node_id = dir.node.device_id.clone();
+        app.register_remote_directory(&dir, &format!("{host}:{port}"));
+    }
     bootstrap::ensure_identity(app, base, crate::bootstrap::DEFAULT_NODE_NAME);
     let identity = app
         .device_identity()
         .ok_or_else(|| anyhow::anyhow!("身份未初始化"))?;
 
-    // 订阅驱动定稿（docs/endpoint-model.md §10）：只走 pull，无 push——
+    // 订阅驱动定稿（docs/endpoint-model-v2.md §4）：只走 pull，无 push——
     // 不建本机会话/自签凭证/锚定中继；订阅方只连公开方中继 watch 取流。
     let req = ShareRequest {
         device_id: identity.device_id.clone(),
         device_name: identity.device_name.clone(),
         endpoint_id: Some(endpoint_id.to_string()),
+        strategy_id,
         delivery_mode: Some(Delivery::Pull),
         relay_addr: None,
         share_token: None,
@@ -185,10 +208,48 @@ async fn request_endpoint_grant(
         .context(format!(
             "订阅握手失败（端点 {endpoint_id}；Confirm 端点需对端 stross ctrl negotiator-list 确认）"
         ))?;
-    Ok(EndpointGrant { grant })
+    Ok(EndpointGrant { grant, node_id })
+}
+
+/// 构建订阅规格（v2「订阅端点生成」依据，docs/endpoint-model-v2.md §2/§3）：
+/// 从统一注册表 `registry[节点][端点][策略]` 解析策略组合（订阅方选定的
+/// 策略 id，缺省 = 端点默认策略）。回退链：注册表 → 授予携带策略 →
+/// 平铺 `pick_rule` 推导默认策略——保证旧对端 / 目录拉取失败时不阻断订阅。
+fn build_subscribe_spec(
+    app: &Arc<Kernel>,
+    host: &str,
+    _port: u16,
+    endpoint_id: &str,
+    strategy_id: Option<String>,
+    grant: &ShareGrant,
+    node_id: &str,
+) -> anyhow::Result<SubscribeSpec> {
+    let strategy = app
+        .resolve_strategy(node_id, endpoint_id, strategy_id.as_deref())
+        .or_else(|| grant.strategy.clone())
+        .unwrap_or_else(|| stross_proto::message::EndpointStrategy {
+            strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
+            serialize: stross_proto::message::SerializeRule::Passthrough,
+            pick: grant.pick_rule.unwrap_or_default(),
+        });
+    let relay_url = grant
+        .relay
+        .as_ref()
+        .map(|r| format!("ws://{host}:{}", r.ws_port));
+    Ok(SubscribeSpec {
+        node_id: node_id.to_string(),
+        endpoint_id: endpoint_id.to_string(),
+        strategy_id,
+        strategy,
+        delivery: grant.delivery.unwrap_or(Delivery::Pull),
+        stream_id: grant.view.stream_id.clone(),
+        relay_url,
+    })
 }
 
 /// 订阅远端文件端点并接收落盘（P1 文件端点完整闭环；订阅驱动只走 pull）。
+/// v2：先经统一注册表解析 `(节点, 端点, 策略)` 策略组合构建 [`SubscribeSpec`]，
+/// 再连公开方中继 watch 接收。
 pub async fn subscribe_file(
     app: &Arc<Kernel>,
     base: &Path,
@@ -198,9 +259,16 @@ pub async fn subscribe_file(
     _delivery_wish: Option<Delivery>,
     out: &Path,
 ) -> anyhow::Result<SubscribeOutcome> {
-    let EndpointGrant { grant } =
+    let EndpointGrant { grant, node_id } =
         request_endpoint_grant(app, base, host, port, endpoint_id, None).await?;
     let delivery = grant.delivery.unwrap_or(Delivery::Pull);
+    let spec = build_subscribe_spec(app, host, port, endpoint_id, None, &grant, &node_id)?;
+    tracing::info!(
+        "订阅文件端点 {endpoint_id}（节点 {node_id}，策略 {}: serialize={:?} pick={:?}）",
+        spec.strategy.strategy_id,
+        spec.strategy.serialize,
+        spec.strategy.pick,
+    );
 
     let received = match delivery {
         Delivery::Pull | Delivery::Both => {
@@ -208,9 +276,9 @@ pub async fn subscribe_file(
                 anyhow::anyhow!("pull 授予缺少公开方中继地址（公开方未锚定中继）")
             })?;
             let watch_url = format!("ws://{host}:{}", relay.ws_port);
-            receive_file_retry(&watch_url, &grant.view.stream_id, out).await?
+            receive_file_retry(&watch_url, &spec.stream_id, out).await?
         }
-        // 订阅驱动定稿（docs/endpoint-model.md §10）：只走 pull，无 push
+        // 订阅驱动定稿（docs/endpoint-model-v2.md §4）：只走 pull，无 push
         Delivery::Push => {
             return Err(anyhow::anyhow!(
                 "公开方授予了 push（对端版本偏差？——订阅驱动只走 pull）"
@@ -220,14 +288,38 @@ pub async fn subscribe_file(
 
     Ok(SubscribeOutcome {
         delivery,
-        stream_id: grant.view.stream_id,
+        stream_id: spec.stream_id.clone(),
         received,
     })
 }
 
+/// 订阅远端文件端点并**经订阅端点生成**接收落盘（v2 订阅端框架路径，
+/// docs/endpoint-model-v2.md §3）：注册表 `(节点, 端点, 策略)` → 生成订阅
+/// 端点（[`FileReceiveEndpoint`]）→ 委托其 `subscribe`（端点自驱动，与分享端
+/// `share` 同构）。与 [`subscribe_file`]（返回落盘结果）共用握手与规格构建；
+/// 本路径面向「不需要同步结果」的自主订阅（后台接收 / 未来剪贴板同步等）。
+pub async fn subscribe_file_via_endpoint(
+    app: &Arc<Kernel>,
+    base: &Path,
+    host: &str,
+    port: u16,
+    endpoint_id: &str,
+    out: &Path,
+) -> anyhow::Result<()> {
+    let EndpointGrant { grant, node_id } =
+        request_endpoint_grant(app, base, host, port, endpoint_id, None).await?;
+    let spec = build_subscribe_spec(app, host, port, endpoint_id, None, &grant, &node_id)?;
+    app.subscribe_via_endpoint(app.clone(), &spec, Some(out))
+        .map_err(|e| anyhow::anyhow!("订阅端点生成失败: {e}"))
+}
+
 /// 接收文件（对「流尚未出现」重试）：只对建流竞态重试，其它错误
 /// （中途断开 / 文件不完整）是真实失败，直接上报。
-async fn receive_file_retry(
+///
+/// `pub(crate)`：订阅端点（[`EndpointApp::receive_file`]）与 CLI
+/// `subscribe_file` 共用此兜底——订阅端点生成路径同样要扛住
+/// 「授予响应先于流注册到达」的竞态（docs/endpoint-model-v2.md §4）。
+pub(crate) async fn receive_file_retry(
     watch_url: &str,
     stream_id: &str,
     out: &Path,
@@ -308,6 +400,58 @@ mod tests {
         assert_eq!(written, payload, "文件字节必须逐字节一致");
         // pull 流 id = 公开方签发的会话（非空即可；具体值取决于公开方内核）
         assert!(!outcome.stream_id.is_empty());
+
+        neg.stop().await;
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// v2 订阅端点生成闭环（docs/endpoint-model-v2.md §3）：订阅方目录拉取 →
+    /// 统一注册表映射（节点→端点→策略）→ 注册表解析策略组合 → 生成订阅端点
+    /// （[`FileReceiveEndpoint`]）→ 委托 `subscribe` 落盘。
+    /// 覆盖：三层注册表查表 + 订阅端点生成的完整框架路径（文件接收）。
+    #[tokio::test]
+    async fn subscribe_file_via_endpoint_roundtrip_in_process() {
+        let dir_a = tmp_dir("va");
+        let dir_b = tmp_dir("vb");
+        let out = tmp_dir("vout");
+
+        // —— 公开方节点 A（中继 + 目录/握手端点 + 文件端点）——
+        let app_a = Arc::new(Kernel::new(Platform::Desktop));
+        bootstrap::ensure_identity(&app_a, &dir_a, "stross");
+        let _relay = app_a.start_relay_on(0, "stross").await.unwrap();
+        let neg = ShareNegotiator::start(app_a.clone(), Arc::new(NoopUi), &dir_a, 0)
+            .await
+            .unwrap();
+        let src = dir_a.join("via-endpoint.txt");
+        let payload = b"subscribe endpoint generation roundtrip\n";
+        std::fs::write(&src, payload).unwrap();
+        let m = app_a
+            .publish_file_endpoint(&src, Visibility::Public, Delivery::Pull)
+            .unwrap();
+
+        // —— 订阅方节点 B：订阅端点生成路径（fire-and-forget，轮询落盘）——
+        let app_b = Arc::new(Kernel::new(Platform::Desktop));
+        subscribe_file_via_endpoint(&app_b, &dir_b, "127.0.0.1", neg.port, &m.endpoint_id, &out)
+            .await
+            .expect("订阅端点生成应成功");
+        // 生成端点自驱动接收：等待落盘（公开方等观看者接入 + 推送，秒级）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let received = loop {
+            let got: Vec<_> = std::fs::read_dir(&out)
+                .map(|it| it.filter_map(|e| e.ok()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if let Some(entry) = got.iter().find(|e| e.file_name() == "via-endpoint.txt") {
+                break std::fs::read(entry.path()).expect("读落盘文件");
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "订阅端点应在超时内完成接收落盘"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        };
+        assert_eq!(received, payload, "订阅端点接收的文件字节必须逐字节一致");
 
         neg.stop().await;
         let _ = std::fs::remove_dir_all(&dir_a);

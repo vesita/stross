@@ -419,6 +419,7 @@ GStreamer 流水线。
 | 第二十二轮 | 推流引擎并发化（engines: HashMap）+ 离线节点剔除 |
 | 第二十三轮 | 通信模式 v2 设计提案 + 文档去重/AGENTS 维护 |
 | 第二十四轮 | 通信模式 v2 Phase A/B（pick 规则层：端点档案 + 解读模块）+ 订阅驱动定稿（取消 push）+ 真机回归修 Bug（watchUrls fake-IP / 确认弹窗措辞 / 设备名 placeholder） |
+| 第二十五轮 | **端点模型 v2 落地**：三层统一注册表（节点→端点→策略，本机+互联节点同一张表）+ 策略组合（`EndpointStrategy`：序列化规则 + pick 规则，`strategy()` 替代 `pick_rule()`）+ 分享端/订阅端双特性（`subscribe` + 订阅端点生成 `FileReceiveEndpoint`）+ 协商/订阅按 `(节点, 端点, 策略)` 定位；v1 归档为历史指针 |
 
 ## 近期关键结论（细节以 AGENTS.md / dev-playbook.md / comm-mode-v2.md 为准）
 

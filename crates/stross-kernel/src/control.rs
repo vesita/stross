@@ -75,7 +75,7 @@ pub enum CtrlRequest {
         #[serde(default)]
         remember: bool,
     },
-    /// 公开设备为端点（端点框架，docs/endpoint-model.md §6；P1 1:1）。
+    /// 公开设备为端点（端点框架，docs/endpoint-model-v2.md §2；P1 1:1）。
     EndpointPublish {
         device_id: String,
         visibility: Visibility,

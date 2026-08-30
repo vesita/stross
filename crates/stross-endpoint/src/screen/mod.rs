@@ -23,12 +23,13 @@ pub mod windows;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
-use stross_proto::message::MediaKind;
+use stross_proto::message::{EndpointStrategy, MediaKind, ReliabilityProfile, SerializeRule};
 
 use crate::contract::{
     Endpoint, EndpointApp, EndpointBase, Probe, SubscribeCtx, TargetKind, spawn_media_share,
 };
 use crate::pipeline::VideoSource;
+use stross_proto::message::PickRule;
 
 /// 屏幕端点（实时目标）：load 探测采集可用性（probe 由平台层注入——
 /// 无图形会话 / 后端缺失时标记不可挂载，屏幕获取失败前置化）。
@@ -65,6 +66,18 @@ impl Endpoint for ScreenEndpoint {
     }
     fn target(&self) -> TargetKind {
         TargetKind::Live
+    }
+    fn transport_profile(&self) -> ReliabilityProfile {
+        // 屏幕实时视频：允许丢帧（关键帧对齐自愈），低延迟
+        ReliabilityProfile::Lossy
+    }
+    fn strategy(&self) -> EndpointStrategy {
+        // 实时目标：直通序列化 + 严格即时（Realtime）
+        EndpointStrategy {
+            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
+            serialize: SerializeRule::Passthrough,
+            pick: PickRule::Realtime,
+        }
     }
     fn available(&self) -> bool {
         self.base.available

@@ -12,7 +12,7 @@
 //! * [`stream`]：流信息（推流声明与流列表共用）
 //! * [`control`]：[`ControlMessage`] 控制消息
 //! * [`discovery`]：mDNS 发现能力引导（单 key JSON）
-//! * [`endpoint`]：端点框架（节点 → 设备 → 端点，见 docs/endpoint-model.md）
+//! * [`endpoint`]：端点框架（节点 → 设备 → 端点，见 docs/endpoint-model-v2.md）
 //! * [`token`]：一次性接入凭证
 
 pub mod capability;
@@ -29,8 +29,8 @@ pub use capability::{CapabilityDescriptor, RoutePath, SessionEventKind, Transpor
 pub use control::ControlMessage;
 pub use discovery::{DiscoveryInfo, TXT_KEY_DISCOVERY};
 pub use endpoint::{
-    Delivery, EndpointManifest, EndpointState, EndpointSummary, FileMeta, TransportPreference,
-    Visibility,
+    Delivery, EndpointManifest, EndpointState, EndpointStrategy, EndpointSummary, FileMeta,
+    SerializeRule, StrategyId, SubscribeSpec, TransportPreference, Visibility,
 };
 pub use ids::{
     CapabilityKind, CodecId, MediaKind, PickRule, ReliabilityProfile, RoleId, TransportId,

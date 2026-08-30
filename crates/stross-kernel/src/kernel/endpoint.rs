@@ -1,6 +1,7 @@
-//! 端点注册表：**单层端点表**（原「设备表 + 端点表」合并）+ 通告参数管理。
+//! 端点注册表：**三层统一注册表**（节点 → 端点 → 策略）+ 通告参数管理。
 //!
-//! 设计规格：docs/endpoint-model.md。
+//! 设计规格：docs/endpoint-model-v2.md（v2 演进，取代 v1 单层模型；
+//! v1 已删除（历史见 git））。
 //!
 //! * 端点 = 节点上可共享的能力实体；**契约（[`Endpoint`] / [`SubscribeCtx`] /
 //!   [`Probe`] 等）与具体端点实现（屏幕 / 麦克风 / 系统声音 / 文件）在
@@ -8,18 +9,25 @@
 //!   （内核 = 纯管理调度，不做媒体数据面）；
 //! * 端点自维护「可挂载性」（`available`，load 探测结果）与失败原因
 //!   （`last_error`）；注册表只做身份登记与通告参数管理；
+//! * **统一注册表**（[`UnifiedRegistry`]）：本机（[`EndpointRegistry`] 行为对象
+//!   表）与互联节点（目录/发现映射）都在**同一张表**里——订阅统一按
+//!   `(节点 id, 端点 id, 策略 id) → 策略组合` 查表，自订与订其它互联节点
+//!   走同一套逻辑；策略 = 序列化规则 + pick 规则（[`EndpointStrategy`]），
+//!   传输档案不进注册表；
 //! * **订阅联动**：`on_subscribed` 出锁克隆端点对象后调用其 `share`
-//!   （端点自驱动，内核不做类型分派）。
+//!   （端点自驱动，内核不做类型分派）；订阅端由
+//!   [`UnifiedRegistry::generate_subscribe_endpoint`] 生成（订阅端点生成）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use stross_endpoint::contract::{Endpoint, SubscribeCtx, TargetKind};
-use stross_endpoint::file::FileEndpoint;
+use stross_endpoint::file::{FileEndpoint, FileReceiveEndpoint};
 use stross_proto::message::{
-    CodecId, Delivery, EndpointManifest, EndpointState, EndpointSummary, TransportId,
-    TransportPreference, Visibility,
+    CodecId, Delivery, EndpointDir, EndpointManifest, EndpointState, EndpointStrategy,
+    EndpointSummary, PickRule, ReliabilityProfile, SerializeRule, StrategyId, SubscribeSpec,
+    TransportId, TransportPreference, Visibility,
 };
 use stross_proto::time::unix_secs;
 
@@ -39,8 +47,9 @@ pub struct EndpointEntry {
     pub updated_at: u64,
 }
 
-/// 端点注册表：**单层端点表**（原「设备表 + 端点表」合并）。
+/// 端点注册表：**本机（自节点）端点表**——行为对象 + 通告参数。
 ///
+/// v2 三层注册表中本机节点这一层的承载（[`UnifiedRegistry`] 持有它）；
 /// 端点自维护可挂载性（`load` 探测）；注册表只做身份登记与通告参数管理。
 #[derive(Default)]
 pub struct EndpointRegistry {
@@ -122,6 +131,7 @@ impl EndpointRegistry {
     }
 
     fn manifest_of(entry: &EndpointEntry) -> EndpointManifest {
+        let strategy = entry.ep.strategy();
         EndpointManifest {
             endpoint_id: entry.ep.id().to_string(),
             kind: entry.ep.kind(),
@@ -132,10 +142,13 @@ impl EndpointRegistry {
             visibility: entry.visibility.clone(),
             delivery: entry.delivery,
             transports: entry.transports.clone(),
-            // 通信模式 v2 档案：端点声明（Endpoint 契约按目标类型推断，
-            // 具体端点可覆写）；协商时随清单上报
+            // 通信模式 v2 档案：端点声明（Endpoint 契约自主指定，不按 TargetKind
+            // 推导）；协商时随清单上报
             transport_profile: entry.ep.transport_profile(),
-            pick_rule: entry.ep.pick_rule(),
+            // v2 策略组合：注册表只记录「数据包怎么处理」两要素（序列化 + pick）。
+            // 平铺 pick_rule 保留为默认策略的协商摘要（wire 兼容旧对端）。
+            pick_rule: strategy.pick,
+            strategies: vec![strategy],
             codecs: entry.codecs.clone(),
             state: entry.state,
             subscribers: entry.subscribers,
@@ -289,6 +302,308 @@ impl EndpointRegistry {
             TargetKind::Determined => vec![p(TransportId::Quic, 0), p(TransportId::Ws, 1)],
         }
     }
+}
+
+/// 统一注册表（v2 三层：节点 → 端点 → 策略；docs/endpoint-model-v2.md §2）。
+///
+/// **所有参与互联的节点（含本机）都在这一张表**：本机端点行为对象在
+/// [`EndpointRegistry`]（自节点注册），互联节点经目录/发现映射进
+/// [`NodeRegistration`]——订阅统一按 `(节点 id, 端点 id, 策略 id)` 查表，
+/// 自订与订其它互联节点走同一套逻辑。
+pub struct UnifiedRegistry {
+    /// 本机（自节点）端点表：行为对象 + 通告参数（订阅联动走它）。
+    local: EndpointRegistry,
+    /// 互联节点注册（目录/发现拉取后映射；不含本机——本机走 `local`）。
+    nodes: HashMap<String, NodeRegistration>,
+    /// 本机节点 id（身份注入；未注入时缺省 `"local"`）。
+    self_node: String,
+    /// 本机节点展示名（身份注入）。
+    self_name: String,
+}
+
+/// 一个互联节点（手机/电脑）的注册：节点信息 + 它拥有的端点（可分享内容）。
+#[derive(Debug, Clone)]
+pub struct NodeRegistration {
+    /// 互联节点 id（device_id；mDNS/目录权威）。
+    pub node_id: String,
+    /// 展示名（device_name）。
+    pub name: String,
+    /// 协商/目录入口（`host:port`；本机为 `"local"`）。
+    pub addr: String,
+    /// 是否本机（本机 = `local` 表 + 本注册镜像，便于 UI 高亮；非特殊身份）。
+    pub is_self: bool,
+    /// 该互联节点的下属端点。
+    pub endpoints: HashMap<String, EndpointRegistration>,
+}
+
+/// 一个端点（节点上可分享的具体内容，如"屏幕"/"麦克风"）的注册。
+#[derive(Debug, Clone)]
+pub struct EndpointRegistration {
+    pub endpoint_id: String,
+    pub kind: stross_proto::message::MediaKind,
+    pub name: String,
+    /// 目标类型（由协商档案推断；远端不落 wire）。
+    pub target: TargetKind,
+    /// 端点自主声明的策略组合（策略独立可寻址，同一内容可有多种处理组合）。
+    pub strategies: HashMap<StrategyId, EndpointStrategy>,
+}
+
+impl Default for UnifiedRegistry {
+    fn default() -> Self {
+        Self {
+            local: EndpointRegistry::new(),
+            nodes: HashMap::new(),
+            self_node: "local".into(),
+            self_name: "本机".into(),
+        }
+    }
+}
+
+impl UnifiedRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 注入本机节点身份（`is_self` 判定与 `(节点, 端点, 策略)` 查表的
+    /// 本机分支用；身份未注入时本机缺省 id 为 `"local"`）。
+    pub fn set_self_node(&mut self, node_id: &str, name: &str) {
+        self.self_node = node_id.to_string();
+        self.self_name = name.to_string();
+    }
+
+    /// 本机节点 id（订阅查表的本机分支键）。
+    pub fn self_node_id(&self) -> &str {
+        &self.self_node
+    }
+
+    // -- 本机端点表委托（行为对象 + 通告参数；原 EndpointRegistry 方法面） --
+
+    pub fn seed(&mut self, ep: Box<dyn Endpoint>) -> bool {
+        self.local.seed(ep)
+    }
+
+    pub fn endpoint_arc(&self, endpoint_id: &str) -> Option<Arc<dyn Endpoint>> {
+        self.local.endpoint_arc(endpoint_id)
+    }
+
+    pub fn target(&self, endpoint_id: &str) -> Option<TargetKind> {
+        self.local.target(endpoint_id)
+    }
+
+    pub fn manifests(&self) -> Vec<EndpointManifest> {
+        self.local.manifests()
+    }
+
+    pub fn published_manifests(&self) -> Vec<EndpointManifest> {
+        self.local.published_manifests()
+    }
+
+    pub fn summaries(&self) -> Vec<EndpointSummary> {
+        self.local.summaries()
+    }
+
+    pub fn manifest(&self, endpoint_id: &str) -> Option<EndpointManifest> {
+        self.local.manifest(endpoint_id)
+    }
+
+    pub fn publish(
+        &mut self,
+        endpoint_id: &str,
+        visibility: Visibility,
+        delivery: Delivery,
+        transports: Vec<TransportPreference>,
+        codecs: Vec<CodecId>,
+    ) -> Result<EndpointManifest> {
+        self.local
+            .publish(endpoint_id, visibility, delivery, transports, codecs)
+    }
+
+    pub fn unpublish(&mut self, endpoint_id: &str) -> Result<()> {
+        self.local.unpublish(endpoint_id)
+    }
+
+    pub fn publish_file(
+        &mut self,
+        path: &Path,
+        visibility: Visibility,
+        delivery: Delivery,
+    ) -> Result<EndpointManifest> {
+        self.local.publish_file(path, visibility, delivery)
+    }
+
+    pub fn file_source(&self, endpoint_id: &str) -> Option<&FileSource> {
+        self.local.file_source(endpoint_id)
+    }
+
+    pub fn set_state(&mut self, endpoint_id: &str, state: EndpointState, subscribers: u32) -> bool {
+        self.local.set_state(endpoint_id, state, subscribers)
+    }
+
+    pub fn on_subscribed(&self, app: &Arc<Kernel>, endpoint_id: &str, ctx: &SubscribeCtx) {
+        self.local.on_subscribed(app, endpoint_id, ctx);
+    }
+
+    pub fn default_transports(target: TargetKind) -> Vec<TransportPreference> {
+        EndpointRegistry::default_transports(target)
+    }
+
+    // -- v2 三层注册：互联节点映射 + 策略解析 + 订阅端点生成 --
+
+    /// 把目录响应（`GET /api/endpoints`）的互联节点映射进统一注册表：
+    /// 节点 → 端点 → 策略（策略组合来自清单 `strategies`，缺省由平铺
+    /// `pick_rule` 推导）。幂等：同节点重复拉取覆盖（目录是权威快照）。
+    pub fn register_remote_directory(&mut self, dir: &EndpointDir, addr: &str) {
+        let node_id = dir.node.device_id.clone();
+        if node_id.is_empty() || node_id == self.self_node {
+            return; // 空节点 / 本机镜像不入远端表（本机走 local）
+        }
+        let mut reg = NodeRegistration {
+            node_id: node_id.clone(),
+            name: dir.node.device_name.clone(),
+            addr: addr.to_string(),
+            is_self: false,
+            endpoints: HashMap::new(),
+        };
+        for m in &dir.endpoints {
+            reg.endpoints.insert(
+                m.endpoint_id.clone(),
+                EndpointRegistration {
+                    endpoint_id: m.endpoint_id.clone(),
+                    kind: m.kind,
+                    name: m.name.clone(),
+                    target: target_from_manifest(m),
+                    strategies: strategies_of(m),
+                },
+            );
+        }
+        self.nodes.insert(node_id, reg);
+    }
+
+    /// 策略解析（统一查表）：`registry[节点][端点][策略]` → 策略组合。
+    ///
+    /// * 本机：从行为对象取（`strategy()` 单一真源）；
+    /// * 互联节点：从目录映射取；`strategy_id` 缺省 = 端点默认策略（首个）。
+    pub fn resolve_strategy(
+        &self,
+        node_id: &str,
+        endpoint_id: &str,
+        strategy_id: Option<&str>,
+    ) -> Option<EndpointStrategy> {
+        if node_id == self.self_node || node_id == "local" {
+            let ep = self.local.endpoint_arc(endpoint_id)?;
+            let s = ep.strategy();
+            // 本机单策略：任何 id 都收敛到端点声明的策略
+            return Some(match strategy_id {
+                Some(id) if id == s.strategy_id => s,
+                _ => s,
+            });
+        }
+        let node = self.nodes.get(node_id)?;
+        let ep = node.endpoints.get(endpoint_id)?;
+        match strategy_id {
+            Some(id) => ep.strategies.get(id).cloned(),
+            None => ep.strategies.values().next().cloned(),
+        }
+    }
+
+    /// 三层注册表快照（含本机镜像；UI / 调试用）：节点 → 端点 → 策略。
+    pub fn node_registrations(&self) -> Vec<NodeRegistration> {
+        let mut v: Vec<NodeRegistration> = self.nodes.values().cloned().collect();
+        // 本机镜像：从行为对象表现算（策略 = 端点声明，单一真源）
+        let mut self_reg = NodeRegistration {
+            node_id: self.self_node.clone(),
+            name: self.self_name.clone(),
+            addr: "local".into(),
+            is_self: true,
+            endpoints: HashMap::new(),
+        };
+        for m in self.local.manifests() {
+            self_reg.endpoints.insert(
+                m.endpoint_id.clone(),
+                EndpointRegistration {
+                    endpoint_id: m.endpoint_id.clone(),
+                    kind: m.kind,
+                    name: m.name.clone(),
+                    target: target_from_manifest(&m),
+                    strategies: strategies_of(&m),
+                },
+            );
+        }
+        v.push(self_reg);
+        v.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        v
+    }
+
+    /// 订阅端点生成（docs/endpoint-model-v2.md §3「订阅端点生成」）：
+    /// 按订阅目标端点的内容类型构造**订阅端**端点（内核不做类型分派——
+    /// 端点实现自驱动，与分享端 `share` 同构）。
+    ///
+    /// 当前支持：`File` → 文件订阅端（接收落盘到 `out_dir`）；其余媒体类型
+    /// 返回 `None`（播放/渲染由内核接收链路 + 壳层承担，暂无订阅端点宿主）。
+    pub fn generate_subscribe_endpoint(
+        &self,
+        spec: &SubscribeSpec,
+        out_dir: Option<&Path>,
+    ) -> Option<Box<dyn Endpoint>> {
+        let kind = self
+            .nodes
+            .get(&spec.node_id)
+            .and_then(|n| n.endpoints.get(&spec.endpoint_id))
+            .map(|e| e.kind)
+            .or_else(|| self.local.manifest(&spec.endpoint_id).map(|m| m.kind));
+        match kind {
+            Some(stross_proto::message::MediaKind::File) => {
+                Some(Box::new(FileReceiveEndpoint::new(
+                    format!("recv:{}", spec.endpoint_id),
+                    spec.endpoint_id.clone(),
+                    out_dir
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(std::env::temp_dir),
+                )))
+            }
+            _ => None,
+        }
+    }
+
+    /// 全部互联节点 id（订阅查表键；含本机）。
+    pub fn node_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.nodes.keys().cloned().collect();
+        ids.push(self.self_node.clone());
+        ids.sort();
+        ids
+    }
+}
+
+/// 从清单推导目标类型（远端目标类型不落 wire；按协商档案推断——
+/// Lossless + StrictOrdered 为确定目标，其余为实时目标）。
+fn target_from_manifest(m: &EndpointManifest) -> TargetKind {
+    if m.transport_profile == ReliabilityProfile::Lossless && m.pick_rule == PickRule::StrictOrdered
+    {
+        TargetKind::Determined
+    } else {
+        TargetKind::Live
+    }
+}
+
+/// 清单 → 策略组合表（缺省由平铺 `pick_rule` 推导直通 + pick 的默认策略）。
+fn strategies_of(m: &EndpointManifest) -> HashMap<StrategyId, EndpointStrategy> {
+    if !m.strategies.is_empty() {
+        return m
+            .strategies
+            .iter()
+            .map(|s| (s.strategy_id.clone(), s.clone()))
+            .collect();
+    }
+    let mut h = HashMap::new();
+    h.insert(
+        EndpointStrategy::DEFAULT_ID.into(),
+        EndpointStrategy {
+            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
+            serialize: SerializeRule::Passthrough,
+            pick: m.pick_rule,
+        },
+    );
+    h
 }
 
 /// 文件端点本地文件源（`control.rs` 状态展示用；路径不落 wire）。
@@ -524,6 +839,16 @@ mod tests {
             fn target(&self) -> TargetKind {
                 TargetKind::Live
             }
+            fn transport_profile(&self) -> stross_proto::message::ReliabilityProfile {
+                stross_proto::message::ReliabilityProfile::Lossy
+            }
+            fn strategy(&self) -> stross_proto::message::EndpointStrategy {
+                stross_proto::message::EndpointStrategy {
+                    strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
+                    serialize: stross_proto::message::SerializeRule::Passthrough,
+                    pick: stross_proto::message::PickRule::Realtime,
+                }
+            }
             fn available(&self) -> bool {
                 self.base.available
             }
@@ -561,7 +886,11 @@ mod tests {
             delivery: Delivery::Push,
             stream_id: "sess-1".into(),
             transport_profile: stross_proto::message::ReliabilityProfile::Lossy,
-            pick_rule: stross_proto::message::PickRule::Realtime,
+            strategy: stross_proto::message::EndpointStrategy {
+                strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
+                serialize: stross_proto::message::SerializeRule::Passthrough,
+                pick: stross_proto::message::PickRule::Realtime,
+            },
             relay_addr: Some("ws://192.168.1.5:9000".into()),
             share_token: Some("tok".into()),
         };
@@ -571,5 +900,173 @@ mod tests {
         // 未知端点不触发
         r.on_subscribed(&app, "nope", &ctx);
         assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // v2 三层统一注册表（docs/endpoint-model-v2.md §2）
+    // -----------------------------------------------------------------------
+
+    fn remote_dir(node_id: &str, name: &str) -> EndpointDir {
+        EndpointDir {
+            node: stross_proto::message::EndpointNode {
+                device_id: node_id.into(),
+                device_name: name.into(),
+            },
+            endpoints: vec![
+                EndpointManifest {
+                    endpoint_id: "screen:0".into(),
+                    kind: MediaKind::Screen,
+                    name: "屏幕".into(),
+                    available: true,
+                    last_error: None,
+                    published: true,
+                    visibility: Visibility::Public,
+                    delivery: Delivery::Pull,
+                    transports: EndpointRegistry::default_transports(TargetKind::Live),
+                    transport_profile: stross_proto::message::ReliabilityProfile::Lossy,
+                    pick_rule: stross_proto::message::PickRule::Realtime,
+                    strategies: vec![stross_proto::message::EndpointStrategy {
+                        strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
+                        serialize: stross_proto::message::SerializeRule::Passthrough,
+                        pick: stross_proto::message::PickRule::Realtime,
+                    }],
+                    codecs: vec![CodecId::H264],
+                    state: EndpointState::Idle,
+                    subscribers: 0,
+                    updated_at: unix_secs(),
+                },
+                EndpointManifest {
+                    endpoint_id: "file:notes.txt".into(),
+                    kind: MediaKind::File,
+                    name: "notes.txt".into(),
+                    available: true,
+                    last_error: None,
+                    published: true,
+                    visibility: Visibility::Public,
+                    delivery: Delivery::Pull,
+                    transports: EndpointRegistry::default_transports(TargetKind::Determined),
+                    transport_profile: stross_proto::message::ReliabilityProfile::Lossless,
+                    pick_rule: stross_proto::message::PickRule::StrictOrdered,
+                    strategies: vec![stross_proto::message::EndpointStrategy {
+                        strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
+                        serialize: stross_proto::message::SerializeRule::Passthrough,
+                        pick: stross_proto::message::PickRule::StrictOrdered,
+                    }],
+                    codecs: vec![],
+                    state: EndpointState::Idle,
+                    subscribers: 0,
+                    updated_at: unix_secs(),
+                },
+            ],
+        }
+    }
+
+    /// 三层注册表：本机与互联节点同一张表，订阅按 (节点, 端点, 策略) 统一查表。
+    #[test]
+    fn unified_registry_three_layer_lookup() {
+        let mut reg = UnifiedRegistry::new();
+        reg.set_self_node("node-pc", "电脑");
+        assert!(reg.seed(screen()), "本机端点登记（自节点注册）");
+        assert!(reg.seed(Box::new(FileEndpoint::new(
+            "file:本地.txt".into(),
+            "本地.txt".into(),
+            std::env::temp_dir().join("stross-unified.txt"),
+        ))));
+
+        // 本机查表：registry[本机][端点][策略] → 策略组合（strategy() 单一真源）
+        let s = reg
+            .resolve_strategy("node-pc", "screen:0", None)
+            .expect("本机屏幕端点应可解析");
+        assert_eq!(s.strategy_id, "default");
+        assert_eq!(s.pick, stross_proto::message::PickRule::Realtime);
+        assert_eq!(
+            s.serialize,
+            stross_proto::message::SerializeRule::Passthrough
+        );
+        // 本机文件端点：严格顺序 + Lossless 推断为确定目标
+        let fs = reg
+            .resolve_strategy("node-pc", "file:本地.txt", Some("default"))
+            .expect("本机文件端点应可解析");
+        assert_eq!(fs.pick, stross_proto::message::PickRule::StrictOrdered);
+        // 未知端点 → None
+        assert!(reg.resolve_strategy("node-pc", "nope", None).is_none());
+
+        // 互联节点映射（目录拉取 → 节点 → 端点 → 策略）
+        reg.register_remote_directory(&remote_dir("node-phone", "手机A"), "192.168.1.5:18779");
+        let s = reg
+            .resolve_strategy("node-phone", "screen:0", None)
+            .expect("远端屏幕端点应可解析");
+        assert_eq!(s.pick, stross_proto::message::PickRule::Realtime);
+        let f = reg
+            .resolve_strategy("node-phone", "file:notes.txt", Some("default"))
+            .expect("远端文件端点应可解析");
+        assert_eq!(f.pick, stross_proto::message::PickRule::StrictOrdered);
+        // 未知策略 id → None（策略独立可寻址）
+        assert!(
+            reg.resolve_strategy("node-phone", "screen:0", Some("nope"))
+                .is_none()
+        );
+
+        // 快照：本机 + 互联节点都在同一张表（含 is_self 标记）
+        let nodes = reg.node_registrations();
+        assert_eq!(nodes.len(), 2, "本机 + 手机两台节点");
+        let self_node = nodes.iter().find(|n| n.is_self).expect("本机镜像在表内");
+        assert_eq!(self_node.node_id, "node-pc");
+        assert!(self_node.endpoints.contains_key("screen:0"));
+        let phone = nodes
+            .iter()
+            .find(|n| n.node_id == "node-phone")
+            .expect("手机节点在表内");
+        assert!(!phone.is_self);
+        assert_eq!(phone.endpoints.len(), 2);
+
+        // 订阅端点生成：File → 文件订阅端（接收落盘）；媒体 → None（接收链路承担）
+        let spec = SubscribeSpec {
+            node_id: "node-phone".into(),
+            endpoint_id: "file:notes.txt".into(),
+            strategy_id: Some("default".into()),
+            strategy: f,
+            delivery: Delivery::Pull,
+            stream_id: "sess-1".into(),
+            relay_url: Some("ws://192.168.1.5:18777".into()),
+        };
+        let ep = reg.generate_subscribe_endpoint(&spec, Some(Path::new("/tmp/stross-recv")));
+        let ep = ep.expect("文件订阅端应可生成");
+        assert_eq!(ep.kind(), MediaKind::File);
+        assert!(ep.supports_subscribe(), "文件订阅端应支持订阅");
+        let spec_media = SubscribeSpec {
+            node_id: "node-phone".into(),
+            endpoint_id: "screen:0".into(),
+            strategy_id: None,
+            strategy: s,
+            delivery: Delivery::Pull,
+            stream_id: "sess-2".into(),
+            relay_url: Some("ws://192.168.1.5:18777".into()),
+        };
+        assert!(
+            reg.generate_subscribe_endpoint(&spec_media, None).is_none(),
+            "媒体类型暂无订阅端点宿主"
+        );
+    }
+
+    /// 旧目录 wire（无 strategies 字段）映射：按平铺 pick_rule 推导默认策略，
+    /// 三层查表仍可用（旧对端兼容）。
+    #[test]
+    fn unified_registry_remote_without_strategies_derives_default() {
+        let mut reg = UnifiedRegistry::new();
+        reg.set_self_node("node-pc", "电脑");
+        let mut dir = remote_dir("node-old", "旧对端");
+        dir.endpoints[0].strategies = vec![]; // 旧 wire：无策略列表
+        dir.endpoints[0].pick_rule = stross_proto::message::PickRule::Realtime;
+        reg.register_remote_directory(&dir, "192.168.1.9:18779");
+        let s = reg
+            .resolve_strategy("node-old", "screen:0", None)
+            .expect("旧对端策略应推导成功");
+        assert_eq!(s.strategy_id, "default");
+        assert_eq!(s.pick, stross_proto::message::PickRule::Realtime);
+        assert_eq!(
+            s.serialize,
+            stross_proto::message::SerializeRule::Passthrough
+        );
     }
 }

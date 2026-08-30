@@ -109,7 +109,7 @@ pub enum CtrlCommand {
         #[arg(long)]
         remember: bool,
     },
-    /// 端点框架命令（公开 / 取消公开 / 目录；docs/endpoint-model.md）
+    /// 端点框架命令（公开 / 取消公开 / 目录；docs/endpoint-model-v2.md）
     Endpoint {
         #[command(subcommand)]
         cmd: EndpointCommand,
@@ -119,7 +119,7 @@ pub enum CtrlCommand {
 /// `stross ctrl endpoint` 子命令。
 #[derive(Subcommand, Debug)]
 pub enum EndpointCommand {
-    /// 公开设备为端点（端点框架 docs/endpoint-model.md；P1 一设备一端点）
+    /// 公开设备为端点（端点框架 docs/endpoint-model-v2.md；P1 一设备一端点）
     Publish {
         /// 设备 id（`stross ctrl endpoint list` 可查）
         #[arg(long)]

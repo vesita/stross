@@ -82,7 +82,7 @@ MediaCodec+AudioTrack）；直连锚点失败自动经本机中继级联代理�
 链路细节见 [docs/architecture.md](docs/architecture.md) §1。
 
 详细设计：线上协议见 [docs/protocol.md](docs/protocol.md)；
-端点框架规格（节点→端点、load/share 契约）见 [docs/endpoint-model.md](docs/endpoint-model.md)；
+端点框架规格（节点→端点→策略三层注册 + 分享/订阅双特性）见 [docs/endpoint-model-v2.md](docs/endpoint-model-v2.md)；
 可插拔传输设计见 [docs/plugin-architecture.md](docs/plugin-architecture.md)；
 下一阶段规划见 [docs/roadmap.md](docs/roadmap.md)。
 

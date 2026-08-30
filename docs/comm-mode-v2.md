@@ -5,7 +5,7 @@
 > 不做新旧 wire 兼容层。Phase C 的
 > 帧头裁字段（codec/track 移到协商结果）无需保留 v1 字段。
 > 关联：[plugin-architecture.md](plugin-architecture.md)（可插拔传输基座，本方案在其上演进）·
-> [endpoint-model.md](endpoint-model.md)（端点框架）· [protocol.md](protocol.md)（线上协议）·
+> [endpoint-model-v2.md](endpoint-model-v2.md)（端点框架）· [protocol.md](protocol.md)（线上协议）·
 > [layering-architecture.md](layering-architecture.md)（分层铁律）。
 
 ## 1. 背景与动机

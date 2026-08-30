@@ -72,7 +72,7 @@ impl DiscoveryInfo {
         self
     }
 
-    /// 编码为 mDNS TXT 条目（**多 key，方案 b，docs/endpoint-model.md §3.4**）。
+    /// 编码为 mDNS TXT 条目（**多 key，方案 b，docs/endpoint-model-v2.md**）。
     ///
     /// mDNS TXT 每条 character-string ≤ 255B（RFC 1035 §3.3，mdns-sd 强校验；
     /// 实测整包 JSON（base + 3 台设备摘要）达 449B 直接广播失败）。

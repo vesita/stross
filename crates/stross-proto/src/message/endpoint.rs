@@ -1,13 +1,18 @@
-//! 端点框架（节点 → 端点）：**单层端点模型**与 L1 摘要。
+//! 端点框架（节点 → 端点 → 策略）：**三层注册**与 L1 摘要。
 //!
-//! 设计规格：docs/endpoint-model.md。
+//! 设计规格：docs/endpoint-model-v2.md（v2 演进，取代 v1 单层模型；
+//! v1 已删除（历史见 git））。
 //!
 //! * **端点**：节点上可共享的能力实体（屏幕 / 麦克风 / 摄像头 / 系统声音 /
 //!   文件……）。端点自维护「可挂载性」（`available`，load 探测结果）、失败
 //!   原因（`last_error`）与通告状态（`published`）；
 //! * **行为契约**（端点 ↔ 内核约定，非语言特性）：每个端点实现 `load`
 //!   （探测自身可用性，能否被挂载成节点）与 `share`（订阅达成后启动共享
-//!   推流），内核不做类型分派；
+//!   推流）——**双向能力体**：端点既能被订阅（分享端 `share`）、也能主动
+//!   订阅别人（订阅端 `subscribe`），方向挂载在端点层，节点只是容器；
+//! * **策略**（第三层）：端点自主声明的策略组合 [`EndpointStrategy`]（序列化
+//!   规则 + pick 规则），策略独立可寻址（[`StrategyId`]）；注册表只记录
+//!   「这个数据包怎么处理」的两要素，订阅按 `(节点, 端点, 策略)` 精确取；
 //! * **目标类型**（内核契约层，不进 wire）：端点分两类——确定目标（文件等，
 //!   内容预先确定，一次推送）与实时目标（相机等，内容持续产生，持续推流）；
 //!   两类的共性抽象为 [`Endpoint`] 契约（stross-kernel），差异经目标类型
@@ -106,6 +111,71 @@ pub struct TransportPreference {
     pub priority: u8,
 }
 
+/// 策略 id：端点内**独立可寻址**（同一内容可有多种处理组合；
+/// docs/endpoint-model-v2.md §2——订阅按 `(节点, 端点, 策略)` 精确取）。
+pub type StrategyId = String;
+
+/// 序列化规则（SerializeRule）：数据 ↔ 管线格式的转换（装载/解装载，含分包）——
+/// 端点自定，内核不碰编码细节（docs/endpoint-model-v2.md §0/§2）。
+///
+/// 与 [`PickRule`]（管线内怎么解读）正交：本枚举描述「怎么把数据转成管线
+/// 格式」；**枚举（确定性，wire 可比对）**，端点实现按变体映射装载/解装载模块。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SerializeRule {
+    /// 直通（Passthrough）：帧即数据，不额外装载/分包。当前全部端点的默认。
+    #[default]
+    Passthrough,
+    /// 分包（Chunked）：大数据块按管线分片装载/解装载（预留：文件大块、
+    /// 协议升级等场景启用；当前端点均未声明）。
+    Chunked,
+}
+
+/// 端点策略：注册表只记录「这个数据包怎么处理」的两要素——
+/// 序列化规则（[`SerializeRule`]：怎么装载/解装载，含分包）+ pick 规则
+/// （[`PickRule`]：管线里怎么解读，docs/comm-mode-v2.md §3.0）。
+///
+/// 传输档案（[`ReliabilityProfile`]）**不进注册表**（端点声明、传输模块执行）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointStrategy {
+    /// 策略 id（端点内独立可寻址；订阅方按它指明要哪个策略）。
+    pub strategy_id: StrategyId,
+    /// 序列化规则（装载/解装载，含分包）。
+    pub serialize: SerializeRule,
+    /// pick 规则（严格即时/严格顺序/无）。
+    pub pick: PickRule,
+}
+
+impl EndpointStrategy {
+    /// 默认策略 id（端点未声明多策略时的唯一策略；订阅方缺省按它取）。
+    pub const DEFAULT_ID: &'static str = "default";
+}
+
+/// 订阅规格（订阅端点生成依据，docs/endpoint-model-v2.md §3）：
+/// 从注册表取 `(节点, 端点, 策略)` → 策略组合 → 生成订阅端点。
+///
+/// 方向挂载在端点层（节点只是「拥有多个端点」的容器，不承载方向）；
+/// 订阅端（[`Endpoint::subscribe`]）据此装载对应管线并处理订阅流/数据。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscribeSpec {
+    /// 互联节点 id（对端 device_id；本机订阅本机时为本地节点 id）。
+    pub node_id: String,
+    /// 对端端点 id（"screen:0" / "mic:builtin" / "file:notes.txt"）。
+    pub endpoint_id: String,
+    /// 选定的策略 id（注册表第三层；`None` = 取端点默认策略）。
+    pub strategy_id: Option<StrategyId>,
+    /// 策略组合（序列化规则 + pick 规则；注册表查得，订阅端点据此装载管线）。
+    pub strategy: EndpointStrategy,
+    /// 定稿后的数据面方向（订阅驱动定稿只走 Pull）。
+    pub delivery: Delivery,
+    /// 数据面流 id（pull = 公开方签发的会话）。
+    pub stream_id: String,
+    /// 订阅方连接公开方中继的 WS 基址（`ws://host:port`；pull 模式）。
+    pub relay_url: Option<String>,
+}
+
 /// 端点运行状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -160,8 +230,17 @@ pub struct EndpointManifest {
     pub transport_profile: ReliabilityProfile,
     /// pick 规则（装载/解读语义：严格即时/严格顺序/无；发送侧装载逻辑与
     /// 接收侧解读模块共用，docs/comm-mode-v2.md §3.0）。缺省 Realtime。
+    ///
+    /// **v2 演进**：pick 规则收敛进 [`EndpointStrategy`]（与序列化规则组合成
+    /// 策略）；本平铺字段保留为**默认策略的协商摘要**（wire 兼容旧对端），
+    /// 新消费方优先读 `strategies`。
     #[serde(default)]
     pub pick_rule: PickRule,
+    /// 端点自主声明的策略组合（策略独立可寻址；订阅按 `(节点, 端点, 策略)`
+    /// 精确取，docs/endpoint-model-v2.md §2）。缺省 = 由平铺
+    /// `serialize(直通) + pick_rule` 推导的单默认策略。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strategies: Vec<EndpointStrategy>,
     /// 该端点实际可用的编解码。
     pub codecs: Vec<CodecId>,
     pub state: EndpointState,
@@ -171,7 +250,7 @@ pub struct EndpointManifest {
     pub updated_at: u64,
 }
 
-/// 文件端点元数据（docs/endpoint-model.md §3.6）：作为文件流**首帧**（FLAG_CONFIG）
+/// 文件端点元数据（docs/endpoint-model-v2.md §3）：作为文件流**首帧**（FLAG_CONFIG）
 /// 的 JSON 载荷下发给接收方。路径只存在于公开方本地（`EndpointRegistry.file_sources`），
 /// **绝不进入本结构 / 目录 / mDNS 摘要**。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +303,11 @@ mod tests {
             ],
             transport_profile: ReliabilityProfile::Lossy,
             pick_rule: PickRule::Realtime,
+            strategies: vec![EndpointStrategy {
+                strategy_id: EndpointStrategy::DEFAULT_ID.into(),
+                serialize: SerializeRule::Passthrough,
+                pick: PickRule::Realtime,
+            }],
             codecs: vec![CodecId::Aac],
             state: EndpointState::Idle,
             subscribers: 0,
@@ -373,8 +457,15 @@ mod tests {
             text.contains("\"pickRule\":\"realtime\""),
             "pick 规则应上 wire: {text}"
         );
+        // v2 策略组合上 wire（三层注册表第三层：序列化规则 + pick 规则）
+        assert!(
+            text.contains("\"strategies\":[{\"strategyId\":\"default\",\"serialize\":\"passthrough\",\"pick\":\"realtime\"}]"),
+            "策略组合应上 wire: {text}"
+        );
         let back: EndpointManifest = serde_json::from_str(&text).unwrap();
         assert_eq!(m, back);
+        assert_eq!(back.strategies.len(), 1);
+        assert_eq!(back.strategies[0].strategy_id, "default");
         // 不可用端点的 last_error 上 wire
         let mut m2 = sample_manifest();
         m2.available = false;
@@ -389,12 +480,61 @@ mod tests {
     }
 
     /// 旧 wire（无档案字段）反序列化：`#[serde(default)]` 回退到 Lossy/Realtime，
-    /// 不破坏旧对端 / 旧目录缓存的兼容性。
+    /// 策略列表为空（消费方按平铺字段推导默认策略），不破坏旧对端 / 旧目录缓存
+    /// 的兼容性。
     #[test]
     fn manifest_parses_without_profile_fields() {
         let old = r#"{"endpointId":"mic:builtin","kind":"mic","name":"麦克风","available":true,"published":true,"visibility":"public","delivery":"pull","transports":[],"codecs":[],"state":"idle","subscribers":0,"updatedAt":1800000000}"#;
         let m: EndpointManifest = serde_json::from_str(old).unwrap();
         assert_eq!(m.transport_profile, ReliabilityProfile::Lossy);
         assert_eq!(m.pick_rule, PickRule::Realtime);
+        assert!(m.strategies.is_empty(), "旧 wire 无策略列表");
+    }
+
+    /// 新 wire（含 strategies）roundtrip：策略组合逐字节稳定（camelCase），
+    /// 缺省策略 id 为 "default"。
+    #[test]
+    fn strategy_wire_roundtrip() {
+        let s = EndpointStrategy {
+            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
+            serialize: SerializeRule::Passthrough,
+            pick: PickRule::StrictOrdered,
+        };
+        let text = serde_json::to_string(&s).unwrap();
+        assert_eq!(
+            text,
+            r#"{"strategyId":"default","serialize":"passthrough","pick":"strictOrdered"}"#
+        );
+        let back: EndpointStrategy = serde_json::from_str(&text).unwrap();
+        assert_eq!(s, back);
+    }
+
+    /// SubscribeSpec roundtrip：订阅端点生成的输入契约（camelCase；缺省
+    /// strategy_id 允许省略——订阅方取端点默认策略）。
+    #[test]
+    fn subscribe_spec_wire_roundtrip() {
+        let spec = SubscribeSpec {
+            node_id: "node-phone".into(),
+            endpoint_id: "screen:0".into(),
+            strategy_id: None,
+            strategy: EndpointStrategy {
+                strategy_id: EndpointStrategy::DEFAULT_ID.into(),
+                serialize: SerializeRule::Passthrough,
+                pick: PickRule::Realtime,
+            },
+            delivery: Delivery::Pull,
+            stream_id: "sess-1".into(),
+            relay_url: Some("ws://192.168.1.5:18777".into()),
+        };
+        let text = serde_json::to_string(&spec).unwrap();
+        assert!(text.contains("\"nodeId\":\"node-phone\""), "wire: {text}");
+        assert!(text.contains("\"strategyId\":null"), "wire: {text}");
+        assert!(
+            text.contains("\"relayUrl\":\"ws://192.168.1.5:18777\""),
+            "wire: {text}"
+        );
+        let back: SubscribeSpec = serde_json::from_str(&text).unwrap();
+        assert_eq!(spec, back);
+        let _ = SerializeRule::default();
     }
 }

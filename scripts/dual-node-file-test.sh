@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 端点框架本地双端节点互发小文件验证（docs/endpoint-model.md §5/§3.6）。
+# 端点框架本地双端节点互发小文件验证（docs/endpoint-model-v2.md §3/§4）。
 #
 # 拓扑 = 同机两个 serve 节点（不同数据目录 → 不同 device_id；不同端口）：
 #   节点 A: stross serve --port 18777 --ctrl-port 18778 --negotiator-port 18779

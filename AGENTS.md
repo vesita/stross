@@ -46,7 +46,7 @@ apps/
   stross-gui        Tauri GUI（桌面 + Android 共用一套 web 前端）
   stross-relay      独立中继 CLI
 scripts/            构建 / 测试 / 真机回归脚本（见 §5）
-docs/               设计文档（layering-architecture.md 是分层判据；endpoint-model.md
+docs/               设计文档（layering-architecture.md 是分层判据；endpoint-model-v2.md
                     是端点框架规格）
 ```
 
@@ -75,7 +75,7 @@ stross-bridge 与壳层；壳层只做参数解析 + 展示 + 平台适配。**�
 - **身份**：`~/.local/share/stross/identity.json`（deviceId/name）+ 信任清单
   `trusted_devices.json`，GUI 与 CLI serve 共用同一目录。
 - **交互术语定稿**：**共享 = 我是内容源（推送预备），订阅 = 我是接收方**。
-  **订阅驱动**（docs/comm-mode-v2.md / endpoint-model.md §10 定稿）：数据流一律
+  **订阅驱动**（docs/comm-mode-v2.md / endpoint-model-v2.md §4 数据流定稿）：数据流一律
   由**订阅方发起并主动取（pull）**——共享方只在**自己的**受控中继发布，订阅方
   连共享方中继 watch；**取消 push**（共享方不主动出站推送）。两端 UI 都不让
   用户选方向。用户可见文本用「共享/订阅」，**不用「通告/广播」**。

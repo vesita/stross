@@ -1,4 +1,4 @@
-//! 凭证协商 / 订阅握手线协议（docs/endpoint-model.md §5）。
+//! 凭证协商 / 订阅握手线协议（docs/endpoint-model-v2.md §4）。
 //!
 //! 端到端消费者：`ShareNegotiator` 服务端（stross-app，axum）、订阅方客户端
 //! （stross-app `subscriber` 模块）、CLI 与 Tauri 前端（经命令调库接口）。
@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::endpoint::{Delivery, EndpointManifest};
+use super::endpoint::{Delivery, EndpointManifest, EndpointStrategy};
 use super::ids::{MediaKind, PickRule, ReliabilityProfile, TransportId};
 
 /// 一次性接入凭证视图（接收端签发后展示；订阅握手授予的 flatten 载荷）。
@@ -45,9 +45,13 @@ pub struct RelayAddr {
 pub struct ShareRequest {
     pub device_id: String,
     pub device_name: String,
-    /// 订阅目标端点（端点框架，docs/endpoint-model.md §5）。
+    /// 订阅目标端点（端点框架，docs/endpoint-model-v2.md §4）。
     #[serde(default)]
     pub endpoint_id: Option<String>,
+    /// 订阅方选定的策略 id（注册表第三层；`None` = 取端点默认策略，
+    /// docs/endpoint-model-v2.md §2）。仅端点语义生效。
+    #[serde(default)]
+    pub strategy_id: Option<String>,
     /// 订阅方期望的 delivery（端点声明 `Both` 时生效；其余以端点声明为准）。
     #[serde(default)]
     pub delivery_mode: Option<Delivery>,
@@ -55,7 +59,7 @@ pub struct ShareRequest {
     /// 出站推送的目标）。
     #[serde(default)]
     pub relay_addr: Option<String>,
-    /// push 模式下订阅方**自签**的一次性接入凭证（docs/endpoint-model.md §5：
+    /// push 模式下订阅方**自签**的一次性接入凭证（docs/endpoint-model-v2.md §4：
     /// 凭证校验器挂在订阅方内核，公开方签发的凭证在订阅方中继校验不过）。
     #[serde(default)]
     pub share_token: Option<String>,
@@ -84,6 +88,10 @@ pub struct ShareGrant {
     /// 协商定稿的 pick 规则（端点语义）；订阅方据此装载对应解读模块。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pick_rule: Option<PickRule>,
+    /// 协商定稿的策略组合（序列化规则 + pick 规则；注册表 `(节点, 端点, 策略)`
+    /// 解析结果，docs/endpoint-model-v2.md §2）。缺省 = 由 `pick_rule` 推导。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<EndpointStrategy>,
     /// pull 模式：公开方中继地址；push 模式为 `None`（公开方凭凭证出站）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayAddr>,
@@ -118,6 +126,7 @@ mod tests {
             device_id: "dev-a".into(),
             device_name: "电脑".into(),
             endpoint_id: Some("mic:builtin".into()),
+            strategy_id: Some("default".into()),
             delivery_mode: Some(Delivery::Push),
             relay_addr: Some("ws://192.168.1.5:41355".into()),
             share_token: Some("sess-9:abc:123".into()),
@@ -127,6 +136,7 @@ mod tests {
         // 端点语义字段：camelCase，与旧实现逐字一致
         assert_eq!(json["deviceId"], "dev-a");
         assert_eq!(json["endpointId"], "mic:builtin");
+        assert_eq!(json["strategyId"], "default");
         assert_eq!(json["deliveryMode"], "push");
         assert_eq!(json["relayAddr"], "ws://192.168.1.5:41355");
         assert_eq!(json["shareToken"], "sess-9:abc:123");
@@ -150,6 +160,11 @@ mod tests {
             transports: None,
             transport_profile: Some(ReliabilityProfile::Lossy),
             pick_rule: Some(PickRule::Realtime),
+            strategy: Some(EndpointStrategy {
+                strategy_id: "default".into(),
+                serialize: crate::message::endpoint::SerializeRule::Passthrough,
+                pick: PickRule::Realtime,
+            }),
             relay: Some(RelayAddr {
                 ws_port: 18777,
                 srt_port: Some(33462),
@@ -164,6 +179,8 @@ mod tests {
         assert_eq!(json["delivery"], "pull");
         assert_eq!(json["transportProfile"], "lossy");
         assert_eq!(json["pickRule"], "realtime");
+        assert_eq!(json["strategy"]["strategyId"], "default");
+        assert_eq!(json["strategy"]["serialize"], "passthrough");
         assert_eq!(json["relay"]["wsPort"], 18777);
         assert_eq!(json["relay"]["srtPort"], 33462);
         assert!(json["relay"].get("quicPort").is_none());

@@ -30,6 +30,19 @@ const VISIBILITY_LABELS: Record<VisibilityKind, string> = {
   private: '私密',
 };
 
+/** 序列化规则中文显示（Rust `SerializeRule` wire 值：camelCase）。 */
+const SERIALIZE_LABELS: Record<string, string> = {
+  passthrough: '直通',
+  chunked: '分包',
+};
+
+/** pick 规则中文显示（Rust `PickRule` wire 值：camelCase）。 */
+const PICK_LABELS: Record<string, string> = {
+  realtime: '严格即时',
+  strictOrdered: '严格顺序',
+  none: '无',
+};
+
 /** 设备/端点种类中文显示。 */
 const DEVICE_KIND_LABELS: Record<EndpointKind, string> = {
   screen: '屏幕',
@@ -213,7 +226,7 @@ interface PendingRequest {
   createdAt: number;
 }
 
-// —— 端点框架（节点 → 端点；docs/endpoint-model.md） ——
+// —— 端点框架（节点 → 端点；docs/endpoint-model-v2.md） ——
 
 /** 端点清单（单层端点模型，Rust `EndpointManifest` 平铺：可挂载性 + 共享状态）。 */
 interface EndpointManifest {
@@ -231,8 +244,12 @@ interface EndpointManifest {
   transports: { transport: string; priority: number }[];
   /** 传输层可靠性档案（lossless/lossy/adaptive；允许丢包/不允许丢包/自适应）。 */
   transportProfile: string;
-  /** pick 规则（realtime/strictOrdered/none；严格即时/严格顺序，装载/解读共用）。 */
+  /** pick 规则（realtime/strictOrdered/none；严格即时/严格顺序，装载/解读共用）。
+   *  v2：默认策略的协商摘要，新消费方优先读 strategies。 */
   pickRule: string;
+  /** v2 策略组合（三层注册表第三层）：序列化规则 + pick 规则，独立可寻址。
+   *  缺省 = 由 transportProfile/pickRule 推导的单个默认策略。 */
+  strategies: { strategyId: string; serialize: string; pick: string }[];
   codecs: string[];
   state: string;
   subscribers: number;

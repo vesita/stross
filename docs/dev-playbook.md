@@ -115,6 +115,11 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
 
 ## 8. 会话中已确认/还在的坑（压缩前捞回）
 
+- **端点框架 v2（三层注册表 + 双特性）已落地**（docs/endpoint-model-v2.md）：
+  - `UnifiedRegistry`（kernel/endpoint.rs）= 本机 `EndpointRegistry`（行为对象）+ 互联节点表（目录拉取映射）；订阅统一 `resolve_strategy(node_id, endpoint_id, strategy_id)` 查表，本机走 `strategy()` 单一真源、远端走目录映射；
+  - **策略**：`EndpointStrategy { strategy_id, serialize, pick }`，端点 `strategy()` 组合方法（替代 v1 `pick_rule()`）；平铺 `transport_profile`/`pick_rule` 保留为默认策略协商摘要（旧对端兼容，勿删）；
+  - **订阅端点生成**：`UnifiedRegistry::generate_subscribe_endpoint` + `Kernel::subscribe_via_endpoint`；文件订阅端 `FileReceiveEndpoint` 经 `EndpointApp::receive_file` 落盘（`receive_file_retry` 竞态兜底在 kernel 实现，CLI 与订阅端点共用）；
+  - 改 `Endpoint` trait 时注意：所有测试 fixture（kernel/endpoint.rs、negotiator/mod.rs 的 CountingEndpoint/RecordingEndpoint）都要补 `strategy()`；`SubscribeCtx` 用 `strategy` 字段（不再是 `pick_rule`）。
 - `negotiator_respond` 已改 **async**（同步 tauri 命令在 GTK 主线程调 `tokio::spawn` 无 reactor → panic）。
 - **凡同步 tauri 命令可能走到 `tokio::spawn`/`tokio::time`/`tokio::net` 都必须改 async**：`endpoint_stop_share` 已改（`stop_share_by_stream` 内 `tokio::spawn` 优雅停流）。前端 invoke 对 sync/async 命令一致，无需改前端。
 - **Android 无窗口级 `setFullscreen`**（`win.isFullscreen()/setFullscreen()` 均抛错）：全屏靠 CSS `.canvas-wrap.fs`（`position:fixed; inset:0`）兜底。`togglePlayerFullscreen` 必须**先应用 CSS 全屏再试 OS 全屏**，不能因 `setFullscreen` 抛错提前 return。

@@ -28,7 +28,10 @@ pub use auth::{AuthError, AuthPolicy, PinAuthPolicy};
 pub use data_plane::{DataPlaneBackend, RelayDataPlane};
 // 端点契约与端点实现（插件区 stross-endpoint）：本模块只保留注册表
 // （EndpointRegistry / EndpointEntry / FileSource），路径经 stross_kernel 根部重导出。
-pub use endpoint::{EndpointEntry, EndpointRegistry, FileSource};
+pub use endpoint::{
+    EndpointEntry, EndpointRegistration, EndpointRegistry, FileSource, NodeRegistration,
+    UnifiedRegistry,
+};
 pub use graph::{NodeInfo, NodeRole, TransportAddr};
 pub use session::{Negotiated, Session, SessionPrefs};
 pub use stross_endpoint::{
@@ -53,7 +56,8 @@ use stross_endpoint::playback::RenderedFrame;
 use stross_proto::frame::Frame;
 use stross_proto::message::{
     CapabilityDescriptor, CodecId, Delivery, DiscoveryInfo, EndpointManifest, EndpointState,
-    MediaKind, RoutePath, ShareToken, StreamInfo, TransportId, TransportPreference, Visibility,
+    EndpointStrategy, MediaKind, RoutePath, ShareToken, StreamInfo, SubscribeSpec, TransportId,
+    TransportPreference, Visibility,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -132,8 +136,9 @@ pub struct Kernel {
     discoverable: AtomicBool,
     /// 采集后端（平台相关，UI 层注入；`Arc` 使其可被引擎复用）。
     backend: Mutex<Option<Arc<dyn CaptureBackend>>>,
-    /// 端点框架：节点设备表 + 已公开端点表（P1 1:1）。
-    registry: Mutex<EndpointRegistry>,
+    /// 端点框架：**三层统一注册表**（节点 → 端点 → 策略；本机 + 互联节点
+    /// 同一张表，docs/endpoint-model-v2.md §2）。
+    registry: Mutex<UnifiedRegistry>,
     /// 端点共享登记（stream_id → 端点）：实时目标生命周期治理——
     /// watchers=0 自动收尾 / 取消通告联动停止 / 同端点订阅收敛（iteration-plan.md 第十二轮）。
     active_shares: Mutex<HashMap<String, ActiveShare>>,
@@ -207,7 +212,7 @@ impl Kernel {
             anchor: Mutex::new(None),
             discoverable: AtomicBool::new(false),
             backend: Mutex::new(None),
-            registry: Mutex::new(EndpointRegistry::new()),
+            registry: Mutex::new(UnifiedRegistry::new()),
             active_shares: Mutex::new(HashMap::new()),
             share_stop_delay: Duration::from_secs(4),
             share_idle_delay: Duration::from_secs(10),
@@ -245,7 +250,12 @@ impl Kernel {
     }
 
     /// 注入本机持久化身份（UI 层启动时调用；缺失时 mDNS 实例名回退旧格式）。
+    /// 同时把本机登记为统一注册表的自节点（`(节点, 端点, 策略)` 查表的
+    /// 本机分支键，docs/endpoint-model-v2.md §2）。
     pub fn set_identity(&self, id: DeviceIdentity) {
+        self.registry
+            .lock_poisoned()
+            .set_self_node(&id.device_id, &id.device_name);
         *self.identity.lock_poisoned() = Some(id);
     }
 
@@ -370,7 +380,7 @@ impl Kernel {
     }
 
     // -----------------------------------------------------------------------
-    // 端点框架（单层端点模型：节点 → 端点，见 docs/endpoint-model.md）
+    // 端点框架（三层端点模型：节点 → 端点 → 策略，见 docs/endpoint-model-v2.md）
     // -----------------------------------------------------------------------
 
     /// 通告端点为可订阅（可见性 / delivery / 传输由公开者声明）。
@@ -413,7 +423,7 @@ impl Kernel {
     }
 
     /// 公开本地文件为文件端点（动态端点 `file:<名>`；本地路径登记但不出现在
-    /// 目录 / 摘要 / wire，见 docs/endpoint-model.md §3.6）。
+    /// 目录 / 摘要 / wire，见 docs/endpoint-model-v2.md §3）。
     pub fn publish_file_endpoint(
         &self,
         path: &Path,
@@ -466,6 +476,62 @@ impl Kernel {
     pub fn local_catalog(&self) -> stross_types::LocalCatalog {
         let endpoints = self.endpoint_catalog();
         stross_types::LocalCatalog { endpoints }
+    }
+
+    // -----------------------------------------------------------------------
+    // 统一注册表（v2 三层：节点 → 端点 → 策略；docs/endpoint-model-v2.md §2）
+    // -----------------------------------------------------------------------
+
+    /// 把目录响应（`GET /api/endpoints`）的互联节点映射进统一注册表
+    /// （节点 → 端点 → 策略）。订阅方拉取目录后调用——与 mDNS 摘要不同，
+    /// 目录携带完整策略组合（序列化 + pick）。
+    pub fn register_remote_directory(&self, dir: &stross_proto::message::EndpointDir, addr: &str) {
+        self.registry
+            .lock_poisoned()
+            .register_remote_directory(dir, addr);
+    }
+
+    /// 统一查表：`registry[节点][端点][策略]` → 策略组合。
+    /// 自订（本机节点）与订其它互联节点走同一套逻辑；`strategy_id` 缺省 =
+    /// 端点默认策略。
+    pub fn resolve_strategy(
+        &self,
+        node_id: &str,
+        endpoint_id: &str,
+        strategy_id: Option<&str>,
+    ) -> Option<EndpointStrategy> {
+        self.registry
+            .lock_poisoned()
+            .resolve_strategy(node_id, endpoint_id, strategy_id)
+    }
+
+    /// 三层注册表快照（节点 → 端点 → 策略；含本机镜像；UI / 调试用）。
+    pub fn registry_nodes(&self) -> Vec<NodeRegistration> {
+        self.registry.lock_poisoned().node_registrations()
+    }
+
+    /// 订阅端点生成 + 委托（v2 订阅端，docs/endpoint-model-v2.md §3）：
+    /// 从注册表 `(节点, 端点, 策略)` 生成订阅端点并调其 `subscribe`——
+    /// 与分享端 `share` 同构（端点自驱动，内核不分派）。订阅目标类型暂无
+    /// 订阅端点宿主时返回错误（媒体播放由接收链路承担）。
+    pub fn subscribe_via_endpoint(
+        &self,
+        app: Arc<Self>,
+        spec: &SubscribeSpec,
+        out_dir: Option<&Path>,
+    ) -> Result<()> {
+        let ep = self
+            .registry
+            .lock_poisoned()
+            .generate_subscribe_endpoint(spec, out_dir)
+            .ok_or_else(|| {
+                Error::Message(format!(
+                    "端点「{}」的订阅目标类型暂无订阅端点宿主（生成订阅端点失败）",
+                    spec.endpoint_id
+                ))
+            })?;
+        ep.subscribe(app, spec.clone());
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1376,6 +1442,17 @@ impl EndpointApp for Kernel {
 
     async fn push_file(&self, path: PathBuf, opts: FilePushOptions) -> anyhow::Result<u64> {
         crate::file_xfer::push_file(&path, &opts).await
+    }
+
+    async fn receive_file(
+        &self,
+        watch_url: String,
+        stream_id: String,
+        out_dir: PathBuf,
+    ) -> anyhow::Result<stross_types::ReceivedFile> {
+        // 对「流尚未出现」重试（与 CLI subscribe_file 同语义兜底；
+        // 订阅端点生成路径共享此竞态收敛）
+        crate::subscriber::receive_file_retry(&watch_url, &stream_id, &out_dir).await
     }
 
     fn note_share_active(

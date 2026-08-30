@@ -97,7 +97,7 @@ function onApproveRequest(req) {
     $('approve-modal').classList.remove('hidden');
 }
 /** 应答协商请求：允许（可勾选记住）或拒绝。允许后服务端签发授予并通知申请方。
- *  订阅驱动定稿（docs/endpoint-model.md §10）：公开方（共享方）在此仅放行订阅，
+ *  订阅驱动定稿（docs/endpoint-model-v2.md §4）：公开方（共享方）在此仅放行订阅，
  *  流由公开方在本地中继发布，订阅方主动连公开方中继 watch 取流（pull），
  *  无 push 出站路径——本端不等待/不接收。 */
 async function respondApprove(allow) {

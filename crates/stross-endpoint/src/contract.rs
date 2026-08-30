@@ -1,11 +1,16 @@
-//! 端点 ↔ 内核行为契约（docs/endpoint-model.md）。
+//! 端点 ↔ 内核行为契约（docs/endpoint-model-v2.md）。
 //!
 //! * **端点** = 节点上可共享的能力实体（屏幕 / 麦克风 / 系统声音 / 文件……）：
 //!   自维护「可挂载性」（`available`，load 探测结果）与失败原因（`last_error`）；
-//! * **行为契约**：每个端点实现两个约定行为——`load`（探测自身可用性）与
-//!   `share`（订阅达成后启动共享推流，类型自决）——内核不做类型分派；
+//! * **双向能力体**（v2）：端点既能被订阅（分享端 `share`）、也能主动订阅别人
+//!   （订阅端 `subscribe`）——**方向挂载在端点层**，节点只是「拥有多个端点」的
+//!   容器，不承载方向；
+//! * **策略**（v2 第三层）：端点自主声明的策略组合 [`EndpointStrategy`]（序列化
+//!   规则 + pick 规则），`strategy()` 组合方法替代 v1 的 `pick_rule()` 散方法；
+//!   注册表只记录「这个数据包怎么处理」的两要素，传输档案（[`ReliabilityProfile`]）
+//!   仍由端点声明、传输模块执行；
 //! * **内核经 [`EndpointApp`] 调度**：端点层不依赖内核，只依赖这个契约接口
-//!   （推流 / 中继端口 / 文件泵）；内核实现它，壳层无感。
+//!   （推流 / 中继端口 / 文件泵 / 文件接收）；内核实现它，壳层无感。
 //!
 //! 目标类型（[`TargetKind`]）：确定目标（文件等，一次推送、有完成态、Lossless）
 //! 与实时目标（屏幕等，持续推流、Lossy）——差异经目标类型维度 + 各端点实现表达。
@@ -16,7 +21,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use stross_proto::message::{Delivery, MediaKind, PickRule, ReliabilityProfile};
+use stross_proto::message::{
+    Delivery, EndpointStrategy, MediaKind, ReliabilityProfile, SubscribeSpec,
+};
 
 use crate::file::FilePushOptions;
 use crate::pipeline::{AudioSourceConfig, StreamConfig, VideoSource};
@@ -55,11 +62,13 @@ impl EndpointBase {
     }
 }
 
-/// 端点 ↔ 内核行为契约。
+/// 端点 ↔ 内核行为契约（v2：双向能力体 + 策略组合）。
 ///
-/// 每个端点必须实现两个约定行为（与内核的约定，非语言特性）：
+/// 每个端点必须实现约定行为（与内核的约定，非语言特性）：
 /// * `load`：探测自身可用性（能否被挂载成节点），维护 `available` / `last_error`；
-/// * `share`：订阅达成后启动共享（推流），类型自决，内核不做分派。
+/// * `share`（**分享端**）：订阅达成后启动共享（推流），类型自决，内核不做分派；
+/// * `subscribe`（**订阅端**）：主动订阅别人并处理（端点作为宿主处理订阅流/数据），
+///   默认不支持（`supports_subscribe() == false`，仅分享端）。
 ///
 /// 端点自维护「可挂载性」：`available() == false` 时不可通告、不可订阅。
 pub trait Endpoint: Send + Sync {
@@ -68,39 +77,47 @@ pub trait Endpoint: Send + Sync {
     fn kind(&self) -> MediaKind;
     /// 用户可见名。
     fn name(&self) -> &str;
-    /// 目标类型（确定目标 / 实时目标）：决定默认传输与共享生命周期。
+    /// 目标类型（确定目标 / 实时目标）：决定共享生命周期（是否 watchers
+    /// 自动收尾）。策略（传输/pick）已由端点自主声明，不按 TargetKind 推导。
     fn target(&self) -> TargetKind;
-    /// 传输层可靠性档案（通信模式 v2，docs/comm-mode-v2.md §3）：协商时随
-    /// 清单上报，内核按它装载传输模块。默认按目标类型推断——实时目标
-    /// （媒体）Lossy（允许丢包），确定目标（文件等）Lossless（不允许丢包）。
-    fn transport_profile(&self) -> ReliabilityProfile {
-        match self.target() {
-            TargetKind::Live => ReliabilityProfile::Lossy,
-            TargetKind::Determined => ReliabilityProfile::Lossless,
-        }
-    }
-    /// pick 规则（装载/解读语义，docs/comm-mode-v2.md §3.0）：协商时随清单
-    /// 上报，发送侧装载逻辑与接收侧解读模块共用。默认按目标类型推断——
-    /// 实时目标 Realtime（严格即时：低延迟、容忍丢帧），确定目标
-    /// StrictOrdered（严格顺序：逐字节不丢）。
-    fn pick_rule(&self) -> PickRule {
-        match self.target() {
-            TargetKind::Live => PickRule::Realtime,
-            TargetKind::Determined => PickRule::StrictOrdered,
-        }
-    }
+    /// 传输层可靠性档案（通信模式 v2，docs/comm-mode-v2.md §3）：**端点自主
+    /// 指定策略标记**——协商时随清单上报，内核按它装载传输模块，不猜测。
+    /// 实时媒体 Lossy（允许丢包）；文件/剪贴板 Lossless（不允许丢包）；
+    /// 弱网流可声明 Adaptive。**不进注册表**（端点声明、传输模块执行）。
+    fn transport_profile(&self) -> ReliabilityProfile;
+    /// 端点自主声明的策略组合（序列化规则 + pick 规则；v2 组合方法，替代 v1
+    /// 的 `pick_rule()` 散方法）。注册表按策略 id 记录，订阅按
+    /// `(节点, 端点, 策略)` 精确取（docs/endpoint-model-v2.md §2）。
+    fn strategy(&self) -> EndpointStrategy;
     /// 能否被挂载成节点（load 探测结果）。
     fn available(&self) -> bool;
     /// load/share 失败原因。
     fn last_error(&self) -> Option<&str>;
     /// load：探测自身可用性；失败 → `available=false` + 记录 `last_error`。
     fn load(&mut self) -> StdResult<(), String>;
-    /// share：订阅达成后启动共享（内部自行 spawn 异步推流）。
+    /// 分享端：订阅达成后启动共享（内部自行 spawn 异步推流）。
     fn share(&self, app: Arc<dyn EndpointApp>, ctx: SubscribeCtx);
+    /// 订阅端：端点是否支持主动订阅别人（`false` = 仅分享端；
+    /// 内核据此决定是否可把订阅委托给本端点）。
+    fn supports_subscribe(&self) -> bool {
+        false
+    }
+    /// 订阅端：主动订阅（[`SubscribeSpec`] 由注册表 `(节点, 端点, 策略)` 解析
+    /// 生成），端点作为宿主处理订阅流/数据（内部自行 spawn 异步处理）。
+    /// 默认：不支持订阅 → 记录告警（与 `supports_subscribe() == false` 一致）。
+    fn subscribe(&self, app: Arc<dyn EndpointApp>, spec: SubscribeSpec) {
+        tracing::warn!(
+            "端点 {}（{}）不支持订阅端，忽略订阅请求 {:?}",
+            self.id(),
+            self.name(),
+            spec.endpoint_id
+        );
+        let _ = app;
+    }
 }
 
 /// 订阅事件载荷：端点 `share` 开推的依据（协商层授予成功后构造，
-/// docs/endpoint-model.md §5 联动）。
+/// docs/endpoint-model-v2.md §4 联动）。
 #[derive(Debug, Clone)]
 pub struct SubscribeCtx {
     /// 订阅方节点 device_id。
@@ -112,9 +129,9 @@ pub struct SubscribeCtx {
     /// 协商定稿的传输层可靠性档案（允许丢包/不允许丢包/自适应）；
     /// 端点据此装载对应传输模块（通信模式 v2，docs/comm-mode-v2.md §3）。
     pub transport_profile: ReliabilityProfile,
-    /// 协商定稿的 pick 规则（严格即时/严格顺序）；端点据此装载对应
-    /// 装载/解读模块（发送侧装载逻辑与接收侧解读模块共用同一规则）。
-    pub pick_rule: PickRule,
+    /// 协商定稿的策略组合（序列化规则 + pick 规则；注册表
+    /// `(节点, 端点, 策略)` 解析结果）；发送侧装载逻辑与接收侧解读模块共用。
+    pub strategy: EndpointStrategy,
     /// push 模式：订阅方中继 HTTP 基址（`ws://ip:port`；公开方出站 push 目标）。
     pub relay_addr: Option<String>,
     /// push 模式：订阅方自签的一次性接入凭证（推流 Hello 出示）。
@@ -137,6 +154,15 @@ pub trait EndpointApp: Send + Sync {
     fn relay_port(&self) -> Option<u16>;
     /// 文件泵推送（文件端点确定目标的一次推送；返回发送字节数）。
     async fn push_file(&self, path: PathBuf, opts: FilePushOptions) -> anyhow::Result<u64>;
+    /// 文件接收（订阅端文件端点确定目标的一次接收；返回落盘结果）。
+    /// 端点 `subscribe`（订阅端）经此把订阅流落盘——与 `push_file` 同构：
+    /// 内核提供调度能力，端点自驱动。
+    async fn receive_file(
+        &self,
+        watch_url: String,
+        stream_id: String,
+        out_dir: PathBuf,
+    ) -> anyhow::Result<stross_types::ReceivedFile>;
     /// 端点共享登记：媒体端点 `start_stream` 成功后回调（实时目标生命周期治理用——
     /// watchers=0 自动收尾 / 取消通告联动停止 / 同端点订阅收敛）。
     ///
@@ -177,7 +203,7 @@ pub fn spawn_media_share(
             quality: crate::pipeline::Quality::MEDIUM,
             audio,
             duration_secs: None,
-            // 订阅驱动定稿（docs/endpoint-model.md §10）：只走 pull——推本机
+            // 订阅驱动定稿（docs/endpoint-model-v2.md §4）：只走 pull——推本机
             // 中继，无出站凭证。
             share_token: None,
         };

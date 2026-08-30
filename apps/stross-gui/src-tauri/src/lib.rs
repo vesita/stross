@@ -141,7 +141,7 @@ pub fn run() {
                         app: app_handle.clone(),
                     };
                     let app_state = app_handle.state::<Arc<Kernel>>().inner().clone();
-                    // 引导层（docs/endpoint-model.md §0）：目录（L2）与订阅握手端点
+                    // 引导层（docs/endpoint-model-v2.md §4）：目录（L2）与订阅握手端点
                     match stross_kernel::bootstrap::start_handshake(app_state, Arc::new(ui), &base)
                         .await
                     {

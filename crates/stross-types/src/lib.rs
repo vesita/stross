@@ -184,6 +184,20 @@ pub struct MediaSubscribeOutcome {
     pub stream_id: String,
 }
 
+/// 文件接收结果（文件端点半程：握手 → 接收 → 落盘；GUI 命令 / CLI 展示共用，
+/// JSON 序列化供前端消费）。应用契约层单一真源（订阅端
+/// [`Endpoint::subscribe`] 经 [`EndpointApp::receive_file`] 返回）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceivedFile {
+    /// 落盘文件名（已净化，只取 basename）。
+    pub name: String,
+    /// 文件字节数（与首帧 FileMeta 校验一致）。
+    pub size: u64,
+    /// 落盘路径。
+    pub path: std::path::PathBuf,
+}
+
 // ---------------------------------------------------------------------------
 // 控制面载荷（CtrlResponse::Ok 的 payload 类型化单一真源；CLI 经
 // `control::client::request_as` 反序列化，不再手写 JSON 字符串键）

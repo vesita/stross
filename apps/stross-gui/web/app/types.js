@@ -14,6 +14,17 @@ const VISIBILITY_LABELS = {
     confirm: '需确认',
     private: '私密',
 };
+/** 序列化规则中文显示（Rust `SerializeRule` wire 值：camelCase）。 */
+const SERIALIZE_LABELS = {
+    passthrough: '直通',
+    chunked: '分包',
+};
+/** pick 规则中文显示（Rust `PickRule` wire 值：camelCase）。 */
+const PICK_LABELS = {
+    realtime: '严格即时',
+    strictOrdered: '严格顺序',
+    none: '无',
+};
 /** 设备/端点种类中文显示。 */
 const DEVICE_KIND_LABELS = {
     screen: '屏幕',

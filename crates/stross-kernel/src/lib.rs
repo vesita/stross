@@ -65,9 +65,9 @@ pub use engine::SenderEngine;
 pub use error::{Error, RelayOpError, Result, WatchError};
 pub use file_xfer::{ReceivedFile, receive_file, receive_file_session};
 pub use kernel::{
-    AuthError, AuthPolicy, DataPlaneBackend, EndpointEntry, EndpointRegistry, FileSource, Kernel,
-    KernelEvent, NodeInfo, NodeRole, PinAuthPolicy, RelayDataPlane, Session, SessionPrefs,
-    TransportAddr,
+    AuthError, AuthPolicy, DataPlaneBackend, EndpointEntry, EndpointRegistration, EndpointRegistry,
+    FileSource, Kernel, KernelEvent, NodeInfo, NodeRegistration, NodeRole, PinAuthPolicy,
+    RelayDataPlane, Session, SessionPrefs, TransportAddr, UnifiedRegistry,
 };
 pub use negotiator::{
     CliUi, DEFAULT_NEGOTIATOR_PORT, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest,
@@ -85,8 +85,8 @@ pub use stross_endpoint::file::FilePushOptions;
 /// 端点层（插件区）契约与端点实现重导出：保持 `stross_kernel::Xxx` 路径兼容
 /// （定义单一真源在 stross-endpoint crate；内核 = 管理调度，消费其契约）。
 pub use stross_endpoint::{
-    Endpoint, EndpointApp, EndpointBase, FileEndpoint, MicEndpoint, Probe, ScreenEndpoint,
-    SubscribeCtx, SystemAudioEndpoint, TargetKind,
+    Endpoint, EndpointApp, EndpointBase, FileEndpoint, FileReceiveEndpoint, MicEndpoint, Probe,
+    ScreenEndpoint, SubscribeCtx, SystemAudioEndpoint, TargetKind,
 };
 pub use stross_proto::message::Platform;
 
@@ -100,8 +100,8 @@ pub use stross_types::{
     UnpublishedView,
 };
 pub use subscriber::{
-    MediaSubscribeOutcome, SubscribeOutcome, fetch_directory, subscribe_file, subscribe_media,
-    subscribe_media_and_watch,
+    MediaSubscribeOutcome, SubscribeOutcome, fetch_directory, subscribe_file,
+    subscribe_file_via_endpoint, subscribe_media, subscribe_media_and_watch,
 };
 /// 展示视图构造帮助函数（`relay_info` / `watch_urls`；兼容重导出见 [`view`]）。
 pub use view::{relay_info, watch_urls};

@@ -34,7 +34,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use stross_proto::message::{
-    Delivery, EndpointDir, EndpointManifest, EndpointNode, MediaKind, TransportId, Visibility,
+    Delivery, EndpointDir, EndpointManifest, EndpointNode, EndpointStrategy, MediaKind,
+    TransportId, Visibility,
 };
 use stross_proto::time::unix_secs;
 use tokio::sync::oneshot;
@@ -257,6 +258,8 @@ struct PendingEntry {
     device_name: String,
     /// 订阅目标端点（端点语义；旧语义为 `None`）。
     endpoint_id: Option<String>,
+    /// 订阅方选定的策略 id（注册表第三层；`None` = 端点默认策略）。
+    strategy_id: Option<String>,
     /// 订阅方期望的 delivery。
     delivery_mode: Option<Delivery>,
     /// push 模式：订阅方中继 HTTP 基址 + 自签凭证（授予成功后触发驱动）。
@@ -343,6 +346,7 @@ impl ShareNegotiator {
                 entry.device_id.clone(),
                 entry.device_name.clone(),
                 entry.endpoint_id.clone(),
+                entry.strategy_id.clone(),
                 entry.delivery_mode,
             )?;
             // 订阅达成：触发上层驱动（文件泵 / 媒体自动推流），docs §5 联动
@@ -391,6 +395,7 @@ impl ShareNegotiator {
         device_id: String,
         device_name: String,
         endpoint_id: Option<String>,
+        strategy_id: Option<String>,
         delivery_mode: Option<Delivery>,
     ) -> Result<ShareGrant, String> {
         let endpoint = endpoint_id
@@ -405,6 +410,7 @@ impl ShareNegotiator {
             &self.store,
             &device_id,
             endpoint.as_ref(),
+            strategy_id.as_deref(),
             delivery_mode,
             media,
             title,
@@ -412,7 +418,7 @@ impl ShareNegotiator {
     }
 
     /// 订阅达成事件：构造 [`SubscribeCtx`] 触发公开方驱动开推
-    /// （docs/endpoint-model.md §5 联动；只对端点语义生效）。
+    /// （docs/endpoint-model-v2.md §4 联动；只对端点语义生效）。
     ///
     /// * pull：数据面流 id = 公开方本机会话（`grant.view.stream_id`），
     ///   推入自己的受控中继，无需凭证；
@@ -506,7 +512,7 @@ pub(crate) async fn handle_request(
         })
         .collect();
 
-    // 按可见性决策（端点语义）或旧信任语义（docs/endpoint-model.md §5）
+    // 按可见性决策（端点语义）或旧信任语义（docs/endpoint-model-v2.md §4）
     match policy_decision(&state.store, endpoint.as_ref(), &req.device_id) {
         Decision::Grant => {
             let (title, media) = match &endpoint {
@@ -518,6 +524,7 @@ pub(crate) async fn handle_request(
                 &state.store,
                 &req.device_id,
                 endpoint.as_ref(),
+                req.strategy_id.as_deref(),
                 req.delivery_mode,
                 media,
                 title,
@@ -559,6 +566,7 @@ pub(crate) async fn handle_request(
                         device_id: req.device_id.clone(),
                         device_name: req.device_name.clone(),
                         endpoint_id: req.endpoint_id.clone(),
+                        strategy_id: req.strategy_id.clone(),
                         delivery_mode: req.delivery_mode,
                         relay_addr: req.relay_addr.clone(),
                         share_token: req.share_token.clone(),
@@ -609,7 +617,7 @@ enum Decision {
     Reject(&'static str),
 }
 
-/// 可见性决策表（docs/endpoint-model.md §5）：
+/// 可见性决策表（docs/endpoint-model-v2.md §4）：
 /// Public 免确认；Confirm 已信任自动、未信任挂起；Private 白名单自动、否则拒绝；
 /// 无端点（旧语义）= 信任自动、未信任挂起。
 fn policy_decision(
@@ -653,11 +661,13 @@ fn policy_decision(
 /// **订阅收敛（iteration-plan.md 第十二轮）**：同端点已有活动共享时——
 /// * pull 复用同一流（中继多 watcher 生效，不新建会话/凭证、不重复触发 share）；
 /// * push 拒绝（公开方单引擎，一次仅一个订阅者，避免"grant 成功但流永不存在"）。
+#[allow(clippy::too_many_arguments)] // 签发原语一次性组合协商全部参数，保持扁平
 fn compose_grant(
     app: &Kernel,
     store: &TrustStore,
     device_id: &str,
     endpoint: Option<&EndpointManifest>,
+    strategy_id: Option<&str>,
     delivery_mode: Option<Delivery>,
     media: Vec<MediaKind>,
     title: String,
@@ -666,7 +676,7 @@ fn compose_grant(
     if let Some(m) = endpoint
         && let Some((sid, _)) = app.active_share_by_endpoint(&m.endpoint_id)
     {
-        // 订阅驱动（docs/endpoint-model.md §10 定稿）：只在 pull 复用——
+        // 订阅驱动（docs/endpoint-model-v2.md §4 定稿）：只在 pull 复用——
         // 同端点已有活动共享（只走 pull），订阅方只用 stream_id（watch 路径）
         // 复用同一流，凭证/中继地址同现流。
         tracing::info!(
@@ -685,6 +695,7 @@ fn compose_grant(
             transports: Some(m.transports.iter().map(|t| t.transport).collect()),
             transport_profile: Some(m.transport_profile),
             pick_rule: Some(m.pick_rule),
+            strategy: Some(strategy_of(m, strategy_id)),
             relay: app.relay_ports().map(|(ws, srt, quic)| RelayAddr {
                 ws_port: ws,
                 srt_port: srt,
@@ -695,7 +706,7 @@ fn compose_grant(
     let view = app
         .issue_share_token_for(title, media, Some(DEFAULT_GRANT_TTL_SECS))
         .map_err(|e| e.to_user_string())?;
-    // 订阅驱动（docs/endpoint-model.md §10 定稿）：数据流一律由订阅方发起并
+    // 订阅驱动（docs/endpoint-model-v2.md §4 定稿）：数据流一律由订阅方发起并
     // 主动取（pull），共享方只在本地中继发布、不做任何主动出站推送。delivery
     // 定稿恒为 Pull（保留枚举 wire 兼容——对端旧版本字段仍可解析，但本端
     // 协商不再产出 push/both 路径）。
@@ -720,15 +731,32 @@ fn compose_grant(
         transports,
         transport_profile: endpoint.map(|m| m.transport_profile),
         pick_rule: endpoint.map(|m| m.pick_rule),
+        strategy: endpoint.map(|m| strategy_of(m, strategy_id)),
         relay,
     })
 }
 
+/// 清单 → 定稿策略组合（注册表第三层；按订阅方选定的策略 id 精确取，
+/// 缺省 = 默认策略（首个），再由平铺 `pick_rule` 推导直通 + pick 兜底——
+/// 与 [`crate::kernel::endpoint`] 的策略推导同语义）。
+fn strategy_of(m: &EndpointManifest, strategy_id: Option<&str>) -> EndpointStrategy {
+    m.strategies
+        .iter()
+        .find(|s| Some(s.strategy_id.as_str()) == strategy_id)
+        .cloned()
+        .or_else(|| m.strategies.first().cloned())
+        .unwrap_or_else(|| EndpointStrategy {
+            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
+            serialize: stross_proto::message::SerializeRule::Passthrough,
+            pick: m.pick_rule,
+        })
+}
+
 /// 订阅达成事件（自由函数版，`handle_request` / `respond` 共用）：构造
-/// [`SubscribeCtx`] 触发端点 `share` 自动开推（docs/endpoint-model.md §1
-/// 契约 / §5 联动；只对端点语义生效）。
+/// [`SubscribeCtx`] 触发端点 `share` 自动开推（docs/endpoint-model-v2.md §3
+/// 契约 / §4 数据流联动；只对端点语义生效）。
 ///
-/// 订阅驱动（docs/endpoint-model.md §10 定稿）：只走 pull——数据面流 id =
+/// 订阅驱动（docs/endpoint-model-v2.md §4 定稿）：只走 pull——数据面流 id =
 /// 公开方本机会话（`grant.view.stream_id`），推入自己的受控中继，无需凭证；
 /// 订阅方连公开方中继 watch 取流（无 push 出站路径）。
 fn notify_subscribed(
@@ -756,7 +784,11 @@ fn notify_subscribed(
         delivery,
         stream_id: grant.view.stream_id.clone(),
         transport_profile: grant.transport_profile.unwrap_or_default(),
-        pick_rule: grant.pick_rule.unwrap_or_default(),
+        strategy: grant.strategy.clone().unwrap_or_else(|| EndpointStrategy {
+            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
+            serialize: stross_proto::message::SerializeRule::Passthrough,
+            pick: grant.pick_rule.unwrap_or_default(),
+        }),
         relay_addr: None,
         share_token: None,
     };
@@ -917,6 +949,7 @@ mod tests {
                 device_id: "dev-phone-1".into(),
                 device_name: "手机A".into(),
                 endpoint_id: None,
+                strategy_id: None,
                 delivery_mode: None,
                 relay_addr: None,
                 share_token: None,
@@ -948,7 +981,7 @@ mod tests {
             port: 0,
         };
         let grant = neg
-            .grant("dev-phone-2".into(), "手机B".into(), None, None)
+            .grant("dev-phone-2".into(), "手机B".into(), None, None, None)
             .expect("信任设备应自动签发");
         assert!(grant.trusted);
         let _ = std::fs::remove_dir_all(&dir);
@@ -972,6 +1005,7 @@ mod tests {
                 device_id: "dev-3".into(),
                 device_name: "手机C".into(),
                 endpoint_id: None,
+                strategy_id: None,
                 delivery_mode: None,
                 relay_addr: None,
                 share_token: None,
@@ -1009,6 +1043,7 @@ mod tests {
                 "手机A".into(),
                 Some("mic:builtin".into()),
                 None,
+                None,
             )
             .expect("Public 端点应自动签发");
         assert_eq!(grant.delivery, Some(Delivery::Pull));
@@ -1045,6 +1080,7 @@ mod tests {
                 "dev-phone".into(),
                 "手机A".into(),
                 Some("sysaudio:builtin".into()),
+                None,
                 Some(Delivery::Push),
             )
             .unwrap();
@@ -1055,6 +1091,7 @@ mod tests {
                 "dev-phone".into(),
                 "手机A".into(),
                 Some("sysaudio:builtin".into()),
+                None,
                 None,
             )
             .unwrap();
@@ -1090,6 +1127,7 @@ mod tests {
                 "设备A".into(),
                 Some("mic:builtin".into()),
                 None,
+                None,
             )
             .unwrap();
         let sid1 = g1.view.stream_id.clone();
@@ -1104,6 +1142,7 @@ mod tests {
                 "dev-b".into(),
                 "设备B".into(),
                 Some("mic:builtin".into()),
+                None,
                 None,
             )
             .unwrap();
@@ -1141,6 +1180,7 @@ mod tests {
                 "dev-a".into(),
                 "设备A".into(),
                 Some("mic:builtin".into()),
+                None,
                 Some(Delivery::Push),
             )
             .unwrap();
@@ -1155,6 +1195,7 @@ mod tests {
                 "dev-b".into(),
                 "设备B".into(),
                 Some("mic:builtin".into()),
+                None,
                 None,
             )
             .unwrap();
@@ -1187,6 +1228,16 @@ mod tests {
             }
             fn target(&self) -> crate::kernel::TargetKind {
                 crate::kernel::TargetKind::Determined
+            }
+            fn transport_profile(&self) -> stross_proto::message::ReliabilityProfile {
+                stross_proto::message::ReliabilityProfile::Lossless
+            }
+            fn strategy(&self) -> stross_proto::message::EndpointStrategy {
+                stross_proto::message::EndpointStrategy {
+                    strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
+                    serialize: stross_proto::message::SerializeRule::Passthrough,
+                    pick: stross_proto::message::PickRule::StrictOrdered,
+                }
             }
             fn available(&self) -> bool {
                 self.base.available
@@ -1236,6 +1287,7 @@ mod tests {
                 device_id: "dev-sub".into(),
                 device_name: "订阅方".into(),
                 endpoint_id: Some(m.endpoint_id.clone()),
+                strategy_id: None,
                 delivery_mode: Some(Delivery::Pull),
                 relay_addr: None,
                 share_token: None,
@@ -1360,6 +1412,7 @@ mod tests {
             device_id: "dev-x".into(),
             device_name: "申请方".into(),
             endpoint_id: Some("screen:0".into()),
+            strategy_id: None,
             delivery_mode: None,
             relay_addr: None,
             share_token: None,

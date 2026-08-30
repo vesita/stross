@@ -14,11 +14,11 @@
 | [requirements.md](requirements.md) | 需求 v2（唯一需求输入） | 权威 |
 | [layering-architecture.md](layering-architecture.md) | **分层判据与红线**（proto→transport→endpoint→types→kernel→bridge→壳层） | 权威 |
 | [architecture.md](architecture.md) | 架构总览：交互模型（共享/订阅）、数据流、中继/接收链路 | 权威 |
-| [endpoint-model.md](endpoint-model.md) | **端点框架规格（唯一规格源）**：load/share 契约、目录/订阅握手、wire | 权威 |
+| [endpoint-model-v2.md](endpoint-model-v2.md) | **端点框架规格（唯一规格源）**：节点→端点→策略三层注册 + 分享/订阅双特性 + 策略组合（序列化+pick） | 权威（已落地） |
+| ~~endpoint-model.md~~ | 端点框架 v1 规格（单层模型 + load/share 契约；已被 v2 演进取代，文件已删除） | 已删除 |
 | [plugin-architecture.md](plugin-architecture.md) | **可插拔传输基座**：Transport trait、ReliabilityProfile、四传输落地 | 权威（阶段 2 已落地） |
 | [comm-mode-v2.md](comm-mode-v2.md) | **通信模式 v2 设计提案**：控制面协商 + 数据面按 id 复用 + 数据衔接层 | 设计提案（待实施） |
 | [protocol.md](protocol.md) | 线上协议：24 字节 v2 帧头 + JSON 控制消息 | 权威 |
-| [endpoint-model.md](endpoint-model.md) 目录 | 见上（节点→端点单层模型） | 权威 |
 | [android-build.md](android-build.md) | **Android 构建实测固化（JDK/工具链/SDK/网络坑 唯一真源）** | 权威 |
 | [platforms.md](platforms.md) | 平台构建与使用（Linux/Windows/Android 快速路径） | 权威（JDK 详见 android-build） |
 | [roadmap.md](roadmap.md) | 路线图（已完成为主 + 待办） | 权威 |
@@ -36,7 +36,7 @@
 - 想改通信模式 / 数据衔接层 / 流级复用：先读 [comm-mode-v2.md](comm-mode-v2.md)
 - 想改中继：`stross-kernel/src/relay/server.rs`
 - 想改内核门面：`stross-kernel/src/kernel/mod.rs`
-- 想改端点框架 / 新增数据源：先读 [endpoint-model.md](endpoint-model.md)，实现见 `stross-endpoint`
+- 想改端点框架 / 新增数据源：先读 [endpoint-model-v2.md](endpoint-model-v2.md)，实现见 `stross-endpoint`
 - 想改 ffmpeg 管线：`stross-endpoint/src/pipeline/`
 - 想改跨壳层类型：`stross-types`
 - 想改 Android 构建：先读 [android-build.md](android-build.md)（唯一真源，AGENTS.md/platforms 只引用）
@@ -46,7 +46,7 @@
 
 1. **单一真源**：同一事实只在一处详述，其余文档只写指针。示例：
    - Android 构建/JDK → `android-build.md`（AGENTS.md、platforms.md 只引用）；
-   - 分层判据 → `layering-architecture.md`；端点规格 → `endpoint-model.md`；
+   - 分层判据 → `layering-architecture.md`；端点规格 → `endpoint-model-v2.md`（v1 已删除，历史见 git）；
    - 传输基座 → `plugin-architecture.md`；通信模式演进 → `comm-mode-v2.md`（只写增量，不重复传输基座）。
 2. **新文档先挂表**：新增文档必须在本表登记（职责 + 状态），并在对应权威文档顶部加关联链接。
 3. **状态标注**：设计提案（待实施）与已落地/归档明确区分；落地方案状态写进文档头部。

@@ -6,7 +6,9 @@
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
-use stross_proto::message::MediaKind;
+use stross_proto::message::{
+    EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SerializeRule,
+};
 
 use crate::contract::{
     Endpoint, EndpointApp, EndpointBase, Probe, SubscribeCtx, TargetKind, spawn_media_share,
@@ -46,6 +48,18 @@ impl Endpoint for MicEndpoint {
     }
     fn target(&self) -> TargetKind {
         TargetKind::Live
+    }
+    fn transport_profile(&self) -> ReliabilityProfile {
+        // 实时音频：允许丢块（持续音轨可容忍微小中断），低延迟
+        ReliabilityProfile::Lossy
+    }
+    fn strategy(&self) -> EndpointStrategy {
+        // 实时目标：直通序列化 + 严格即时（Realtime）
+        EndpointStrategy {
+            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
+            serialize: SerializeRule::Passthrough,
+            pick: PickRule::Realtime,
+        }
     }
     fn available(&self) -> bool {
         self.base.available
@@ -111,6 +125,18 @@ impl Endpoint for SystemAudioEndpoint {
     }
     fn target(&self) -> TargetKind {
         TargetKind::Live
+    }
+    fn transport_profile(&self) -> ReliabilityProfile {
+        // 实时音频：允许丢块（持续音轨可容忍微小中断），低延迟
+        ReliabilityProfile::Lossy
+    }
+    fn strategy(&self) -> EndpointStrategy {
+        // 实时目标：直通序列化 + 严格即时（Realtime）
+        EndpointStrategy {
+            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
+            serialize: SerializeRule::Passthrough,
+            pick: PickRule::Realtime,
+        }
     }
     fn available(&self) -> bool {
         self.base.available

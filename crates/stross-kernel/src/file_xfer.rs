@@ -1,4 +1,4 @@
-//! 文件端点传输（docs/endpoint-model.md §3.6）：文件泵（推）/ 文件接收（拉）。
+//! 文件端点传输（docs/endpoint-model-v2.md §3）：文件泵（推）/ 文件接收（拉）。
 //!
 //! 走**既有数据面零改动**：文件以 `TRACK_FILE` 轨作为普通媒体流推送/观看；
 //! 中继不缓存不门控该轨，因此**公开方必须等到 ≥1 个观看者接入后才开始发帧**
@@ -7,7 +7,7 @@
 //! 帧序列：`FLAG_CONFIG`（FileMeta JSON）→ 数据帧（≤64KiB/帧，pts=块序）
 //! → `FLAG_END`（末块；空文件为空载荷 END 帧）。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::relay::client as relay_http;
@@ -15,7 +15,6 @@ use crate::sender::RelayClient;
 use crate::transport::SessionPacket;
 use crate::watch::connect_watch;
 use anyhow::{Context, bail};
-use serde::Serialize;
 use stross_proto::frame::{CODEC_FILE, FLAG_CONFIG, FLAG_END, Frame, TRACK_FILE};
 use stross_proto::message::{ControlMessage, FileMeta};
 
@@ -149,16 +148,9 @@ async fn watchers_of(streams_url: &str, stream_id: &str) -> Option<u32> {
 }
 
 /// 接收结果（GUI 命令 / CLI 展示共用；JSON 序列化供前端消费）。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReceivedFile {
-    /// 落盘文件名（已净化，只取 basename）。
-    pub name: String,
-    /// 文件字节数（与首帧 FileMeta 校验一致）。
-    pub size: u64,
-    /// 落盘路径。
-    pub path: PathBuf,
-}
+/// 应用契约层单一真源在 stross-types（`subscribe_file` / 订阅端点经此返回）；
+/// 此处重导出保持 `stross_kernel::file_xfer::ReceivedFile` 路径兼容。
+pub use stross_types::ReceivedFile;
 
 /// 连接并接收一个文件流到 `out_dir`（返回落盘结果）。
 pub async fn receive_file(

@@ -1,4 +1,4 @@
-//! `stross endpoint`：端点框架（docs/endpoint-model.md）的**订阅方交互面**。
+//! `stross endpoint`：端点框架（docs/endpoint-model-v2.md）的**订阅方交互面**。
 //!
 //! 分层（docs/layering-architecture.md）：本文件只做**参数解析 + 展示**；
 //! 目录拉取（`fetch_directory`）、订阅编排（本地接收准备 + 握手 + watch/重试）

@@ -32,7 +32,9 @@ pub use endpoint::{
     Delivery, EndpointManifest, EndpointState, EndpointSummary, FileMeta, TransportPreference,
     Visibility,
 };
-pub use ids::{CapabilityKind, CodecId, MediaKind, ReliabilityProfile, RoleId, TransportId};
+pub use ids::{
+    CapabilityKind, CodecId, MediaKind, PickRule, ReliabilityProfile, RoleId, TransportId,
+};
 pub use negotiator::{
     EndpointDir, EndpointNode, RelayAddr, ShareGrant, ShareRequest, ShareTokenView,
 };

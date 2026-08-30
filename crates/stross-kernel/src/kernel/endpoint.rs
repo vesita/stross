@@ -132,6 +132,10 @@ impl EndpointRegistry {
             visibility: entry.visibility.clone(),
             delivery: entry.delivery,
             transports: entry.transports.clone(),
+            // 通信模式 v2 档案：端点声明（Endpoint 契约按目标类型推断，
+            // 具体端点可覆写）；协商时随清单上报
+            transport_profile: entry.ep.transport_profile(),
+            pick_rule: entry.ep.pick_rule(),
             codecs: entry.codecs.clone(),
             state: entry.state,
             subscribers: entry.subscribers,
@@ -379,6 +383,17 @@ mod tests {
             TransportId::Quic,
             "实时目标默认 QUIC 优先"
         );
+        // 通信模式 v2 档案：实时目标（屏幕）默认 Lossy + Realtime
+        assert_eq!(
+            m.transport_profile,
+            stross_proto::message::ReliabilityProfile::Lossy,
+            "实时目标默认允许丢包"
+        );
+        assert_eq!(
+            m.pick_rule,
+            stross_proto::message::PickRule::Realtime,
+            "实时目标默认严格即时规则"
+        );
 
         // 重复通告报错
         assert!(
@@ -457,6 +472,17 @@ mod tests {
         assert!(m.available, "文件端点 load 应探测可读");
         assert_eq!(m.transports.len(), 2, "确定目标默认 QUIC>WS");
         assert_eq!(m.transports[0].transport, TransportId::Quic);
+        // 通信模式 v2 档案：确定目标（文件）默认 Lossless + StrictOrdered
+        assert_eq!(
+            m.transport_profile,
+            stross_proto::message::ReliabilityProfile::Lossless,
+            "确定目标默认不允许丢包"
+        );
+        assert_eq!(
+            m.pick_rule,
+            stross_proto::message::PickRule::StrictOrdered,
+            "确定目标默认严格顺序规则"
+        );
         // 文件源可查（本地路径不落 wire：清单里没有 path 字段）
         let src = r.file_source(&m.endpoint_id).expect("文件源已登记");
         assert_eq!(src.name, "备注.txt");
@@ -534,6 +560,8 @@ mod tests {
             subscriber: "dev-phone".into(),
             delivery: Delivery::Push,
             stream_id: "sess-1".into(),
+            transport_profile: stross_proto::message::ReliabilityProfile::Lossy,
+            pick_rule: stross_proto::message::PickRule::Realtime,
             relay_addr: Some("ws://192.168.1.5:9000".into()),
             share_token: Some("tok".into()),
         };

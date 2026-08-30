@@ -4,7 +4,8 @@
 //! 推流/接收编排都在这里，以 [`Kernel`] 门面为单一入口：
 //!
 //! * [`relay`]：中继服务器 + 中继 HTTP 客户端（数据面，服务端契约单一真源）
-//! * [`sender`] / [`watch`] / [`jitter`] / [`session_channel`]：推流客户端与观看链路
+//! * [`pick`]：pick 规则层（装载/解读语义：严格即时 / 严格顺序，docs/comm-mode-v2.md §3.0）
+//! * [`sender`] / [`watch`]：推流客户端与观看链路
 //! * [`discovery`]：mDNS 服务发现（浏览 + 广播）
 //! * [`negotiator`] / [`negotiator_client`]：凭证自动协商（服务端 + 客户端）
 //! * [`control`]：控制面（服务端 + 客户端，仅回环）
@@ -37,15 +38,14 @@ pub mod discovery;
 pub mod engine;
 pub mod error;
 pub mod file_xfer;
-pub mod jitter;
 pub mod kernel;
 mod lock;
 pub mod negotiator;
 pub mod negotiator_client;
+pub mod pick;
 pub mod receiver;
 pub mod relay;
 pub mod sender;
-pub mod session_channel;
 pub mod settings;
 pub mod subscriber;
 pub mod view;

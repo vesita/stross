@@ -5,7 +5,7 @@
 //! * [`serve`]   —— Stross 常驻实例（内核 + 受控中继 + 控制面）
 //! * [`ctrl`]    —— 接入运行中实例的控制面，异步下发控制命令（D7）
 //! * [`push`]    —— 推流（内嵌中继，或推往外部中继）
-//! * [`receive`] —— 接收并原生解码（`SessionDataManager` + `PlaybackSink`，D6）
+//! * [`receive`] —— 接收并原生解码（pick 解读模块 + `PlaybackSink`，D6）
 //!
 //! 本地双实例串流测试示例：
 //!
@@ -56,7 +56,7 @@ enum Command {
     Adb(adb::AdbArgs),
     /// 推流：内嵌中继，或推往外部中继
     Push(push::PushArgs),
-    /// 接收：WS 收流 → SessionDataManager → PlaybackSink 原生解码
+    /// 接收：WS 收流 → pick 解读模块 → PlaybackSink 原生解码
     Receive(receive::ReceiveArgs),
     /// 端点框架订阅方交互：目录拉取（ls）/ 订阅并接收（subscribe）
     Endpoint(endpoint::EndpointArgs),

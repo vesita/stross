@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::endpoint::{Delivery, EndpointManifest};
-use super::ids::{MediaKind, TransportId};
+use super::ids::{MediaKind, PickRule, ReliabilityProfile, TransportId};
 
 /// 一次性接入凭证视图（接收端签发后展示；订阅握手授予的 flatten 载荷）。
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -77,6 +77,13 @@ pub struct ShareGrant {
     /// 公开方接受的传输列表（按公开者声明的优先序；订阅方据此选择/降级）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transports: Option<Vec<TransportId>>,
+    /// 协商定稿的传输层可靠性档案（端点语义；通信模式 v2，docs/comm-mode-v2.md §3）。
+    /// `None` = 旧语义（无端点）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_profile: Option<ReliabilityProfile>,
+    /// 协商定稿的 pick 规则（端点语义）；订阅方据此装载对应解读模块。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick_rule: Option<PickRule>,
     /// pull 模式：公开方中继地址；push 模式为 `None`（公开方凭凭证出站）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayAddr>,
@@ -141,6 +148,8 @@ mod tests {
             trusted: true,
             delivery: Some(Delivery::Pull),
             transports: None,
+            transport_profile: Some(ReliabilityProfile::Lossy),
+            pick_rule: Some(PickRule::Realtime),
             relay: Some(RelayAddr {
                 ws_port: 18777,
                 srt_port: Some(33462),
@@ -153,6 +162,8 @@ mod tests {
         assert_eq!(json["token"], "tok");
         assert_eq!(json["trusted"], true);
         assert_eq!(json["delivery"], "pull");
+        assert_eq!(json["transportProfile"], "lossy");
+        assert_eq!(json["pickRule"], "realtime");
         assert_eq!(json["relay"]["wsPort"], 18777);
         assert_eq!(json["relay"]["srtPort"], 33462);
         assert!(json["relay"].get("quicPort").is_none());

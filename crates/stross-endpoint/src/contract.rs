@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use stross_proto::message::{Delivery, MediaKind};
+use stross_proto::message::{Delivery, MediaKind, PickRule, ReliabilityProfile};
 
 use crate::file::FilePushOptions;
 use crate::pipeline::{AudioSourceConfig, StreamConfig, VideoSource};
@@ -70,6 +70,25 @@ pub trait Endpoint: Send + Sync {
     fn name(&self) -> &str;
     /// 目标类型（确定目标 / 实时目标）：决定默认传输与共享生命周期。
     fn target(&self) -> TargetKind;
+    /// 传输层可靠性档案（通信模式 v2，docs/comm-mode-v2.md §3）：协商时随
+    /// 清单上报，内核按它装载传输模块。默认按目标类型推断——实时目标
+    /// （媒体）Lossy（允许丢包），确定目标（文件等）Lossless（不允许丢包）。
+    fn transport_profile(&self) -> ReliabilityProfile {
+        match self.target() {
+            TargetKind::Live => ReliabilityProfile::Lossy,
+            TargetKind::Determined => ReliabilityProfile::Lossless,
+        }
+    }
+    /// pick 规则（装载/解读语义，docs/comm-mode-v2.md §3.0）：协商时随清单
+    /// 上报，发送侧装载逻辑与接收侧解读模块共用。默认按目标类型推断——
+    /// 实时目标 Realtime（严格即时：低延迟、容忍丢帧），确定目标
+    /// StrictOrdered（严格顺序：逐字节不丢）。
+    fn pick_rule(&self) -> PickRule {
+        match self.target() {
+            TargetKind::Live => PickRule::Realtime,
+            TargetKind::Determined => PickRule::StrictOrdered,
+        }
+    }
     /// 能否被挂载成节点（load 探测结果）。
     fn available(&self) -> bool;
     /// load/share 失败原因。
@@ -90,6 +109,12 @@ pub struct SubscribeCtx {
     pub delivery: Delivery,
     /// 数据面流 id：pull = 公开方本机会话（内核预授权）；push = 订阅方自签会话。
     pub stream_id: String,
+    /// 协商定稿的传输层可靠性档案（允许丢包/不允许丢包/自适应）；
+    /// 端点据此装载对应传输模块（通信模式 v2，docs/comm-mode-v2.md §3）。
+    pub transport_profile: ReliabilityProfile,
+    /// 协商定稿的 pick 规则（严格即时/严格顺序）；端点据此装载对应
+    /// 装载/解读模块（发送侧装载逻辑与接收侧解读模块共用同一规则）。
+    pub pick_rule: PickRule,
     /// push 模式：订阅方中继 HTTP 基址（`ws://ip:port`；公开方出站 push 目标）。
     pub relay_addr: Option<String>,
     /// push 模式：订阅方自签的一次性接入凭证（推流 Hello 出示）。
@@ -152,11 +177,9 @@ pub fn spawn_media_share(
             quality: crate::pipeline::Quality::MEDIUM,
             audio,
             duration_secs: None,
-            share_token: if ctx.delivery == Delivery::Push {
-                ctx.share_token.clone()
-            } else {
-                None
-            },
+            // 订阅驱动定稿（docs/endpoint-model.md §10）：只走 pull——推本机
+            // 中继，无出站凭证。
+            share_token: None,
         };
         let relay_url = resolve_media_url(&ctx);
         match app.start_stream(cfg, relay_url).await {
@@ -174,35 +197,19 @@ pub fn spawn_media_share(
     });
 }
 
-/// 媒体推流的目标地址：push → 订阅方中继 + `/ws/push`；pull → `None`
-/// （推本机中继，地址由内核自动选择）。
-pub fn resolve_media_url(ctx: &SubscribeCtx) -> Option<String> {
-    if ctx.delivery == Delivery::Push {
-        let base = ctx.relay_addr.as_deref()?;
-        Some(format!("{base}/ws/push"))
-    } else {
-        None
-    }
+/// 媒体推流的目标地址：订阅驱动定稿只走 pull → `None`（推本机中继，地址由
+/// 内核自动选择；无 push 出站路径）。
+pub fn resolve_media_url(_ctx: &SubscribeCtx) -> Option<String> {
+    None
 }
 
-/// 文件泵推送地址：push → 订阅方中继；pull → 自己的受控中继（回环地址）。
-pub fn resolve_file_url(app: &dyn EndpointApp, ctx: &SubscribeCtx) -> Option<String> {
-    match ctx.delivery {
-        Delivery::Push => {
-            let base = ctx.relay_addr.as_deref()?;
-            Some(format!("{base}/ws/push"))
-        }
-        Delivery::Pull | Delivery::Both => {
-            let port = app.relay_port()?;
-            Some(format!("ws://127.0.0.1:{port}/ws/push"))
-        }
-    }
+/// 文件泵推送地址：订阅驱动定稿只走 pull → 自己的受控中继（回环地址）。
+pub fn resolve_file_url(app: &dyn EndpointApp, _ctx: &SubscribeCtx) -> Option<String> {
+    let port = app.relay_port()?;
+    Some(format!("ws://127.0.0.1:{port}/ws/push"))
 }
 
-/// 观看数轮询基址（文件泵等观看者接入用）：push = 订阅方中继；pull = 自己中继。
-pub fn resolve_watcher_base(app: &dyn EndpointApp, ctx: &SubscribeCtx) -> Option<String> {
-    match ctx.delivery {
-        Delivery::Push => ctx.relay_addr.clone(),
-        Delivery::Pull | Delivery::Both => app.relay_port().map(|p| format!("ws://127.0.0.1:{p}")),
-    }
+/// 观看数轮询基址（文件泵等观看者接入用）：订阅驱动定稿只走 pull → 自己中继。
+pub fn resolve_watcher_base(app: &dyn EndpointApp, _ctx: &SubscribeCtx) -> Option<String> {
+    app.relay_port().map(|p| format!("ws://127.0.0.1:{p}"))
 }

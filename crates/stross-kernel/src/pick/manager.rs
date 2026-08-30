@@ -1,21 +1,26 @@
-//! 交互数据管理模块（需求 docs/requirements.md §4.4 / F4）。
+//! 流式通道（RealtimePacing 内部机制）与解读模块注册表
+//! （需求 docs/requirements.md §4.4 / F4）。
 //!
-//! 每条会话（session_id）两个通道：
+//! 每条会话（session_id）一个**解读模块**（pick 规则层，通信模式 v2，
+//! docs/comm-mode-v2.md §3.0）：
 //!
-//! * **流式通道**（[`StreamChannel`]）：媒体帧。按会话协商出的传输可靠性分流——
-//!   无损（WS/QUIC 全序不丢）直通；有损/自适应（WebRTC/SRT）经
-//!   [抖动缓冲](crate::jitter::JitterBuffer) 按序 / 按关键帧对齐产出；
-//! * **无损通道**（二期）：文件分块 / 剪贴板 / 输入，Lossless + 滑动窗口（另行实现）。
+//! * [`RealtimePacing`](super::interpret::RealtimePacing)（默认）：媒体帧
+//!   严格即时解读——按会话协商出的传输可靠性分流（无损直通 / 有损经
+//!   [抖动缓冲](super::buffer::JitterBuffer) 按序/按关键帧对齐产出）；
+//! * [`StrictOrdered`](super::interpret::StrictOrdered)：文件分块 / 剪贴板 /
+//!   输入——严格顺序、逐字节不丢（Lossless + seq 单调校验）。
 //!
-//! [`SessionDataManager`] 是会话级容器：以 `session_id` 索引各通道，
-//! 生命周期与会话一致（`channel()` 于会话建立、`remove()` 于会话拆除）。
+//! [`InterpretRegistry`] 是会话级容器：以 `session_id` 装载/索引各解读模块，
+//! 生命周期与会话一致（`adapter()` 于会话建立、`remove()` 于会话拆除）。
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use stross_proto::frame::{Frame, TRACK_VIDEO};
+use stross_proto::message::PickRule;
 
-use crate::jitter::{JitterBuffer, JitterConfig};
+use super::buffer::{JitterBuffer, JitterConfig};
+use super::interpret::{Interpreter, RealtimePacing, StrictOrdered};
 
 /// 流式通道的数据路径（由会话协商出的传输可靠性决定）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,38 +120,56 @@ impl StreamChannel {
     }
 
     /// 两轨抖动缓冲统计（有损路径有效；诊断用）。
-    pub const fn stats(&self) -> (crate::jitter::JitterStats, crate::jitter::JitterStats) {
+    pub const fn stats(&self) -> (super::buffer::JitterStats, super::buffer::JitterStats) {
         (self.video.stats, self.audio.stats)
     }
 }
 
-/// 交互数据管理：按会话索引流式通道。
+/// 解读模块注册表：按会话装载 pick 规则解读模块。
 #[derive(Default)]
-pub struct SessionDataManager {
-    channels: HashMap<String, StreamChannel>,
+pub struct InterpretRegistry {
+    interpreters: HashMap<String, Box<dyn Interpreter>>,
 }
 
-impl SessionDataManager {
-    /// 会话建立时创建（或复用）其流式通道。
-    pub fn channel(&mut self, session_id: &str, kind: ChannelKind) -> &mut StreamChannel {
-        self.channels
+impl InterpretRegistry {
+    /// 会话建立时创建（或复用）其解读模块。
+    ///
+    /// `rule`：协商定稿的 pick 规则（订阅握手携带；通信模式 v2）——
+    /// [`PickRule::StrictOrdered`]（文件/剪贴板）装载严格顺序模块，
+    /// 其余（Realtime/None）装载严格即时模块。`kind` 由传输可靠性契约
+    /// 决定（实时模块内部的无损直通 / 有损抖动分流）。
+    pub fn adapter(
+        &mut self,
+        session_id: &str,
+        rule: PickRule,
+        kind: ChannelKind,
+    ) -> &mut dyn Interpreter {
+        let key = (rule, kind);
+        let slot = self
+            .interpreters
             .entry(session_id.to_string())
-            .or_insert_with(|| StreamChannel::new(kind))
+            .or_insert_with(|| match key {
+                (PickRule::StrictOrdered, _) => {
+                    Box::new(StrictOrdered::new()) as Box<dyn Interpreter>
+                }
+                (_, kind) => Box::new(RealtimePacing::new(kind)) as Box<dyn Interpreter>,
+            });
+        slot.as_mut()
     }
 
     /// 会话拆除时移除（释放缓冲）。
     pub fn remove(&mut self, session_id: &str) {
-        self.channels.remove(session_id);
+        self.interpreters.remove(session_id);
     }
 
-    /// 当前活跃通道数。
+    /// 当前活跃会话数。
     pub fn len(&self) -> usize {
-        self.channels.len()
+        self.interpreters.len()
     }
 
     /// 是否为空。
     pub fn is_empty(&self) -> bool {
-        self.channels.is_empty()
+        self.interpreters.is_empty()
     }
 }
 
@@ -192,15 +215,50 @@ mod tests {
     }
 
     #[test]
-    fn manager_lifecycle() {
-        let mut m = SessionDataManager::default();
+    fn manager_loads_adapter_by_rule() {
+        let mut m = InterpretRegistry::default();
         assert!(m.is_empty());
-        m.channel("sess-1", ChannelKind::Lossy)
+        // 严格即时规则（默认/媒体）：RealtimePacing 模块
+        m.adapter("sess-1", PickRule::Realtime, ChannelKind::Lossy)
             .push(frame(TRACK_AUDIO, 0, false), Instant::now());
-        m.channel("sess-2", ChannelKind::Lossless);
+        // 严格顺序规则（文件/剪贴板）：StrictOrdered 模块
+        m.adapter("sess-2", PickRule::StrictOrdered, ChannelKind::Lossless)
+            .push(frame(TRACK_AUDIO, 0, false), Instant::now());
+        assert_eq!(m.len(), 2);
+        assert_eq!(
+            m.adapter("sess-1", PickRule::Realtime, ChannelKind::Lossy)
+                .rule(),
+            PickRule::Realtime
+        );
+        assert_eq!(
+            m.adapter("sess-2", PickRule::StrictOrdered, ChannelKind::Lossless)
+                .rule(),
+            PickRule::StrictOrdered
+        );
+        m.remove("sess-1");
+        assert_eq!(m.len(), 1);
+        // sess-2 仍存活（按 id 装载/拆除互不级联）
+        assert!(
+            m.adapter("sess-2", PickRule::StrictOrdered, ChannelKind::Lossless)
+                .rule()
+                == PickRule::StrictOrdered
+        );
+    }
+
+    #[test]
+    fn manager_lifecycle() {
+        let mut m = InterpretRegistry::default();
+        assert!(m.is_empty());
+        m.adapter("sess-1", PickRule::Realtime, ChannelKind::Lossy)
+            .push(frame(TRACK_AUDIO, 0, false), Instant::now());
+        m.adapter("sess-2", PickRule::Realtime, ChannelKind::Lossless);
         assert_eq!(m.len(), 2);
         m.remove("sess-1");
         assert_eq!(m.len(), 1);
-        assert!(m.channels.contains_key("sess-2"));
+        assert!(
+            m.adapter("sess-2", PickRule::Realtime, ChannelKind::Lossless)
+                .rule()
+                == PickRule::Realtime
+        );
     }
 }

@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::ids::{CodecId, MediaKind, TransportId};
+use super::ids::{CodecId, MediaKind, PickRule, ReliabilityProfile, TransportId};
 
 /// mDNS 摘要层（L1）：只带 id/kind/name/是否可挂载/是否已通告，绝无协议、
 /// 可见性等详情（详情走 L2 `GET /api/endpoints` 拉取）。
@@ -154,6 +154,14 @@ pub struct EndpointManifest {
     pub delivery: Delivery,
     /// 公开者选择的传输（按 priority 升序）。
     pub transports: Vec<TransportPreference>,
+    /// 传输层可靠性档案（允许丢包/不允许丢包/自适应；端点在 `share()` 前
+    /// 据此装载对应传输模块）。缺省 Lossy（媒体实时路径）。
+    #[serde(default)]
+    pub transport_profile: ReliabilityProfile,
+    /// pick 规则（装载/解读语义：严格即时/严格顺序/无；发送侧装载逻辑与
+    /// 接收侧解读模块共用，docs/comm-mode-v2.md §3.0）。缺省 Realtime。
+    #[serde(default)]
+    pub pick_rule: PickRule,
     /// 该端点实际可用的编解码。
     pub codecs: Vec<CodecId>,
     pub state: EndpointState,
@@ -214,6 +222,8 @@ mod tests {
                     priority: 1,
                 },
             ],
+            transport_profile: ReliabilityProfile::Lossy,
+            pick_rule: PickRule::Realtime,
             codecs: vec![CodecId::Aac],
             state: EndpointState::Idle,
             subscribers: 0,
@@ -354,6 +364,15 @@ mod tests {
             !text.contains("\"device\""),
             "单层模型不应有 device 嵌套: {text}"
         );
+        // 通信模式 v2 档案字段上 wire（传输档案 + pick 规则；camelCase）
+        assert!(
+            text.contains("\"transportProfile\":\"lossy\""),
+            "传输档案应上 wire: {text}"
+        );
+        assert!(
+            text.contains("\"pickRule\":\"realtime\""),
+            "pick 规则应上 wire: {text}"
+        );
         let back: EndpointManifest = serde_json::from_str(&text).unwrap();
         assert_eq!(m, back);
         // 不可用端点的 last_error 上 wire
@@ -367,5 +386,15 @@ mod tests {
         );
         let back2: EndpointManifest = serde_json::from_str(&text2).unwrap();
         assert_eq!(m2, back2);
+    }
+
+    /// 旧 wire（无档案字段）反序列化：`#[serde(default)]` 回退到 Lossy/Realtime，
+    /// 不破坏旧对端 / 旧目录缓存的兼容性。
+    #[test]
+    fn manifest_parses_without_profile_fields() {
+        let old = r#"{"endpointId":"mic:builtin","kind":"mic","name":"麦克风","available":true,"published":true,"visibility":"public","delivery":"pull","transports":[],"codecs":[],"state":"idle","subscribers":0,"updatedAt":1800000000}"#;
+        let m: EndpointManifest = serde_json::from_str(old).unwrap();
+        assert_eq!(m.transport_profile, ReliabilityProfile::Lossy);
+        assert_eq!(m.pick_rule, PickRule::Realtime);
     }
 }

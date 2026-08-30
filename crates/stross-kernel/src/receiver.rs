@@ -1,7 +1,7 @@
 //! 接收播放引擎（1e）：从局域网中继**接收并原生解码**。
 //!
 //! 链路：`watch`（WS / SRT / QUIC，按 relay URL scheme 选传输，见
-//! [`crate::watch::connect_watch`]）→ [`SessionDataManager`] 无损通道
+//! [`crate::watch::connect_watch`]）→ pick 规则解读模块（[`crate::pick`]）
 //! （1b）→ [`FfmpegPlaybackSink`] 解码（1c，D6）→ 解码帧通道交给上层
 //! （GUI 绘制 / 录制）。与发送侧对称，是"接收端有选择权"（F2.1）的实现基础。
 //!
@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::SessionPacket;
+use crate::pick::manager::InterpretRegistry;
+use crate::pick::manager::channel_kind_for_url;
 use crate::relay::RelayState;
-use crate::session_channel::{SessionDataManager, channel_kind_for_url};
 use crate::watch;
 // 桌面解码播放路径（ffmpeg 子进程）；Android 走 `start_raw` 编码帧转发，
 // 由 Kotlin MediaCodec 解码（见 stross-gui `mobile::spawn_android_playback`）。
@@ -25,6 +26,7 @@ use stross_endpoint::playback::{
     VideoOut, VideoPacing,
 };
 use stross_proto::frame::Frame;
+use stross_proto::message::PickRule;
 use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
@@ -69,7 +71,7 @@ pub struct LocalProxy {
     pub ws_base: String,
 }
 
-/// watch 主循环公共核心：连接（含级联兜底）→ 每帧经抖动/直通通道 →
+/// watch 主循环公共核心：连接（含级联兜底）→ 每帧经解读模块 →
 /// `consume` 消费；`sync` 每 100ms 与收尾时同步统计。
 /// [`receive_loop`]（解码播放）与 [`receive_raw_loop`]（编码帧转发）共用，
 /// 消除两处 ~40 行重复的循环/通道/统计骨架。
@@ -77,6 +79,7 @@ async fn watch_consume_loop<C, S>(
     inner: Arc<ReceiverInner>,
     relay_url: String,
     stream_id: String,
+    pick_rule: PickRule,
     local_proxy: Option<LocalProxy>,
     consume: C,
     sync: S,
@@ -91,7 +94,10 @@ async fn watch_consume_loop<C, S>(
             return;
         }
     };
-    watch_consume_loop_connected(inner, data, &relay_url, &stream_id, consume, sync).await;
+    watch_consume_loop_connected(
+        inner, data, &relay_url, &stream_id, pick_rule, consume, sync,
+    )
+    .await;
 }
 
 /// [`watch_consume_loop`] 的**已连接**版本：连接（含级联兜底）由调用方完成，
@@ -102,6 +108,7 @@ async fn watch_consume_loop_connected<C, S>(
     data: Box<dyn crate::DataSession>,
     relay_url: &str,
     stream_id: &str,
+    pick_rule: PickRule,
     mut consume: C,
     mut sync: S,
 ) where
@@ -111,7 +118,7 @@ async fn watch_consume_loop_connected<C, S>(
     // 连接成功即置运行态（不能等首帧或 100ms sync：首帧早到时前端
     // 可能已轮询到 running=false 而误判「流已结束」）
     inner.stats.lock_poisoned().running = true;
-    let mut mgr = SessionDataManager::default();
+    let mut mgr = InterpretRegistry::default();
     // 通道按传输可靠性分流（B5）：SRT（Adaptive，ARQ 超时即丢/可能乱序）→
     // 有损路径进抖动缓冲；WS/QUIC（全序不丢）→ 直通。
     let channel_kind = channel_kind_for_url(relay_url);
@@ -125,10 +132,10 @@ async fn watch_consume_loop_connected<C, S>(
             Ok(Some(SessionPacket::Media(frame))) => {
                 inner.stats.lock_poisoned().received += 1;
                 // 单次借用通道：push + poll 共用一个 &mut（热路径）
-                let channel = mgr.channel(stream_id, channel_kind);
-                channel.push(frame, Instant::now());
+                let adapter = mgr.adapter(stream_id, pick_rule, channel_kind);
+                adapter.push(frame, Instant::now());
                 // 消息驱动：立即产出
-                for f in channel.poll(Instant::now()) {
+                for f in adapter.poll(Instant::now()) {
                     consume(f);
                 }
             }
@@ -185,6 +192,9 @@ pub struct Receiver {
 struct ReceiverInner {
     stopped: AtomicBool,
     stats: Mutex<ReceiveStats>,
+    /// 协商定稿的解读档案（通信模式 v2）：装载对应解读模块
+    /// （RealtimePacing / StrictOrdered）。
+    pick_rule: PickRule,
     frames: Mutex<Option<mpsc::Receiver<RenderedFrame>>>,
     /// 编码帧转发通道（`start_raw` 用；Android 播放路径，Kotlin MediaCodec 解码）。
     raw_frames: Mutex<Option<mpsc::Receiver<Frame>>>,
@@ -196,6 +206,8 @@ impl Receiver {
     ///
     /// `audio_out` 决定音频去向：设备（扬声器，D3 反向音频）或丢弃。
     /// `local_proxy`：本机中继代理能力（直连失败时级联兜底，见 [`LocalProxy`]）。
+    /// `pick_rule`：协商定稿的解读档案（默认 [`PickRule::Realtime`]；
+    /// 文件等确定目标订阅方应传 [`PickRule::StrictOrdered`]）。
     #[cfg(not(target_os = "android"))]
     pub async fn start(
         relay_url: String,
@@ -203,7 +215,36 @@ impl Receiver {
         audio_out: AudioOut,
         local_proxy: Option<LocalProxy>,
     ) -> Result<Arc<Self>> {
-        Self::start_impl(relay_url, stream_id, audio_out, local_proxy, false).await
+        Self::start_impl(
+            relay_url,
+            stream_id,
+            audio_out,
+            local_proxy,
+            false,
+            PickRule::Realtime,
+        )
+        .await
+    }
+
+    /// 同 [`Receiver::start`]，可指定解读档案（通信模式 v2：内核按档案
+    /// 装载对应解读模块）。
+    #[cfg(not(target_os = "android"))]
+    pub async fn start_with_rule(
+        relay_url: String,
+        stream_id: String,
+        audio_out: AudioOut,
+        local_proxy: Option<LocalProxy>,
+        pick_rule: PickRule,
+    ) -> Result<Arc<Self>> {
+        Self::start_impl(
+            relay_url,
+            stream_id,
+            audio_out,
+            local_proxy,
+            false,
+            pick_rule,
+        )
+        .await
     }
 
     /// 开始接收 `relay_url` 上的 `stream_id`，解码帧**全量**经
@@ -232,6 +273,7 @@ impl Receiver {
         let inner = Arc::new(ReceiverInner {
             stopped: AtomicBool::new(false),
             stats: Mutex::new(ReceiveStats::default()),
+            pick_rule: PickRule::Realtime,
             frames: Mutex::new(Some(frame_rx)),
             raw_frames: Mutex::new(None),
         });
@@ -254,11 +296,13 @@ impl Receiver {
         audio_out: AudioOut,
         local_proxy: Option<LocalProxy>,
         full_frames: bool,
+        pick_rule: PickRule,
     ) -> Result<Arc<Self>> {
         let (frame_tx, frame_rx) = mpsc::channel::<RenderedFrame>(128);
         let inner = Arc::new(ReceiverInner {
             stopped: AtomicBool::new(false),
             stats: Mutex::new(ReceiveStats::default()),
+            pick_rule,
             frames: Mutex::new(Some(frame_rx)),
             raw_frames: Mutex::new(None),
         });
@@ -301,6 +345,7 @@ impl Receiver {
         let inner = Arc::new(ReceiverInner {
             stopped: AtomicBool::new(false),
             stats: Mutex::new(ReceiveStats::default()),
+            pick_rule: PickRule::Realtime,
             frames: Mutex::new(None),
             raw_frames: Mutex::new(Some(frame_rx)),
         });
@@ -381,10 +426,12 @@ async fn receive_loop(
     let sink = session.clone();
     let session_stats = session.clone();
     let inner2 = inner.clone();
+    let rule = inner.pick_rule;
     watch_consume_loop(
         inner.clone(),
         relay_url,
         stream_id,
+        rule,
         local_proxy,
         move |frame| {
             let _ = sink.push(frame);
@@ -461,11 +508,13 @@ async fn receive_loop_recording(
     let sink2 = session.clone();
     let session_stats = session.clone();
     let inner2 = inner.clone();
+    let rule = inner.pick_rule;
     watch_consume_loop_connected(
         inner.clone(),
         data,
         &relay_url,
         &stream_id,
+        rule,
         move |frame| {
             let _ = sink2.push(frame);
         },
@@ -501,10 +550,12 @@ async fn receive_raw_loop(
     // 公共主循环：帧消费 = 编码帧转发；周期同步 = running 标记
     let inner2 = inner.clone();
     let inner3 = inner.clone();
+    let rule = inner.pick_rule;
     watch_consume_loop(
         inner.clone(),
         relay_url,
         stream_id,
+        rule,
         local_proxy,
         move |f| {
             if frame_tx.try_send(f).is_err() {

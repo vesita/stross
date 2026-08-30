@@ -56,7 +56,7 @@
 
 | 服务 | 模块 | 说明 |
 |---|---|---|
-| 数据面 | `relay`（server + client + http + peers + data_plane + state）、`sender`、`watch`、`session_channel`、`jitter` | 中继服务端与客户端契约同层（单一真源）、推流/观看链路、抖动缓冲 |
+| 数据面 | `relay`（server + client + http + peers + data_plane + state）、`sender`、`watch`、`pick`（pick 规则层：load/interpret/manager/buffer） | 中继服务端与客户端契约同层（单一真源）、推流/观看链路、装载/解读语义（docs/comm-mode-v2.md §3.0） |
 | 发现 | `discovery`（mDNS 浏览/广播）、`devices::scan_lan` | 设备发现 + 扫描聚合一站式（mDNS + 探测 + 手动地址去重） |
 | 信令 | `control`（CtrlServer + client）、`negotiator` + `negotiator_client`、`subscriber`、`file_xfer`、`bootstrap` | 控制面/协商端点（服务端 + 客户端）、订阅方编排、文件端点传输、引导层 |
 | 端点框架 | `kernel::endpoint`（EndpointRegistry + Endpoint 契约）、`kernel::graph`、`kernel::session`、`kernel::auth` | 单层端点（load/share 契约，端点自驱动）、设备图、会话/路由、PIN 鉴权 |

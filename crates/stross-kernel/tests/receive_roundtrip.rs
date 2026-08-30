@@ -1,7 +1,7 @@
 //! 接收播放集成测试（1e）：推流 → 中继 → 原生接收解码（真实 ffmpeg）。
 //!
 //! 覆盖 GUI「📥 接收」页使用的同一套 API：
-//! `Kernel::start_receive` → WS watch → SessionDataManager →
+//! `Kernel::start_receive` → WS watch → pick 规则解读模块 →
 //! `FfmpegPlaybackSink` 解码 → `receive_status` 统计。
 
 use std::sync::Arc;

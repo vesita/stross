@@ -1,4 +1,5 @@
-//! 接收端抖动缓冲（jitter buffer）：吸收网络抖动，按序产出媒体帧。
+//! 接收端抖动缓冲（jitter buffer）：吸收网络抖动，按序产出媒体帧
+//! （pick 规则层解读模块的内部机制，docs/comm-mode-v2.md §3.0）。
 //!
 //! 需求 docs/requirements.md §4.4：**流式通道**的接收端组件——
 //! 定长环形缓冲、按 `seq` 索引与排序、乱序帧落槽等待、超时未齐跳过并
@@ -8,7 +9,7 @@
 //! **接收端本地**的纯逻辑，时间由调用方注入（可单测）。
 //!
 //! 职责边界：**只服务有损/自适应路径**（WebRTC/SRT 可能乱序或缺帧）。
-//! 无损传输（WS/QUIC 全序不丢）由 [`crate::session_channel::StreamChannel`]
+//! 无损传输（WS/QUIC 全序不丢）由 [`super::manager::StreamChannel`]
 //! 直通处理，不经过本组件（`seq` 语义见协议帧头注释）。
 
 use std::time::{Duration, Instant};

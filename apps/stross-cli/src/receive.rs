@@ -1,6 +1,6 @@
 //! `stross receive`：接收并原生解码播放（D6 桌面 PlaybackSink）。
 //!
-//! 链路：`stross_kernel::Receiver`（watch → [`SessionDataManager`] 无损通道 →
+//! 链路：`stross_kernel::Receiver`（watch → pick 解读模块 →
 //! [`FfmpegPlaybackSink`] 解码）→ 可选 RGBA 帧落盘 / 扬声器输出。
 //! 分层（docs/layering-architecture.md）：接收编排在库，本文件只做
 //! **参数解析 + 帧落盘/延迟统计展示**（CLI 工具行为）。
@@ -63,7 +63,7 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.out)?;
     tracing::info!("连接中继 {}（流 {}）", args.relay, args.stream);
 
-    // 接收链路统一在 stross_kernel::Receiver（watch → SessionDataManager →
+    // 接收链路统一在 stross_kernel::Receiver（watch → pick 解读模块 →
     // FfmpegPlaybackSink 解码 → 解码帧通道），CLI 只消费解码帧做落盘/统计。
     // 分层（docs/layering-architecture.md）：接收编排不再在 CLI 重复实现
     // （曾与 GUI 各写一份 watch→通道→播放）。

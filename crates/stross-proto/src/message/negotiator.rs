@@ -6,12 +6,13 @@
 //! 序列化由 `#[serde]` 保持与旧实现逐字节一致（旧字段名 / skip 语义未动）。
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::endpoint::{Delivery, EndpointManifest};
 use super::ids::{MediaKind, TransportId};
 
 /// 一次性接入凭证视图（接收端签发后展示；订阅握手授予的 flatten 载荷）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareTokenView {
     /// ShareToken JSON 字符串（原样粘贴给推流端 / 出站推流出示）。
@@ -25,7 +26,7 @@ pub struct ShareTokenView {
 }
 
 /// 中继地址（pull 模式：订阅方连公开方中继；ws 必填，srt/quic 可缺）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayAddr {
     pub ws_port: u16,
@@ -39,7 +40,7 @@ pub struct RelayAddr {
 ///
 /// 端点语义（`endpoint_id` 非空 = 订阅某端点）：`media` 可为空，由端点推断；
 /// 旧语义（`endpoint_id` 为空 = 接收方签发）与现状逐字节兼容。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareRequest {
     pub device_id: String,
@@ -63,7 +64,7 @@ pub struct ShareRequest {
 }
 
 /// 签发结果（成功返回给申请方）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareGrant {
     #[serde(flatten)]
@@ -82,7 +83,7 @@ pub struct ShareGrant {
 }
 
 /// 目录节点摘要（`GET /api/endpoints` 响应的 `node` 字段）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointNode {
     pub device_id: String,
@@ -92,7 +93,7 @@ pub struct EndpointNode {
 /// L2 目录响应（`GET /api/endpoints`）：节点 + 端点清单（单层端点模型）。
 /// Private 端点与不可挂载端点在服务端已过滤（§9），此处为公开快照。
 /// L1 摘要 `EndpointSummary` 用于 mDNS，不在此响应。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointDir {
     pub node: EndpointNode,

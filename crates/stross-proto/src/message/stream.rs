@@ -1,11 +1,12 @@
 //! 流信息（推流声明与流列表共用）。
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::ids::CodecId;
 
 /// 单条轨道信息（hello / 流信息用）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackInfo {
     pub codec: CodecId,
@@ -22,7 +23,7 @@ pub struct TrackInfo {
 }
 
 /// 一条流的公开信息（REST `/api/streams` 与 ws 广播共用）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamInfo {
     pub stream_id: String,

@@ -17,12 +17,13 @@ use stross_proto::message::DiscoveryInfo;
 use stross_proto::message::{RoleId, TransportId};
 #[cfg(feature = "discovery")]
 use tokio::sync::watch;
+use utoipa::ToSchema;
 
 /// 一个局域网内可发现的 Stross 中继（设备）。
 ///
 /// 由 mDNS 浏览结果构造（feature `discovery` 的周期任务维护），
 /// 也可手动注册（[`RelayState::insert_peer`]，调试 / 测试 / 跨网段补充）。
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerInfo {
     /// 唯一标识（`ip:port`）。

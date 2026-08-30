@@ -7,7 +7,7 @@
 //!
 //! 接入点：
 //!
-//! * [`handle_push`] / [`handle_watch`]：WebSocket 升级处直接调用（[`super::http`]）
+//! * [`handle_push`] / [`handle_watch`]：WebSocket 升级处直接调用（[`super::api`]）
 //! * [`handle_connect`]：SRT / QUIC 监听统一入口，按首条控制消息分流
 //!   （`Hello` = 推流，`Watch` = 观看）
 //! * [`spawn_accept_loop`]：SRT / QUIC 通用入站 accept 循环（消除复制）

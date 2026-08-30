@@ -1,4 +1,4 @@
-//! 中继 HTTP API 的**官方客户端**（与 server 侧 [`super::http`] 同 crate，
+//! 中继 HTTP API 的**官方客户端**（与 server 侧 [`super::api`] 同 crate，
 //! 响应契约单一真源；纯 raw TCP + serde_json，零新增依赖，平台无关）。
 //!
 //! 消费方：CLI `devices` / `adb status` 探测、`endpoint ls` 目录拉取、

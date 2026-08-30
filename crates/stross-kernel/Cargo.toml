@@ -20,6 +20,10 @@ futures-util.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 axum.workspace = true
+# axum_extras：在 api.rs 用 #[utoipa::path] 直接解析 axum 处理器签名。
+utoipa = { workspace = true, features = ["axum_extras"] }
+# 中继 / 协商端点挂 /docs（swagger-ui）。
+utoipa-swagger-ui = { workspace = true, features = ["axum"] }
 mdns = { workspace = true, optional = true }
 
 [features]

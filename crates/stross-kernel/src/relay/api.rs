@@ -1,7 +1,10 @@
-//! HTTP 层：路由 / 静态页面 / REST API / WebSocket 升级 / WebRTC 信令。
+//! HTTP 层：路由 / REST API / WebSocket 升级 / WebRTC 信令。
 //!
 //! 数据面转发逻辑在 [`super::data_plane::handle_push`] / [`super::data_plane::handle_watch`]
-//! （传输无关）；本模块只负责把 HTTP/WS 入口接到转发逻辑上。
+//! （传输无关）；本模块负责把 HTTP/WS 入口接到转发逻辑上。
+//!
+//! 结构（相对旧的单文件 http.rs）：DTO 收敛到 [`super::dto`]，REST 处理器在此
+//! 用 `#[utoipa::path]` 声明 OpenAPI（[`ApiDoc`]），并挂 swagger-ui 于 `/docs`。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,16 +15,38 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::Mutex;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use stross_proto::message::StreamInfo;
 
 use crate::relay::data_plane::{handle_push, handle_watch};
+use crate::relay::dto::{
+    ApiError, ProxyItem, ProxyReq, ProxyStartResp, RelayInfoResp, WebRtcAnswerReq,
+    WebRtcAnswerResp, WebRtcStartReq, WebRtcStartResp,
+};
 use crate::relay::{PeerInfo, RelayState};
 use crate::transport::TransportError;
 use crate::transport::webrtc::{PeerCommand, WebRtcTransport};
 use crate::transport::ws::WsTransport;
+
+/// OpenAPI 文档（`/api-docs/openapi.json` + swagger-ui /docs）。
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        api_info,
+        api_streams,
+        api_peers,
+        api_proxy_start,
+        api_proxies,
+        api_webrtc_start,
+        api_webrtc_answer
+    ),
+    tags((name = "relay", description = "中继 REST API：入端口 / 流 / 设备 / 级联代理 / WebRTC 信令"))
+)]
+pub(crate) struct ApiDoc;
 
 /// CORS 中间件：Stross 桌面/Android 前端运行在 Tauri 的本地源
 /// （`tauri://localhost` / `http://tauri.localhost`），连接阶段会跨源
@@ -38,7 +63,7 @@ async fn cors_layer(
     resp
 }
 
-/// 组装中继的 HTTP 路由（静态页面 + REST API + WebSocket 升级）。
+/// 组装中继的 HTTP 路由（REST API + WebSocket 升级 + /docs swagger-ui）。
 pub(super) fn router(state: RelayState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -51,22 +76,18 @@ pub(super) fn router(state: RelayState) -> Router {
         .route("/api/webrtc/answer", post(api_webrtc_answer))
         .route("/ws/push", get(ws_push))
         .route("/ws/watch", get(ws_watch))
+        .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(axum::middleware::from_fn(cors_layer))
         .with_state(state)
 }
 
-/// 中继入口信息（各传输端口；前端据此构造 srt:// / quic:// 拨号地址）。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RelayInfoResp {
-    /// HTTP/WS 端口。
-    port: u16,
-    /// SRT 推流/观看端口（随机分配）。
-    srt_port: Option<u16>,
-    /// QUIC 推流/观看端口（随机分配）。
-    quic_port: Option<u16>,
-}
-
+/// 中继入口信息。前端据此构造 `srt://` / `quic://` 拨号地址。
+#[utoipa::path(
+    get,
+    path = "/api/info",
+    tag = "relay",
+    responses((status = 200, description = "中继入口信息", body = RelayInfoResp))
+)]
 async fn api_info(State(state): State<RelayState>) -> Json<RelayInfoResp> {
     Json(RelayInfoResp {
         port: state.port,
@@ -75,55 +96,68 @@ async fn api_info(State(state): State<RelayState>) -> Json<RelayInfoResp> {
     })
 }
 
+/// 当前在线流列表（本地推流 + 代理流）。
+#[utoipa::path(
+    get,
+    path = "/api/streams",
+    tag = "relay",
+    responses((status = 200, description = "在线流列表", body = [StreamInfo]))
+)]
 async fn api_streams(State(state): State<RelayState>) -> Json<Vec<StreamInfo>> {
     Json(state.streams())
 }
 
 /// 局域网内其它设备（观看端页面「局域网设备」区拉取）。
+#[utoipa::path(
+    get,
+    path = "/api/peers",
+    tag = "relay",
+    responses((status = 200, description = "局域网设备", body = [PeerInfo]))
+)]
 async fn api_peers(State(state): State<RelayState>) -> Json<Vec<PeerInfo>> {
     Json(state.peers())
 }
 
-// ---------------------------------------------------------------------------
-// 级联代理（转发链/树）：POST /api/proxy 把上游中继的流拉到本地广播
-// ---------------------------------------------------------------------------
-
-/// 请求建立代理流。
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProxyReq {
-    /// 上游中继基址（`ws://host:port`；`srt://` / `quic://` 亦可）。
-    upstream: String,
-    /// 上游流 id。
-    stream_id: String,
-    /// 上游流信息（可选；前端自动发现时已持有，透传避免再向上游查询）。
-    #[serde(default)]
-    info: Option<StreamInfo>,
-}
-
 /// 建立代理流：本地 `/api/streams` 立即出现该流，普通 watch 即可订阅。
 /// 409 = 本地已有同名流（推流或代理）。
+#[utoipa::path(
+    post,
+    path = "/api/proxy",
+    tag = "relay",
+    request_body = ProxyReq,
+    responses(
+        (status = 200, description = "代理已建立", body = ProxyStartResp),
+        (status = 409, description = "本地已有同名流", body = ApiError)
+    )
+)]
 async fn api_proxy_start(
     State(state): State<RelayState>,
     Json(req): Json<ProxyReq>,
-) -> Result<Json<serde_json::Value>, ApiErr> {
+) -> Result<Json<ProxyStartResp>, ApiErr> {
     match state.start_proxy(&req.upstream, &req.stream_id, req.info) {
-        Ok(id) => Ok(Json(serde_json::json!({
-            "streamId": id,
-            "proxied": true,
-        }))),
+        Ok(id) => Ok(Json(ProxyStartResp {
+            stream_id: id,
+            proxied: true,
+        })),
         Err(e) => Err(api_err(StatusCode::CONFLICT, e.to_string())),
     }
 }
 
 /// 列出本中继当前代理的流（id → 上游）。
-async fn api_proxies(State(state): State<RelayState>) -> Json<Vec<serde_json::Value>> {
+#[utoipa::path(
+    get,
+    path = "/api/proxies",
+    tag = "relay",
+    responses((status = 200, description = "代理流列表", body = [ProxyItem]))
+)]
+async fn api_proxies(State(state): State<RelayState>) -> Json<Vec<ProxyItem>> {
     Json(
         state
             .proxies()
             .into_iter()
-            .map(|(stream_id, upstream)| {
-                serde_json::json!({ "streamId": stream_id, "upstream": upstream })
+            .map(|(stream_id, upstream)| ProxyItem {
+                stream_id,
+                upstream,
             })
             .collect(),
     )
@@ -135,26 +169,23 @@ async fn api_proxies(State(state): State<RelayState>) -> Json<Vec<serde_json::Va
 
 static NEXT_WEBRTC_PEER: AtomicU64 = AtomicU64::new(1);
 
-type ApiErr = (StatusCode, Json<serde_json::Value>);
+type ApiErr = (StatusCode, Json<ApiError>);
 
 fn api_err(status: StatusCode, msg: impl Into<String>) -> ApiErr {
-    (status, Json(serde_json::json!({ "error": msg.into() })))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WebRtcStartReq {
-    stream_id: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WebRtcStartResp {
-    peer_id: String,
-    sdp: String,
+    (status, Json(ApiError { error: msg.into() }))
 }
 
 /// 开始 WebRTC 观看信令：创建 peer（control + media 双通道），返回 SDP offer。
+#[utoipa::path(
+    post,
+    path = "/api/webrtc/start",
+    tag = "relay",
+    request_body = WebRtcStartReq,
+    responses(
+        (status = 200, description = "信令已开始（SDP offer）", body = WebRtcStartResp),
+        (status = 500, description = "创建 peer 失败", body = ApiError)
+    )
+)]
 async fn api_webrtc_start(
     State(state): State<RelayState>,
     Json(req): Json<WebRtcStartReq>,
@@ -190,18 +221,22 @@ async fn api_webrtc_start(
     Ok(Json(WebRtcStartResp { peer_id, sdp }))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WebRtcAnswerReq {
-    peer_id: String,
-    sdp: String,
-}
-
 /// 提交观看端 answer：接入 peer，双通道打开后启动与 WS 完全相同的转发逻辑。
+#[utoipa::path(
+    post,
+    path = "/api/webrtc/answer",
+    tag = "relay",
+    request_body = WebRtcAnswerReq,
+    responses(
+        (status = 200, description = "已接入 peer", body = WebRtcAnswerResp),
+        (status = 404, description = "peer 不存在或已使用", body = ApiError),
+        (status = 400, description = "answer 校验失败", body = ApiError)
+    )
+)]
 async fn api_webrtc_answer(
     State(state): State<RelayState>,
     Json(req): Json<WebRtcAnswerReq>,
-) -> Result<Json<serde_json::Value>, ApiErr> {
+) -> Result<Json<WebRtcAnswerResp>, ApiErr> {
     let mut peer = state
         .webrtc_peers
         .lock()
@@ -232,7 +267,7 @@ async fn api_webrtc_answer(
         }
         handle_watch(session, stream_id, state).await;
     });
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(WebRtcAnswerResp { ok: true }))
 }
 
 #[derive(Deserialize)]
@@ -317,5 +352,48 @@ impl stross_transport::ws::WsIo for AxumWs {
             let _ = socket.send(axum::extract::ws::Message::Close(None)).await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// OpenAPI 文档能生成且路径齐全（dto/api/utoipa 声明闭环）。
+    #[test]
+    fn openapi_generates_with_all_relay_paths() {
+        let spec = ApiDoc::openapi();
+        let json = serde_json::to_value(&spec).expect("OpenAPI 应可序列化");
+        let paths = json["paths"].as_object().expect("应有 paths");
+        for p in [
+            "/api/info",
+            "/api/streams",
+            "/api/peers",
+            "/api/proxy",
+            "/api/proxies",
+            "/api/webrtc/start",
+            "/api/webrtc/answer",
+        ] {
+            assert!(paths.contains_key(p), "缺少路径 {p}");
+        }
+        // 关键 schema 名称齐全
+        let schemas = json["components"]["schemas"]
+            .as_object()
+            .expect("应有 schemas");
+        for s in [
+            "RelayInfoResp",
+            "ProxyReq",
+            "ProxyStartResp",
+            "ProxyItem",
+            "WebRtcStartReq",
+            "WebRtcStartResp",
+            "WebRtcAnswerReq",
+            "WebRtcAnswerResp",
+            "ApiError",
+            "StreamInfo",
+            "PeerInfo",
+        ] {
+            assert!(schemas.contains_key(s), "缺少 schema {s}");
+        }
     }
 }

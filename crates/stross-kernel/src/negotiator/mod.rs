@@ -29,10 +29,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use stross_proto::message::{
     Delivery, EndpointDir, EndpointManifest, EndpointNode, MediaKind, ShareToken, TransportId,
@@ -45,11 +44,13 @@ use crate::Kernel;
 use crate::kernel::SubscribeCtx;
 use crate::lock::MutexExt;
 
+mod api;
+mod dto;
+
 // 协商线协议类型（ShareRequest / ShareGrant / RelayAddr / ShareTokenView）已
-// 收敛至 stross-proto::message::negotiator（docs/layering-architecture.md：
-// 线协议类型与协议同层）。此处重导出保持既有路径 `stross_kernel::ShareRequest`
-// 等兼容。
-pub use stross_proto::message::{RelayAddr, ShareGrant, ShareRequest, ShareTokenView};
+// 收敛至 stross-proto::message::negotiator。此处经 dto 重导出保持既有路径
+// `stross_kernel::ShareRequest` 等兼容。
+pub use dto::{RelayAddr, ShareGrant, ShareRequest, ShareTokenView};
 
 /// 协商端点默认端口（LAN 可达；防火墙需放行该 TCP 端口）。
 pub const DEFAULT_NEGOTIATOR_PORT: u16 = 18779;
@@ -273,11 +274,8 @@ impl ShareNegotiator {
             ui,
             pending: Arc::new(Mutex::new(HashMap::new())),
         });
-        let router = Router::new()
-            .route("/api/negotiator/request", post(handle_request))
-            .route("/api/endpoints", get(handle_endpoints))
-            .layer(axum::middleware::from_fn(cors_layer))
-            .with_state(state.clone());
+        // 路由 + OpenAPI 在 api 子模块（cors_layer 亦移入）。
+        let router = api::router(state.clone());
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         let listener = tokio::net::TcpListener::bind(addr)
             .await
@@ -424,14 +422,28 @@ impl ShareNegotiator {
 }
 
 /// 服务器共享状态（与 [`CtrlServer`] 的 `CtrlState` 同构）。
-struct ServerState {
+pub(crate) struct ServerState {
     app: Arc<Kernel>,
     store: Arc<TrustStore>,
     ui: Arc<dyn NegotiatorUi>,
     pending: PendingMap,
 }
 
-async fn handle_request(
+#[utoipa::path(
+    post,
+    path = "/api/negotiator/request",
+    tag = "negotiator",
+    request_body = ShareRequest,
+    responses(
+        (status = 200, description = "凭证已签发（或已合并到现有活动共享）", body = ShareGrant),
+        (status = 400, description = "media 为空", body = dto::ApiError),
+        (status = 403, description = "被拒绝（不在白名单 / 用户拒绝 / 等待确认超时）", body = dto::ApiError),
+        (status = 404, description = "端点不存在或不可挂载", body = dto::ApiError),
+        (status = 500, description = "内部错误", body = dto::ApiError),
+        (status = 504, description = "等待用户确认超时", body = dto::ApiError)
+    )
+)]
+pub(crate) async fn handle_request(
     State(state): State<Arc<ServerState>>,
     Json(req): Json<ShareRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -754,7 +766,13 @@ fn notify_subscribed(
 
 /// 目录 API（L2）：本节点**已通告**端点（不可挂载端点可见但不可订阅——
 /// `available=false` 由订阅方 UI 与握手校验拒绝；Private 端点不对目录公开，§9）。
-async fn handle_endpoints(State(state): State<Arc<ServerState>>) -> Json<serde_json::Value> {
+#[utoipa::path(
+    get,
+    path = "/api/endpoints",
+    tag = "negotiator",
+    responses((status = 200, description = "本节点已通告端点目录", body = EndpointDir))
+)]
+pub(crate) async fn handle_endpoints(State(state): State<Arc<ServerState>>) -> Json<EndpointDir> {
     let endpoints: Vec<EndpointManifest> = state
         .app
         .published_endpoints()
@@ -774,58 +792,13 @@ async fn handle_endpoints(State(state): State<Arc<ServerState>>) -> Json<serde_j
         },
         endpoints,
     };
-    Json(serde_json::to_value(dir).unwrap_or_default())
+    Json(dir)
 }
 
 fn new_pending_id() -> u64 {
     // 全局自增：时间戳 + 进程内计数器（多实例互不冲突）
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
-/// CORS 中间件：Tauri 前端运行在本地源（`tauri://localhost`），跨源访问
-/// 协商端点（POST + `Content-Type: application/json` 会触发预检），必须允许
-/// 任意来源（与中继 HTTP 层的 cors_layer 语义一致——LAN 可信模型下不限定来源）。
-async fn cors_layer(
-    req: axum::http::Request<axum::body::Body>,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let method = req.method().clone();
-    let mut resp = next.run(req).await;
-    let headers = resp.headers_mut();
-    headers.insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        axum::http::HeaderValue::from_static("*"),
-    );
-    headers.insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
-        axum::http::HeaderValue::from_static("POST, OPTIONS"),
-    );
-    headers.insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
-        axum::http::HeaderValue::from_static("Content-Type"),
-    );
-    // 预检直接放行（axum 对 OPTIONS 无路由 → 404；这里显式返回 204）
-    if method == axum::http::Method::OPTIONS {
-        resp = axum::response::Response::builder()
-            .status(axum::http::StatusCode::NO_CONTENT)
-            .body(axum::body::Body::empty())
-            .expect("静态响应");
-        resp.headers_mut().insert(
-            axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            axum::http::HeaderValue::from_static("*"),
-        );
-        resp.headers_mut().insert(
-            axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
-            axum::http::HeaderValue::from_static("POST, OPTIONS"),
-        );
-        resp.headers_mut().insert(
-            axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
-            axum::http::HeaderValue::from_static("Content-Type"),
-        );
-        return resp;
-    }
-    resp
 }
 
 // ---------------------------------------------------------------------------

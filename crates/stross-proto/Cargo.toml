@@ -10,5 +10,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
+# ToSchema：API 公开的线协议类型可进入 OpenAPI 文档（dto/线格式单一真源）。
+utoipa.workspace = true
 
 [dev-dependencies]

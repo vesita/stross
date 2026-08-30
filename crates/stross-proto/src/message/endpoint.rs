@@ -14,6 +14,7 @@
 //!   维度 + 各端点实现表达。
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::ids::{CodecId, MediaKind, TransportId};
 
@@ -32,7 +33,7 @@ pub struct EndpointSummary {
 }
 
 /// 端点可见性（决定**目录可见性 + 授予决策**两件事）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Visibility {
     /// 任何人可订阅，免确认。
@@ -65,7 +66,7 @@ impl Visibility {
 }
 
 /// 数据面连接方向（由公开者声明；订阅握手时定稿）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Delivery {
     /// 订阅者连公开者中继（watch 路径）。
@@ -98,7 +99,7 @@ impl Delivery {
 }
 
 /// 公开者选择的传输协议（priority 升序 = 公开者偏好）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TransportPreference {
     pub transport: TransportId,
@@ -106,7 +107,7 @@ pub struct TransportPreference {
 }
 
 /// 端点运行状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum EndpointState {
     /// 已通告但无订阅（不采集/不推送）。
@@ -133,7 +134,7 @@ impl EndpointState {
 /// 单层端点模型：端点 = 节点上可共享的能力实体（原「设备」与「端点」合并），
 /// `published` 表示是否已通告；未通告端点只在本机目录可见，不进对端目录/
 /// mDNS 摘要的可订阅集。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointManifest {
     /// 节点内稳定 id（"screen:0" / "mic:builtin" / "file:notes.txt"）。

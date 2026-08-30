@@ -18,8 +18,8 @@ use crate::net::local_ips;
 use crate::transport::quic::QuicTransport;
 use crate::transport::srt::SrtTransport;
 
+use super::api;
 use super::data_plane;
-use super::http;
 use super::state::{RelayEvent, RelayState};
 
 /// 默认中继端口（协议约定固定端口，docs：中继 HTTP/WS 18777）。
@@ -194,7 +194,7 @@ impl RelayServer {
 
         let state =
             RelayState::with_ports(controlled, actual_port, Some(srt_port), Some(quic_port));
-        let app = http::router(state.clone());
+        let app = api::router(state.clone());
 
         data_plane::spawn_accept_loop(srt_listener, state.clone(), shutdown_tx.subscribe(), "SRT");
         data_plane::spawn_accept_loop(

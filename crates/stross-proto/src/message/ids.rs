@@ -4,9 +4,12 @@
 //! `rename_all` 保证线上 JSON 与 mDNS TXT 格式稳定。
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// 传输标识（有限集合）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TransportId {
     /// WebSocket（TCP，无损）。
@@ -22,7 +25,7 @@ pub enum TransportId {
 }
 
 /// 编解码标识（有限集合，可扩展）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum CodecId {
     H264,
@@ -54,7 +57,7 @@ pub enum CapabilityKind {
 }
 
 /// 媒体能力类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum MediaKind {
     Screen,
@@ -88,7 +91,7 @@ impl MediaKind {
 }
 
 /// 设备角色（发现广播 F1.2 用；有限集合）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RoleId {
     /// 可作源（推流）。

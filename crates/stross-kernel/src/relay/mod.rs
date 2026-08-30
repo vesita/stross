@@ -23,12 +23,14 @@
 //! * [`data_plane`]：数据面转发（传输无关；HTTP / SRT / QUIC 共用）
 //! * [`state`]：共享状态（流表 / 代理表 / 受控授权 / 事件广播）
 //! * [`server`]：生命周期（[`RelayHandle`] / [`RelayServer`]）
-//! * [`http`]：HTTP 路由 / 静态页面 / REST API / WebSocket 升级 / WebRTC 信令
+//! * [`api`]：HTTP 路由 / REST API / WebSocket 升级 / WebRTC 信令（utoipa 声明）
+//! * [`dto`]：REST API 的请求/响应 DTO（`ToSchema`）
 //! * [`client`]：中继 HTTP API 的官方客户端（`/api/info`、`/api/streams`、POST JSON）
 //! * [`peers`]：局域网设备发现缓存（[`PeerInfo`]，feature `discovery`）
 
+mod api;
 mod data_plane;
-mod http;
+mod dto;
 mod peers;
 mod server;
 mod state;

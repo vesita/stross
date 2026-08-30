@@ -162,7 +162,7 @@ Rust 侧用 `AnnexBSplitter`（状态机切 NAL）→ `AccessUnitBuilder`
 crates/stross-endpoint/src/playback/）：
 
 1. 订阅 `ws://host/ws/watch?stream=ID`（或 SRT/QUIC watch）收媒体帧；
-2. 抖动缓冲（SessionDataManager 流式通道）：定长环形缓冲按 seq/pts 索引排序，
+2. 抖动缓冲（pick 解读模块的流式通道）：定长环形缓冲按 seq/pts 索引排序，
    乱序帧落槽等待、按 pts 顺序消费、超时未齐跳过并等关键帧重对齐
    （内存有界 = 固定容量，需求 §4.4）；
 3. 视频 → ffmpeg 子进程解码（H.264 → RGBA 原始帧，`RenderedFrame`）交给上层绘制；

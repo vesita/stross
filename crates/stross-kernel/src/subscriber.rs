@@ -15,11 +15,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::net;
 use crate::relay::client as relay_http;
 use anyhow::Context;
 use serde::Serialize;
-use stross_proto::message::{Delivery, EndpointDir, MediaKind, ShareGrant, ShareRequest};
+use stross_proto::message::{Delivery, EndpointDir, ShareGrant, ShareRequest};
 
 use crate::Kernel;
 use crate::bootstrap;
@@ -61,22 +60,23 @@ pub struct SubscribeOutcome {
 /// （纯数据 DTO，定义收敛至 stross-types——应用契约层单一真源。）
 pub use stross_types::MediaSubscribeOutcome;
 
-/// 订阅远端媒体端点并返回观看入口（pull：公开方中继；push：本机中继 +
-/// 自签凭证，公开方凭凭证出站推入）。订阅达成后公开方经端点驱动自动开推
-/// （docs/endpoint-model.md §5：媒体端点 pull 推本机中继、push 凭凭证出站）。
+/// 订阅远端媒体端点并返回观看入口（订阅驱动：只走 pull——连公开方中继
+/// watch 取流，公开方在本地中继发布；无 push 出站路径）。
+/// 订阅达成后公开方经端点驱动自动开推（docs/endpoint-model.md §5：
+/// 媒体端点 pull 推本机中继）。
 pub async fn subscribe_media(
     app: &Arc<Kernel>,
     base: &Path,
     host: &str,
     port: u16,
     endpoint_id: &str,
-    delivery_wish: Option<Delivery>,
+    _delivery_wish: Option<Delivery>,
 ) -> anyhow::Result<MediaSubscribeOutcome> {
-    let EndpointGrant { grant, local } =
-        request_endpoint_grant(app, base, host, port, endpoint_id, delivery_wish).await?;
+    let EndpointGrant { grant, .. } =
+        request_endpoint_grant(app, base, host, port, endpoint_id, None).await?;
     let delivery = grant.delivery.unwrap_or(Delivery::Pull);
     let (relay_url, stream_id) = match delivery {
-        Delivery::Pull => {
+        Delivery::Pull | Delivery::Both => {
             let relay = grant.relay.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("pull 授予缺少公开方中继地址（公开方未锚定中继）")
             })?;
@@ -85,17 +85,10 @@ pub async fn subscribe_media(
                 grant.view.stream_id.clone(),
             )
         }
+        // 订阅驱动定稿（docs/endpoint-model.md §10）：只走 pull，无 push
         Delivery::Push => {
-            let l = local
-                .ok_or_else(|| anyhow::anyhow!("push 授予但本机未准备接收（自签凭证缺失）"))?;
-            (
-                format!("ws://127.0.0.1:{}", l.relay_port),
-                l.stream_id.clone(),
-            )
-        }
-        Delivery::Both => {
             return Err(anyhow::anyhow!(
-                "公开方授予了不支持的 delivery: Both（对端版本偏差？）"
+                "公开方授予了 push（对端版本偏差？——订阅驱动只走 pull）"
             ));
         }
     };
@@ -152,11 +145,9 @@ pub async fn subscribe_media_and_watch(
     Ok(())
 }
 
-/// 订阅握手结果（[`request_endpoint_grant`] 的公共形态）：
-/// 授予 + push 模式的本机接收准备（公开方凭凭证出站推入的落点）。
+/// 订阅握手结果（[`request_endpoint_grant`] 的公共形态）。
 struct EndpointGrant {
     grant: ShareGrant,
-    local: Option<LocalReceiver>,
 }
 
 /// 订阅握手：身份 →（push 意向先本机准备）→ POST 对端协商端点。
@@ -169,26 +160,22 @@ async fn request_endpoint_grant(
     host: &str,
     port: u16,
     endpoint_id: &str,
-    delivery_wish: Option<Delivery>,
+    _delivery_wish: Option<Delivery>,
 ) -> anyhow::Result<EndpointGrant> {
     bootstrap::ensure_identity(app, base, crate::bootstrap::DEFAULT_NODE_NAME);
     let identity = app
         .device_identity()
         .ok_or_else(|| anyhow::anyhow!("身份未初始化"))?;
 
-    // push 意向：先建本机会话 + 自签凭证 + 锚定本机中继（docs §5 凭证修正）
-    let local = if matches!(delivery_wish, Some(Delivery::Push)) {
-        Some(prepare_local_receiver(app).await?)
-    } else {
-        None
-    };
+    // 订阅驱动定稿（docs/endpoint-model.md §10）：只走 pull，无 push——
+    // 不建本机会话/自签凭证/锚定中继；订阅方只连公开方中继 watch 取流。
     let req = ShareRequest {
         device_id: identity.device_id.clone(),
         device_name: identity.device_name.clone(),
         endpoint_id: Some(endpoint_id.to_string()),
-        delivery_mode: delivery_wish,
-        relay_addr: local.as_ref().map(|l| l.relay_addr.clone()),
-        share_token: local.as_ref().map(|l| l.share_token.clone()),
+        delivery_mode: Some(Delivery::Pull),
+        relay_addr: None,
+        share_token: None,
         media: vec![],
     };
     // 订阅握手（Public / Confirm+信任 自动签发；Confirm 首见需对端人工确认，
@@ -198,40 +185,35 @@ async fn request_endpoint_grant(
         .context(format!(
             "订阅握手失败（端点 {endpoint_id}；Confirm 端点需对端 stross ctrl negotiator-list 确认）"
         ))?;
-    Ok(EndpointGrant { grant, local })
+    Ok(EndpointGrant { grant })
 }
 
-/// 订阅远端文件端点并接收落盘（P1 文件端点完整闭环）。
+/// 订阅远端文件端点并接收落盘（P1 文件端点完整闭环；订阅驱动只走 pull）。
 pub async fn subscribe_file(
     app: &Arc<Kernel>,
     base: &Path,
     host: &str,
     port: u16,
     endpoint_id: &str,
-    delivery_wish: Option<Delivery>,
+    _delivery_wish: Option<Delivery>,
     out: &Path,
 ) -> anyhow::Result<SubscribeOutcome> {
-    let EndpointGrant { grant, local } =
-        request_endpoint_grant(app, base, host, port, endpoint_id, delivery_wish).await?;
+    let EndpointGrant { grant } =
+        request_endpoint_grant(app, base, host, port, endpoint_id, None).await?;
     let delivery = grant.delivery.unwrap_or(Delivery::Pull);
 
     let received = match delivery {
-        Delivery::Pull => {
+        Delivery::Pull | Delivery::Both => {
             let relay = grant.relay.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("pull 授予缺少公开方中继地址（公开方未锚定中继）")
             })?;
             let watch_url = format!("ws://{host}:{}", relay.ws_port);
             receive_file_retry(&watch_url, &grant.view.stream_id, out).await?
         }
+        // 订阅驱动定稿（docs/endpoint-model.md §10）：只走 pull，无 push
         Delivery::Push => {
-            let l = local
-                .ok_or_else(|| anyhow::anyhow!("push 授予但本机未准备接收（自签凭证缺失）"))?;
-            let watch_url = format!("ws://127.0.0.1:{}", l.relay_port);
-            receive_file_retry(&watch_url, &l.stream_id, out).await?
-        }
-        Delivery::Both => {
             return Err(anyhow::anyhow!(
-                "公开方授予了不支持的 delivery: Both（对端版本偏差？）"
+                "公开方授予了 push（对端版本偏差？——订阅驱动只走 pull）"
             ));
         }
     };
@@ -263,28 +245,6 @@ async fn receive_file_retry(
             }
         }
     }
-}
-
-/// push 模式本机准备：锚定受控中继 + 建会话 + 自签一次性凭证。
-struct LocalReceiver {
-    relay_addr: String,
-    relay_port: u16,
-    /// 本机自签会话（= 数据面流 id；公开方出站推的就是它）。
-    stream_id: String,
-    share_token: String,
-}
-
-async fn prepare_local_receiver(app: &Arc<Kernel>) -> anyhow::Result<LocalReceiver> {
-    let relay = app.start_relay_on(0, "stross").await?;
-    let view =
-        app.issue_share_token_for("订阅接收文件".into(), vec![MediaKind::File], Some(600))?;
-    let ip = net::advertise_ip();
-    Ok(LocalReceiver {
-        relay_addr: format!("ws://{ip}:{}", relay.port),
-        relay_port: relay.port,
-        stream_id: view.stream_id,
-        share_token: view.token,
-    })
 }
 
 #[cfg(test)]

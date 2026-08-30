@@ -148,9 +148,8 @@ pub struct DiscoveryInfo {
 
 ```
 订阅方 A ──GET /api/endpoints (若白名单需带 device_id)──▶ 公开方 B
-push 意向：A 先本地建会话 + 自签一次性凭证（现有 issue_share_token 语义）
-A ──POST /api/negotiator/request { deviceId, endpointId, deliveryMode,
-                                   relayAddr, shareToken?, media }──▶ B
+A ──POST /api/negotiator/request { deviceId, deliveryMode(pull),
+                                   endpointId, media }──▶ B
 B ── 决策表 ──▶ A:
     Public           → 自动签发（trusted=false，不写信任清单）
     Confirm + 已信任 → 自动签发（trusted=true）
@@ -158,30 +157,31 @@ B ── 决策表 ──▶ A:
     Private + 白名单 → 自动签发 / Private + 非白名单 → 403
     endpointId 不存在/未通告 → 404
     endpointId 不可挂载（available=false）→ 404 + 原因（last_error）
-A 收 ShareGrant { delivery, transports, relay?, ShareToken }：
-    pull → A 连 B 的 relay 地址 watch（token.stream_id + Hello）
-    push → B 凭 **A 自签的 shareToken** 出站推入 A 中继（A 侧 watch 自己的中继接收）
+A 收 ShareGrant { delivery=pull, transports, relay?, streamId }：
+    pull → A 连 B 的 relay 地址 watch（streamId + Hello）——订阅驱动定稿，
+          只走 pull；无 push 出站路径
 ```
 
-> **push 凭证修正（第三轮，沿用）**：push 方向的数据面接入凭证必须由**订阅方**
-> 签发；公开方签发的凭证在订阅方中继校验不过。LAN 可信模型下与「二维码贴
-> 凭证」等价风险。pull 模式无需凭证（watch 路径不鉴权），公开方推入**自己的**
-> 受控中继（回环来源 + 内核预授权会话放行）。
+> **订阅驱动定稿（docs/comm-mode-v2.md / 本期）**：数据流一律由**订阅方发起并
+> 主动取（pull）**——共享方（内容源）只在**自己的**受控中继发布，订阅方连
+> 共享方中继 watch 取流；**取消 push**（共享方不凭凭证主动出站推送）。保留
+> `Delivery::{Pull,Push,Both}` 枚举（wire 兼容，对端旧字段仍可解析），但协商
+> 与数据面链路只走 Pull。pull 无需凭证（watch 路径不鉴权），共享方推入自己
+> 的受控中继（回环来源 + 内核预授权会话放行）。
 
 错误码：400 参数非法 / 403 被拒或超时 / 404 端点不存在或不可挂载 /
 408/504 人工确认超时。
 
 **联动（契约化接线）**：公开方在**授予成功后**触发订阅事件（`SubscribeCtx`：
-订阅方 device_id、定稿 delivery、数据面 stream_id、push 模式的 relay_addr 与
-share_token），**端点自驱动**——协商层直接调 `endpoint.share(app, ctx)`，
-内核不再按类型分派（原 `endpoint_driver` 的 match 分派已删除）：
-* 文件端点（确定目标）→ 文件泵：凭 stream_id 推入对应中继（pull=自己的
-  受控中继，push=订阅方中继），**先等 ≥1 个观看者接入**（轮询中继
-  `/api/streams`，超时 8s）再发文件帧——避免广播不补发导致订阅方丢文件头；
-  传完自动回 Idle（有完成态）；
+订阅方 device_id、定稿 delivery=pull、数据面 stream_id），**端点自驱动**——
+协商层直接调 `endpoint.share(app, ctx)`，内核不再按类型分派（原
+`endpoint_driver` 的 match 分派已删除）：
+* 文件端点（确定目标）→ 文件泵：凭 stream_id 推入**自己的**受控中继
+  （pull 语义），**先等 ≥1 个观看者接入**（轮询中继 `/api/streams`，超时
+  8s）再发文件帧——避免广播不补发导致订阅方丢文件头；传完自动回 Idle
+  （有完成态）；
 * 媒体端点（实时目标）→ 各端点自行组 `StreamConfig` 调 `start_stream`：
-  pull 推本机中继（可被多订阅者观看），push 带订阅方凭证出站；持续推流
-  直到停止；
+  pull 推本机中继（可被多订阅者观看）；持续推流直到停止；
 * 新增端点类型（剪贴板/服务/游戏输入）→ 新 struct 实现 load/share，
   **内核与协商层零改动**。
 

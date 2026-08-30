@@ -78,8 +78,8 @@
 > 直接解决：屏幕+系统声音并发同播（接收端多流）、停一条流不级联、分享/订阅模型简化。
 > 允许破坏性更新 → 帧头 v2 可裁字段（codec/track 移到协商结果）。
 
-- [ ] **Phase A（小）**：端点档案（`transport_profile` / `interpret_profile`）+ 协商字段
-- [ ] **Phase B（中）**：`DataPlaneAdapter` trait（`RealtimePacing` / `StrictOrdered`）+ 装载
+- [x] **Phase A（小）**：端点档案（`transport_profile` / `pick_rule`）+ 协商字段 ✅
+- [x] **Phase B（中）**：pick 规则层 `Interpreter` trait（`RealtimePacing` / `StrictOrdered`）+ 装载 ✅
 - [ ] **Phase C（大）**：QUIC 流级 ID 复用（一条连接 N 媒体流）+ 中继 demux + 接收端多流/混音
 
 ### P3 音视频同步（AV Sync）

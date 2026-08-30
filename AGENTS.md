@@ -27,8 +27,11 @@ crates/
                     convert 数据处理辅助）；新增数据源 = 加目录实现契约即挂载
   stross-kernel     ★ 内核（纯管理调度，单一门面 Kernel）：
                     中继 server + 中继 HTTP 客户端（relay/，契约单一真源）、
-                    mDNS Discovery、sender/watch/jitter、控制面 CtrlServer
-                    + client（D7）、凭证协商 ShareNegotiator + client、
+                    mDNS Discovery、sender/watch、pick 规则层 pick/
+                    （装载 load.rs / 解读 interpret.rs / 注册表 manager.rs /
+                    抖动缓冲 buffer.rs，docs/comm-mode-v2.md §3.0）、
+                    控制面 CtrlServer + client（D7）、凭证协商
+                    ShareNegotiator + client、
                     端点注册表 kernel/endpoint.rs（会话/路由/鉴权/登记）、
                     订阅方编排 subscriber、文件传输 file_xfer、引导 bootstrap、
                     扫描聚合 devices、推流引擎 engine、接收 receiver、view 展示视图构造
@@ -71,10 +74,11 @@ stross-bridge 与壳层；壳层只做参数解析 + 展示 + 平台适配。**�
   选址规则挑一个可拨号地址。
 - **身份**：`~/.local/share/stross/identity.json`（deviceId/name）+ 信任清单
   `trusted_devices.json`，GUI 与 CLI serve 共用同一目录。
-- **交互术语定稿**：**共享 = 我是内容源（推送预备），订阅 = 我是接收方**；
-  数据面方向（pull/push）是**系统/端点决策，两端 UI 都不让用户选**（共享弹窗已移除方向字段）。
-  用户可见文本用「共享/订阅」，**不用「通告/广播」**。通信模式演进方向见
-  docs/comm-mode-v2.md（控制面协商 + 数据面按 id 复用，设计提案）。
+- **交互术语定稿**：**共享 = 我是内容源（推送预备），订阅 = 我是接收方**。
+  **订阅驱动**（docs/comm-mode-v2.md / endpoint-model.md §10 定稿）：数据流一律
+  由**订阅方发起并主动取（pull）**——共享方只在**自己的**受控中继发布，订阅方
+  连共享方中继 watch；**取消 push**（共享方不主动出站推送）。两端 UI 都不让
+  用户选方向。用户可见文本用「共享/订阅」，**不用「通告/广播」**。
 
 ## 3. 构建
 
@@ -129,9 +133,9 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
 - 手机→PC：PC `stross ctrl create-session` + `share-token` 签发凭证（或
   手机订阅电脑端点经 18779 自动协商免粘贴）→ 手机推流 → PC `stross receive`
   解码。
-- PC→手机：手机共享「麦克风」端点 → PC 订阅（凭证式 push）→ 手机凭凭证
-  出站推流到 PC，或直接 `stross push --share-token <token> --stream-id
-  <凭证streamId> --relay ws://<手机IP>:8777/ws/push --audio`。
+- PC→手机：手机共享「麦克风」端点 → PC 订阅（订阅驱动 pull）→ 手机在自己
+  中继发布，PC 连手机中继 watch 取流。也可 `stross push`（手动凭证推流，
+  保留作为独立推流工具，不经端点框架）。
 
 ## 5. 回归脚本（scripts/）
 

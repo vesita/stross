@@ -34,8 +34,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use stross_proto::message::{
-    Delivery, EndpointDir, EndpointManifest, EndpointNode, MediaKind, ShareToken, TransportId,
-    Visibility,
+    Delivery, EndpointDir, EndpointManifest, EndpointNode, MediaKind, TransportId, Visibility,
 };
 use stross_proto::time::unix_secs;
 use tokio::sync::oneshot;
@@ -150,11 +149,23 @@ impl TrustStore {
 }
 
 /// 读取或生成本机身份。不存在时生成新的 `device_id` 并持久化。
+///
+/// name 为解析后的展示名（壳层经 `stross_bridge::device_name_or` 注入）；
+/// 已有身份若 name 无标识意义（如 Android 早期写入的 `localhost`——
+/// `/proc/sys/kernel/hostname`），用传入 name 覆盖，避免对端看到
+/// 「localhost」这种节点名。
 pub fn load_or_create_identity(base_dir: &std::path::Path, name: &str) -> DeviceIdentity {
     let path = base_dir.join("identity.json");
     if let Ok(s) = std::fs::read_to_string(&path)
-        && let Ok(id) = serde_json::from_str::<DeviceIdentity>(&s)
+        && let Ok(mut id) = serde_json::from_str::<DeviceIdentity>(&s)
     {
+        // 已有身份若设备名无标识意义（如 Android 早期写入的 `localhost`，
+        // `/proc/sys/kernel/hostname` 恒为 localhost），用传入展示名覆盖，
+        // 避免对端看到「localhost」。
+        if is_placeholder_name(&id.device_name) {
+            id.device_name = name.to_string();
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&id).unwrap_or_default());
+        }
         return id;
     }
     let id = DeviceIdentity {
@@ -170,6 +181,14 @@ pub fn load_or_create_identity(base_dir: &std::path::Path, name: &str) -> Device
         tracing::warn!("身份持久化失败: {e}");
     }
     id
+}
+
+/// 设备名是否无标识意义（空 / `localhost` / `android`——Android 主机名恒为
+/// localhost，直接广播会得到无意义名字）。与 `stross_bridge::hostname` 的
+/// placeholder 判定同语义；内联于 kernel（分层铁律：内核不依赖 stross-bridge）。
+fn is_placeholder_name(name: &str) -> bool {
+    let n = name.trim();
+    n.is_empty() || n == "localhost" || n == "android"
 }
 
 /// 生成随机设备标识（16 字节 /dev/urandom → hex；失败时回退时间戳）。
@@ -645,64 +664,52 @@ fn compose_grant(
 ) -> Result<ShareGrant, String> {
     // 订阅收敛检查（先于建会话：复用不产生新会话）
     if let Some(m) = endpoint
-        && let Some((sid, existing_delivery)) = app.active_share_by_endpoint(&m.endpoint_id)
+        && let Some((sid, _)) = app.active_share_by_endpoint(&m.endpoint_id)
     {
-        // 定稿 delivery（复用判定用；公开方拍板）
-        let want = match (m.delivery, delivery_mode) {
-            (Delivery::Both, Some(w)) => w,
-            (Delivery::Both, None) => Delivery::Pull,
-            (d, _) => d,
-        };
-        if existing_delivery == Delivery::Pull && want == Delivery::Pull {
-            // pull 复用：订阅方只用 stream_id（watch 路径），凭证/中继地址同现流
-            tracing::info!(
-                "端点「{}」已有活动共享（{sid}），订阅方 {device_id} 复用同一流",
-                m.name
-            );
-            return Ok(ShareGrant {
-                view: stross_types::ShareTokenView {
-                    token: String::new(),
-                    stream_id: sid,
-                    pin: String::new(),
-                    expires_at: 0,
-                },
-                trusted: store.is_trusted(device_id),
-                delivery: Some(Delivery::Pull),
-                transports: Some(m.transports.iter().map(|t| t.transport).collect()),
-                relay: app.relay_ports().map(|(ws, srt, quic)| RelayAddr {
-                    ws_port: ws,
-                    srt_port: srt,
-                    quic_port: quic,
-                }),
-            });
-        }
-        return Err(format!(
-            "端点「{}」当前正被其它订阅者使用（一次仅一个订阅者）",
+        // 订阅驱动（docs/endpoint-model.md §10 定稿）：只在 pull 复用——
+        // 同端点已有活动共享（只走 pull），订阅方只用 stream_id（watch 路径）
+        // 复用同一流，凭证/中继地址同现流。
+        tracing::info!(
+            "端点「{}」已有活动共享（{sid}），订阅方 {device_id} 复用同一流",
             m.name
-        ));
+        );
+        return Ok(ShareGrant {
+            view: stross_types::ShareTokenView {
+                token: String::new(),
+                stream_id: sid,
+                pin: String::new(),
+                expires_at: 0,
+            },
+            trusted: store.is_trusted(device_id),
+            delivery: Some(Delivery::Pull),
+            transports: Some(m.transports.iter().map(|t| t.transport).collect()),
+            transport_profile: Some(m.transport_profile),
+            pick_rule: Some(m.pick_rule),
+            relay: app.relay_ports().map(|(ws, srt, quic)| RelayAddr {
+                ws_port: ws,
+                srt_port: srt,
+                quic_port: quic,
+            }),
+        });
     }
     let view = app
         .issue_share_token_for(title, media, Some(DEFAULT_GRANT_TTL_SECS))
         .map_err(|e| e.to_user_string())?;
+    // 订阅驱动（docs/endpoint-model.md §10 定稿）：数据流一律由订阅方发起并
+    // 主动取（pull），共享方只在本地中继发布、不做任何主动出站推送。delivery
+    // 定稿恒为 Pull（保留枚举 wire 兼容——对端旧版本字段仍可解析，但本端
+    // 协商不再产出 push/both 路径）。
+    let _ = delivery_mode;
     let (delivery, transports, relay) = match endpoint {
         None => (None, None, None),
         Some(m) => {
-            // 公开方拍板 delivery：Both 时尊重订阅方期望，缺省 Pull
-            let delivery = match (m.delivery, delivery_mode) {
-                (Delivery::Both, Some(want)) => want,
-                (Delivery::Both, None) => Delivery::Pull,
-                (d, _) => d,
-            };
+            let delivery = Delivery::Pull;
             let transports: Vec<TransportId> = m.transports.iter().map(|t| t.transport).collect();
-            let relay = if matches!(delivery, Delivery::Pull) {
-                app.relay_ports().map(|(ws, srt, quic)| RelayAddr {
-                    ws_port: ws,
-                    srt_port: srt,
-                    quic_port: quic,
-                })
-            } else {
-                None
-            };
+            let relay = app.relay_ports().map(|(ws, srt, quic)| RelayAddr {
+                ws_port: ws,
+                srt_port: srt,
+                quic_port: quic,
+            });
             (Some(delivery), Some(transports), relay)
         }
     };
@@ -711,6 +718,8 @@ fn compose_grant(
         trusted: store.is_trusted(device_id),
         delivery,
         transports,
+        transport_profile: endpoint.map(|m| m.transport_profile),
+        pick_rule: endpoint.map(|m| m.pick_rule),
         relay,
     })
 }
@@ -719,16 +728,16 @@ fn compose_grant(
 /// [`SubscribeCtx`] 触发端点 `share` 自动开推（docs/endpoint-model.md §1
 /// 契约 / §5 联动；只对端点语义生效）。
 ///
-/// * pull：数据面流 id = 公开方本机会话（`grant.view.stream_id`），推入
-///   自己的受控中继，无需凭证；
-/// * push：流 id / 凭证取自**订阅方**自签 token（订阅方中继校验用）。
+/// 订阅驱动（docs/endpoint-model.md §10 定稿）：只走 pull——数据面流 id =
+/// 公开方本机会话（`grant.view.stream_id`），推入自己的受控中继，无需凭证；
+/// 订阅方连公开方中继 watch 取流（无 push 出站路径）。
 fn notify_subscribed(
     app: &Arc<Kernel>,
     endpoint_id: Option<&str>,
     grant: &ShareGrant,
     subscriber: &str,
-    relay_addr: Option<&str>,
-    share_token: Option<&str>,
+    _relay_addr: Option<&str>,
+    _share_token: Option<&str>,
 ) {
     let Some(endpoint_id) = endpoint_id else {
         return; // 旧语义（无端点）不触发联动
@@ -742,25 +751,14 @@ fn notify_subscribed(
         tracing::info!("端点 {endpoint_id} 已有活动共享，复用流（订阅方 {subscriber}）");
         return;
     }
-    let stream_id = match (delivery, share_token) {
-        (Delivery::Push, Some(tok)) => ShareToken::from_token_string(tok)
-            .map_or_else(|| grant.view.stream_id.clone(), |t| t.stream_id),
-        _ => grant.view.stream_id.clone(),
-    };
     let ctx = SubscribeCtx {
         subscriber: subscriber.to_string(),
         delivery,
-        stream_id,
-        relay_addr: if delivery == Delivery::Push {
-            relay_addr.map(str::to_string)
-        } else {
-            None
-        },
-        share_token: if delivery == Delivery::Push {
-            share_token.map(str::to_string)
-        } else {
-            None
-        },
+        stream_id: grant.view.stream_id.clone(),
+        transport_profile: grant.transport_profile.unwrap_or_default(),
+        pick_rule: grant.pick_rule.unwrap_or_default(),
+        relay_addr: None,
+        share_token: None,
     };
     app.on_endpoint_subscribed(app.clone(), endpoint_id, &ctx);
 }
@@ -1022,7 +1020,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn endpoint_delivery_both_honors_subscriber_wish() {
+    async fn endpoint_delivery_both_granted_as_pull_subscription_driven() {
         let dir = tmp_dir("both");
         let app = Arc::new(desktop_kernel());
         app.publish_endpoint(
@@ -1040,7 +1038,8 @@ mod tests {
             task: tokio::spawn(async {}),
             port: 0,
         };
-        // Both + 订阅方指明 Push → 尊重订阅方
+        // 订阅驱动定稿：无论端点声明的 Both，协商只产出 Pull（无 push 路径）；
+        // 订阅方指明 Push 也被收敛为 Pull。
         let grant = neg
             .grant(
                 "dev-phone".into(),
@@ -1049,9 +1048,8 @@ mod tests {
                 Some(Delivery::Push),
             )
             .unwrap();
-        assert_eq!(grant.delivery, Some(Delivery::Push));
-        assert!(grant.relay.is_none(), "push 模式不带公开方中继地址");
-        // Both + 未指明 → 缺省 Pull
+        assert_eq!(grant.delivery, Some(Delivery::Pull), "订阅驱动只走 pull");
+        // Both + 未指明 → 仍 Pull
         let grant = neg
             .grant(
                 "dev-phone".into(),
@@ -1117,10 +1115,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 订阅收敛：同端点已有活动共享（push）时，第二个 push 订阅者被拒绝
-    /// （公开方单引擎，避免"grant 成功但流永不存在"）。
+    /// 订阅收敛：同端点已有活动共享时，第二个订阅者复用同一流（订阅驱动
+    /// 只走 pull——即使端点声明 Push 也被收敛为 Pull 并复用）。
     #[tokio::test]
-    async fn push_second_subscription_rejected() {
+    async fn push_declared_endpoint_still_reuses_as_pull() {
         let dir = tmp_dir("pushrej");
         let app = Arc::new(desktop_kernel());
         app.publish_endpoint(
@@ -1146,36 +1144,29 @@ mod tests {
                 Some(Delivery::Push),
             )
             .unwrap();
-        assert_eq!(g1.delivery, Some(Delivery::Push));
-        let sid1 = g1.view.stream_id;
+        assert_eq!(g1.delivery, Some(Delivery::Pull), "订阅驱动收敛为 pull");
+        let sid1 = g1.view.stream_id.clone();
         let weak: std::sync::Weak<dyn crate::EndpointApp> =
             std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
-        app.note_share_active(weak, "mic:builtin", &sid1, Delivery::Push);
-        // 第二个 push 订阅者：拒绝（错误信息可读）
-        let err = neg
+        app.note_share_active(weak, "mic:builtin", &sid1, Delivery::Pull);
+        // 第二个订阅者：复用同一流（不再报「正被使用」）
+        let g2 = neg
             .grant(
                 "dev-b".into(),
                 "设备B".into(),
                 Some("mic:builtin".into()),
-                Some(Delivery::Push),
+                None,
             )
-            .expect_err("同端点第二 push 订阅应被拒绝");
-        assert!(err.contains("正被其它订阅者使用"), "错误应说明原因: {err}");
+            .unwrap();
+        assert_eq!(g2.view.stream_id, sid1, "Push 声明端点仍复用同一流");
+        assert_eq!(g2.delivery, Some(Delivery::Pull));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn push_subscription_fires_endpoint_share_with_subscriber_credentials() {
+    async fn confirm_subscription_fires_pull_share() {
         use std::sync::Mutex as StdMutex;
         let dir = tmp_dir("share");
-        // 订阅方自签凭证（文档 §5：push 数据面接入凭证挂在订阅方内核）
-        let sub_token = ShareToken {
-            v: ShareToken::VERSION,
-            stream_id: "sub-session-9".into(),
-            pin: "123456".into(),
-            expires_at: 1_900_000_000,
-            media: vec![MediaKind::File],
-        };
         let app = Arc::new(desktop_kernel());
         // 订阅达成应触发端点 share（端点自驱动契约）：注入记录端点记录 ctx
         let fired: Arc<StdMutex<Vec<crate::kernel::SubscribeCtx>>> =
@@ -1226,7 +1217,7 @@ mod tests {
             fired: fired.clone(),
         }));
         let m = app
-            .publish_endpoint("rec:0", Visibility::Public, Delivery::Push, None, None)
+            .publish_endpoint("rec:0", Visibility::Public, Delivery::Pull, None, None)
             .unwrap();
 
         let neg = ShareNegotiator {
@@ -1236,7 +1227,8 @@ mod tests {
             task: tokio::spawn(async {}),
             port: 0,
         };
-        // 挂起条目携带订阅方中继 + 自签凭证；人工应答允许 → 触发端点 share
+        // 挂起条目（订阅方仅声明拉取意向，无自签凭证——订阅驱动只走 pull）；
+        // 人工应答允许 → 触发端点 share
         let (tx, rx) = oneshot::channel();
         neg.pending.lock_poisoned().insert(
             "np1".into(),
@@ -1244,25 +1236,26 @@ mod tests {
                 device_id: "dev-sub".into(),
                 device_name: "订阅方".into(),
                 endpoint_id: Some(m.endpoint_id.clone()),
-                delivery_mode: Some(Delivery::Push),
-                relay_addr: Some("ws://192.168.1.9:9123".into()),
-                share_token: Some(sub_token.to_token_string()),
+                delivery_mode: Some(Delivery::Pull),
+                relay_addr: None,
+                share_token: None,
                 tx,
             },
         );
         neg.respond("np1", true, false).unwrap();
-        rx.await.unwrap().expect("应签发 push 凭证");
+        let grant = rx.await.unwrap().expect("应签发 pull 授予");
+        assert_eq!(grant.delivery, Some(Delivery::Pull));
         let ctxs = fired.lock().unwrap();
         assert_eq!(ctxs.len(), 1, "确认后应触发一次端点 share");
         let ctx = &ctxs[0];
         assert_eq!(ctx.subscriber, "dev-sub");
-        assert_eq!(ctx.delivery, Delivery::Push);
+        assert_eq!(ctx.delivery, Delivery::Pull);
         assert_eq!(
-            ctx.stream_id, "sub-session-9",
-            "push 流 id 取自订阅方自签凭证"
+            ctx.stream_id, grant.view.stream_id,
+            "pull 流 id 取自公开方签发的会话"
         );
-        assert_eq!(ctx.relay_addr.as_deref(), Some("ws://192.168.1.9:9123"));
-        assert!(ctx.share_token.is_some());
+        assert!(ctx.relay_addr.is_none());
+        assert!(ctx.share_token.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1307,7 +1300,7 @@ mod tests {
             Visibility::Private {
                 nodes: vec!["dev-ok".into()],
             },
-            Delivery::Push,
+            Delivery::Pull,
             None,
             None,
         )

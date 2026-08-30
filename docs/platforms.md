@@ -59,8 +59,7 @@ cargo run -p stross-relay --features discovery -- -p 8777 --advertise
 ### 快速构建
 
 ```bash
-export JAVA_HOME=<JDK 21 路径>   # 构建必须：系统默认 JDK 25 会让 Kotlin 1.9.25
-                                 # 的 buildSrc 崩溃（IllegalArgumentException: 25.0.4.1）
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk   # 本机默认 JDK 21（<25 均可；Gradle 8 与 25 不兼容）
 rustup target add aarch64-linux-android
 ./scripts/setup-android.sh                       # 生成 Android 工程并装配 Kotlin 插件
 cd apps/stross-gui/src-tauri && cargo tauri android build --debug -t aarch64

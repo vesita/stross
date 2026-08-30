@@ -9,27 +9,27 @@
 
 ### 交互模型
 
-桌面/Android 应用采用「**本机通告 + 对端订阅**」两极模型（第八轮 UI 收敛）：
+桌面/Android 应用采用「**本机共享 + 对端订阅**」两极模型（第八轮 UI 收敛）：
 打开即自动锚定本机（受控中继 + mDNS 广播）；**任何可共享能力都是端点**，
-统一走「通告 / 订阅」，不再有独立于端点的广播/凭证/共享流面板：
+统一走「共享 / 订阅」，不再有独立于端点的广播/凭证/共享流面板：
 
 ```text
 本机（能力提供方）                    对端节点（被发现设备）
 ┌───────────────────────┐   ┌──────────────────────────────┐
 │ 设备树（local_catalog） │   │ 设备卡片（名称 + 端点目录）       │
 │  · 屏幕 / 麦克风 / 文件 …│   │  · 展开拉目录（endpoint_ls）    │
-│  · 通告（可见性/delivery）│   │  · 可订阅端点 → 订阅握手        │
-│  · 已通告徽标 / 取消通告   │   │  · 端点自驱动推流（点即收）      │
+│  · 共享（可见性；方向由系统定）│   │  · 可订阅端点 → 订阅握手        │
+│  · 已共享徽标 / 取消共享   │   │  · 端点自驱动推流（点即收）      │
 └───────────────────────┘   └──────────────────────────────┘
 右栏「接收」面板：订阅流播放 / 停止（接收端主动权）
 ```
 
 - 「锚定本机」：`start_relay` 启动常驻受控中继（接收与推流共用）+ mDNS 广播，
   内核签发会话 id（D4），中继只接受内核授权会话（F2.2）。
-- 「通告（出站）」：本机端点（屏幕/麦克风/文件…）通告为可订阅——选可见性
-  （Public 免确认 / Confirm 首次人工确认可记住 / Private 白名单）与交付方向
-  （pull 连公开方中继 watch / push 公开方凭订阅方凭证出站推流），进入本机与
-  对端目录；端点自维护「可挂载性」（load 探测），不可用灰显 + 原因。
+- 「共享（出站）」：本机端点（屏幕/麦克风/文件…）共享为可订阅——选可见性
+  （任何人免确认 / 需我确认可记住 / 私密白名单）；数据面方向（pull/push）是
+  **系统/端点决策，UI 不让用户选**，进入本机与对端目录；端点自维护「可挂载性」
+  （load 探测），不可用灰显 + 原因。
 - 「订阅（入站）」：点对端端点条目 → 协商端点 `POST /api/negotiator/request`
   订阅握手 → 端点 `share` 自动启动推流 → 本机 `start_receive` 原生播放
   （`PlaybackSink`，D6），**无浏览器观看端**（D1）。
@@ -202,8 +202,8 @@ AudioTrack 系统 API 薄壳**，`feedVideo` 入队立即返回 + 独立解码�
 | `scan_relays()` / `devices::scan_lan()` | mDNS 扫描局域网中继 / 设备扫描聚合（发现 + 探测 + 手动地址去重；GUI `scan_devices` 命令与 CLI `devices` 共用） |
 | `create_session / route / authorize / teardown` | 会话生命周期（受控中继只接受内核会话 id） |
 | `issue_share_token / verify_share_token` | 建会话 + 签发/校验一次性凭证（手动路径与协商端点共用） |
-| `publish_endpoint / unpublish_endpoint / publish_file_endpoint` | 端点通告（可见性/delivery；文件 = 动态端点） |
-| `endpoint_catalog / published_endpoints / local_catalog` | 目录（本机已通告 / 对端可订阅端点清单） |
+| `publish_endpoint / unpublish_endpoint / publish_file_endpoint` | 端点共享（可见性；方向系统定；文件 = 动态端点） |
+| `endpoint_catalog / published_endpoints / local_catalog` | 目录（本机已共享 / 对端可订阅端点清单） |
 | `on_endpoint_subscribed(app, id, ctx)` | 订阅达成 → 端点自驱动 `share`（内核不分派） |
 | `start_stream(cfg, relay_url)` / `stop_stream()` / `stream_status()` | 推流生命周期 |
 | `start_receive / start_receive_raw / stop_receive / receive_status` | 接收编排（原生播放 / 原始帧） |

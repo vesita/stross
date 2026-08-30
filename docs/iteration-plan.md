@@ -28,7 +28,7 @@ GStreamer 流水线。
 |---|---|---|---|---|
 | A | 当前收口 | 一期验收 1/5 | 已知问题②④ + 三设备实测 + 提交 | ✅ 已完成（A0–A3 落地；A4 三设备实测部分完成，见轮次记录） |
 | B | **反向外设（D3 核心验收）** | 一期验收 3、6；§6.1 反向音频 ≤200ms | 跨设备推流：手机麦克风 → 电脑播放 | ✅ 核心闭环完成（B1/B2/B2.5 真机闭环；B3/B4/B5/B7 落地；B6 部分） |
-| C | 弱网与长跑韧性 | §6.2 弱网 5–10% 丢包不冻结 >1s、内存有界 | 弱网测试自动化 + 韧性手段 + 长跑验证 | ⏳ 待开始（弱网基线已测，见 stress-test-report.md） |
+| C | 弱网与长跑韧性 | §6.2 弱网 5–10% 丢包不冻结 >1s、内存有界 | 弱网测试自动化 + 韧性手段 + 长跑验证 | ⏳ 待开始（弱网基线已测） |
 | D | 多端互通与网格完善 | 一期验收 2、4、6；F5.1/F5.3 | Android GUI、互通矩阵、会话控制完善 | 🔄 进行中（D1 Android GUI 已落地；互通矩阵/传输统计待办） |
 | E | 二期无损共享 | F6.1/F6.2 | 文件互传 + 剪贴板同步（ReliableChannel） | 🔄 二期（文件端点已落地；剪贴板待办） |
 
@@ -386,381 +386,42 @@ GStreamer 流水线。
 
 ## 建议推进顺序（截至第十二轮）
 
-1. **P0-2 断线自动重连**（closed-loop-plan.md §3）：接收端退避重连 + 推流端重 Hello +
+1. **P0-2 断线自动重连**：接收端退避重连 + 推流端重 Hello +
    拒绝原因透传——闭环验收 4 的最后缺口；
 2. **C 阶段（弱网与长跑）**：`weaknet-test.sh` 10% 丢包档 SRT 调参（上调
-   `rcv_latency`/ARQ 参数）+ 长跑自动化固化——弱网基线已测（stress-test-report.md）；
+   `rcv_latency`/ARQ 参数）+ 长跑自动化固化——弱网基线已测；
 3. **D 阶段收尾**：跨平台互通矩阵（Windows/Android 实测）、传输统计推送进
    运行页（F5.3）、AV Sync（P3）；
 4. **E 二期**：剪贴板同步等 ReliableChannel 剩余项（文件端点已落地）。
 
 ---
 
-## 第七轮（统一化重构，2026-08-28）：内核定义落定 + 桥接层独立
 
-**目标**：解决「内核定义不明确」「app 里写内核太奇怪」——`stross-core` 更名
-`stross-kernel` 并吸收原 `stross-app` 全部服务；平台适应独立 `stross-bridge`；
-壳层只做参数解析 + 展示 + 平台适配。**产出**：单一 `Kernel` 门面（90+ 方法，事件经
-`KernelEvent` 广播）；端口常量收敛（relay 18777 / GUI 8777 / ctrl 18778 / 协商 18779 /
-SRT 33462 / QUIC 33464）；目录与订阅握手收敛。**验证**：workspace 零警告；真机互相发现 +
-自动协商闭环（详细变更见 git 历史）。
+## 轮次索引（已完成轮次一句话摘要；详细记录见 git 历史）
 
-## 第八轮（UI 收敛到「通告 + 订阅」+ 内核推流状态修复，2026-08-28）
-
-**目标**：按用户意见把 UI 收敛为「本机设备通告 + 对端设备通告订阅」两极，删除旧
-广播/凭证/共享流面板（publish.ts / negotiate.ts 删除，右栏改「接收」面板）；修复数据面
-流结束后引擎状态滞留导致的「已经在推流中」卡死。**产出**：`Kernel.engine` 改
-`Arc<Mutex<Option<RunningStream>>>` + `StreamEnded` 自动清理；端点订阅闭环（订阅达成 →
-端点自动开推）；前端渲染签名门控 + 对端目录 20s TTL；设备命名用注入主机名（Android
-回退「Stross 设备」）。**验证**：真机「手机订阅 PC 屏幕 → 自动推流 → 手机收帧」闭环；
-前端 jsdom 56 项断言。
-
-## 第九轮（端点插件区 + Wayland 屏幕采集，2026-08-29）
-
-**目标**：修复 PC 端（Wayland）无法获取屏幕的 bug；按「端点插件区」愿景落地
-`stross-endpoint` 取代 `stross-media`，内核收敛为纯管理调度。**产出**：Wayland 屏幕采集
-（portal+pipewire SHM 路径）+ 静止画面保活（按目标帧率重发上一帧）；`Endpoint` 契约
-（load/share，端点自驱动）+ screen/audio/file 端点 + codec/convert 处理辅助；
-`Platform` 移入 stross-proto。**验证**：Wayland 实机 e2e 212 帧真实桌面内容；提交 `43b8661`。
-
-## 第十轮（播放体验：低延迟调参 + PTS 调度层 + 延迟回归固化，2026-08-29）
-
-**目标**（用户拍板）：播放体验/延迟优先——SRT 低延迟调参 → PTS 驱动播放调度层 →
-延迟/节奏回归固化。**产出**：`DEFAULT_SRT_LATENCY_MS` 120→20（实测 ~143ms 稳定）；
-`PlaybackScheduler`（`VideoPacing{target_delay:150ms, jump_reset:500ms}`，仅实时显示路径）；
-ffmpeg 解码 `-threads 1`（**绝对延迟 566ms 元凶**，-5.6x）；延迟测量口径修正
-（含解码管线）。**验证**：三传输全达标（WS min=99.9 / SRT min=145.4 / QUIC min=100.4 ms）。
-
-## 第十一轮（代码质量提升：clippy pedantic 白名单 + 双代理审查修复 + 播放器完善，2026-08-29）
-
-**目标**：系统性代码质量提升——clippy 代码类 lint 白名单机械修复（68 文件）+ 双代理
-审查驱动高危 Bug 修复。**产出**（高价值项）：SRT 分片计数 u8 回绕拒绝、QUIC 读侧
-4GiB OOM 上限（`MAX_MSG_LEN=64MB`）、pacer wait==0 阻塞、pts 队列代际清空、
-subscriber `Delivery::Both` unreachable→bail、前端错误显示全失效（errMsg）、
-startReceive 防重入+失败回滚、轮询边界修复、drawReceiveFrame 热路径复用。
-**验证**：`check.sh` full 全绿；kernel 85 / endpoint 61 / transport 21 全过。
-
-### 历史遗留（第七~十一轮仍有效，去重合并；其余细节见 git 历史）
-
-- [ ] Android 设备树无屏幕端点（Android 屏幕共享走采集授权路径，非端点模型，待后续）；
-- [ ] 真机（手机→PC / PC→手机）延迟复测待用户环境实测（本机双开已达标）；
-- [ ] 延迟测量拆「传输层 / 端到端含解码」两指标（如需保留 QUIC ≤30ms 口径）；
-- [ ] PTS 调度层（P1）在 GUI 实时显示路径的节奏回归（headless 直通不经过 pacer）；
-- [ ] `sender.rs` Hello 错误传播（推流拒绝时 connect 假成功）——留待 P0-2 推流 UX 专项；
-- [ ] `webrtc.rs` inbound `send().await` 反压阻塞 run loop → `try_send` + 丢帧计数；
-- [ ] mDNS daemon `OnceLock<Result<…>>` 收敛（两处 expect panic）；
-- [ ] 凭证校验实现两遍（`verify_share_token` vs `KernelTokenValidator`）收敛；
-- [ ] 中继/协商 CORS 中间件两份收敛；URL host:port 解析三份收敛（统一 `RelayUrl`）；
-- [ ] discovery 未知枚举值整设备消失（容忍反序列化）——混合版本演进策略需单独评估；
-- [ ] `frame.rs` 32 位目标 len 回绕 panic（`checked_add` 一行）；`pts_ms: u32` 回绕（49.7 天会话上限声明）；
-- [ ] 全量 must_use_candidate（186 处）与 # Errors/# Panics 文档补齐（量大，可分批）。
-
----
-
-## 第十二轮（运行闭环 P0-1：端点共享生命周期治理，2026-09）
-
-> 方案：`docs/closed-loop-plan.md`。范围声明：开发期不做 wire 版本兼容；
-> 本轮只做工程闭环，协议优化（watch 鉴权 / 保活控制帧等）排后续。
-
-**目标**（对应闭环缺陷 #5/#6/#8/#9）：端点共享可停止、订阅者全断开自动收尾、
-同端点多订阅者收敛（pull 复用流）、会话/凭证/授权随流结束清理、端点状态实时更新。
-
-**变更**：
-| 项 | 落点 |
+| 轮次 | 一句话 |
 |---|---|
-| 端点共享登记 | `EndpointApp::note_share_active(weak, endpoint_id, stream_id, delivery)` 新增（默认空实现）；`spawn_media_share` 传 endpoint_id（screen/audio 三处调用点）；Kernel `active_shares` 表（stream_id → 端点）+ `set_state(Active)` + 无观看者接入窗口兜底（`share_idle_delay` 10s，经 Weak 回调不拖住内核） |
-| 停止路径 | `Kernel::stop_endpoint_share`（幂等）+ `stop_share_by_stream`（同步：取引擎 spawn 收尾 + teardown + 清登记 + Idle）；`unpublish_endpoint` 改 async 并**联动停止活动共享**；GUI 新命令 `endpoint_stop_share` + 本机端点树「停止共享」按钮（state=active 时显示，badge live 样式） |
-| watchers→0 自动收尾 | `attach_data_plane`（改 `self: &Arc<Self>`）事件转发扩展：`WatchersChanged{0}` → 延迟复查（`share_stop_delay` 4s，经 `DataPlaneBackend::stream_watchers` 新增查询）仍无人观看才停；`StreamEnded` → 清登记 + Idle + **本机会话 teardown**（会话生命周期 = 流生命周期，顺带修复会话/授权/token 只增不减）；`teardown` 补充移除签发表（凭证随会话失效） |
-| 订阅收敛 | `compose_grant` 先查 `active_share_by_endpoint`：pull 复用同一流（grant 只带 stream_id，不新建会话/凭证）；push 第二订阅者拒绝（清晰报错，不再"grant 成功但流不存在"）；`notify_subscribed` 复用场景不重复触发 share |
-| 端点状态实时化 | `set_state` 生产接线：登记 Active / 停止 Idle / `WatchersChanged` 同步 subscribers=watchers |
-
-**验证**：
-- `scripts/check.sh` full 全绿（fmt / clippy -D warnings / workspace 测试 / tsc / js 同步 / jsdom 新增 [12] 停止共享断言）；
-- kernel 单测 89 项 ✅（新增：active_share 登记/查询/停止幂等、teardown 清 token、pull 复用同流、push 第二订阅拒绝）；
-- 集成测试 ✅ `endpoint_share_stops_after_last_watcher_leaves`：真实受控中继 + 双端，观看端断开 → watchers→0 延迟复查 → 登记清除 + 会话拆除 + 流回收；
-- 测试暴露机制细节：中继观看端只在「下一次广播」时发现对端已断（send 失败），断连检测依赖推流端持续发帧——真实端点共享恒 30fps 推流，生产路径成立。
-
-**遗留 / 待定**：
-- [ ] P0-2 断线自动重连（接收端退避重连 + 推流端重 Hello + 拒绝原因透传），见 closed-loop-plan.md §3；
-- [ ] 复用以登记为准（登记随停止/流结束同步清除）：停止与新订阅接入之间的极端竞态窗口由 P0-2 重试兜底；
-- [ ] 并发双订阅同端点（同一毫秒内）仍可能双建会话（share 先到者胜）——开发期可接受；
-- [ ] 协商层复用/拒绝的 HTTP 状态码暂用 500 承载业务错误（消息可读），协议优化阶段改 409；
-- [ ] 协议优化阶段：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕（closed-loop-plan.md §5）。
-
-
----
-
-## 第十三轮（实机打包 + 真机验证 + UI 优化，2026-09）
-
-**起因**：用户「打包新版本上手机实机验证 P0-1 闭环 + 随手优化 UI」。
-
-**Android 打包修复**（此前 Android target 无法编译，三处 cfg 错误）：
-| 问题 | 修复 |
-|---|---|
-| `factory.rs` Android 分支误引用不存在的 `screen::linux::audio_probe`（Android 下该模块被 `cfg(not(target_os="linux"))` 掉） | 新增 `android_audio_probe()`（恒可用的 `Probe`：Android 音频采集走原生 MediaRecorder/AAudio，**不依赖 ffmpeg**）；desktop 分支保持 `screen::*::audio_probe` |
-| `lib.rs` 无条件 re-export `playback::FfmpegPlaybackSink`（Android 下被 `cfg(not(target_os="android"))` gate 掉） | 该 re-export 单独 `#[cfg(not(target_os="android"))]` |
-| 中途曾把 `audio::audio_probe`（ffmpeg 检查）用作 Android 探测，导致真机端点「不可用（ffmpeg 不可用）」 | 撤回（改恒可用 probe），避免 dead_code |
-
-**打包链环境**：项目 `build.gradle.kts` 钉 `compileSdk=36/buildToolsVersion=36.0.0`，但当前 `/opt/android-sdk` 仅装 build-tools 37 / platform android-37，且 SDK 目录 root 所有、不可写、license 未接受。AGP 8.11 对 compileSdk 37 仅警告（非阻断），但切 37 触发的其它组件（build-tools 35）仍因 license/写权限失败。**经用户 sudo 安装** build-tools 35/36 + platform android-36 + 接受 license 后构建成功（`cargo tauri android build --debug`，JDK 17）。
-
-**真机结果**（OPPO PLC110，Android 16，WiFi 192.168.11.60，WebView CDP 驱动）：
-- debug APK 构建成功并安装（旧包为 release 签名不一致 → 卸载重装）；App 启动中继 8777 在线、WebView 远程调试通道可用；
-- 真机 UI 冒烟 ✓：端点可用、通告弹窗（可见性/delivery 选择）、通告后徽标「已通告·公开·拉取」+「取消通告」均工作；
-- **跨设备订阅受限**（非 P0-1 bug，实测发现）：手机监听端口**无 18779 协商服务**（仅 8777），PC `stross devices` 扫描**发现 0 台**（mDNS 隔离/多网卡）→「手机作公开方→PC 协商订阅」在当前网络/代码下不可行；P0-1 核心收尾已由集成测试覆盖。
-
-**UI 优化**（基于真机截图，修实机抓到的缺陷）：
-- **端点行竖排 bug**（P0-1 新增「已通告徽标 + 取消通告按钮」与文本同排，窄屏下名称/meta 被挤压成逐字竖排）→ `.ep-row` 允许 `flex-wrap` + `.ep-name/.ep-meta` `white-space:nowrap` + ellipsis；
-- **meta 类别去重**（名称「系统声音」+ meta「系统声」重复）→ 可用端点 meta 显示「实时」，不可用显示原因；
-- **`.ep-actions` 右对齐操作组**：徽标 + 通告/取消通告按钮包进右对齐容器，避免「取消通告」按钮孤行，紧凑美观；
-- jsdom [11]/[12] 回归保持全绿。
-
-**用户诉求**：手机端点太少（Android 仅麦克风/系统声音两个音频端点）——属 P1 明确范围（屏幕需 MediaProjection 前台服务、摄像头 CameraX，均后置，见 factory.rs 注释）。用户拍板「先完成 P0-1 + UI 优化」，扩充端点记入后续。
-
-**遗留 / 待定**（新增）：
-- [ ] **扩充 Android 端点集**：屏幕（MediaProjection 前台服务采集 + Rust 端点 + 授权）、摄像头（Camera2/CameraX + 文件/剪贴板等）；Android GUI 缺协商服务（18779）→ 手机无法被自动协商订阅，需评估是否补；
-- [ ] P0-2 断线自动重连（承接第十二轮，见 closed-loop-plan.md §3）；
-- [ ] 跨设备端到端真机回归：当前 mDNS 隔离 + 手机无协商服务，需网络/配置支持才能跑通「通告→订阅→断开→收尾」；
-- [ ] 协议优化阶段：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕（closed-loop-plan.md §5）。
-
----
-
-## 第十四轮（真机端到端闭环跑通：P0-1 生命周期，2026-09）
-
-**目标**：跨设备真机跑通「端点通告→订阅→断开→自动收尾」，解决上轮发现的跨设备阻塞。
-
-**两大堵点与修复**：
-| 堵点 | 根因 | 修复 |
-|---|---|---|
-| 手机无 18779 协商服务 | `lib.rs` 刻意「Android 仅作客户端不启动协商服务」（`#[cfg(mobile)]` 只 manage 空 handle） | 解除限制：`start_handshake` 所有平台启动；`NegotiatorUiBridge` 去掉 `#[cfg(not(mobile))]` gate（Android 前端同样订阅 `negotiator-request`）。手机 App 前台时监听 0.0.0.0:18779 |
-| 无法订阅实时媒体端点 | CLI `endpoint subscribe` 只走 `subscribe_file`（文件落盘），对实时「系统声音」报「实收 0 字节」 | 新增库接口 `subscribe_media_and_watch`（`subscribe_media` 握手 → `connect_watch` 连对端中继建 watcher → 读帧保持）；CLI 按端点 kind 分派：File→落盘，其余→媒体观看保持（Ctrl-C 断开触发收尾）；导出到 `stross_kernel`。对「流尚未出现」做 `STREAM_APPEAR_WINDOW`(9s) 重试（watcher 接入与公开方泵建流竞态） |
-
-**真机结果**（OPPO PLC110，Android 16，PC+手机同网段 192.168.11.x）：
-- 手机通告麦克风（public/pull）→ PC `stross endpoint subscribe --host <手机> --endpoint mic:builtin --delivery pull`；
-- **订阅达成**：手机 UI「已通告 · 公开 · 拉取 · 1 订阅中」+「停止共享」（active）；手机中继 `/api/streams` 出现 `sess-3「麦克风」watchers=1`；
-- **断开自动收尾**：终止 PC 订阅进程 → 手机 watchers→0 延迟复查（4s）→ UI 回「已通告 · 公开 · 拉取」（无订阅中/停止共享）+ `/api/streams` 清空 → **P0-1 闭环真机验证成功**。
-
-**关键发现（实测）**：
-- **Android 前台约束**：手机 Stross 必须在**前台**协商服务才响应（App 后台被冻结，18779 虽监听但拉目录超时）；切前台即恢复。真机闭环需保持 Stross 前台。
-- 系统声音端点 share 依赖 MediaProjection（录屏授权）较繁琐；**麦克风**（RECORD_AUDIO）更易跑通——本次用麦克风验证。
-- mDNS 扫描仍 0 台（PC 侧 Mihomo TUN/fake-IP 疑似干扰组播），但**直连协商（不经 mDNS）已足够跑通闭环**——设备发现可后续借手动添加/修复 mDNS browse 接口。
-
-**遗留 / 待定**（新增）：
-- [ ] mDNS 跨设备发现修复（PC 扫 0 台；疑 Mihomo TUN 干扰组播；或用手动添加兜底已验证）——接入「设备卡」自动发现仍依赖它；
-- [ ] 系统声音端点真机验证（需 MediaProjection 录屏授权 + 前台）；Android 后台保持协商服务的可行性评估（FGS）；
-- [ ] P0-2 断线自动重连（承接前轮）；协议优化阶段（watch 鉴权/保活/pts 回绕）。
-
----
-
-## 第十五轮（mDNS 复盘 + 「可被发现」显式开关，2026-09）
-
-**起因**：第十四轮真机闭环虽已跑通，但 PC `stross devices` 扫仍 0 台（mDNS 自动发现失败）。复盘发现前后共修了两层，且最初的方向判断有误；最终把「发现」改为**用户显式开关**。
-
-**对既有 mDNS 修复思路的复盘**（用户要求审阅）：
-- **已做**：fork `mdns/src/service_daemon.rs` 的 `process_packet`——把「query-with-answer（手机周期公告）」误当查询忽略 answer 的分支，改为也走 `handle_response` 喂缓存。**方向对但分析片面**。
-- **走偏处**：以为是「浏览端 resolve 不补全」，反复调 4s/12s 窗口。实测发现**根子在手机端**：
-  1. `Discovery::start`（mDNS 注册）只在锚定中继时调（`relay/server.rs`、`kernel/mod.rs`），**端点通告/取消通告不触发重注册** → TXT `ep.*.published` 停在锚定时刻旧值（「手机广播不更新」，与用户判断一致）；
-  2. 手机 App 经多次 install/`am start` 后 mDNS 状态退化（只发 PTR、不响应 SRV/TXT/A 补查）——**重启 App 重新锚定后 avahi 即能看到完整记录**（TXT 全端点、地址/端口齐全），证明手机端本可发完整记录，只是当时状态异常。
-- **回退**：`process_packet` 的 patch 因破坏 mdns-sd 上游 3 个集成测试（`known-answer-suppression` 等依赖 query-with-answer 走查询语义）而**回退**——它并非正确修复，反而污染了标准的已知应答抑制。
-
-**本轮改动：可被发现 = 用户显式开关（默认关）**
-- **内核**：`Kernel` 增 `discoverable`（`AtomicBool`，默认关）；`set_discoverable`/`discoverable`；锚定中继时**仅当开启才广播**；新增 `Discovery::redefine`——**保持同 fullname 覆盖重注册**（mdns-sd `my_services` 按全名小写 `HashMap::insert`，TXT 更新即生效，避免先注销再注册空窗）。
-- **立即刷新**：`publish_endpoint` / `unpublish_endpoint` / `publish_file_endpoint` 在 registry 锁**外**调 `apply_discoverable()`，通告状态一变化就重注册刷新 TXT `published`。
-- **持久化**：`Settings`（`settings.json` 与 identity 同目录，`discoverable` 默认 false）；内核 `load_settings`/`save_settings`。
-- **CLI**：`serve --discoverable`（显式开启；不传读 settings.json）。`relay` 独立进程维持各自 `--no-advertise`（不同制品，不并入）。
-- **GUI**：header 右上「可被发现」开关；`set_discoverable`/`discoverable_status` 命令；setup 读 settings 注入。
-
-**自测验证（`devices` 跨进程扫描）**：
-- `--discoverable` 起 serve → 独立 `devices` 扫到该服务（设备名 pico）；
-- 不传 `--discoverable` → 扫 0 台（默认不可被发现 ✓）；
-- 通告 `screen:0` 后重扫 → TXT 显示「屏幕（已通告）」→ **通告即刷新生效** ✓；
-- settings.json `discoverable:true` 不传 flag → 仍广播（持久化✓）。
-- 静态门禁：`cargo build --workspace`、`cargo test -p stross-kernel`（settings/discovery/全部 93+ 用例）、clippy、fmt 全绿；前端 `tsc` 通过、`app/*.js` 再生成。
-
-**遗留 / 待定**：
-- [ ] Android GUI 端点通告 → 手机 mDNS TXT `published` 即时刷新，需真机复核（本轮只验了 CLI 路径）；
-- [ ] 手动添加设备（`devices` 已有 `--extra`？/GUI manual-addr）作为 mDNS 兜底，跨设备发现仍依赖网络组播健康；
-- [ ] 手机端手机 App 状态退化（只发 PTR 不响应查询）的**根因**仍需追（疑 App 重启后 daemon 未正确重建）；与本轮开关配套后，建议真机「重启 App 重新锚定」再验 mDNS。
-
----
-
-## 第十六轮（mDNS 真机「手机收不到下行多播 / PC 扫不到手机」根因定论，2026-09）
-
-**起因**：真机上 PC 用 `stross devices` 扫不到手机（手机能发现 / 曾发现电脑）。经多轮（地址匹配→探测闸门→发送接口→接口归属→TUN→网络加速）逐一排除后，最终定论在**环境侧（WiFi AP 下行多播被拦）**，而非 Stross 代码。
-
-**排除链（每步都有日志/抓包证据）**：
-1. ~~地址匹配失败~~：诊断证明 `wlan0` 的 `intf_addrs=["192.168.11.60"]` 非空，`prepare_announce` 能构造 `answers_count=4`。
-2. ~~探测闸门 `probing_count>0`~~：`set_requires_probe(false)` 生效，不再 reject 整个 QR=1。
-3. ~~发送接口/接口归属/`handle_read` 家族检查丢弃~~：加全量入包诊断（`recvPkt`）后，PC 的单播能到手机（`from=192.168.11.61:48779 if_index=40 intf=wlan0`），但多播从未到达手机 socket。
-4. ~~PC 的 TUN / 网络加速开关~~：TUN 关闭、网络加速/双通道关闭后仍同症状；PC 出网多播计数正常（enp6s0 TX +24）。
-
-**定论**：**手机能发上行多播、能收单播、能收自己 socket 的回环多播，唯独收不到「从 AP 下来的多播」**（`Su` 路由下行多播被 IGMP snooping/客户端隔离拦截）。同一套代码在**多播通畅的网络**（手机↔PC 经 USB 共享，同网段 10.159.157.0/24）上**双向发现均成功**：PC 扫到手机 `10.159.157.104:8777`（完整 SRV+TXT+A/端点/SRT/QUIC），手机列表出现 PC `10.159.157.158:18777`。→ **mDNS 代码无 bug，纯环境问题。**
-
-**处理 / 结论**：
-- **排查诊断日志已全部清理**（`crates/mdns/src/service_daemon.rs`、`crates/stross-kernel/src/discovery.rs` 的 `DIAG` 移除），恢复干净 `trace!`/`debug!`；`cargo test -p mdns` 全绿。
-- mdns fork 保留的**功能性改动**：`set_requires_probe(false)`、`handle_read` 接口 fallback、`ingest_records`（query-with-answer 入库）、`apply_multicast_rate_limit`。
-- **解决办法（任选）**：①改 `Su` 路由器（关 IGMP snooping / 关客户端隔离 / 开多播转发）；②用多播通畅网络（如 USB 共享）跑真机闭环；③可选代码兜底（mDNS 加单播下发/单播应答），让手机在收不到下行多播时仍可被发现/发现对端。
-
-**遗留 / 待定**：
-- [ ] P0-1 真机闭环走 USB 网络已可发现；如需 WiFi 也稳定，实施「mDNS 单播兜底」或修复路由器多播；
-- [ ] 手机 App mDNS「只发 PTR 不响应补查」（状态退化）隐患仍存，建议配合重启 App 重新锚定核验（本轮已另作记录）。
-
----
-
-## 第十七轮（统一发现端口：mDNS 与子网扫描收敛到同一节点，2026-09）
-
-**起因**：延续第十六轮定论——`Su` 路由只拦「下行多播」、**单播双向通**（§8.2）。用户采纳「双发现机制应指向**同一节点**（降低认知成本）」的建议，选定：**协商/发现端口 18779（桌面与 Android GUI 一致）作发现权威**，mDNS 与子网扫描都据此收敛到**同一台设备同一个 `relay_port`**；保留 mDNS 为组播通畅时的首选。
-
-**改动**：
-- **`crates/stross-kernel/src/devices.rs`**：新增 `DiscoveryResp`（权威发现清单：deviceId/name/relayPort/srtPort/quicPort/roles/media/transports/endpoints）+ 发现权威端口常量 `DISCOVERY_PORT=18779`；`subnet_scan`/`scan_probe_host` 改为**单一探 `18779/api/discovery`**，以其 `relay_port` 作设备节点（不再是硬编码 `[18777,8777]`，故能发现自定义中继端口设备且与 mDNS 同节点）。
-- **`crates/stross-kernel/src/kernel/mod.rs`**：新增 `discovery_manifest()`，从 `relay_ports()`+`device_identity()`+`mdns_info()` 组装清单。
-- **`crates/stross-kernel/src/negotiator/*`**：18779 新增 `GET /api/discovery`（`handle_discovery`，读 `Kernel::discovery_manifest`），并入 OpenAPI；CORS 放行 `GET`。
-- **`crates/stross-proto/src/message/endpoint.rs`**：`EndpointSummary` 补 `ToSchema`（供 `DiscoveryResp` 进 OpenAPI）。
-- **`scripts/discovery-test.sh`**（新增）：回归 `/api/discovery` 清单正确性 + mDNS/子网扫描收敛到同一 `relay_port`。
-
-**验证（关键，真机）**：
-- `cargo test -p stross-kernel` 全绿（99 lib）；`cargo clippy --workspace --all-targets -D warnings` 干净；`cargo fmt --check` 通过。
-- PC `/api/discovery` 返回 `relayPort=18777`（与 mDNS 一致）；PC `stross devices` 找到本机 18777 + 手机 8777。
-- **手机→PC 反向**（真机 WiFi，下行多播被拦）：手机 logcat 铁证——
-  `mDNS 零远端设备，触发子网单播扫描回退` → `子网扫描回退发现 3 台设备` → 设备列表出现 `Stross 设备 192.168.11.61:18777`，且 PC 当时**非广播**（无 mDNS），纯靠子网回退 + `/api/discovery`。
-
-**遗留 / 待定**：
-- [ ] 手机端发现的 PC 名在 mDNS（`pico`）与 `/api/discovery`（`Stross 设备`）下不一致——取决于声明名来源（hostname vs identity.device_name），后续统一；
-- [ ] 仅跑 `stross relay`（不启动协商）的**纯中继节点**不在 18779，子网扫描探不到（交由 mDNS 发现）——按用户拍板保留此取舍。
-
-### 本轮的模块收敛 + 版本标记
-
-**用户决策**：把散落的发现代码收敛为 **kernel 内单一 `discovery` 模块（`crates/stross-kernel/src/discovery/`）**，并标记为 **v0.2.0**（本模块契约封盘），以便转去完善其它模块。
-
-- 结构：`discovery/mod.rs`（模块文档 + `pub const DISCOVERY_VERSION = "0.2.0"` + 公共 API 重导出）、`discovery/mdns.rs`（mDNS 通告/浏览，原 `discovery.rs`）、`discovery/aggregate.rs`（扫描聚合 + `DiscoveryResp`/`DISCOVERY_PORT`，原 `devices.rs`）。
-- 删除 `src/devices.rs` 与 `src/discovery.rs`；`lib.rs` 的 `pub mod devices` 移除，扫描聚合的 crate 级重导出改为 `pub use discovery::{...}` 并随 `discovery` feature。
-- 外部消费者（CLI `devices`/`adb status`、GUI `scan_devices` 命令）引用由 `stross_kernel::devices::*` 改为 `stross_kernel::discovery::*`。
-- `Kernel::discovery_manifest` / `negotiator::handle_discovery` 的 DTO 引用改为 `crate::discovery::DiscoveryResp`。
-- 验证：`cargo test -p stross-kernel --lib` 99 全绿（测试挂到 `discovery::aggregate`/`discovery::mdns`）；`cargo clippy --workspace --all-targets -D warnings` 干净；`cargo fmt --check` 通过；`scripts/discovery-test.sh` 通过（含 mDNS 静默→子网回退生效）。
-- **说明**：发现机制与 `Kernel` 强耦合（`discovery_manifest` 读 `relay_ports/device_identity/mdns_info`），故收敛为 kernel 内模块而非独立 crate；若后续要拆独立 crate 需先引入数据提供者 trait（DI）抽象。
-
-### 端口真源收敛（`stross-types::ports`）
-
-- 固定端口（中继 18777 / Android GUI 8777 / 控制面 18778 / 协商+发现 18779 / SRT 33462 / QUIC 33464）**统一为 `stross-types::ports` 单一真源**；kernel 各模块改用 `pub use stross_types::ports::X as Y` 别名保持路径兼容（`relay::DEFAULT_PORT`/`GUI_PORT`、`control::DEFAULT_CTRL_PORT`、`negotiator::DEFAULT_NEGOTIATOR_PORT`、`discovery::DISCOVERY_PORT`、`lib::DEFAULT_SRT/QUIC_PORT`）。
-- **消除局部重复**：发现端口与协商端口是同一服务同一端口，`DISCOVERY_PORT` 与 `DEFAULT_NEGOTIATOR_PORT` 现共同指向 `stross_types::ports::NEGOTIATOR_DISCOVERY`，不再各写一份 `18779`。
-
----
-
-## 第十八轮（基线回归：本地双端 + 真机双向闭环，2026-09）
-
-> 起因：用户「可以进行本地双端测试以及连接手机进行测试」。
-
-**本地双端**：
-- `scripts/dual-node-file-test.sh` 全过（3 条订阅链路 pull/push/pull，文件逐字节一致）；
-- `scripts/discovery-test.sh` 全过（`/api/discovery` 权威清单 + devices 同节点断言；mDNS 静默→子网回退为 best-effort 跳过，因网内存在其它 mDNS 节点）；
-- 工作区 `cargo build --workspace` 干净（1m12s）。
-
-**真机（OPPO PLC110 / 192.168.11.60 ↔ PC / 192.168.11.61，同 /24）**：
-- **手机端**：`GET 18779/api/discovery` 返回权威清单（relayPort=8777），`GET 8777/api/info` 正常；
-- **PC 端**：`stross devices` 扫到手机 `192.168.11.60:8777`（mDNS 广播通道）；
-- **手机→PC**：手机扫到 PC `192.168.11.61:18777`（子网单播回退——下行多播被 Su 拦截的场景），且与 mDNS 指向**同一节点同一 relay_port**；
-- **手机订阅 PC 屏幕（pull）真机闭环**：PC 通告 `screen:0`（public/pull）→ 手机展开目录看到「屏幕 · 公开 · 拉取 · 订阅」→ 订阅并接收 → PC 日志「端点已自动推流 stream=sess-1 订阅方 6b57…」+「端点共享已登记 screen:0 → sess-1」+ Wayland 建流成功 → 手机接收面板「接收中 · 收到 18 帧 · 解码 0 帧 · 已绘制 11 帧」；PC `/api/streams` 出现 `sess-1（屏幕）watchers=1`；
-- **自动收尾**：手机点「停止接收」→ PC watchers→0（4s 延迟复查）→ `/api/streams` 清空 + `screen:0` 回 `state=idle`（仍已通告）——**P0-1 生命周期闭环真机复验通过**。
-
-**观察（非阻断）**：手机设备列表出现两条同 PC 记录（`192.168.11.61:18777` 活节点 + `192.168.11.61:27777` 陈旧记录——后者来自先前用 27777 起测试节点的 mDNS/目录缓存，节点已死而未清）。属发现陈旧条目清理范畴，记入后续优化。
-
-**结论**：发现（统一端口）与端点订阅（通告→订阅→自动开推→断连自动收尾）在本地与真机均闭环，可进入下一模块（端点扩充 / 通告订阅流程优化）。
-
----
-
-## 第十九轮（交互模型定稿 + UI 术语清理 + 协商应答 panic 修复，2026-09）
-
-**起因**：用户拍板交互心智模型——**「广播/通告」改为「共享」**（我是内容源，推送预备）；**「订阅」= 接收**；订阅握手完成后共享端向订阅者推送。据此收敛 UI 文案与弹窗选项。
-
-**用户交互模型（定稿）**：
-- **共享** = 我是内容源（推送预备），把端点共享出去；
-- **订阅** = 我是接收方；
-- 方向（pull/push）是**公开方/系统决策**，订阅者不选——`Both` 定稿为默认拉取；`Push-only` 端点由框架按宣告自动预置本机接收，用户零决策。
-
-**UI 改动（`apps/stross-gui/web`）**：
-- **术语「通告」→「共享」**（避免与 mDNS 广播 / 旧「广播共享」歧义；用户选了「共享」）：按钮「共享/取消共享」、徽标「已共享」、弹窗标题「共享「…」」、错误文案「共享失败/取消共享失败」、空状态「该节点暂未共享任何端点」；`index.html` 接收副注「订阅的共享流在此播放」。
-- **移除无意义字眼**：本机卡片 meta 去「mDNS 广播中」、设备树标题去「（通告为端点）」、端点行 meta 去「实时」、目录行去「方向」、空状态去「（mDNS）」。
-- **订阅弹窗移除 delivery 选择**：`openSubscribeModal`/`confirmSubscribe` 不再构/传 `delivery`；`index.html` 删 `<select id="sub-delivery">`；`ui.ts` 删现死的 `fillSelect`。
-- 端点在 badge/目录仍展示**可见性**（公开/需确认），方向不进用户视野。
-
-**协商应答 panic 修复（`apps/stross-gui/src-tauri/src/commands.rs`）**：`negotiator_respond` 由**同步**改为 **async**。根因：同步 `tauri::command` 在 GTK 主线程执行，`respond()`→`notify_subscribed`→`endpoint.share()`→`spawn_media_share` 内的 `tokio::spawn` 无 Tokio runtime 上下文，panic「there is no reactor running」（用户所贴崩溃日志）。async 命令跑在 tokio runtime 上。HTTP 路径（`handle_request`）本就跑在 tokio 上不受影响。
-
-**验证**：
-- `npx typescript@5.9.3 tsc` 前端 strict 通过；`app/*.js` 与 `app/*.ts` 全部同步（tsc 重新生成）；
-- `node scripts/test-frontend.mjs` 全绿（含 1 处**随行为更新**的断言：共享后徽标含「已共享 · 需确认」且**不含方向**）；
-- `cargo build -p stross-gui` + `cargo clippy -p stross-gui -- -D warnings` 干净（异步化无新告警）。
-
-**遗留**：真机 APK 在 Android debug 构建中（frontendDist=../web，JS 编译期打包，需重装 APK 才能看到新 UI）。
-
----
-
-## 第二十轮（发现/UI 缺陷修复 + 死代码清理，2026-09）
-
-> 起因：用户反馈三处小 bug + 清理诉求——①PC 关了「可被发现」手机仍能发现；②手机出现两个 27777；③UI 节点不该展示「中继/共享/接收」字眼；④订阅 PC 屏幕后接收处播放器面板不关闭；⑤检查构建流程、清理无用代码（怀疑 Kotlin 是否还有用）。
-
-**① 可被发现语义修正：关闭 = 所有发现路径不可见（隐私）**
-- 根因：`discoverable=false` 只停了 mDNS 广播，但**子网单播扫描回退**主动探测 `18779/api/discovery`，不受开关约束——故关了开关仍被手机扫到。
-- 修复：`Kernel::discovery_manifest` 加 `discoverable` 门控（`false` 返回 `None` → `/api/discovery` 404）；子网扫描探测不到 → 关闭即完全不可见。
-- 修正 `discovery-test.sh` 第 2 段断言：原本测「mDNS 静默仍被子网扫描发现」，该语义与隐私门控矛盾；改为断言「`discoverable=false` → `/api/discovery` 404」（用户拍板语义）。
-- kernel 单测：`discovery_manifest_gated_by_discoverable`（关→None / 开→Some / 再关→None）。
-
-**② 发现结果去重：同一设备 mDNS + 子网扫描双路径重复**
-- 根因：`scan_lan` 里 `devices.extend(subnet_scan(...))` **未与既有 mDNS 结果按 `ip:port` 去重**，同一物理设备经 mDNS 与子网扫描会重复出现（手机界面同一节点两张卡片）。
-- 修复：`scan_lan` 先把 mDNS 结果 `ip:port` 建 `seen` 集合，子网扫描 / 手动地址结果均经 `seen` 去重后才追加。
-
-**③ 节点卡片移除角色字眼**
-- 删除节点名旁的「中继/共享/接收」角色 chip（`ROLE_LABELS` 的技术角色对用户无信息量；交互已由「共享/订阅」按钮承载）。同时清掉现死的 `roleChip`/`roleLabel`/`chipEl`/`RoleKind`/`ROLE_LABELS` 与 `.chips`/`.chip` CSS。
-
-**④ 停止接收后播放器面板不关闭**
-- 根因：`setReceiving(false)` 未重置 `recvFrameCount`，`updateRecvOverlay` 据 `recvFrameCount>0` 把画布容器留在可见态。
-- 修复：`setReceiving(false)` 重置 `recvFrameCount/recvAudioBlocks`。jsdom 新增 `B6: 播放器画布容器隐藏` 断言。
-
-**⑤ 构建流程 / 死代码排查结论**
-- **Kotlin 不是死代码**：`MediaPlugin.kt`/`PlaybackPlugin.kt`/`ProjectionService.kt`/`MainActivity.kt` 全部服务于 Android 采集/播放（`#[cfg(mobile)]`，桌面不编译）；`android/` 源与 `gen/` 副本一致；6 个 `@Command`（startCapture/stopCapture/startPlayback/stopPlayback/feedAudio/feedVideo）全被 `mobile.rs` 经 `run_mobile_plugin` 调用。`ProjectionService` 被 `MediaPlugin` 引用。桌面 GUI（`cfg(not(mobile))`）完全不依赖 Kotlin，走 `FfmpegBackend` + `frontendDist`。
-- **Rust 无死代码**：`generate_handler!` 注册的 19 个命令全部被前端 `invoke`；`firewall.rs`/`mobile.rs` 内部函数均有上游；clippy `-D warnings` 干净。
-- **构建流程注意点（重要）**：前端（`web/*`）是 Tauri `frontendDist`，**编译期嵌入**桌面/Android 二进制。**增量 `cargo build` 不总会因为 `web/*.js` 变化而重新嵌入**（tauri asset codegen 按内容 hash 缓存，增量时不重跑），曾导致 `cargo run -p stross-gui` 显示旧 UI。**改前端后建议 `cargo clean -p stross-gui` 再 build**（或 `touch tauri.conf.json` 强制 build.rs 重嵌入）。已实测 clean 重build 后嵌入资产为新文案。
-
-**验证**：kernel 单测 18（discovery）+ 新增门控用例全过；`discovery-test.sh` 过（含新 404 断言）；前端 tsc/sync/jsdom 全绿（新增画布隐藏断言）；workspace build + clippy 干净。
-
-**排期（后续小 bug / 迭代）**：
-- 发现陈旧条目清理（节点死后设备列表仍显示；依赖 mDNS TTL，需主动超时重探）；
-- 名称一致性（mDNS `pico` vs `/api/discovery` `Stross 设备`）；
-- Android 屏幕端点（MediaProjection FGS + Rust 端点）、摄像头（CameraX）、剪贴板（E 阶段）；
-- 协议优化：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕；
-- C 弱网 / D 互通矩阵 / E 二期（见阶段总览）。
-
----
-
-## 第二十一轮：PC UI 整体重做 + 术语清理（共享侧）
-
-**背景 / 定性**：用户反馈 PC 界面问题大、需「淘汰」。经 CDP/截图核实：**安卓与 PC 共用同一套前端**（`apps/stross-gui/web`），差异只是窄屏竖排 vs 宽屏双栏渲染；所谓「安卓更新了一代」实为移动竖排布局更清爽，且 PC 二进制曾因**增量构建不重嵌入前端资产**而显旧 UI。用户确认 PC UI「受构建逻辑影响存在落后」，且心智模型：**共享 = 推送端，订阅 = 接收端**（方向属系统决策，两侧都不选）。
-
-**改动（前端 `apps/stross-gui/web`，桌面+安卓共享受益）**：
-
-- **桌面布局重做**：`.dual` 由 `5fr/4fr` 双栏改为「设备=窄侧栏（320-400px）+ 接收=主视区（`minmax(0,1fr)`）」；窄屏（≤860px）仍折叠单栏（安卓同款）。卡片头 `pane-head` 改为「标题 + 扫描按钮」、手动地址独立 `.pane-addrow` 行（输入+添加）。消除宽屏大块空荡。
-- **接收面板空状态**：新增 `#recv-empty`（图标 + 「尚未接收共享」+ 引导文案），`setReceiving(false)` 时显示、接收中隐藏；`subscribe.ts` 在 `setReceiving` 里 toggle。
-- **共享（推送）侧去术语/去方向**（此前只清了订阅侧，共享侧遗漏）：
-  - 移除共享弹窗「数据面方向」字段（拉取/推送/双向）；`confirmPublish` 改传 `publishTarget.ep.delivery || 'pull'`（系统/端点决定）。
-  - 弹窗按钮「通告」改「共享」（修正标题「共享」vs 按钮「通告」的不一致）。
-  - 副标题：「端点 = 订阅入口：对端节点在目录里看到它…」→「开启后，局域网内其它设备可以订阅并接收这个内容（共享 = 由本机推送）」。
-  - 「可见性（谁可订阅）」→「谁可以订阅」；「公开/需确认」→「任何人/需我确认（首次询问，之后自动）」。
-- **目录/节点去术语**：`展开即拉取（endpoint_ls，协商端口缺省）`删除；「目录（设备 → 可订阅端点）」→「可订阅的内容」；「该节点暂未共享任何端点」→「该设备暂未共享任何内容」；「文件端点（CLI 订阅）」→「文件（命令行订阅）」；「不可挂载」→「不可用」；「本机设备」空态→「本机暂无可共享的内容」。
-- **头栏/本机卡片**：`本机（我）`→`本机`；`已锚定 · 中继端口 N`→`已就绪`；`ffmpeg`→`推流就绪`（无则 `缺少推流引擎`）；「可被发现」tooltip 去 `mDNS` 技术词。
-- **死代码/一致性**：删 `DELIVERY_LABELS`/`DeliveryKind`（delivery 不再作为用户可见标签）；`.pane-tools`→`.pane-addrow`；清 3 处残留「通告」注释；合并重复 `fieldset legend` 规则。订阅弹窗副标题去「传输=…」改「订阅后将接收对方共享的这个内容」。
-
-**验证**：`check.sh --quick` 全绿（rustfmt/clippy/tsc strict/app.js 同步）；jsdom `test-frontend.mjs` 全过（更新「目录标题（可订阅的内容）」、「订阅弹窗打开（端点信息）」断言）；clean 重build 桌面二进制后截图确认：主界面（接收空状态）、共享弹窗（无方向）、设备目录（可订阅的内容）均达标。手机 APK 重建（JDK 17）使安卓同步新 UI + 上一轮 kernel 去重/门控。
-
-### 第二十一轮（续）——用户实测暴露的两个 Bug 修复
-
-**Bug A：端点「停止共享」崩溃 `there is no reactor running`（kernel/mod.rs:540）**
-- 现象：`cargo run -p stross-gui` 下，手机订阅本机屏幕（引擎 `sess-1` 自动推流）后，点「停止共享」→ `stop_share_by_stream` 在 `tokio::spawn`（优雅停流）处 panic `there is no reactor running, must be called from the context of a Tokio 1.x runtime`，GUI abort。
-- 根因：与 `negotiator_respond` 同族——`endpoint_stop_share` 是**同步** tauri 命令，跑在 GTK 主线程（无 Tokio reactor），`stop_endpoint_share`→`stop_share_by_stream` 内 `tokio::spawn` 需要 runtime。
-- 修复：`endpoint_stop_share` 改 `async`（同 `negotiator_respond` 手法），命令在 Tokio runtime 上执行 → `tokio::spawn` 有 reactor。前端无需改（invoke 对 sync/async 命令一致）。
-- 验证：真机复现还原——手机订阅 PC 屏幕（`端点已自动推流 stream=sess-1`）→ PC 点「停止共享」→ 日志「端点共享停止: screen:0」+ PipeWire 优雅关闭，**GUI 保持存活**（修复前 abort）。
-
-**Bug B：Android 接收屏幕时「全屏」不可用**
-- 现象：手机接收屏幕流点全屏按钮无反应。
-- 根因：`togglePlayerFullscreen` 先查 `win.isFullscreen()`（Android 抛错→沿用本地）再 `win.setFullscreen(next)`——**Android WebView 无 OS setFullscreen（抛错），旧代码在此 `catch { return; }` 提前返回，导致 CSS 层全屏（`.canvas-wrap.fs`）从未应用**。
-- 修复：`togglePlayerFullscreen` 改为**先应用 CSS 层全屏**（`setPlayerFullscreen(next)`），OS 窗口级全屏仅作 best-effort（失败忽略）；`setFullscreen` 抛错不再阻断。手机（real device）复现确认 `isFullscreen()/setFullscreen()` 均抛错，重建 APK 后验证 CSS 全屏生效。
-- 注：「Tauri 窗口级全屏（桌面/Android 一致）」注释有误——Android 无此能力，靠 CSS `.canvas-wrap.fs`（`position:fixed; inset:0`）兜底。
-
-
+| 第七轮 | 统一化重构：stross-core→stross-kernel 吸收 stross-app，单一 Kernel 门面 + stross-bridge 独立 |
+| 第八轮 | UI 收敛「通告+订阅」+ 内核推流状态修复 |
+| 第九轮 | 端点插件区 + Wayland 屏幕采集 |
+| 第十轮 | 播放体验：低延迟调参 + PTS 调度层 + 延迟回归固化 |
+| 第十一轮 | clippy pedantic 白名单 + 双代理审查修复 + 播放器完善 |
+| 第十二轮 | 运行闭环 P0-1：端点共享生命周期治理（可停止/自动收尾/订阅收敛） |
+| 第十三轮 | 实机打包 + 真机验证 + UI 优化 |
+| 第十四轮 | 真机端到端闭环跑通（P0-1 生命周期） |
+| 第十五轮 | mDNS 复盘 + 「可被发现」显式开关 |
+| 第十六轮 | mDNS 真机「手机收不到下行多播 / PC 扫不到手机」根因定论 |
+| 第十七轮 | 统一发现端口：mDNS 与子网扫描收敛到同一节点（18779 权威） |
+| 第十八轮 | 基线回归：本地双端 + 真机双向闭环 |
+| 第十九轮 | 交互模型定稿 + UI 术语清理 + 协商应答 panic 修复（async） |
+| 第二十轮 | 发现/UI 缺陷修复（可被发现门控 + 去重）+ 死代码清理 |
+| 第二十一轮 | PC UI 布局重做 + 去技术用语 + 停止共享 panic + Android 全屏修复 |
+| 第二十二轮 | 推流引擎并发化（engines: HashMap）+ 离线节点剔除 |
+| 第二十三轮 | 通信模式 v2 设计提案 + 文档去重/AGENTS 维护 |
+
+## 近期关键结论（细节以 AGENTS.md / dev-playbook.md / comm-mode-v2.md 为准）
+
+- **术语**：共享/订阅；方向系统定；不用「通告/广播」。
+- **推送并发化**：`engines: HashMap<stream_id, RunningStream>`；接收端仍单流（需 v2）。
+- **通信模式 v2**：控制面协商 + 数据面按 id 复用（Phase A/B/C，允许破坏性更新）。
+- **构建**：JDK 21（Gradle 8 与 25 不兼容）；前端改后需 clean 重build 嵌入；Android 构建见 android-build.md。

@@ -152,7 +152,7 @@ pub async fn scan(
 /// 一并探测并入（按 `ip:port` 去重）。
 ///
 /// **mDNS 失效回退**：当 mDNS 浏览未发现任何**远端**设备（路由只掐下行多播、
-/// 单播仍通——见 docs/mdns-android-finding-debug.md §8.2）时，自动触发纯单播
+/// 单播仍通——见 dev-playbook.md §5）时，自动触发纯单播
 /// 子网扫描（[`subnet_scan`]），保证在「广播不可用」的网络下仍能发现对端。
 /// 只在 mDNS 零结果才扫描，避免每次刷新都打满网卡。
 pub async fn scan_lan(
@@ -199,7 +199,7 @@ pub async fn scan_lan(
 /// 统一发现清单（`GET /api/discovery`，监听于发现权威端口 [`DISCOVERY_PORT`]）：
 /// 每台设备对外只暴露**一个权威节点**——身份 + 能力 + 真实中继入口端口。
 /// mDNS 与子网扫描都据此收敛到**同一台设备同一个 `relay_port`**
-/// （docs/mdns-android-finding-debug.md §8.3-3：mDNS 与单播兜底应指向同一节点，
+/// （dev-playbook.md §5：mDNS 与单播兜底应指向同一节点，
 /// 降低用户认知成本）。`relayPort` 是设备连接/展示节点，`srtPort/quicPort` 为数据面端口。
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -312,7 +312,7 @@ async fn scan_probe_host(host: &str, probe: Duration) -> Option<ScannedDevice> {
 /// 探测中继入口端口，命中即聚合成 [`ScannedDevice`]。
 ///
 /// **纯单播，不依赖组播/广播**——适配「路由只掐下行多播、单播仍通」的网络
-/// （docs/mdns-android-finding-debug.md §8.2：手机收不到下行多播、单播双向正常，
+/// （dev-playbook.md §5：手机收不到下行多播、单播双向正常，
 /// 正是这种网络 mDNS 失效但本方案可用）。`self_ip_strings` 用于把扫到的本机标为
 /// `is_self`（与 mDNS 路径 `scan` 的语义一致）。
 async fn subnet_scan(

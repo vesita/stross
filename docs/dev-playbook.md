@@ -5,6 +5,12 @@
 > 优先于从零推断。技术细节（端口/分层/验证偏好）以 AGENTS.md 为准，此处
 > 只补**会话里刚踩过、AGENTS.md 没细写、且易反复踩**的套路。
 
+> **开发策略（用户拍板）**：**允许破坏性更新**——协议/架构可 breaking，
+> 全端同步演进，不做新旧 wire 兼容层。所以改帧头/协议不用背兼容包袱。
+> **通信模式 v2**（控制面协商 + 数据面按 id 复用 + 传输/解读模块）是当前演进方向，
+> 见 docs/comm-mode-v2.md（Phase A 端点档案 → Phase B 数据衔接层 → Phase C 流级复用）。
+> **文档纪律**：新文档挂 docs/README.md 清单；单一真源；术语「共享/订阅」。
+
 ---
 
 ## 1. 构建时序坑（最重要，反复踩）
@@ -112,7 +118,9 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
 - `negotiator_respond` 已改 **async**（同步 tauri 命令在 GTK 主线程调 `tokio::spawn` 无 reactor → panic）。
 - **凡同步 tauri 命令可能走到 `tokio::spawn`/`tokio::time`/`tokio::net` 都必须改 async**：`endpoint_stop_share` 已改（`stop_share_by_stream` 内 `tokio::spawn` 优雅停流）。前端 invoke 对 sync/async 命令一致，无需改前端。
 - **Android 无窗口级 `setFullscreen`**（`win.isFullscreen()/setFullscreen()` 均抛错）：全屏靠 CSS `.canvas-wrap.fs`（`position:fixed; inset:0`）兜底。`togglePlayerFullscreen` 必须**先应用 CSS 全屏再试 OS 全屏**，不能因 `setFullscreen` 抛错提前 return。
-- 发现「陈旧条目」未清：设备死后手机列表可能仍显示（依赖 mDNS TTL；未做主动超时重探）。
+- 发现「陈旧条目」未清：设备死后手机列表可能仍显示（依赖 mDNS TTL；未做主动超时重探）。**已部分修**：前端 `refreshDevices` 剔 `!d.online`（探测失败即移除），手动地址仍保留；mDNS TTL 窗口内的死节点因此不再长期残留。
+- **推流引擎已并发化**：`kernel.engine`（`Option<RunningStream>`）→ `engines: HashMap<stream_id, RunningStream>`。端点模型允许任意端点并发推（屏幕+系统声音等），不再有「已经在推流中」单流限制；仅同 stream_id 重复才拒。回归测试 `concurrent_streams_both_start`。
+  - **接收端仍单流**：手机/PC 的「接收」面板一次只播放一条流（`start_receive` 切换流会停旧流）。所以 PC 并发推了 screen+audio 两条流，订阅方只看到最后订阅的那条——「屏幕+声音同屏播放」需要**链接复用**（把多路媒体并进一条流 / 运行中加轨），属后续想法。
 - 名称不一致：mDNS `pico`(hostname) vs `/api/discovery` `Stross 设备`(identity.device_name)。
 - Android 屏幕端点（MediaProjection FGS）、摄像头（CameraX）、剪贴板（E 阶段）待扩充。
 - 协议优化排队：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕。

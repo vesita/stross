@@ -1,5 +1,7 @@
 # Stross 路线图（下一阶段）
 
+> **开发策略：允许破坏性更新**——协议/架构可 breaking，开发期全端同步演进
+> （不做新旧 wire 兼容层）。
 > 汇总自实测反馈与架构讨论，按优先级排序。已完成的分层架构为
 > proto → transport → types → endpoint → kernel → bridge → 壳层（单一
 > `Kernel` 门面，见 [layering-architecture.md](layering-architecture.md)）。
@@ -58,7 +60,7 @@
       通过发现机制互相找到，不再绑定在「连接 → 推/看」流程里
 - [x] 跨设备推流（反向外设：手机麦克风 → 电脑）：凭证式协商（B1）+ GUI 闭环
       （B2）+ 自动协商免粘贴（B2.5），真机闭环（OPPO PLC110 ↔ 本机）：
-      接收端建会话签发一次性 `ShareToken`（`ctrl share-token`；GUI 通告「麦克风」
+      接收端建会话签发一次性 `ShareToken`（`ctrl share-token`；GUI 共享「麦克风」
       端点 → 对端订阅）；推流端 `push --share-token` 或订阅端点经 18779 自动申请
       凭证（首次人工确认 + 信任记忆，免确认自动签发）接入对方受控中继；来源感知
       门控（非回环必须凭证）防远程冒用；Android 纯音频走 `micOnly`。
@@ -68,6 +70,17 @@
       局域网子网，不再手敲 sudo、不放行整个网段）
 - [ ] 数据面/控制面通道分离：媒体帧（大流量）与控制元数据
       （流列表/状态/心跳）分通道传输
+
+### 通信模式 v2（数据衔接层 + 流级 ID 复用）——设计提案，见 comm-mode-v2.md
+
+> 目标：控制面协商协议/处理方法并约定 `stream_id`；数据面每包只带 id 复用
+> 共享连接；kernel 按 id 装载「传输模块（共享）+ 解读模块（per-stream）」。
+> 直接解决：屏幕+系统声音并发同播（接收端多流）、停一条流不级联、分享/订阅模型简化。
+> 允许破坏性更新 → 帧头 v2 可裁字段（codec/track 移到协商结果）。
+
+- [ ] **Phase A（小）**：端点档案（`transport_profile` / `interpret_profile`）+ 协商字段
+- [ ] **Phase B（中）**：`DataPlaneAdapter` trait（`RealtimePacing` / `StrictOrdered`）+ 装载
+- [ ] **Phase C（大）**：QUIC 流级 ID 复用（一条连接 N 媒体流）+ 中继 demux + 接收端多流/混音
 
 ### P3 音视频同步（AV Sync）
 

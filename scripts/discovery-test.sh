@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 统一发现链路回归（docs/mdns-android-finding-debug.md §8.3-3）：mDNS 与
+# 统一发现链路回归（dev-playbook.md §5 网络事实）：mDNS 与
 # 子网单播扫描应收敛到**同一台设备同一个 relay_port**，降低用户认知成本。
 #
 # 验证点：

@@ -9,6 +9,7 @@
 > 四种传输共用同一 `handle_push`/`handle_watch`（抽象价值四重证明）
 > · 决策推迟：WASM 策略插件、跨设备控制闭环、Sink 其余（见 §5.3 决策记录）
 > 关联：[architecture.md](architecture.md)（分层架构）· [protocol.md](protocol.md)（线上协议）· [roadmap.md](roadmap.md)（P0 设备路由 / P2 流解耦 / WebRTC 低延迟）
+> 演进：[comm-mode-v2.md](comm-mode-v2.md)（通信模式 v2：控制面协商 + 数据面按 id 复用 + 数据衔接层——本基座上的下一步提案）
 
 ## 1. 背景与目标
 
@@ -243,7 +244,7 @@ impl DataSession {
 
 浏览器观看端（`stross-core/assets/viewer/`）已随 D1 移除；剩余一个前端
 `apps/stross-gui/web/`（Tauri 壳），已从手写 JS 迁移为 **TypeScript 真源**
-（`app.ts`）：
+（`app/*.ts`，tsc 产物 `app/*.js` 提交进仓库）：
 
 - **约束**：推流端前端由 index.html 直接加载——**cargo 构建必须零 node 依赖**；
 - **方案**：前端目录一个 `tsconfig.json`（strict，`noEmitOnError`），

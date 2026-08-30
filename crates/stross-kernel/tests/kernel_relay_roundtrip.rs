@@ -400,7 +400,7 @@ async fn remote_source_requires_token_even_when_authorized() {
     relay.stop().await;
 }
 
-/// 端点共享生命周期（docs/closed-loop-plan.md P0-1）：
+/// 端点共享生命周期（iteration-plan.md 第十二轮）：
 /// 订阅者全部断开（watchers→0）后，端点共享自动收尾——
 /// 清共享登记 + 本机会话拆除（会话生命周期 = 流生命周期）+ 流从数据面回收。
 #[tokio::test]

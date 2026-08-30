@@ -71,6 +71,10 @@ stross-bridge 与壳层；壳层只做参数解析 + 展示 + 平台适配。**�
   选址规则挑一个可拨号地址。
 - **身份**：`~/.local/share/stross/identity.json`（deviceId/name）+ 信任清单
   `trusted_devices.json`，GUI 与 CLI serve 共用同一目录。
+- **交互术语定稿**：**共享 = 我是内容源（推送预备），订阅 = 我是接收方**；
+  数据面方向（pull/push）是**系统/端点决策，两端 UI 都不让用户选**（共享弹窗已移除方向字段）。
+  用户可见文本用「共享/订阅」，**不用「通告/广播」**。通信模式演进方向见
+  docs/comm-mode-v2.md（控制面协商 + 数据面按 id 复用，设计提案）。
 
 ## 3. 构建
 
@@ -81,10 +85,12 @@ scripts/build.sh android         # Android APK（需先 scripts/setup-android.sh
 npx tsc -p apps/stross-gui/web/tsconfig.json
 ```
 
-- **Android 构建必须用 JDK 21**：系统默认 JDK 25 会让 Kotlin 1.9.25 的
-  buildSrc 配置崩溃（`IllegalArgumentException: 25.0.4.1`）。
+- **Android 构建 JDK**（Gradle 8 与系统 JDK 25 不兼容，约束「JVM ≤ 21 可用」）：
+  本机默认 **JDK 21**（`jdk21-openjdk` + `archlinux-java set java-21-openjdk`）→
+  构建指向 `JAVA_HOME=/usr/lib/jvm/java-21-openjdk`（17 亦可，仅 ≥25 不可用）。
+  工具链/许可证/网络坑完整指南见 **docs/android-build.md（唯一真源）**。
   ```bash
-  export JAVA_HOME=<JDK 21 路径>          # 如 Arch 系 /usr/lib/jvm/java-21-openjdk
+  export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
   PATH="$JAVA_HOME/bin:$PATH" cargo tauri android build --debug -t aarch64
   # 产物: gen/android/app/build/outputs/apk/*/debug/app-*-debug.apk
   ```
@@ -123,7 +129,7 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
 - 手机→PC：PC `stross ctrl create-session` + `share-token` 签发凭证（或
   手机订阅电脑端点经 18779 自动协商免粘贴）→ 手机推流 → PC `stross receive`
   解码。
-- PC→手机：手机通告「麦克风」端点 → PC 订阅（凭证式 push）→ 手机凭凭证
+- PC→手机：手机共享「麦克风」端点 → PC 订阅（凭证式 push）→ 手机凭凭证
   出站推流到 PC，或直接 `stross push --share-token <token> --stream-id
   <凭证streamId> --relay ws://<手机IP>:8777/ws/push --audio`。
 
@@ -162,6 +168,18 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
   否则首帧早到时前端误判「流已结束」）。
 - **GUI 前端**：图标用内联 SVG 雪碧图（icon()），零 emoji；`.js/.ts` 成对
   提交（`.js` 是 tsc 产物）。
+- **推流引擎已并发化**：kernel `engines: HashMap<stream_id, RunningStream>`（原单引擎，
+  曾有「已经在推流中」限制）。端点模型允许任意端点并发推（屏幕+系统声音）；
+  仅同一 stream_id 重复才拒。**接收端仍单流**（一次播一条流，`start_receive` 会停旧流）——
+  「屏幕+声音同屏」需通信模式 v2（docs/comm-mode-v2.md）。
+- **离线节点剔除**：前端 `refreshDevices` 剔 `!d.online`（`/api/info` 探测失败即移除），
+  避免 mDNS TTL 未到期时残留「已关闭节点」；手动地址不可达分支保留。
+- **同步 tauri 命令不得 `tokio::spawn`**：`endpoint_stop_share`、`negotiator_respond`
+  等凡可能走到 `tokio::spawn`/`time`/`net` 的命令必须 **async**（同步命令跑 GTK 主线程
+  无 reactor → panic「there is no reactor running」）。
+- **Android 无窗口级 `setFullscreen`**（`isFullscreen()/setFullscreen()` 均抛错）：
+  全屏靠 CSS `.canvas-wrap.fs`；`togglePlayerFullscreen` 必须**先应用 CSS 全屏再试 OS 全屏**，
+  不能因 `setFullscreen` 抛错提前 return。
 
 ## 7. 协作纪律
 
@@ -170,3 +188,6 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
   差异**、带 body，风格 `fix(scope): 行为差异` / `feat(scope): ...`。
 - 验证偏好：新增逻辑先 `cargo test -p <crate>`；真机路径用 adb + CDP 脚本
   实测，结论记入 docs/iteration-plan.md 对应阶段。
+- **文档纪律**：新文档先在 docs/README.md 清单登记（职责+状态）；同一事实**单一真源**
+  （其余只写指针，如 Android 构建→android-build.md）；用户可见术语统一「共享/订阅」；
+  压缩对话前把套路/坑写进 docs/dev-playbook.md。

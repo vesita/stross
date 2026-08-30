@@ -12,8 +12,10 @@ paru -S --needed android-tools jdk21-openjdk \
 ```
 
 - `android-tools`（官方源）：adb/fastboot，装后直接 `adb` 可用
-- `jdk21-openjdk`（官方源）：**Gradle 8.14.3 与系统 JDK 25 不兼容**，构建必须指向
-  java-21（`JAVA_HOME=/usr/lib/jvm/java-21-openjdk`）
+- JDK（官方源）：**Gradle 8.14.3 与系统 JDK 25 不兼容**，约束本质「JVM ≤ 21 可用」：
+  - 本机默认 **JDK 21**（`jdk21-openjdk` + `archlinux-java set java-21-openjdk`）→
+    `JAVA_HOME=/usr/lib/jvm/java-21-openjdk`；
+  - 17 亦可（Gradle/Kotlin 均支持），仅 ≥25 不可用。
 - AUR：`android-sdk` 基座（/opt/android-sdk，含 sdkmanager）+ `android-platform-36`
   + `android-sdk-build-tools`（37）+ `android-sdk-build-tools-36` + `android-ndk`（r29）
 - Rust Android 目标：`rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android`
@@ -33,6 +35,7 @@ sudo bash -c 'yes | JAVA_HOME=/usr/lib/jvm/java-21-openjdk JAVA_TOOL_OPTIONS=-Dj
 
 ```bash
 cd apps/stross-gui/src-tauri
+# 本机默认 JDK 21：JAVA_HOME=/usr/lib/jvm/java-21-openjdk（见 §1）
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk ANDROID_HOME=/opt/android-sdk \
   cargo tauri android build -t aarch64 --apk --debug
 # 产物：gen/android/app/build/outputs/apk/universal/debug/*.apk

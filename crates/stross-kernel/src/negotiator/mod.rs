@@ -631,7 +631,7 @@ fn policy_decision(
 /// 端点语义：公开方拍板 delivery（`Both` 时尊重订阅方期望、缺省 Pull），
 /// 传输列表按公开者声明的优先序透传，pull 模式附带本机中继地址。
 ///
-/// **订阅收敛（docs/closed-loop-plan.md P0-1）**：同端点已有活动共享时——
+/// **订阅收敛（iteration-plan.md 第十二轮）**：同端点已有活动共享时——
 /// * pull 复用同一流（中继多 watcher 生效，不新建会话/凭证、不重复触发 share）；
 /// * push 拒绝（公开方单引擎，一次仅一个订阅者，避免"grant 成功但流永不存在"）。
 fn compose_grant(
@@ -736,7 +736,7 @@ fn notify_subscribed(
     let Some(delivery) = grant.delivery else {
         return;
     };
-    // 订阅收敛（docs/closed-loop-plan.md P0-1）：该端点已有活动共享（复用场景）
+    // 订阅收敛（iteration-plan.md 第十二轮）：该端点已有活动共享（复用场景）
     // → 不重复触发 share（流已在推，新订阅者直接 watch 同流）
     if app.active_share_by_endpoint(endpoint_id).is_some() {
         tracing::info!("端点 {endpoint_id} 已有活动共享，复用流（订阅方 {subscriber}）");
@@ -1064,7 +1064,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 订阅收敛（docs/closed-loop-plan.md P0-1）：同端点已有活动共享（pull）时，
+    /// 订阅收敛（iteration-plan.md 第十二轮）：同端点已有活动共享（pull）时，
     /// 第二个订阅者复用同一流（不新建会话/凭证），grant.stream_id 与首个一致。
     #[tokio::test]
     async fn pull_reuse_same_stream_for_second_subscriber() {

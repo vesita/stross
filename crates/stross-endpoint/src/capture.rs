@@ -71,7 +71,7 @@ pub trait CaptureBackend: Send + Sync {
 /// 桌面端采集后端：ffmpeg 子进程（见 [`crate::pipeline::StreamSession`]）。
 ///
 /// Wayland 屏幕共享：内部路由到 portal+pipewire 采集（见
-/// [`crate::screen::wayland`]），启动/运行错误经 `error_rx` 转发到
+/// [`crate::share::screen::wayland`]），启动/运行错误经 `error_rx` 转发到
 /// [`CaptureStatus::error`]（桌面侧 `CaptureStatusView` 轮询展示）。
 pub struct FfmpegBackend {
     session: Mutex<Option<StreamSession>>,

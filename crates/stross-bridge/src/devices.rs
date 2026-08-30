@@ -18,7 +18,7 @@ pub const fn platform() -> Platform {
 }
 
 /// 平台端点构造（定义与实现单一真源在 stross-endpoint）。
-pub fn platform_endpoints(platform: Platform) -> Vec<Box<dyn stross_kernel::Endpoint>> {
+pub fn platform_endpoints(platform: Platform) -> Vec<Box<dyn stross_kernel::ShareEndpoint>> {
     stross_endpoint::factory::platform_endpoints(platform)
 }
 

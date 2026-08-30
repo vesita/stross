@@ -695,7 +695,7 @@ fn compose_grant(
             transports: Some(m.transports.iter().map(|t| t.transport).collect()),
             transport_profile: Some(m.transport_profile),
             pick_rule: Some(m.pick_rule),
-            strategy: Some(strategy_of(m, strategy_id)),
+            strategy: Some(checked_strategy(m, strategy_id)?),
             relay: app.relay_ports().map(|(ws, srt, quic)| RelayAddr {
                 ws_port: ws,
                 srt_port: srt,
@@ -731,9 +731,28 @@ fn compose_grant(
         transports,
         transport_profile: endpoint.map(|m| m.transport_profile),
         pick_rule: endpoint.map(|m| m.pick_rule),
-        strategy: endpoint.map(|m| strategy_of(m, strategy_id)),
+        strategy: endpoint
+            .map(|m| checked_strategy(m, strategy_id))
+            .transpose()?,
         relay,
     })
+}
+
+/// 策略 → 定稿（按订阅方选定的策略 id 精确取，缺省默认策略）并**校验内核
+/// 序列化工具支持**：未实现的序列化规则（如预留的 Chunked 分包）拒绝授予，
+/// 不静默降级——数据契约在协商边界就锁定（docs/endpoint-model-v2.md §0）。
+fn checked_strategy(
+    m: &EndpointManifest,
+    strategy_id: Option<&str>,
+) -> Result<EndpointStrategy, String> {
+    let strategy = strategy_of(m, strategy_id);
+    if crate::pick::loader_for(&strategy).is_none() {
+        return Err(format!(
+            "内核不支持序列化规则 {:?}（端点 {} 策略 {}）——协商拒绝，不静默降级",
+            strategy.serialize, m.endpoint_id, strategy.strategy_id
+        ));
+    }
+    Ok(strategy)
 }
 
 /// 清单 → 定稿策略组合（注册表第三层；按订阅方选定的策略 id 精确取，
@@ -867,7 +886,8 @@ fn new_pending_id() -> u64 {
 mod tests {
     use super::*;
     use crate::{
-        Endpoint, EndpointBase, MicEndpoint, Platform, Probe, ScreenEndpoint, SystemAudioEndpoint,
+        Endpoint, EndpointBase, MicEndpoint, Platform, Probe, ScreenEndpoint, ShareEndpoint,
+        SystemAudioEndpoint,
     };
     use stross_proto::message::MediaKind;
 
@@ -1239,6 +1259,8 @@ mod tests {
                     pick: stross_proto::message::PickRule::StrictOrdered,
                 }
             }
+        }
+        impl ShareEndpoint for RecordingEndpoint {
             fn available(&self) -> bool {
                 self.base.available
             }

@@ -28,7 +28,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 文件泵参数（公开方驱动构造；定义单一真源在 stross-endpoint crate——
 /// 端点层 `FileEndpoint` 与内核 `push_file` 共用）。
-pub use stross_endpoint::file::FilePushOptions;
+pub use stross_endpoint::share::file::FilePushOptions;
 
 /// 推送一个本地文件到中继（阻塞到全部帧发送完成并优雅 Bye）。
 pub async fn push_file(path: &Path, opts: &FilePushOptions) -> anyhow::Result<u64> {

@@ -81,12 +81,13 @@ pub use settings::{Settings, load_or_default as load_settings, save as save_sett
 pub use stross_endpoint::contract::{
     resolve_file_url, resolve_media_url, resolve_watcher_base, spawn_media_share,
 };
-pub use stross_endpoint::file::FilePushOptions;
+pub use stross_endpoint::share::file::FilePushOptions;
 /// 端点层（插件区）契约与端点实现重导出：保持 `stross_kernel::Xxx` 路径兼容
 /// （定义单一真源在 stross-endpoint crate；内核 = 管理调度，消费其契约）。
 pub use stross_endpoint::{
-    Endpoint, EndpointApp, EndpointBase, FileEndpoint, FileReceiveEndpoint, MicEndpoint, Probe,
-    ScreenEndpoint, SubscribeCtx, SystemAudioEndpoint, TargetKind,
+    Endpoint, EndpointApp, EndpointBase, EndpointClass, FileEndpoint, FileReceiveEndpoint,
+    MediaReceiveEndpoint, MediaSourceEndpoint, MicEndpoint, Probe, ScreenEndpoint, ShareEndpoint,
+    SubscribeCtx, SubscribeEndpoint, SystemAudioEndpoint, TargetKind,
 };
 pub use stross_proto::message::Platform;
 

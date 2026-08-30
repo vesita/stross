@@ -25,6 +25,6 @@ pub mod manager;
 
 pub use buffer::{JitterBuffer, JitterConfig, JitterStats};
 pub use interpret::{Interpreter, RealtimePacing, StrictOrdered};
-pub use load::{Loader, PassthroughLoader};
+pub use load::{Loader, PassthroughLoader, loader_for};
 pub use manager::{ChannelKind, InterpretRegistry, StreamChannel};
 pub use stross_proto::message::PickRule;

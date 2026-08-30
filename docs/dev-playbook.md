@@ -115,6 +115,25 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
 
 ## 8. 会话中已确认/还在的坑（压缩前捞回）
 
+- **端点 v2.1（分享/订阅独立契约 + 能力族）已落地**（docs/endpoint-model-v2.md §3）：
+  - **契约拆分**：`Endpoint`（公共视图：身份/kind/class/策略）→ `ShareEndpoint`
+    （load/available/share）+ `SubscribeEndpoint`（subscribe）——**没有双向占位**；
+    注册表持 `Box<dyn ShareEndpoint>`，订阅端点生成返回 `Box<dyn SubscribeEndpoint>`；
+  - **文件结构**：`stross-endpoint/src/share/`（screen/audio/file）与
+    `stross-endpoint/src/subscribe/`（media/file）分目录；公共 API 路径不变
+    （`stross_endpoint::ScreenEndpoint` 等仍从 crate 根导出）；
+  - **能力族**：`EndpointClass`（Graph/Audio/File/Clipboard/Input/Service，按 kind
+    推导）；`MediaSourceEndpoint` 族实现分享端（`impl_media_source_endpoint!` 宏
+    生成 Endpoint+ShareEndpoint 样板）；`generate_subscribe_endpoint` 按族分发
+    （File→落盘，Graph/Audio→播放器 `MediaReceiveEndpoint`）；
+  - **序列化=内核数据契约**：`pick::Loader` 携带 `SerializeRule`（`loader_for`
+    工厂）；协商 `checked_strategy` 与 `receive_media` 对未实现规则（Chunked）
+    直接拒绝，不静默降级；
+  - **Android 屏幕端点**已适配（`share/screen/android.rs` 探测恒可用；采集执行
+    在壳层 `AndroidCapture`；真机测试后置）；
+  - 改 `Endpoint` 时注意：测试 fixture（kernel/endpoint.rs、negotiator/mod.rs）
+    要按拆分写 `impl Endpoint` + `impl ShareEndpoint` 两段；宏 `impl_media_source_endpoint!`
+    用 `$t {{ ... }}, {{ ... }}` 花括号 item 序列形态（tt/item 片段会二义性）。
 - **端点框架 v2（三层注册表 + 双特性）已落地**（docs/endpoint-model-v2.md）：
   - `UnifiedRegistry`（kernel/endpoint.rs）= 本机 `EndpointRegistry`（行为对象）+ 互联节点表（目录拉取映射）；订阅统一 `resolve_strategy(node_id, endpoint_id, strategy_id)` 查表，本机走 `strategy()` 单一真源、远端走目录映射；
   - **策略**：`EndpointStrategy { strategy_id, serialize, pick }`，端点 `strategy()` 组合方法（替代 v1 `pick_rule()`）；平铺 `transport_profile`/`pick_rule` 保留为默认策略协商摘要（旧对端兼容，勿删）；

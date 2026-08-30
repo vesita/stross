@@ -1,13 +1,13 @@
 # 端点模型 v2：节点 → 端点 → 策略 三层注册 + 订阅驱动（设计规格）
 
-> 状态：**已落地（单轮实施）**——三层统一注册表（本机 + 互联节点同一张表）、
-> 策略组合（序列化规则 + pick 规则，`strategy()` 组合方法替代 v1 `pick_rule()`）、
-> 分享端/订阅端双特性（`share` / `subscribe` + 订阅端点生成）、协商/订阅流程按
-> `(节点, 端点, 策略)` 定位；v1 规格 [endpoint-model.md](endpoint-model.md) 已删除
-> （历史见 git）。
-> 核心：端点（可分享内容）= 双向能力体（既能被订阅、也能订阅别人）。统一注册表只记录
-> **策略（序列化规则 + pick 规则）**，数据按策略 id 匹配管线，内核调度启动、
-> 解序列化后转发，订阅端点自己解析。
+> 状态：**已落地（单轮实施 + v2.1 演进）**——三层统一注册表（本机 + 互联节点
+> 同一张表）、策略组合（序列化规则 + pick 规则，`strategy()` 组合方法替代 v1
+> `pick_rule()`）、**分享/订阅独立契约**（`ShareEndpoint` / `SubscribeEndpoint`，
+> 文件结构分 `share/` + `subscribe/` 目录）、能力族（Graph/Audio/File… 共享
+> 一类实现，播放器入端点）、协商/订阅流程按 `(节点, 端点, 策略)` 定位、序列化
+> 作为内核/协议数据契约（装载器按规则装载，未实现规则拒绝）；Android 屏幕端点
+> （MediaProjection）已适配。v1 规格 [endpoint-model.md](endpoint-model.md) 已删除
+> （历史见 git）。落地差异与实现记录见 §7。
 > 关联：[comm-mode-v2.md](comm-mode-v2.md)（pick 规则）·
 > [layering-architecture.md](layering-architecture.md)（分层铁律）。
 
@@ -103,25 +103,62 @@ struct EndpointStrategy {
 - **传输档案不进注册表**：允许丢包/不允许丢包是传输层契约，由端点声明、
   传输模块执行，不属于「数据包怎么处理」的策略核心。
 
-## 3. 分享端 / 订阅端双特性
+## 3. 分享端点 / 订阅端点：独立契约（v2.1 演进）
 
-端点（可分享内容）= 双向能力体，既能被订阅（分享端）、也能订阅别人（订阅端）。
-**方向就挂载在这一层（端点层），不是节点层**：节点只是「拥有多个端点」
-的容器，不承载方向。
+> **v2.1 演进（已落地）**：v2 的「双向能力体」在实施中暴露出别扭处——每个
+> 具体端点实际只做一个方向（屏幕端点只有 `share` 有意义、文件接收端点只有
+> `subscribe` 有意义），双向契约逼出大量无意义占位。**真拆成两个独立契约**，
+> 与「分享端点是摄像机、订阅端点是播放器」的直觉一致：
+
+- **`ShareEndpoint`（分享端点 = 内容源）**：屏幕 / 麦克风 / 系统声音 / 文件(发)，
+  `load` 探测 + `share` 开推——**不实现任何播放/接收逻辑**；
+- **`SubscribeEndpoint`（订阅端点 = 内容宿）**：播放器（Graph/Audio 类统一
+  接收解码）/ 文件(收) 落盘——**不实现任何采集/分享逻辑**；
+- **`Endpoint`（公共契约）**：只承载两端共同视图（身份 / 内容类型 / 能力族 /
+  策略档案），注册表与 UI 按它展示。
 
 ```rust
-trait Endpoint: Send + Sync {
-    /// 分享端：被订阅后开推。
-    fn share(self, app, ctx: SubscribeCtx);
-    /// 订阅端：主动订阅别人并处理（端点作为宿主处理订阅流/数据）。
-    fn subscribe(self, app, spec: SubscribeSpec);
-
-    /// 端点自主声明的策略（序列化规则 + pick 规则）。
+pub trait Endpoint: Send + Sync {
+    fn id(&self) -> &str;
+    fn kind(&self) -> MediaKind;
+    fn name(&self) -> &str;
+    fn class(&self) -> EndpointClass;   // 能力族（默认按 kind 推导）
+    fn target(&self) -> TargetKind;
+    fn transport_profile(&self) -> ReliabilityProfile;
     fn strategy(&self) -> EndpointStrategy;
+}
+pub trait ShareEndpoint: Endpoint {
+    fn available(&self) -> bool;
+    fn last_error(&self) -> Option<&str>;
+    fn load(&mut self) -> StdResult<(), String>;
+    fn share(&self, app: Arc<dyn EndpointApp>, ctx: SubscribeCtx);
+}
+pub trait SubscribeEndpoint: Endpoint {
+    fn subscribe(&self, app: Arc<dyn EndpointApp>, spec: SubscribeSpec);
 }
 ```
 
-`subscribe` 让「屏幕端点作为宿主处理订阅流」「剪贴板端点订阅别人」成为可能。
+**架构原则（内核约定特性、端点实现、内核只基于特性行动）**：
+
+- 内核（`UnifiedRegistry`）持有 `Box<dyn ShareEndpoint>`，只调用 `share` /
+  `load` / 策略；订阅端点生成返回 `Box<dyn SubscribeEndpoint>`，只调用
+  `subscribe`——**内核函数不认识任何具体端点类型**；
+- **能力族 `EndpointClass`（Graph / Audio / File / Clipboard / Input / Service）**
+  按数据形态分组（屏幕/窗口/摄像头 → Graph，麦克风/系统声音 → Audio）：同一族
+  的分享端（[`MediaSourceEndpoint`]：只声明 `video()` / `audio()`，`share`/
+  策略/传输由族默认实现）与订阅端（Graph/Audio → `MediaReceiveEndpoint`
+  播放器，File → `FileReceiveEndpoint` 落盘）共享一类实现；
+- **文件结构分目录**：`stross-endpoint/src/share/`（分享端点实现区）与
+  `stross-endpoint/src/subscribe/`（订阅端点实现区）——新增端点按方向落目录、
+  按族实现，互不承载对方逻辑；
+- **序列化 = 内核/协议工具（数据契约）**：`SerializeRule` 是 wire 层的策略
+  组成，装载（`pick::Loader`，按 `SerializeRule` 装载）与解读（`pick::interpret`，
+  按 `PickRule` 解读）都由内核提供；端点只**声明**策略不**实现**序列化——
+  协商边界（`checked_strategy`）与订阅执行（`receive_media`）对未实现的序列化
+  规则（如预留的 `Chunked` 分包）直接拒绝，不静默降级。
+
+`subscribe` 让「播放器 / 文件接收」成为端点概念（播放器入端点），
+与「屏幕端点作为宿主处理订阅流」同一族实现。
 
 ## 4. 数据流（设计规格）
 
@@ -168,18 +205,18 @@ trait Endpoint: Send + Sync {
 
 | 项 | 待定 | 落地 |
 |---|---|---|
-| `SerializeRule` 形态 | 序列化规则是枚举还是 trait/协议标记 | **枚举**（确定性，wire 可比对）+ 端点实现映射；当前全部端点声明 `Passthrough`（直通），`Chunked`（分包）预留 |
+| `SerializeRule` 形态 | 序列化规则是枚举还是 trait/协议标记 | **枚举**（确定性，wire 可比对）；**内核/协议工具**（`pick::Loader` 按规则装载），端点只声明不实现；`Passthrough` 当前唯一实现，`Chunked`（分包）预留且协商/订阅边界拒绝 |
 | 策略 id 粒度 | 1:1（策略 id=端点 id）还是独立可复用 | **独立 `StrategyId`**（模型既定，支持多策略）；当前每端点一个默认策略（id=`default`），未知策略 id 解析返回 None |
 | 管道管线归属 | 管线（序列化+pick 组合）建于哪层 | 内核按策略匹配并调度启动（订阅端点在其上解析） |
 | 传输档案 | 是否仍由端点声明（不进注册表） | 保留端点声明、传输模块执行（注册表聚焦序列化+pick） |
-| 订阅端宿主范围 | 哪些端点实现 subscribe | 文件端点（接收落盘）首个落地；媒体播放仍由内核接收链路 + 壳层承担（暂无订阅端点宿主，`generate_subscribe_endpoint` 返回 None） |
+| 订阅端宿主范围 | 哪些端点实现 subscribe | **按能力族**：File → 文件订阅端（落盘）；Graph/Audio → 媒体订阅端（`MediaReceiveEndpoint` 播放器入端点，`EndpointApp::receive_media` 收流解码） |
 
 ## 7. 收尾（已落地记录）
 
-- 本文档状态 → 「已落地（单轮）」；
+- 本文档状态 → 「已落地（单轮 + v2.1）」；
 - `endpoint-model.md` v1 **已删除**（历史见 git；v2 为唯一规格源）；
 - `iteration-plan.md` 记录轮次；`dev-playbook.md` 增补「三层注册表」
-  「订阅端特性」坑位。
+  「分享/订阅独立契约」「能力族」坑位。
 
 ### 落地差异（实施时对蓝图的小修正，均符合总思路）
 
@@ -191,5 +228,17 @@ trait Endpoint: Send + Sync {
    （Lossless + StrictOrdered → 确定目标，否则实时目标）推断。
 3. **策略解析回退链**：注册表查表 → 授予 `strategy` → 平铺 `pick_rule` 推导
    直通 + pick 默认策略（旧对端兼容）。
-4. **接收端点可用性**：`FileReceiveEndpoint` 不探测源可用性（落盘目录由
-   接收时创建），`supports_subscribe()==true` 且 `share` 恒告警（不进通告/目录）。
+4. **v2.1 分享/订阅拆分**：双向能力体 → `ShareEndpoint` / `SubscribeEndpoint`
+   独立契约（消灭 `supports_subscribe` 与 `share`/`subscribe` 无意义占位）；
+   文件结构分 `share/`（screen/audio/file）+ `subscribe/`（media/file）目录。
+5. **能力族**：`EndpointClass`（Graph/Audio/File…，按 kind 推导可覆写）；
+   `MediaSourceEndpoint` 分享端族实现（只声明 `video()`/`audio()`，share/
+   策略/传输族默认）；订阅端点生成按族分发。
+6. **序列化工具化**：`Loader::serialize_rule()` + `loader_for(strategy)` 内核
+   装载工厂；协商（`checked_strategy`）与订阅执行（`receive_media`）对未实现
+   序列化规则拒绝——数据契约在两端边界锁定，不静默降级。
+7. **Android 屏幕端点**：`share/screen/android.rs` 探测（MediaProjection 恒
+   可用，运行时授权由采集后端异步回报）；factory Android 分支构造三件套
+   （屏幕/麦克风/系统声音）；采集执行在壳层注入的 `AndroidCapture` 后端。
+8. **死代码清理**：`sink.rs`（`RecordingSink`/`Sink`，无生产消费者）删除；
+   重构触发的未用 import/占位全部移除。

@@ -260,7 +260,7 @@ pub struct StreamSession {
     /// 停止经 ffmpeg 子进程 stdin 关闭自清理）。
     #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
     #[allow(dead_code)] // 只持有不读取，用于维持采集任务存活
-    wayland: Option<crate::screen::wayland::WaylandCapture>,
+    wayland: Option<crate::share::screen::wayland::WaylandCapture>,
     /// 采集侧错误通道（portal 授权失败 / 协商失败等；FfmpegBackend 转发到
     /// CaptureStatus.error——桌面侧 CaptureStatusView 轮询展示）。
     error_rx: Option<mpsc::Receiver<String>>,
@@ -298,7 +298,7 @@ impl StreamSession {
             #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
             let wayland_screen = {
                 matches!(cfg.video, Some(VideoSource::Screen))
-                    && crate::screen::wayland::is_wayland_session()
+                    && crate::share::screen::wayland::is_wayland_session()
             };
             #[cfg(not(all(target_os = "linux", feature = "wayland-capture")))]
             let wayland_screen = false;
@@ -314,7 +314,7 @@ impl StreamSession {
                     let tx2 = tx.clone();
                     let ff = first_frame.clone();
                     tokio::spawn(read_video_loop(stdout, tx2, started, ff));
-                    wayland = Some(crate::screen::wayland::start(cfg, stdin, error_tx));
+                    wayland = Some(crate::share::screen::wayland::start(cfg, stdin, error_tx));
                     video = Some(child);
                 }
                 #[cfg(not(all(target_os = "linux", feature = "wayland-capture")))]

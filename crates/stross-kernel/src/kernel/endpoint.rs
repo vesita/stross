@@ -22,8 +22,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use stross_endpoint::contract::{Endpoint, SubscribeCtx, TargetKind};
-use stross_endpoint::file::{FileEndpoint, FileReceiveEndpoint};
+use stross_endpoint::contract::{
+    EndpointClass, ShareEndpoint, SubscribeCtx, SubscribeEndpoint, TargetKind,
+};
+use stross_endpoint::share::file::FileEndpoint;
+use stross_endpoint::subscribe::file::FileReceiveEndpoint;
+use stross_endpoint::subscribe::media::MediaReceiveEndpoint;
 use stross_proto::message::{
     CodecId, Delivery, EndpointDir, EndpointManifest, EndpointState, EndpointStrategy,
     EndpointSummary, PickRule, ReliabilityProfile, SerializeRule, StrategyId, SubscribeSpec,
@@ -36,7 +40,7 @@ use crate::error::{Error, Result};
 
 /// 端点条目：行为对象（[`Endpoint`]）+ 通告参数（公开者声明）。
 pub struct EndpointEntry {
-    pub ep: Arc<dyn Endpoint>,
+    pub ep: Arc<dyn ShareEndpoint>,
     pub published: bool,
     pub visibility: Visibility,
     pub delivery: Delivery,
@@ -67,7 +71,7 @@ impl EndpointRegistry {
     ///
     /// load 失败不阻止登记：端点保留在表里但标记不可挂载（`available=false`
     /// + `last_error`）——UI 可见原因，不可通告/订阅。
-    pub fn seed(&mut self, mut ep: Box<dyn Endpoint>) -> bool {
+    pub fn seed(&mut self, mut ep: Box<dyn ShareEndpoint>) -> bool {
         let id = ep.id().to_string();
         if self.endpoints.contains_key(&id) {
             return false;
@@ -93,7 +97,7 @@ impl EndpointRegistry {
     }
 
     /// 端点行为对象（`on_subscribed` 出锁调用用；持锁调用会死锁）。
-    pub fn endpoint_arc(&self, endpoint_id: &str) -> Option<Arc<dyn Endpoint>> {
+    pub fn endpoint_arc(&self, endpoint_id: &str) -> Option<Arc<dyn ShareEndpoint>> {
         self.endpoints.get(endpoint_id).map(|e| e.ep.clone())
     }
 
@@ -378,11 +382,11 @@ impl UnifiedRegistry {
 
     // -- 本机端点表委托（行为对象 + 通告参数；原 EndpointRegistry 方法面） --
 
-    pub fn seed(&mut self, ep: Box<dyn Endpoint>) -> bool {
+    pub fn seed(&mut self, ep: Box<dyn ShareEndpoint>) -> bool {
         self.local.seed(ep)
     }
 
-    pub fn endpoint_arc(&self, endpoint_id: &str) -> Option<Arc<dyn Endpoint>> {
+    pub fn endpoint_arc(&self, endpoint_id: &str) -> Option<Arc<dyn ShareEndpoint>> {
         self.local.endpoint_arc(endpoint_id)
     }
 
@@ -535,33 +539,46 @@ impl UnifiedRegistry {
     }
 
     /// 订阅端点生成（docs/endpoint-model-v2.md §3「订阅端点生成」）：
-    /// 按订阅目标端点的内容类型构造**订阅端**端点（内核不做类型分派——
-    /// 端点实现自驱动，与分享端 `share` 同构）。
+    /// 按订阅目标端点的**能力族**（[`EndpointClass`]：Graph/Audio/File…）
+    /// 构造**统一的族订阅端点**（内核不做类型分派——端点实现自驱动，
+    /// 与分享端 `share` 同构）。
     ///
-    /// 当前支持：`File` → 文件订阅端（接收落盘到 `out_dir`）；其余媒体类型
-    /// 返回 `None`（播放/渲染由内核接收链路 + 壳层承担，暂无订阅端点宿主）。
+    /// * `File` → 文件订阅端（接收落盘到 `out_dir`）；
+    /// * `Graph` / `Audio` → 媒体订阅端（[`MediaReceiveEndpoint`]：收流 +
+    ///   解码，播放器入端点；`out_dir` 不适用）；
+    /// * 其余族（剪贴板/输入/服务）暂未定义订阅端点宿主 → `None`。
     pub fn generate_subscribe_endpoint(
         &self,
         spec: &SubscribeSpec,
         out_dir: Option<&Path>,
-    ) -> Option<Box<dyn Endpoint>> {
-        let kind = self
+    ) -> Option<Box<dyn SubscribeEndpoint>> {
+        let (kind, class) = self
             .nodes
             .get(&spec.node_id)
             .and_then(|n| n.endpoints.get(&spec.endpoint_id))
-            .map(|e| e.kind)
-            .or_else(|| self.local.manifest(&spec.endpoint_id).map(|m| m.kind));
-        match kind {
-            Some(stross_proto::message::MediaKind::File) => {
-                Some(Box::new(FileReceiveEndpoint::new(
+            .map(|e| (e.kind, EndpointClass::from_kind(e.kind)))
+            .or_else(|| {
+                self.local
+                    .manifest(&spec.endpoint_id)
+                    .map(|m| (m.kind, EndpointClass::from_kind(m.kind)))
+            })?;
+        match class {
+            EndpointClass::File => Some(Box::new(FileReceiveEndpoint::new(
+                format!("recv:{}", spec.endpoint_id),
+                spec.endpoint_id.clone(),
+                out_dir
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(std::env::temp_dir),
+            ))),
+            EndpointClass::Graph | EndpointClass::Audio => {
+                Some(Box::new(MediaReceiveEndpoint::new(
                     format!("recv:{}", spec.endpoint_id),
                     spec.endpoint_id.clone(),
-                    out_dir
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(std::env::temp_dir),
+                    kind,
                 )))
             }
-            _ => None,
+            // 剪贴板 / 输入 / 服务：暂无订阅端点宿主（后续按族补实现）
+            EndpointClass::Clipboard | EndpointClass::Input | EndpointClass::Service => None,
         }
     }
 
@@ -619,7 +636,7 @@ mod tests {
     use super::*;
     use std::result::Result as StdResult;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use stross_endpoint::contract::Probe;
+    use stross_endpoint::contract::{Endpoint, Probe};
     use stross_proto::message::MediaKind;
 
     fn ok_probe() -> Probe {
@@ -631,8 +648,8 @@ mod tests {
         Arc::new(move || Err(r.clone()))
     }
 
-    fn screen() -> Box<dyn Endpoint> {
-        Box::new(stross_endpoint::screen::ScreenEndpoint::new(
+    fn screen() -> Box<dyn ShareEndpoint> {
+        Box::new(stross_endpoint::share::screen::ScreenEndpoint::new(
             "屏幕",
             ok_probe(),
         ))
@@ -649,12 +666,12 @@ mod tests {
         assert!(!m.published, "登记后未通告");
         // 不可用端点（探测失败）：保留在表里但标记不可挂载 + 原因
         let mut r2 = EndpointRegistry::new();
-        assert!(
-            r2.seed(Box::new(stross_endpoint::screen::ScreenEndpoint::new(
+        assert!(r2.seed(Box::new(
+            stross_endpoint::share::screen::ScreenEndpoint::new(
                 "屏幕",
                 fail_probe("无图形会话（DISPLAY / WAYLAND_DISPLAY 均未设置）")
-            )))
-        );
+            )
+        )));
         let m2 = r2.manifest("screen:0").unwrap();
         assert!(!m2.available);
         assert_eq!(
@@ -849,6 +866,8 @@ mod tests {
                     pick: stross_proto::message::PickRule::Realtime,
                 }
             }
+        }
+        impl ShareEndpoint for CountingEndpoint {
             fn available(&self) -> bool {
                 self.base.available
             }
@@ -1020,7 +1039,8 @@ mod tests {
         assert!(!phone.is_self);
         assert_eq!(phone.endpoints.len(), 2);
 
-        // 订阅端点生成：File → 文件订阅端（接收落盘）；媒体 → None（接收链路承担）
+        // 订阅端点生成（按能力族分发）：File → 文件订阅端（接收落盘）；
+        // Graph/Audio → 媒体订阅端（播放器入端点）
         let spec = SubscribeSpec {
             node_id: "node-phone".into(),
             endpoint_id: "file:notes.txt".into(),
@@ -1033,7 +1053,11 @@ mod tests {
         let ep = reg.generate_subscribe_endpoint(&spec, Some(Path::new("/tmp/stross-recv")));
         let ep = ep.expect("文件订阅端应可生成");
         assert_eq!(ep.kind(), MediaKind::File);
-        assert!(ep.supports_subscribe(), "文件订阅端应支持订阅");
+        assert_eq!(
+            crate::EndpointClass::from_kind(ep.kind()),
+            crate::EndpointClass::File,
+            "文件能力族"
+        );
         let spec_media = SubscribeSpec {
             node_id: "node-phone".into(),
             endpoint_id: "screen:0".into(),
@@ -1043,9 +1067,14 @@ mod tests {
             stream_id: "sess-2".into(),
             relay_url: Some("ws://192.168.1.5:18777".into()),
         };
-        assert!(
-            reg.generate_subscribe_endpoint(&spec_media, None).is_none(),
-            "媒体类型暂无订阅端点宿主"
+        let media_ep = reg
+            .generate_subscribe_endpoint(&spec_media, None)
+            .expect("Graph 类媒体订阅端点（播放器入端点）应可生成");
+        assert_eq!(media_ep.kind(), MediaKind::Screen);
+        assert_eq!(
+            crate::EndpointClass::from_kind(media_ep.kind()),
+            crate::EndpointClass::Graph,
+            "屏幕归 Graph 能力族"
         );
     }
 

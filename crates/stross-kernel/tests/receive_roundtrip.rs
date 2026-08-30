@@ -211,3 +211,45 @@ async fn concurrent_streams_both_start() {
     app.stop_stream().await.expect("停止全部推流");
     assert!(!app.stream_status().running, "停止后应回到空闲");
 }
+
+/// 媒体订阅端点（Graph/Audio 类统一订阅端，播放器入端点）的接收执行：
+/// `EndpointApp::receive_media` 连公开方中继收流、按订阅规格 pick 规则解读并
+/// 解码，阻塞到流结束返回解码帧数（>0 = 播放器入端点的数据链路打通）。
+#[tokio::test]
+async fn receive_media_decodes_subscribe_spec_stream() {
+    if !ffmpeg_available() {
+        eprintln!("跳过：未找到 ffmpeg");
+        return;
+    }
+    use stross_endpoint::contract::EndpointApp;
+    use stross_proto::message::{EndpointStrategy, PickRule, SerializeRule, SubscribeSpec};
+
+    let app = Arc::new(Kernel::new(Platform::Desktop));
+    app.set_backend(Arc::new(FfmpegBackend::new()));
+    let relay = app.start_relay_on(0, "stross").await.expect("启动中继");
+    let relay_ws = format!("ws://127.0.0.1:{}", relay.port);
+
+    // 推流 2.5 秒合成视频（duration_secs 到点自动结束）
+    let started = app
+        .start_stream(cfg("media-recv", 2), None)
+        .await
+        .expect("推流启动");
+    let spec = SubscribeSpec {
+        node_id: "local".into(),
+        endpoint_id: "screen:0".into(),
+        strategy_id: None,
+        strategy: EndpointStrategy {
+            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
+            serialize: SerializeRule::Passthrough,
+            pick: PickRule::Realtime,
+        },
+        delivery: stross_proto::message::Delivery::Pull,
+        stream_id: started.stream_id.clone(),
+        relay_url: Some(relay_ws),
+    };
+    // 媒体订阅端点执行：阻塞到流结束 → 返回解码帧数
+    let frames = EndpointApp::receive_media(app.as_ref(), &spec)
+        .await
+        .expect("媒体订阅端点接收应成功");
+    assert!(frames > 0, "播放器入端点应解码出视频帧（实收 {frames}）");
+}

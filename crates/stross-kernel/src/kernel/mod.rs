@@ -35,8 +35,9 @@ pub use endpoint::{
 pub use graph::{NodeInfo, NodeRole, TransportAddr};
 pub use session::{Negotiated, Session, SessionPrefs};
 pub use stross_endpoint::{
-    Endpoint, EndpointBase, FileEndpoint, MicEndpoint, Probe, ScreenEndpoint, SubscribeCtx,
-    SystemAudioEndpoint, TargetKind,
+    Endpoint, EndpointApp, EndpointBase, EndpointClass, FileEndpoint, FileReceiveEndpoint,
+    MediaReceiveEndpoint, MediaSourceEndpoint, MicEndpoint, Probe, ScreenEndpoint, ShareEndpoint,
+    SubscribeCtx, SubscribeEndpoint, SystemAudioEndpoint, TargetKind,
 };
 
 use std::collections::HashMap;
@@ -47,12 +48,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use stross_endpoint::capture::CaptureBackend;
-use stross_endpoint::contract::EndpointApp;
-use stross_endpoint::file::FilePushOptions;
 use stross_endpoint::pipeline::StreamConfig;
 #[cfg(not(target_os = "android"))]
 use stross_endpoint::playback::AudioOut;
 use stross_endpoint::playback::RenderedFrame;
+use stross_endpoint::share::file::FilePushOptions;
 use stross_proto::frame::Frame;
 use stross_proto::message::{
     CapabilityDescriptor, CodecId, Delivery, DiscoveryInfo, EndpointManifest, EndpointState,
@@ -245,7 +245,7 @@ impl Kernel {
     ///
     /// 平台端点构造（探测闭包注入）由桥接层提供；load 失败不阻止登记——
     /// 端点保留但标记不可挂载（`available=false` + `last_error`）。
-    pub fn seed_endpoint(&self, ep: Box<dyn Endpoint>) {
+    pub fn seed_endpoint(&self, ep: Box<dyn ShareEndpoint>) {
         self.registry.lock_poisoned().seed(ep);
     }
 
@@ -1413,7 +1413,7 @@ impl Kernel {
 
 /// 端点注入目标（stross-endpoint 端点装配用）：登记 + 平台查询。
 impl stross_endpoint::factory::EndpointSeeder for Kernel {
-    fn seed_endpoint(&self, ep: Box<dyn Endpoint>) -> bool {
+    fn seed_endpoint(&self, ep: Box<dyn ShareEndpoint>) -> bool {
         self.seed_endpoint(ep);
         true
     }
@@ -1453,6 +1453,51 @@ impl EndpointApp for Kernel {
         // 对「流尚未出现」重试（与 CLI subscribe_file 同语义兜底；
         // 订阅端点生成路径共享此竞态收敛）
         crate::subscriber::receive_file_retry(&watch_url, &stream_id, &out_dir).await
+    }
+
+    /// 媒体接收（订阅端 Graph/Audio 类执行，播放器入端点）：按订阅规格的
+    /// pick 规则解读 + 解码，阻塞到流结束返回解码帧数。
+    ///
+    /// 桌面走 `Receiver`（ffmpeg 解码，音频丢弃——自治接收语义；GUI 播放
+    /// 路径仍走 `start_receive` 命令）；Android 播放由壳层 `start_receive_raw`
+    /// 承担（Kotlin MediaCodec），本路径暂不支持（返回明确错误）。
+    #[cfg(not(target_os = "android"))]
+    async fn receive_media(&self, spec: &SubscribeSpec) -> anyhow::Result<u64> {
+        // 序列化 = 内核数据契约：订阅端按策略装载解读前先校验内核序列化工具
+        // 支持（未实现规则拒绝，不静默降级）
+        if crate::pick::loader_for(&spec.strategy).is_none() {
+            return Err(anyhow::anyhow!(
+                "内核不支持序列化规则 {:?}（数据契约不匹配，订阅拒绝）",
+                spec.strategy.serialize
+            ));
+        }
+        let relay_url = spec
+            .relay_url
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("媒体订阅端点缺公开方中继地址（pull 未锚定）"))?;
+        let recv = Receiver::start_with_rule(
+            relay_url,
+            spec.stream_id.clone(),
+            AudioOut::Discard,
+            None,
+            spec.strategy.pick,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("媒体订阅端点接收启动失败: {e}"))?;
+        let mut frames = recv
+            .take_frames()
+            .ok_or_else(|| anyhow::anyhow!("媒体订阅端点接收通道未就绪"))?;
+        let mut count = 0u64;
+        while frames.recv().await.is_some() {
+            count += 1;
+        }
+        Ok(count)
+    }
+    #[cfg(target_os = "android")]
+    async fn receive_media(&self, _spec: &SubscribeSpec) -> anyhow::Result<u64> {
+        Err(anyhow::anyhow!(
+            "Android 媒体订阅端点暂由壳层 start_receive_raw 承担（播放器入端点为桌面路径，后续按族接入）"
+        ))
     }
 
     fn note_share_active(

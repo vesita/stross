@@ -182,3 +182,32 @@ async fn receive_over_srt_decodes_live_stream() {
     push_task.abort();
     relay.stop().await;
 }
+
+/// 并发推流（端点模型「任意端点可推送/订阅」的目标）：两个不同 stream_id 同时推流
+/// 都应成功。单引擎时代第二个 `start_stream` 会报「已经在推流中」——本测试是
+/// 回归护栏，防止内核对并发展点推流（如屏幕 + 系统声音）被单流限制卡死。
+#[tokio::test]
+async fn concurrent_streams_both_start() {
+    if !ffmpeg_available() {
+        eprintln!("跳过：未找到 ffmpeg");
+        return;
+    }
+    let app = Arc::new(Kernel::new(Platform::Desktop));
+    app.set_backend(Arc::new(FfmpegBackend::new()));
+    let _relay = app.start_relay_on(0, "stross").await.expect("启动中继");
+
+    // 两路并发：不同 stream_id（模拟屏幕 + 系统声音各自推送）
+    let a = app
+        .start_stream(cfg("conc-a", 30), None)
+        .await
+        .expect("第 1 路推流启动");
+    let b = app
+        .start_stream(cfg("conc-b", 30), None)
+        .await
+        .expect("第 2 路推流启动（并发，不得报「已经在推流中」）");
+    assert_ne!(a.stream_id, b.stream_id, "两路应各得独立 stream id");
+    assert!(app.stream_status().running, "并发推流后应处运行态");
+
+    app.stop_stream().await.expect("停止全部推流");
+    assert!(!app.stream_status().running, "停止后应回到空闲");
+}

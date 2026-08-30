@@ -177,8 +177,12 @@ async function refreshDevices(force = false) {
             anchor.quicUrl = local.quicPort ? `quic://127.0.0.1:${local.quicPort}` : null;
         }
         // 远端设备卡片（探测已在 Rust 完成：含在线共享 / SRT / QUIC）
+        // 仅保留 `online`（能探测到 /api/info）的设备——剔除离线/已关闭的节点，
+        // 避免 mDNS TTL 未到期时手机/PC 列表残留「已关闭的节点」卡片（如关掉
+        // 电脑后手机仍显示 pico）。手动地址不可达的场景由下方 manualRelays 分支单独保留。
         const cards = devs
             .filter((d) => !d.isSelf)
+            .filter((d) => d.online)
             .map((d) => ({
             key: baseOf(d),
             name: d.name || 'Stross 设备',

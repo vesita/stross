@@ -121,7 +121,9 @@ pub struct Kernel {
     /// 平台标签（纯值；设备能力枚举等平台知识在 stross-bridge）。
     platform: Platform,
     /// 运行中推流（`Arc` 供数据面事件转发任务共享：流结束时清理引擎状态）。
-    engine: Arc<Mutex<Option<RunningStream>>>,
+    /// **并发流**：端点模型的「任意端点可推送/订阅」目标要求一个节点能同时推多路
+    /// 流（如屏幕 + 系统声音），故按 `stream_id` 管理多台推流引擎（原来是单引擎）。
+    engines: Arc<Mutex<HashMap<String, RunningStream>>>,
     /// 本机锚点：常驻受控中继 + mDNS 广播（免先连：一起启动、生命周期一致）。
     anchor: Mutex<Option<LocalAnchor>>,
     /// 「可被发现」（mDNS 广播本机）：显式用户开关，默认**关**。
@@ -133,7 +135,7 @@ pub struct Kernel {
     /// 端点框架：节点设备表 + 已公开端点表（P1 1:1）。
     registry: Mutex<EndpointRegistry>,
     /// 端点共享登记（stream_id → 端点）：实时目标生命周期治理——
-    /// watchers=0 自动收尾 / 取消通告联动停止 / 同端点订阅收敛（docs/closed-loop-plan.md P0-1）。
+    /// watchers=0 自动收尾 / 取消通告联动停止 / 同端点订阅收敛（iteration-plan.md 第十二轮）。
     active_shares: Mutex<HashMap<String, ActiveShare>>,
     /// watchers 归零后停止端点共享的延迟（给订阅者重连 / 新订阅者接入窗口；测试注入）。
     share_stop_delay: Duration,
@@ -201,7 +203,7 @@ impl Kernel {
             data_plane_task: Mutex::new(None),
             share_tokens: Arc::new(Mutex::new(HashMap::new())),
             platform,
-            engine: Arc::new(Mutex::new(None)),
+            engines: Arc::new(Mutex::new(Default::default())),
             anchor: Mutex::new(None),
             discoverable: AtomicBool::new(false),
             backend: Mutex::new(None),
@@ -467,7 +469,7 @@ impl Kernel {
     }
 
     // -----------------------------------------------------------------------
-    // 端点共享生命周期（docs/closed-loop-plan.md P0-1）
+    // 端点共享生命周期（iteration-plan.md 第十二轮）
     // -----------------------------------------------------------------------
 
     /// 端点共享登记（媒体端点 `start_stream` 成功后由端点层回调，
@@ -533,14 +535,11 @@ impl Kernel {
             .registry
             .lock_poisoned()
             .set_state(&share.endpoint_id, EndpointState::Idle, 0);
-        // 优雅停流（推流端 Bye；引擎当前流即该 stream_id 时才动作）
-        if self.engine_stream_id().as_deref() == Some(stream_id) {
-            let engine = self.engine.lock_poisoned().take();
-            if let Some(stream) = engine {
-                tokio::spawn(async move {
-                    stream.engine.stop().await;
-                });
-            }
+        // 优雅停流：按 stream_id 从并发流表取出对应引擎，仅在存在时动作
+        if let Some(stream) = self.engines.lock_poisoned().remove(stream_id) {
+            tokio::spawn(async move {
+                stream.engine.stop().await;
+            });
         }
         // 拆除本机会话（会话生命周期 = 流生命周期；远程 push 会话不在本机，
         // SessionNotFound 忽略）
@@ -558,14 +557,6 @@ impl Kernel {
         if let Some(0) = dp.stream_watchers(stream_id) {
             self.stop_share_by_stream(stream_id);
         }
-    }
-
-    /// 当前引擎推流的 stream_id。
-    fn engine_stream_id(&self) -> Option<String> {
-        self.engine
-            .lock_poisoned()
-            .as_ref()
-            .map(|s| s.stream_id.clone())
     }
 
     /// 生命周期治理延迟（默认 stop 4s / idle 10s；测试与嵌入式调用方可按需收紧）。
@@ -601,7 +592,7 @@ impl Kernel {
     /// 同时注入接入凭证校验器（B 阶段跨设备推流：受控中继在预授权之外
     /// 接受本内核签发的 [`ShareToken`]）。
     ///
-    /// 事件转发同时承担**端点共享生命周期治理**（docs/closed-loop-plan.md P0-1）：
+    /// 事件转发同时承担**端点共享生命周期治理**（iteration-plan.md 第十二轮）：
     /// * `StreamEnded` → 清共享登记 + 复位状态 + 本机会话 teardown（会话生命周期 = 流生命周期）；
     /// * `WatchersChanged{0}` → 延迟复查后停止端点共享（订阅者全部断开自动收尾）。
     pub fn attach_data_plane(self: &Arc<Self>, backend: Arc<dyn DataPlaneBackend>) {
@@ -609,7 +600,7 @@ impl Kernel {
         backend.set_share_token_validator(self.token_validator());
         let mut rx = backend.events();
         let events = self.events.clone();
-        let engine = Arc::clone(&self.engine);
+        let engines = Arc::clone(&self.engines);
         let me = self.clone();
         let stop_delay = self.share_stop_delay;
         let task = tokio::spawn(async move {
@@ -629,21 +620,11 @@ impl Kernel {
                                 0,
                             );
                         }
-                        // 2) 推流引擎状态清理（防采集进程中途退出后
-                        //    「已经在推流中」卡死后续端点自动推流）
-                        let dead = {
-                            let mut g = engine.lock_poisoned();
-                            if let Some(s) = g.as_ref()
-                                && s.stream_id == stream_id
-                            {
-                                g.take()
-                            } else {
-                                None
-                            }
-                        };
-                        if let Some(st) = dead {
+                        // 2) 并发推流引擎状态清理：按 stream_id 移除对应引擎
+                        //    （防采集进程中途退出后该流残留、卡住同 id 重推）
+                        if let Some(dead) = engines.lock_poisoned().remove(&stream_id) {
                             tokio::spawn(async move {
-                                st.engine.stop().await;
+                                dead.engine.stop().await;
                             });
                         }
                         // 3) 本机会话随流结束拆除（无 PIN 会话直接放行；
@@ -1038,9 +1019,8 @@ impl Kernel {
         mut cfg: StreamConfig,
         relay_url: Option<String>,
     ) -> Result<StartResult> {
-        if self.engine.lock_poisoned().is_some() {
-            return Err(Error::Message("已经在推流中，请先停止".into()));
-        }
+        // 并发推流：端点模型允许同一节点同时推多路流（屏幕 + 系统声音等），
+        // 不再有「已经在推流中」的单流限制；仅同一 stream_id 重复启动则拒绝。
         let backend = self
             .backend
             .lock_poisoned()
@@ -1066,13 +1046,23 @@ impl Kernel {
             .or_else(|| self.anchor.lock_poisoned().as_ref().map(|a| a.port))
             .unwrap_or(DEFAULT_PORT);
         let started_at = stross_proto::time::unix_secs();
-        *self.engine.lock_poisoned() = Some(RunningStream {
-            engine,
-            relay_port,
-            title: cfg.title.clone(),
-            stream_id: cfg.stream_id.clone(),
-            started_at,
-        });
+        {
+            let mut g = self.engines.lock_poisoned();
+            if g.contains_key(&cfg.stream_id) {
+                return Err(Error::Message("该流已在推流中".into()));
+            }
+            g.insert(
+                cfg.stream_id.clone(),
+                RunningStream {
+                    engine,
+                    relay_port,
+                    title: cfg.title.clone(),
+                    stream_id: cfg.stream_id.clone(),
+                    started_at,
+                },
+            );
+            tracing::info!("推流开始: {} (并发推流数={})", cfg.stream_id, g.len());
+        }
         Ok(StartResult {
             relay_port,
             watch_urls: view::watch_urls(relay_url.as_deref(), relay_port),
@@ -1112,10 +1102,13 @@ impl Kernel {
         Ok(())
     }
 
-    /// 停止推流。
+    /// 停止全部推流（CLI/控制面「停止推流」语义）。逐一取出引擎优雅停流。
     pub async fn stop_stream(&self) -> Result<()> {
-        let engine = self.engine.lock_poisoned().take();
-        if let Some(stream) = engine {
+        let streams: Vec<RunningStream> = {
+            let mut g = self.engines.lock_poisoned();
+            g.drain().map(|(_, s)| s).collect()
+        };
+        for stream in streams {
             tokio::spawn(async move {
                 stream.engine.stop().await;
             });
@@ -1123,10 +1116,10 @@ impl Kernel {
         Ok(())
     }
 
-    /// 推流状态。
+    /// 推流状态（并发流时报告第一条流的运行态；CLI/控制面为单流语义）。
     pub fn stream_status(&self) -> StreamStatus {
-        let guard = self.engine.lock_poisoned();
-        match guard.as_ref() {
+        let guard = self.engines.lock_poisoned();
+        match guard.values().next() {
             Some(s) => StreamStatus {
                 running: true,
                 stream_id: Some(s.stream_id.clone()),
@@ -1145,10 +1138,11 @@ impl Kernel {
     }
 
     /// 采集真实状态（Android 由原生控制帧异步回报；桌面在启动后即为就绪）。
+    /// 并发流时报告第一条流的采集态。
     pub fn capture_status(&self) -> CaptureStatusView {
-        let guard = self.engine.lock_poisoned();
-        let active = guard.is_some();
-        let (started, error) = match guard.as_ref() {
+        let guard = self.engines.lock_poisoned();
+        let active = !guard.is_empty();
+        let (started, error) = match guard.values().next() {
             Some(s) => {
                 let st = s.engine.capture_status();
                 (st.started, st.error)
@@ -1162,11 +1156,12 @@ impl Kernel {
         }
     }
 
-    /// 运行中推流的中继端口（供"打开观看端"使用）。
+    /// 运行中推流的中继端口（供"打开观看端"使用；并发流时取第一条流）。
     pub fn stream_relay_port(&self) -> u16 {
-        self.engine
+        self.engines
             .lock_poisoned()
-            .as_ref()
+            .values()
+            .next()
             .map_or(DEFAULT_PORT, |s| s.relay_port)
     }
 

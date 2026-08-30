@@ -88,21 +88,23 @@ async function setDiscoverable(on: boolean): Promise<void> {
 
 // ---------------------------------------------------------------- 权限自动化
 
-/** 电脑端收到设备接入请求：展示授权确认弹窗（首次人工确认，信任门控）。 */
+/** 本端（共享方）收到订阅请求：展示授权确认弹窗（首次人工确认，信任门控）。
+ *  共享方=内容源，主客体：是【有设备想订阅】你共享的内容，不是「设备接入」。 */
 function onApproveRequest(req: PendingRequest): void {
   pendingApprove = req;
   $('approve-device').textContent =
-    `${req.deviceName}（${req.deviceId.slice(0, 12)}…）`;
+    `设备「${req.deviceName}」（${req.deviceId.slice(0, 12)}…）`;
   $('approve-media').textContent =
-    '申请共享：' + (req.media.length ? req.media.join('、') : '未知媒体');
+    '想订阅你共享的内容：' + (req.media.length ? req.media.join('、') : '未知媒体');
   $('approve-error').classList.add('hidden');
   $('approve-status').textContent = '';
   $('approve-modal').classList.remove('hidden');
 }
 
-/** 应答协商请求：允许（可勾选记住）或拒绝。允许后服务端签发凭证并通知申请方。
- *  公开方（发布方）在此仅放行订阅，流由公开方按端点 delivery 自动推送，
- *  由订阅方（另一台设备）接收——本端不等待/不接收。 */
+/** 应答协商请求：允许（可勾选记住）或拒绝。允许后服务端签发授予并通知申请方。
+ *  订阅驱动定稿（docs/endpoint-model.md §10）：公开方（共享方）在此仅放行订阅，
+ *  流由公开方在本地中继发布，订阅方主动连公开方中继 watch 取流（pull），
+ *  无 push 出站路径——本端不等待/不接收。 */
 async function respondApprove(allow: boolean): Promise<void> {
   if (!pendingApprove) return;
   const reqId = pendingApprove.id;

@@ -14,6 +14,7 @@
 //! [`RelayUrl::quic`]，保证"生成端"与"解析端"同一套格式。
 
 use std::fmt;
+use std::net::IpAddr;
 use std::str::FromStr;
 
 use stross_proto::message::TransportId;
@@ -159,10 +160,21 @@ impl RelayUrl {
     ///
     /// 收口「中继入口 / 观看 URL 列表」的构造（原散落在 app 与 relay 各处
     /// 手拼 `http://{ip}:{port}/` 并各自处理回退）。
+    ///
+    /// **过滤 fake-IP / 链路本地**（Clash TUN 198.18.0.0/15、169.254/16
+    /// 连不通，进 watchUrls 会向 UI 展示不可拨号地址——AGENTS.md §6 已知坑）：
+    /// 与 [`crate::net::is_fake_or_link_local`] 同源决策；IPv6 保留（子网前缀
+    /// 未知，交给对端选址判断）。
     pub fn http_entries(port: u16) -> Vec<String> {
         let ips = crate::net::local_ips();
         let mut urls: Vec<String> = ips
             .iter()
+            .filter(|ip| {
+                let IpAddr::V4(_) = ip else {
+                    return true; // IPv6 保留
+                };
+                !crate::net::is_fake_or_link_local(ip)
+            })
             .map(|ip| Self::http(&ip.to_string(), port))
             .collect();
         if urls.is_empty() {
@@ -337,5 +349,22 @@ mod tests {
                 .all(|u| u.starts_with("http://") && u.ends_with(":8777/")),
             "全部为合法入口: {entries:?}"
         );
+    }
+
+    /// 回归：http_entries 必须过滤 fake-IP / 链路本地（Clash TUN 198.18.0.0/15、
+    /// 169.254/16 连不通，不能进 watchUrls 误导 UI）。IPv6 保留。
+    #[test]
+    fn http_entries_filters_fake_and_link_local() {
+        use crate::net::is_fake_or_link_local;
+        use std::net::Ipv4Addr;
+        assert!(is_fake_or_link_local(&std::net::IpAddr::V4(Ipv4Addr::new(
+            198, 18, 0, 1
+        ))));
+        assert!(is_fake_or_link_local(&std::net::IpAddr::V4(Ipv4Addr::new(
+            169, 254, 1, 9
+        ))));
+        assert!(!is_fake_or_link_local(&std::net::IpAddr::V4(
+            Ipv4Addr::new(192, 168, 11, 61)
+        )));
     }
 }

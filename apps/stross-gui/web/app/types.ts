@@ -229,6 +229,10 @@ interface EndpointManifest {
   visibility: string;
   delivery: string;
   transports: { transport: string; priority: number }[];
+  /** 传输层可靠性档案（lossless/lossy/adaptive；允许丢包/不允许丢包/自适应）。 */
+  transportProfile: string;
+  /** pick 规则（realtime/strictOrdered/none；严格即时/严格顺序，装载/解读共用）。 */
+  pickRule: string;
   codecs: string[];
   state: string;
   subscribers: number;

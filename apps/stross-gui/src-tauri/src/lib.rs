@@ -117,7 +117,7 @@ pub fn run() {
                     .path()
                     .app_data_dir()
                     .unwrap_or_else(|_| std::env::temp_dir());
-                let name = stross_bridge::hostname_or("Stross 设备");
+                let name = stross_bridge::device_name_or("Stross 设备");
                 let id = stross_kernel::load_or_create_identity(&base, &name);
                 app.state::<Arc<Kernel>>().set_identity(id);
                 // 「可被发现」（mDNS 广播本机）：读持久化设置并注入内核。

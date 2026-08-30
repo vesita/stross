@@ -418,10 +418,15 @@ GStreamer 流水线。
 | 第二十一轮 | PC UI 布局重做 + 去技术用语 + 停止共享 panic + Android 全屏修复 |
 | 第二十二轮 | 推流引擎并发化（engines: HashMap）+ 离线节点剔除 |
 | 第二十三轮 | 通信模式 v2 设计提案 + 文档去重/AGENTS 维护 |
+| 第二十四轮 | 通信模式 v2 Phase A/B（pick 规则层：端点档案 + 解读模块）+ 订阅驱动定稿（取消 push）+ 真机回归修 Bug（watchUrls fake-IP / 确认弹窗措辞 / 设备名 placeholder） |
 
 ## 近期关键结论（细节以 AGENTS.md / dev-playbook.md / comm-mode-v2.md 为准）
 
 - **术语**：共享/订阅；方向系统定；不用「通告/广播」。
-- **推送并发化**：`engines: HashMap<stream_id, RunningStream>`；接收端仍单流（需 v2）。
+- **推流并发化**：`engines: HashMap<stream_id, RunningStream>`；接收端仍单流（需 v2）。
 - **通信模式 v2**：控制面协商 + 数据面按 id 复用（Phase A/B/C，允许破坏性更新）。
+- **订阅驱动定稿**：数据流一律由订阅方发起并主动取（pull），共享方只在本地中继
+  发布，取消 push（边主动推送）；pick 规则层 `stross-kernel::pick/`（加载/解读/
+  注册表/抖动缓冲），`InterpretProfile → PickRule`。真机验证：PC 订阅手机麦克风
+  走 pull（连手机中继），PC serve 无 push 流。
 - **构建**：JDK 21（Gradle 8 与 25 不兼容）；前端改后需 clean 重build 嵌入；Android 构建见 android-build.md。

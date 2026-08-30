@@ -19,20 +19,9 @@ use crate::contract::{
     Endpoint, EndpointApp, EndpointBase, ShareEndpoint, SubscribeCtx, TargetKind,
 };
 
-/// 文件泵参数（公开方驱动构造；内核 `push_file` 消费——契约单一真源）。
-#[derive(Debug, Clone)]
-pub struct FilePushOptions {
-    /// 中继推流地址（`ws://host:port/ws/push`；文件走无损 WS 路径）。
-    pub push_url: String,
-    /// 数据面流 id（pull = 公开方本机会话；push = 订阅方自签会话）。
-    pub stream_id: String,
-    /// 推流标题（Hello.title；展示用）。
-    pub title: String,
-    /// 跨设备接入凭证（push 模式 = 订阅方自签；本机 pull = `None`）。
-    pub share_token: Option<String>,
-    /// 观看数轮询基址（`ws://host:port`；`None` = 不等观看者直接推）。
-    pub watcher_base: Option<String>,
-}
+/// 文件泵参数（契约单一真源在 stross-types）；此处重导出保持
+/// `stross_endpoint::file::FilePushOptions` 路径兼容。
+pub use stross_types::contract::FilePushOptions;
 
 /// 文件端点（确定目标）。
 pub struct FileEndpoint {

@@ -8,3 +8,8 @@ license.workspace = true
 [dependencies]
 stross-proto.workspace = true
 serde.workspace = true
+# 端点 SPI（contract）上移后所需：async_trait（dyn EndpointApp 对象安全）、
+# anyhow（契约方法 Result）、tracing（端点自驱动日志）
+async-trait.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

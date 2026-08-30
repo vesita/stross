@@ -140,6 +140,13 @@ pub trait SubscribeEndpoint: Endpoint {
 
 **架构原则（内核约定特性、端点实现、内核只基于特性行动）**：
 
+- **契约单一真源在 stross-types**（`stross_types::contract`）：内核经
+  `stross_kernel::*` 重导出**声明**它需要的特性，端点插件区经
+  `stross_endpoint::contract` 重导出**实现**这些特性——两端都只依赖共享
+  契约层与 wire 层，互不依赖对方的具体类型（数据契约 `StreamConfig`/
+  `VideoSource`/`AudioSourceConfig`/`Quality`/`FilePushOptions` 同处上移；
+  端点自驱动的 `tokio::spawn` 经 `EndpointApp::spawn_task` 由内核提供，
+  契约层零 tokio 依赖）；
 - 内核（`UnifiedRegistry`）持有 `Box<dyn ShareEndpoint>`，只调用 `share` /
   `load` / 策略；订阅端点生成返回 `Box<dyn SubscribeEndpoint>`，只调用
   `subscribe`——**内核函数不认识任何具体端点类型**；

@@ -2,6 +2,9 @@
 // Stross 前端 —— 订阅（入站接收）域（script 全局作用域）：
 // 订阅对端端点 → start_receive 接收 → canvas 绘制 / 扬声器播放；
 // 接收状态与停止按钮在右栏「接收」面板（电脑端授权手机接入后也走此链路）。
+/** 接收结束判定宽限期（ms）：流切换/刚启动时新接收器可能短暂 `!running`
+ *  （连接窗口），过早收尾会把 UI 拉回空闲。此窗口内不判定为「流已结束」。 */
+const RECV_END_GRACE_MS = 3000;
 /** 当前接收目标中继（点选的局域网设备锚点优先，否则本机锚点；均无则 null）。 */
 function currentRelay() {
     if (targetRelay)
@@ -54,6 +57,7 @@ async function startReceive(streamId) {
         await call('start_receive', { relay, stream: streamId, audio: 'device' });
         started = true;
         receiving = true;
+        recvStartAt = Date.now();
         recvFrameCount = 0;
         recvAudioBlocks = 0;
         recvError = null;
@@ -90,6 +94,11 @@ async function stopReceive() {
         recvUnlisten = null;
     }
     setReceiving(false);
+    // 停止接收：对端卡片「订阅」键还原（清订阅态）
+    if (subscribedEndpoint) {
+        subscribedEndpoint = null;
+        renderDeviceList();
+    }
     const ctx = canvasCtx();
     if (ctx)
         ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -148,8 +157,23 @@ async function pollReceiveStatus() {
             // 会话不在运行（对方停止 / 中继回收 / 断流 / 未接通）：结束接收会话。
             // 不要求 received>0——`!running && received==0`（从未收到数据）也须
             // 收尾，否则 UI 永久卡「等待流数据…」且轮询链不终止。
-            void endReceiveStatus();
-            return;
+            // **曾收到数据后停**（收到帧/解码帧/音频块）→ 真结束，立即收尾；
+            // **从未收到数据**（新流连接窗口，如视频↔音频切换时新接收器刚起）
+            // → 给宽限期，仍未运行再判定结束——否则过早收尾把 UI 拉回空闲，
+            //  对端端点也回落「订阅」（真实缺陷：屏幕→系统声音切换后两端点都回落）。
+            const hadData = recvFrameCount > 0 || recvAudioBlocks > 0 || s.received > 0 || s.decodedVideo > 0;
+            if (hadData) {
+                void endReceiveStatus();
+                return;
+            }
+            if (Date.now() - recvStartAt < RECV_END_GRACE_MS) {
+                status.textContent = '等待流数据…';
+                $('recv-dot').className = 'dot starting';
+            }
+            else {
+                void endReceiveStatus();
+                return;
+            }
         }
         else if (recvFrameCount > 0) {
             status.textContent = '接收中';
@@ -201,6 +225,16 @@ async function endReceiveStatus() {
     catch (_) { /* ignore */ }
     // 复用统一清理：status-line / dot / meta / 画布容器隐藏 / 面板刷新
     setReceiving(false);
+    // 流结束（非用户停止）：对端卡片「订阅」键还原（清订阅态），并即时刷下目录
+    // ——共享方/网络关闭导致流结束是「关闭共享」事件，订阅方即时响应撤下该端点。
+    if (subscribedEndpoint) {
+        const host = subscribedEndpoint.host;
+        subscribedEndpoint = null;
+        renderDeviceList();
+        const dev = deviceViews.find((d) => d.base && deviceHostOf(d) === host);
+        if (dev)
+            void loadRemoteDir(dev, true);
+    }
     const ctx = canvasCtx();
     if (ctx)
         ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);

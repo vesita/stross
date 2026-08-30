@@ -421,6 +421,7 @@ GStreamer 流水线。
 | 第二十四轮 | 通信模式 v2 Phase A/B（pick 规则层：端点档案 + 解读模块）+ 订阅驱动定稿（取消 push）+ 真机回归修 Bug（watchUrls fake-IP / 确认弹窗措辞 / 设备名 placeholder） |
 | 第二十五轮 | **端点模型 v2 落地**：三层统一注册表（节点→端点→策略，本机+互联节点同一张表）+ 策略组合（`EndpointStrategy`：序列化规则 + pick 规则，`strategy()` 替代 `pick_rule()`）+ 分享端/订阅端双特性（`subscribe` + 订阅端点生成 `FileReceiveEndpoint`）+ 协商/订阅按 `(节点, 端点, 策略)` 定位；v1 归档为历史指针 |
 | 第二十六轮 | **端点 v2.1（分享/订阅独立契约 + 能力族 + 安卓屏幕）**：`ShareEndpoint`/`SubscribeEndpoint` 拆分（消灭双向占位）；文件结构分 `share/`+`subscribe/`；`EndpointClass` 能力族（Graph/Audio/File…）+ `MediaSourceEndpoint` 分享端族实现 + 订阅端点按族分发（播放器入端点 `MediaReceiveEndpoint`/`receive_media`）；序列化工具化（`Loader::serialize_rule` + 协商/订阅边界拒绝未实现规则）；Android 屏幕端点适配（MediaProjection 探测）；死代码清理（sink.rs 删除） |
+| 第二十七轮 | **契约上移 stross-types（内核约定特性落地）**：端点 SPI（`Endpoint`/`ShareEndpoint`/`SubscribeEndpoint`/`MediaSourceEndpoint`/`EndpointApp`/`SubscribeCtx` + 数据契约 `StreamConfig`/`VideoSource`/`AudioSourceConfig`/`Quality`/`FilePushOptions` + `impl_media_source_endpoint!` 宏）迁入 `stross_types::contract` 单一真源；端点 `contract.rs` 变重导出 shim；`EndpointApp::spawn_task` 提供 fire-and-forget 载体（契约层零 tokio）；内核/端点两端只依赖共享契约与 wire 层 |
 
 ## 近期关键结论（细节以 AGENTS.md / dev-playbook.md / comm-mode-v2.md 为准）
 

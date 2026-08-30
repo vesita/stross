@@ -6,6 +6,14 @@
 //! mdns 等）。任何只想消费类型的地方（CLI / GUI / 将来的服务端或游戏联机
 //! 基础设施）挂本 crate 即可对上契约，无需拖入内核。
 //!
+//! **端点 SPI（[`contract`] 模块）**：分享端 / 订阅端契约单一真源——
+//! **内核约定特性、端点实现、内核只基于特性行动**（docs/endpoint-model-v2.md
+//! §3）。内核经 `stross_kernel::*` 重导出声明它需要的特性，端点插件区
+//! （stross-endpoint）经 `stross_endpoint::contract` 重导出实现这些特性；
+//! 本 crate 只新增 async-trait / anyhow / tracing 三个小依赖（契约方法签名与
+//! 端点自驱动日志所需），不引入 tokio（`EndpointApp::spawn_task` 由内核提供
+//! 运行时载体）。
+//!
 //! 约定：
 //! * 所有结构 `#[serde(rename_all = "camelCase")]`——serde 字段名即 wire 键，
 //!   单一真源（CLI 经 `control::client::request_as` 反序列化，不再手写 JSON
@@ -21,6 +29,10 @@ use serde::{Deserialize, Serialize};
 use stross_proto::message::{
     Delivery, EndpointManifest, EndpointSummary, MediaKind, RoleId, TransportId,
 };
+
+/// 端点 SPI（分享端 / 订阅端契约）——**内核约定特性、端点实现**。
+/// 单一真源在本模块；内核与端点插件区经本 crate 重导出（见 [`contract`]）。
+pub mod contract;
 
 // ---------------------------------------------------------------------------
 // 固定端口真源（跨壳层单一真源；docs/layering-architecture.md 端口约定）
@@ -154,6 +166,15 @@ pub use stross_proto::message::ShareTokenView;
 // ---------------------------------------------------------------------------
 // 协商 / 订阅 DTO
 // ---------------------------------------------------------------------------
+
+/// 端点 SPI 根级重导出（`stross_types::ShareEndpoint` 等路径；内核与端点
+/// 插件区都从这里拿契约）。
+pub use contract::{
+    AudioSourceConfig, Endpoint, EndpointApp, EndpointBase, EndpointClass, FilePushOptions,
+    MediaSourceEndpoint, Probe, Quality, ShareEndpoint, StreamConfig, SubscribeCtx,
+    SubscribeEndpoint, TargetKind, VideoSource, resolve_file_url, resolve_media_url,
+    resolve_watcher_base, spawn_media_share,
+};
 
 /// 待人工确认的请求（推送给 UI 展示；控制面载荷经 `request_as` 反序列化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]

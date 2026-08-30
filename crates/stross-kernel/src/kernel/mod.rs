@@ -1500,6 +1500,12 @@ impl EndpointApp for Kernel {
         ))
     }
 
+    /// 端点自驱动辅助：内核在运行时上下文 spawn 异步任务（端点 `share`/
+    /// `subscribe` 的 fire-and-forget 载体——契约层零 tokio 依赖）。
+    fn spawn_task(&self, fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>) {
+        tokio::spawn(fut);
+    }
+
     fn note_share_active(
         &self,
         self_weak: std::sync::Weak<dyn EndpointApp>,

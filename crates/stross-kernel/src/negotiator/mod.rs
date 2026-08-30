@@ -501,8 +501,15 @@ pub(crate) async fn handle_request(
             Json(serde_json::json!({ "error": "media 不能为空" })),
         );
     }
-    let media_names: Vec<String> = req
-        .media
+    // 端点语义：媒体名取目标端点 kind（端点框架请求 `media` 为空，见
+    // subscriber::request_endpoint_grant）；旧语义（无 endpoint_id）取请求方
+    // media 列表。二者都序列化为 MediaKind camelCase 名（前端按此映射中文标签，
+    // 否则「想订阅你共享的内容」会显示「未知媒体」）。
+    let media_source: Vec<MediaKind> = match &endpoint {
+        Some(m) => vec![m.kind],
+        None => req.media.clone(),
+    };
+    let media_names: Vec<String> = media_source
         .iter()
         .map(|m| {
             serde_json::to_string(m)

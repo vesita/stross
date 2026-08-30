@@ -24,6 +24,17 @@ const RECV_MAX_W: u32 = 720;
 /// 平台差异（1f-3）：桌面用 ffmpeg 子进程解码（PlaybackSink）；Android 无
 /// ffmpeg，走编码帧转发 → Kotlin MediaCodec 解码（`mobile::spawn_android_playback`），
 /// 前端事件与绘制完全一致。
+/// 当前 Android 播放链（`spawn_android_playback` 的 blocking 任务句柄）。
+///
+/// 单条链 = 一个 Kotlin `PlaybackPlugin`（MediaCodec/AudioTrack）。连续订阅
+/// 两个媒体端点（如屏幕 → 系统声音）时，若上一条播放链尚未收尾就启动新链，
+/// 两条链会在**同一个** Kotlin 插件上竞态（startPlayback/stopPlayback 交叠）→
+/// 解码器/音频状态冲突 → 原生崩溃（真机复现：屏幕+声音同时订阅即崩）。
+/// 因此 `start_receive` 在启新链前先停旧接收并 **等待旧链收尾**。
+#[cfg(target_os = "android")]
+static ANDROID_PLAYBACK: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
 #[tauri::command]
 pub async fn start_receive(
     app: tauri::AppHandle,
@@ -34,6 +45,16 @@ pub async fn start_receive(
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
+        // 1) 停旧接收：关闭旧编码帧通道 → 旧播放链循环结束并调用 stopPlayback。
+        state.stop_receive();
+        // 2) 等旧播放链收尾（stopPlayback 完成）再启新链——消灭同插件竞态。
+        //    先取出句柄再 await：否则 `if let` 内临时 MutexGuard 跨 await 持有
+        //    （非 Send）→ 命令 future 不满足 tauri 的 Send 约束，编译失败。
+        let prev_handle = ANDROID_PLAYBACK.lock().unwrap().take();
+        if let Some(prev) = prev_handle {
+            let _ = prev.await;
+        }
+        // 3) 启新接收会话 + 新播放链，句柄入 static 供下次序列化。
         state
             .start_receive_raw(relay.clone(), stream.clone())
             .await
@@ -42,7 +63,8 @@ pub async fn start_receive(
             Some(r) => r,
             None => return Err("接收会话已启动但没有编码帧通道".into()),
         };
-        crate::mobile::spawn_android_playback(&app, frames, audio);
+        let h = crate::mobile::spawn_android_playback(&app, frames, audio);
+        *ANDROID_PLAYBACK.lock().unwrap() = Some(h);
         Ok(())
     }
     #[cfg(not(target_os = "android"))]

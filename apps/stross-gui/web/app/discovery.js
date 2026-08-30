@@ -22,11 +22,11 @@ function isLinkLocalIp(ip) {
         /^fe80:/i.test(ip) ||
         /^169\.254\./.test(ip));
 }
-/** 局域网设备探测超时（ms；Rust 侧聚合按此探测每台设备）。 */
-const PROBE_TIMEOUT_MS = 2000;
+/** 局域网设备探测超时（ms；Rust 侧聚合按此探测每台设备）。
+ *  缩短以加快节点状态刷新（上线/下线及时可见）；LAN 内 1.5s 足以完成探测。 */
+const PROBE_TIMEOUT_MS = 1500;
 /** 免先连核心：自动锚定本机（`start_relay` 幂等，启动受控中继 + mDNS 广播）。 */
 async function ensureAnchor() {
-    setAnchorBadge('anchoring');
     try {
         const info = (await call('start_relay'));
         anchor = {
@@ -35,13 +35,11 @@ async function ensureAnchor() {
             srtUrl: null,
             quicUrl: null,
         };
-        setAnchorBadge('ok');
         renderLocalCard(); // 本机卡片状态更新（SRT/QUIC 端口随下一轮扫描到位）
         void refreshDevices(); // 锚点端口 + 本机/对端在线共享随扫描结果到位
     }
     catch (e) {
         anchor = null;
-        setAnchorBadge('err');
         const box = $('grid-error');
         box.textContent = '本机锚定失败：' + errMsg(e) + '（仍可接收局域网共享）';
         box.classList.remove('hidden');
@@ -228,6 +226,14 @@ async function refreshDevices(force = false) {
         if (deviceListSignature() !== before) {
             renderDeviceList();
         }
+        // 对端目录随扫描周期刷新：正在展开的卡片及时反映对端「新共享/取消共享」
+        // （断连/共享状态变化不再依赖手动折叠再展开才可见；loadRemoteDir 自带
+        //   TTL + in-flight 守卫，不会每 2s 打一次对端）。
+        const expandedDev = expandedDevice
+            ? deviceViews.find((d) => d.key === expandedDevice)
+            : null;
+        if (expandedDev)
+            void loadRemoteDir(expandedDev);
     }
     catch (e) {
         showGridError('扫描失败：' + errMsg(e));

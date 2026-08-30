@@ -97,6 +97,9 @@ function canvasCtx() {
  *  `ImageData` 构造引用传入的 Uint8ClampedArray（不拷贝），两者同内存。 */
 let recvRgbaBuf = null;
 let recvImg = null;
+/** 当前视频位图尺寸（0 = 尚无帧）；供全屏自动旋转判断横/竖屏方向。 */
+let recvVideoW = 0;
+let recvVideoH = 0;
 /** 把 RGBA 帧画到 canvas（宽度自适应，等比缩放）。
  *  `data` 为 base64 字符串（Rust 侧编码，桌面/Android 统一；atob 原生解码）。 */
 function drawReceiveFrame(w, h, data) {
@@ -204,9 +207,4 @@ function showRecvError(msg) {
 function hideRecvError() {
     $('recv-error').classList.add('hidden');
 }
-/** 头部锚点徽标状态：锚定中 / 已锚定 / 失败。 */
-function setAnchorBadge(state) {
-    const badge = $('anchor-badge');
-    badge.className = 'badge' + (state === 'ok' ? ' ok' : state === 'err' ? ' err' : '');
-    badge.textContent = state === 'ok' ? '已锚定' : state === 'err' ? '锚定失败' : '锚定中…';
-}
+// 「已锚定」徽标已移除（语义不明；锚定失败仍经 grid-error 提示，不影响接收）。

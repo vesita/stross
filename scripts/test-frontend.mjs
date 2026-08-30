@@ -263,7 +263,7 @@ function check(name, cond, extra = '') {
 await sleep(2500); // init：app_info → devices → ensureAnchor → 扫描 → 聚合
 
 console.log('\n[1] 免先连锚定 + 设备列表渲染');
-check('header 徽标 = 已锚定', $('anchor-badge').textContent === '已锚定');
+check('「已锚定」徽标已移除（语义不明，锚定失败仍经 grid-error 提示）', !document.getElementById('anchor-badge'));
 check('init 自动调用了 start_relay（免先连锚定）', calls.some((c) => c.cmd === 'start_relay'));
 let devCards = document.querySelectorAll('#device-list .dev-card');
 check('设备卡片 = 3（本机 + 手机A + 电脑B）', devCards.length === 3, `实际 ${devCards.length}`);
@@ -297,6 +297,11 @@ check('订阅握手后走 start_receive（streamId=sess-sub）', rc.some((c) => 
 check('接收目标 = 握手返回的 wsBase', rc.some((c) => c.args.relay === 'ws://192.168.1.52:9002'), JSON.stringify(rc[rc.length - 1]?.args));
 check('接收状态行显示（订阅中）', !$('recv-status-line').classList.contains('hidden'));
 check('「停止接收」按钮出现', !$('recv-stop-btn').classList.contains('hidden'));
+// 订阅键状态：订阅达成后对端端点的「订阅」键应变为「已订阅 · 接收中」（不再停留「订阅」）
+await sleep(100);
+const cardAfterSub = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
+const dirAfterSub = cardAfterSub?.querySelector('[data-role="remote-dir"]');
+check('订阅后端点键显示「已订阅 · 接收中」', !!dirAfterSub?.textContent.includes('已订阅 · 接收中'), dirAfterSub?.textContent.trim());
 
 console.log('\n[3b] 断流自愈：流结束后接收 UI 自动回到空闲态');
 {
@@ -307,6 +312,11 @@ console.log('\n[3b] 断流自愈：流结束后接收 UI 自动回到空闲态')
   check('B6: 等待浮层隐藏', $('recv-overlay').classList.contains('hidden'));
   check('B6: 停止按钮隐藏', $('recv-stop-btn').classList.contains('hidden'));
   check('B6: 播放器画布容器隐藏（画布不残留）', $('recv-canvas-wrap').classList.contains('hidden'));
+  // 断流后（共享关闭事件）：对端端点键应还原为「订阅」（清「已订阅 · 接收中」态）
+  await sleep(200);
+  const cardAfterEnd = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
+  const dirAfterEnd = cardAfterEnd?.querySelector('[data-role="remote-dir"]');
+  check('B6: 断流后端点键还原为「订阅」', !!dirAfterEnd?.querySelector('[data-act="subscribe-endpoint"]'), dirAfterEnd?.textContent.trim());
   mockRecvEnded = false;
 }
 
@@ -391,7 +401,7 @@ await eventHandlers['negotiator-request']({ payload: { id: 'n9', deviceId: 'dev-
 await sleep(100);
 check('授权弹窗打开', !$('approve-modal').classList.contains('hidden'));
 check('弹窗显示设备名', $('approve-device').textContent.includes('手机X'));
-check('弹窗显示申请媒体', $('approve-media').textContent.includes('mic'));
+check('弹窗显示申请媒体', $('approve-media').textContent.includes('麦克风'));
 $('approve-allow-btn').click();
 await sleep(100);
 const ar = calls.filter((c) => c.cmd === 'negotiator_respond');

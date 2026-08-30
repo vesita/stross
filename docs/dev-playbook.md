@@ -116,6 +116,14 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
 ## 8. 会话中已确认/还在的坑（压缩前捞回）
 
 - **端点 v2.1（分享/订阅独立契约 + 能力族）已落地**（docs/endpoint-model-v2.md §3）：
+  - **契约单一真源在 stross-types/contract.rs**（内核声明、端点实现）：`Endpoint`/
+    `ShareEndpoint`/`SubscribeEndpoint`/`MediaSourceEndpoint`/`EndpointApp`/
+    `SubscribeCtx`/`StreamConfig`/`VideoSource`/`AudioSourceConfig`/`Quality`/
+    `FilePushOptions`/`impl_media_source_endpoint!` 全部上移；stross-endpoint 的
+    `contract.rs` 只是 `pub use stross_types::contract::*` shim，pipeline/file
+    重导出数据契约（路径兼容）。**改契约去 stross-types，别在 endpoint 里加**；
+  - `EndpointApp` 新增 `spawn_task`（内核实现为 `tokio::spawn`）——契约层零
+    tokio 依赖，端点 fire-and-forget 一律经它；
   - **契约拆分**：`Endpoint`（公共视图：身份/kind/class/策略）→ `ShareEndpoint`
     （load/available/share）+ `SubscribeEndpoint`（subscribe）——**没有双向占位**；
     注册表持 `Box<dyn ShareEndpoint>`，订阅端点生成返回 `Box<dyn SubscribeEndpoint>`；

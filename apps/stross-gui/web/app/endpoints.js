@@ -173,16 +173,19 @@ async function stopShare(endpointId) {
 // ---------------------------------------------------------------------------
 // 对端：目录拉取 + 订阅
 // ---------------------------------------------------------------------------
-/** 对端目录缓存 TTL：目录是共享快照，短 TTL 让对端新共享/取消共享及时可见。 */
-const REMOTE_DIR_TTL_MS = 20000;
-/** 拉取对端节点目录（endpoint_ls；端口缺省 = 库层默认协商端口）。 */
-async function loadRemoteDir(dev) {
+/** 对端目录缓存 TTL：目录是共享快照，短 TTL 让对端新共享/取消共享及时可见。
+ *  展开卡片的目录随扫描周期（refreshDevices）刷新，控制在 8s 内反映变化。 */
+const REMOTE_DIR_TTL_MS = 8000;
+/** 拉取对端节点目录（endpoint_ls；端口缺省 = 库层默认协商端口）。
+ *  `force = true` 绕过 TTL 强制拉取——订阅的流因共享关闭而结束时即时刷下
+ *  已关闭端点（「关闭共享通知」的订阅方响应，不必等 TTL）。 */
+async function loadRemoteDir(dev, force = false) {
     const host = deviceHostOf(dev);
     if (!host)
         return;
     const cached = remoteDirs.get(dev.key);
     const cachedAt = remoteDirAt.get(dev.key);
-    if (cached && cachedAt && Date.now() - cachedAt < REMOTE_DIR_TTL_MS) {
+    if (!force && cached && cachedAt && Date.now() - cachedAt < REMOTE_DIR_TTL_MS) {
         renderRemoteDir(dev, cached);
         return;
     }
@@ -193,7 +196,13 @@ async function loadRemoteDir(dev) {
     if (box)
         box.textContent = '目录加载中…';
     try {
-        const dir = (await call('endpoint_ls', { host }));
+        // JS 侧超时兜底：Rust `endpoint_ls` 若挂起（真机偶发），Promise 永不 resolve
+        // → `remoteDirLoading` 守卫被独占 → 目录卡「加载中…」永不自愈（真机缺陷）。
+        // 前端 race 一个超时，确保任何情况下都清守卫 + 报「目录不可用」而非静默卡死。
+        const dir = (await Promise.race([
+            call('endpoint_ls', { host }),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('目录拉取超时')), 4000)),
+        ]));
         remoteDirs.set(dev.key, dir);
         remoteDirAt.set(dev.key, Date.now());
         renderRemoteDir(dev, dir);
@@ -256,6 +265,26 @@ function renderRemoteDir(dev, dir) {
             hint.textContent = '文件（命令行订阅）';
             row.appendChild(hint);
         }
+        else if (subscribedEndpoint &&
+            subscribedEndpoint.host === deviceHostOf(dev) &&
+            subscribedEndpoint.endpointId === ep.endpointId) {
+            // 当前订阅中的端点：「订阅」键改为接收中态（订阅键状态可见，避免可重复点击）
+            const badge = document.createElement('span');
+            badge.className = 'badge ep-badge live';
+            badge.textContent = '已订阅 · 接收中';
+            row.appendChild(badge);
+        }
+        else if (subscribingEndpoint &&
+            subscribingEndpoint.host === deviceHostOf(dev) &&
+            subscribingEndpoint.endpointId === ep.endpointId) {
+            // 正在订阅（握手进行中）：「订阅」键显进行态，防重复点击
+            const sub = document.createElement('button');
+            sub.type = 'button';
+            sub.className = 'sm ep-act';
+            sub.disabled = true;
+            sub.innerHTML = '<span class="spinner"></span><span>正在订阅…</span>';
+            row.appendChild(sub);
+        }
         else {
             const sub = document.createElement('button');
             sub.type = 'button';
@@ -305,6 +334,12 @@ async function confirmSubscribe() {
     setBtnLoading(btn, true);
     $('sub-error').classList.add('hidden');
     try {
+        // 「正在订阅…」进行态：握手期间对端卡片对应「订阅」键显进行态（防重复点击）
+        subscribingEndpoint = {
+            host: subscribeTarget.host,
+            endpointId: subscribeTarget.ep.endpointId,
+        };
+        renderDeviceList();
         const r = (await call('endpoint_subscribe_media', {
             host: subscribeTarget.host,
             endpointId: subscribeTarget.ep.endpointId,
@@ -312,12 +347,24 @@ async function confirmSubscribe() {
             // （Both/Pull 都按 compose_grant 定稿为拉取）；订阅者不做选择。
             delivery: subscribeTarget.ep.delivery === 'push' ? 'push' : undefined,
         }));
+        subscribingEndpoint = null; // 握手成功：转入「已订阅 · 接收中」态
         $('sub-modal').classList.add('hidden');
         // 订阅达成：把接收目标指向握手返回的入口，走既有接收链路
         targetRelay = { wsBase: r.relayUrl, srtUrl: null, quicUrl: null };
         await startReceive(r.streamId);
+        // 仅当接收真正启动才标记已订阅：否则订阅握手成功但 startReceive 失败
+        // （如无中继）时，对端卡片会错显「已订阅 · 接收中」而实际未接收。
+        subscribedEndpoint =
+            receiving
+                ? { host: subscribeTarget.host, endpointId: subscribeTarget.ep.endpointId }
+                : null;
+        // 重渲染设备列表：订阅键 → 「已订阅 · 接收中」（不再停留「订阅」）
+        renderDeviceList();
     }
     catch (e) {
+        // 握手失败：清「正在订阅…」进行态（订阅键回到「订阅」）
+        subscribingEndpoint = null;
+        renderDeviceList();
         $('sub-error').textContent = '订阅失败：' + errMsg(e);
         $('sub-error').classList.remove('hidden');
     }

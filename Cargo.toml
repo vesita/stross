@@ -43,8 +43,8 @@ async-trait = "0.1"
 # lamco-pipewire = pipewire 采集（低层 API，KWin 协商 + SHM/CPU 路径），
 # lamco-portal = xdg-desktop-portal ScreenCast 会话；ashpd 用于选源。
 ashpd = "0.13"
-lamco-pipewire = "0.6.10"
-lamco-portal = "0.4.4"
+lamco-pipewire = "0.6.11"
+lamco-portal = "0.4.5"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.23.1"
 clap = { version = "4", features = ["derive"] }
@@ -63,7 +63,7 @@ futures-util = "0.3"
 hostname = "0.4"
 local-ip-address = "0.6"
 quinn = "0.11"
-rcgen = "0.14.9"
+rcgen = "0.14.10"
 rsrt = "0.3"
 reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 rustls = { version = "0.23", features = ["ring"] }

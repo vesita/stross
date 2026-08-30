@@ -30,10 +30,33 @@ use stross_endpoint::subscribe::file::FileReceiveEndpoint;
 use stross_endpoint::subscribe::media::MediaReceiveEndpoint;
 use stross_proto::message::{
     CodecId, Delivery, EndpointDir, EndpointManifest, EndpointState, EndpointStrategy,
-    EndpointSummary, PickRule, ReliabilityProfile, SerializeRule, StrategyId, SubscribeSpec,
-    TransportId, TransportPreference, Visibility,
+    EndpointSummary, MediaKind, PickRule, ReliabilityProfile, SerializeRule, StrategyId,
+    SubscribeSpec, TransportId, TransportPreference, Visibility,
 };
 use stross_proto::time::unix_secs;
+
+/// 能力族展示顺序（与 [`stross_endpoint::factory::platform_endpoints`] 的种子顺序
+/// 一致：屏幕 → 音频 → 文件…）。未知 kind 排最后。
+fn kind_rank(kind: MediaKind) -> u8 {
+    match kind {
+        MediaKind::Screen => 0,
+        MediaKind::Window => 1,
+        MediaKind::Camera => 2,
+        MediaKind::Mic => 3,
+        MediaKind::SystemAudio => 4,
+        MediaKind::File => 5,
+        MediaKind::Clipboard => 6,
+        MediaKind::Input => 7,
+        MediaKind::Service => 8,
+    }
+}
+
+/// 端点清单排序：能力族固定顺序（主）+ 端点 id（稳定次键，避免同名同族乱序）。
+fn endpoint_order(a: &EndpointManifest, b: &EndpointManifest) -> std::cmp::Ordering {
+    kind_rank(a.kind)
+        .cmp(&kind_rank(b.kind))
+        .then_with(|| a.endpoint_id.cmp(&b.endpoint_id))
+}
 
 use crate::Kernel;
 use crate::error::{Error, Result};
@@ -107,22 +130,31 @@ impl EndpointRegistry {
     }
 
     /// 全部端点清单（本机目录用；含未通告）。
+    ///
+    /// **确定性排序**：按能力族固定顺序 + 端点 id——注册表持 HashMap（无序），
+    /// 直接 `values()` 迭代会使手机/PC/各次运行的展示顺序不一致（真实缺陷）。
     pub fn manifests(&self) -> Vec<EndpointManifest> {
-        self.endpoints.values().map(Self::manifest_of).collect()
+        let mut v: Vec<EndpointManifest> = self.endpoints.values().map(Self::manifest_of).collect();
+        v.sort_by(endpoint_order);
+        v
     }
 
     /// 已通告端点清单（对端目录用；Private 过滤由调用方做）。
     pub fn published_manifests(&self) -> Vec<EndpointManifest> {
-        self.endpoints
+        let mut v: Vec<EndpointManifest> = self
+            .endpoints
             .values()
             .filter(|e| e.published)
             .map(Self::manifest_of)
-            .collect()
+            .collect();
+        v.sort_by(endpoint_order);
+        v
     }
 
     /// mDNS 摘要（L1）：全部端点（含不可挂载 + 未通告标记）。
     pub fn summaries(&self) -> Vec<EndpointSummary> {
-        self.endpoints
+        let mut v: Vec<EndpointSummary> = self
+            .endpoints
             .values()
             .map(|e| EndpointSummary {
                 endpoint_id: e.ep.id().to_string(),
@@ -131,7 +163,13 @@ impl EndpointRegistry {
                 available: e.ep.available(),
                 published: e.published,
             })
-            .collect()
+            .collect();
+        v.sort_by(|a, b| {
+            kind_rank(a.kind)
+                .cmp(&kind_rank(b.kind))
+                .then_with(|| a.endpoint_id.cmp(&b.endpoint_id))
+        });
+        v
     }
 
     fn manifest_of(entry: &EndpointEntry) -> EndpointManifest {

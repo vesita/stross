@@ -94,8 +94,14 @@ function onApproveRequest(req: PendingRequest): void {
   pendingApprove = req;
   $('approve-device').textContent =
     `设备「${req.deviceName}」（${req.deviceId.slice(0, 12)}…）`;
-  $('approve-media').textContent =
-    '想订阅你共享的内容：' + (req.media.length ? req.media.join('、') : '未知媒体');
+  // 端点语义下 media 是目标端点 kind（如 screen）；优先展示端点名（中文），
+  // 否则把 MediaKind 序列化名（camelCase）映射成中文标签——避免显示「未知媒体」。
+  const mediaLabel =
+    req.endpointName ||
+    (req.media.length
+      ? req.media.map((m) => labelOf(DEVICE_KIND_LABELS, m)).join('、')
+      : '未知媒体');
+  $('approve-media').textContent = '想订阅你共享的内容：' + mediaLabel;
   $('approve-error').classList.add('hidden');
   $('approve-status').textContent = '';
   $('approve-modal').classList.remove('hidden');

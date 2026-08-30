@@ -223,6 +223,8 @@ interface PendingRequest {
   deviceName: string;
   /** 序列化后的媒体名（camelCase）。 */
   media: string[];
+  /** 订阅目标端点名（端点语义；旧语义缺省）。 */
+  endpointName?: string;
   createdAt: number;
 }
 

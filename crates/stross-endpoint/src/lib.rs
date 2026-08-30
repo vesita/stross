@@ -67,4 +67,5 @@ pub use playback::{
     PlaybackStats, RenderedFrame, VideoOut,
 };
 pub use share::{FileEndpoint, FilePushOptions, MicEndpoint, ScreenEndpoint, SystemAudioEndpoint};
+pub use stross_types::impl_media_source_endpoint;
 pub use subscribe::{FileReceiveEndpoint, MediaReceiveEndpoint};

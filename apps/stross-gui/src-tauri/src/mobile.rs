@@ -243,7 +243,11 @@ const DROP_BACKLOG: usize = 8;
 ///    音频帧 → `feedAudio`；积压超过 [`DROP_BACKLOG`] 时跳非关键帧追实时。
 ///
 /// 接收结束（rx 关闭）时通知 Kotlin 释放解码器 / AudioTrack。
-pub fn spawn_android_playback(app: &AppHandle<Wry>, rx: mpsc::Receiver<Frame>, audio: AudioOut) {
+pub fn spawn_android_playback(
+    app: &AppHandle<Wry>,
+    rx: mpsc::Receiver<Frame>,
+    audio: AudioOut,
+) -> tokio::task::JoinHandle<()> {
     #[cfg(target_os = "android")]
     mobile_jni::init(app);
     let handle = app.state::<PlaybackPluginHandle>().0.clone();
@@ -312,5 +316,5 @@ pub fn spawn_android_playback(app: &AppHandle<Wry>, rx: mpsc::Receiver<Frame>, a
         let _ =
             handle.run_mobile_plugin::<serde_json::Value>("stopPlayback", serde_json::json!({}));
         tracing::info!("Android 播放链路结束");
-    });
+    })
 }

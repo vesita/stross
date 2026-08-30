@@ -1189,7 +1189,16 @@ impl Kernel {
     /// 统一发现清单（`/api/discovery` 数据源，见 [`crate::discovery::DiscoveryResp`]）：
     /// 从当前锚定中继 + 身份 + 能力组装。未锚定（无中继入口）返回 `None`（非可发现节点）。
     /// `name` 用身份名，与 mDNS 广播的展示名一致（mDNS 与子网扫描都指向同一节点）。
+    ///
+    /// **可被发现门控**：`discoverable == false` 时也返回 `None`——「可被发现」是
+    /// 隐私开关，关闭时**所有**发现路径（mDNS 广播 + 子网单播扫描回退）都不可见。
+    /// 子网回退主动探测 `18779/api/discovery`，若不此处门控，mDNS 关闭仍会被
+    /// 扫描发现，违背隐私优先语义（用户反馈 bug）。
     pub fn discovery_manifest(&self) -> Option<crate::discovery::DiscoveryResp> {
+        // 可被发现关闭 → 不对外提供发现清单（含子网单播回退的探测口径）
+        if !self.discoverable() {
+            return None;
+        }
         let (relay_port, srt_port, quic_port) = self.relay_ports()?;
         let identity = self.device_identity()?;
         let info = self.mdns_info(&identity.device_name);
@@ -1796,5 +1805,31 @@ mod tests {
             k.verify_share_token(&t).is_err(),
             "teardown 后凭证应失效（签发表移除）"
         );
+    }
+
+    /// 「可被发现」门控统一发现清单：`discoverable=false` 时 `/api/discovery`
+    /// 不可见（子网单播扫描回退也探测不到），关闭 = 所有发现路径不可见。
+    #[tokio::test]
+    async fn discovery_manifest_gated_by_discoverable() {
+        use crate::negotiator::DeviceIdentity;
+        let k = Arc::new(Kernel::new(Platform::Desktop));
+        k.set_identity(DeviceIdentity {
+            device_id: "dev-gated".into(),
+            device_name: "pico".into(),
+        });
+        let _ = k.start_relay_on(0, "pico").await.unwrap();
+        // 默认 discoverable=false → 清单不可见
+        assert!(
+            k.discovery_manifest().is_none(),
+            "可被发现默认关闭时不应对外提供发现清单"
+        );
+        // 开启 → 清单可见（mDNS + 子网扫描都据此找到本节点）
+        k.set_discoverable(true);
+        let m = k.discovery_manifest().expect("开启后可被发现应返回清单");
+        assert_eq!(m.device_id, "dev-gated");
+        assert!(m.relay_port > 0, "已锚定中继才有入口");
+        // 再关闭 → 清单重新不可见
+        k.set_discoverable(false);
+        assert!(k.discovery_manifest().is_none());
     }
 }

@@ -642,3 +642,125 @@ startReceive 防重入+失败回滚、轮询边界修复、drawReceiveFrame 热�
 
 - 固定端口（中继 18777 / Android GUI 8777 / 控制面 18778 / 协商+发现 18779 / SRT 33462 / QUIC 33464）**统一为 `stross-types::ports` 单一真源**；kernel 各模块改用 `pub use stross_types::ports::X as Y` 别名保持路径兼容（`relay::DEFAULT_PORT`/`GUI_PORT`、`control::DEFAULT_CTRL_PORT`、`negotiator::DEFAULT_NEGOTIATOR_PORT`、`discovery::DISCOVERY_PORT`、`lib::DEFAULT_SRT/QUIC_PORT`）。
 - **消除局部重复**：发现端口与协商端口是同一服务同一端口，`DISCOVERY_PORT` 与 `DEFAULT_NEGOTIATOR_PORT` 现共同指向 `stross_types::ports::NEGOTIATOR_DISCOVERY`，不再各写一份 `18779`。
+
+---
+
+## 第十八轮（基线回归：本地双端 + 真机双向闭环，2026-09）
+
+> 起因：用户「可以进行本地双端测试以及连接手机进行测试」。
+
+**本地双端**：
+- `scripts/dual-node-file-test.sh` 全过（3 条订阅链路 pull/push/pull，文件逐字节一致）；
+- `scripts/discovery-test.sh` 全过（`/api/discovery` 权威清单 + devices 同节点断言；mDNS 静默→子网回退为 best-effort 跳过，因网内存在其它 mDNS 节点）；
+- 工作区 `cargo build --workspace` 干净（1m12s）。
+
+**真机（OPPO PLC110 / 192.168.11.60 ↔ PC / 192.168.11.61，同 /24）**：
+- **手机端**：`GET 18779/api/discovery` 返回权威清单（relayPort=8777），`GET 8777/api/info` 正常；
+- **PC 端**：`stross devices` 扫到手机 `192.168.11.60:8777`（mDNS 广播通道）；
+- **手机→PC**：手机扫到 PC `192.168.11.61:18777`（子网单播回退——下行多播被 Su 拦截的场景），且与 mDNS 指向**同一节点同一 relay_port**；
+- **手机订阅 PC 屏幕（pull）真机闭环**：PC 通告 `screen:0`（public/pull）→ 手机展开目录看到「屏幕 · 公开 · 拉取 · 订阅」→ 订阅并接收 → PC 日志「端点已自动推流 stream=sess-1 订阅方 6b57…」+「端点共享已登记 screen:0 → sess-1」+ Wayland 建流成功 → 手机接收面板「接收中 · 收到 18 帧 · 解码 0 帧 · 已绘制 11 帧」；PC `/api/streams` 出现 `sess-1（屏幕）watchers=1`；
+- **自动收尾**：手机点「停止接收」→ PC watchers→0（4s 延迟复查）→ `/api/streams` 清空 + `screen:0` 回 `state=idle`（仍已通告）——**P0-1 生命周期闭环真机复验通过**。
+
+**观察（非阻断）**：手机设备列表出现两条同 PC 记录（`192.168.11.61:18777` 活节点 + `192.168.11.61:27777` 陈旧记录——后者来自先前用 27777 起测试节点的 mDNS/目录缓存，节点已死而未清）。属发现陈旧条目清理范畴，记入后续优化。
+
+**结论**：发现（统一端口）与端点订阅（通告→订阅→自动开推→断连自动收尾）在本地与真机均闭环，可进入下一模块（端点扩充 / 通告订阅流程优化）。
+
+---
+
+## 第十九轮（交互模型定稿 + UI 术语清理 + 协商应答 panic 修复，2026-09）
+
+**起因**：用户拍板交互心智模型——**「广播/通告」改为「共享」**（我是内容源，推送预备）；**「订阅」= 接收**；订阅握手完成后共享端向订阅者推送。据此收敛 UI 文案与弹窗选项。
+
+**用户交互模型（定稿）**：
+- **共享** = 我是内容源（推送预备），把端点共享出去；
+- **订阅** = 我是接收方；
+- 方向（pull/push）是**公开方/系统决策**，订阅者不选——`Both` 定稿为默认拉取；`Push-only` 端点由框架按宣告自动预置本机接收，用户零决策。
+
+**UI 改动（`apps/stross-gui/web`）**：
+- **术语「通告」→「共享」**（避免与 mDNS 广播 / 旧「广播共享」歧义；用户选了「共享」）：按钮「共享/取消共享」、徽标「已共享」、弹窗标题「共享「…」」、错误文案「共享失败/取消共享失败」、空状态「该节点暂未共享任何端点」；`index.html` 接收副注「订阅的共享流在此播放」。
+- **移除无意义字眼**：本机卡片 meta 去「mDNS 广播中」、设备树标题去「（通告为端点）」、端点行 meta 去「实时」、目录行去「方向」、空状态去「（mDNS）」。
+- **订阅弹窗移除 delivery 选择**：`openSubscribeModal`/`confirmSubscribe` 不再构/传 `delivery`；`index.html` 删 `<select id="sub-delivery">`；`ui.ts` 删现死的 `fillSelect`。
+- 端点在 badge/目录仍展示**可见性**（公开/需确认），方向不进用户视野。
+
+**协商应答 panic 修复（`apps/stross-gui/src-tauri/src/commands.rs`）**：`negotiator_respond` 由**同步**改为 **async**。根因：同步 `tauri::command` 在 GTK 主线程执行，`respond()`→`notify_subscribed`→`endpoint.share()`→`spawn_media_share` 内的 `tokio::spawn` 无 Tokio runtime 上下文，panic「there is no reactor running」（用户所贴崩溃日志）。async 命令跑在 tokio runtime 上。HTTP 路径（`handle_request`）本就跑在 tokio 上不受影响。
+
+**验证**：
+- `npx typescript@5.9.3 tsc` 前端 strict 通过；`app/*.js` 与 `app/*.ts` 全部同步（tsc 重新生成）；
+- `node scripts/test-frontend.mjs` 全绿（含 1 处**随行为更新**的断言：共享后徽标含「已共享 · 需确认」且**不含方向**）；
+- `cargo build -p stross-gui` + `cargo clippy -p stross-gui -- -D warnings` 干净（异步化无新告警）。
+
+**遗留**：真机 APK 在 Android debug 构建中（frontendDist=../web，JS 编译期打包，需重装 APK 才能看到新 UI）。
+
+---
+
+## 第二十轮（发现/UI 缺陷修复 + 死代码清理，2026-09）
+
+> 起因：用户反馈三处小 bug + 清理诉求——①PC 关了「可被发现」手机仍能发现；②手机出现两个 27777；③UI 节点不该展示「中继/共享/接收」字眼；④订阅 PC 屏幕后接收处播放器面板不关闭；⑤检查构建流程、清理无用代码（怀疑 Kotlin 是否还有用）。
+
+**① 可被发现语义修正：关闭 = 所有发现路径不可见（隐私）**
+- 根因：`discoverable=false` 只停了 mDNS 广播，但**子网单播扫描回退**主动探测 `18779/api/discovery`，不受开关约束——故关了开关仍被手机扫到。
+- 修复：`Kernel::discovery_manifest` 加 `discoverable` 门控（`false` 返回 `None` → `/api/discovery` 404）；子网扫描探测不到 → 关闭即完全不可见。
+- 修正 `discovery-test.sh` 第 2 段断言：原本测「mDNS 静默仍被子网扫描发现」，该语义与隐私门控矛盾；改为断言「`discoverable=false` → `/api/discovery` 404」（用户拍板语义）。
+- kernel 单测：`discovery_manifest_gated_by_discoverable`（关→None / 开→Some / 再关→None）。
+
+**② 发现结果去重：同一设备 mDNS + 子网扫描双路径重复**
+- 根因：`scan_lan` 里 `devices.extend(subnet_scan(...))` **未与既有 mDNS 结果按 `ip:port` 去重**，同一物理设备经 mDNS 与子网扫描会重复出现（手机界面同一节点两张卡片）。
+- 修复：`scan_lan` 先把 mDNS 结果 `ip:port` 建 `seen` 集合，子网扫描 / 手动地址结果均经 `seen` 去重后才追加。
+
+**③ 节点卡片移除角色字眼**
+- 删除节点名旁的「中继/共享/接收」角色 chip（`ROLE_LABELS` 的技术角色对用户无信息量；交互已由「共享/订阅」按钮承载）。同时清掉现死的 `roleChip`/`roleLabel`/`chipEl`/`RoleKind`/`ROLE_LABELS` 与 `.chips`/`.chip` CSS。
+
+**④ 停止接收后播放器面板不关闭**
+- 根因：`setReceiving(false)` 未重置 `recvFrameCount`，`updateRecvOverlay` 据 `recvFrameCount>0` 把画布容器留在可见态。
+- 修复：`setReceiving(false)` 重置 `recvFrameCount/recvAudioBlocks`。jsdom 新增 `B6: 播放器画布容器隐藏` 断言。
+
+**⑤ 构建流程 / 死代码排查结论**
+- **Kotlin 不是死代码**：`MediaPlugin.kt`/`PlaybackPlugin.kt`/`ProjectionService.kt`/`MainActivity.kt` 全部服务于 Android 采集/播放（`#[cfg(mobile)]`，桌面不编译）；`android/` 源与 `gen/` 副本一致；6 个 `@Command`（startCapture/stopCapture/startPlayback/stopPlayback/feedAudio/feedVideo）全被 `mobile.rs` 经 `run_mobile_plugin` 调用。`ProjectionService` 被 `MediaPlugin` 引用。桌面 GUI（`cfg(not(mobile))`）完全不依赖 Kotlin，走 `FfmpegBackend` + `frontendDist`。
+- **Rust 无死代码**：`generate_handler!` 注册的 19 个命令全部被前端 `invoke`；`firewall.rs`/`mobile.rs` 内部函数均有上游；clippy `-D warnings` 干净。
+- **构建流程注意点（重要）**：前端（`web/*`）是 Tauri `frontendDist`，**编译期嵌入**桌面/Android 二进制。**增量 `cargo build` 不总会因为 `web/*.js` 变化而重新嵌入**（tauri asset codegen 按内容 hash 缓存，增量时不重跑），曾导致 `cargo run -p stross-gui` 显示旧 UI。**改前端后建议 `cargo clean -p stross-gui` 再 build**（或 `touch tauri.conf.json` 强制 build.rs 重嵌入）。已实测 clean 重build 后嵌入资产为新文案。
+
+**验证**：kernel 单测 18（discovery）+ 新增门控用例全过；`discovery-test.sh` 过（含新 404 断言）；前端 tsc/sync/jsdom 全绿（新增画布隐藏断言）；workspace build + clippy 干净。
+
+**排期（后续小 bug / 迭代）**：
+- 发现陈旧条目清理（节点死后设备列表仍显示；依赖 mDNS TTL，需主动超时重探）；
+- 名称一致性（mDNS `pico` vs `/api/discovery` `Stross 设备`）；
+- Android 屏幕端点（MediaProjection FGS + Rust 端点）、摄像头（CameraX）、剪贴板（E 阶段）；
+- 协议优化：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕；
+- C 弱网 / D 互通矩阵 / E 二期（见阶段总览）。
+
+---
+
+## 第二十一轮：PC UI 整体重做 + 术语清理（共享侧）
+
+**背景 / 定性**：用户反馈 PC 界面问题大、需「淘汰」。经 CDP/截图核实：**安卓与 PC 共用同一套前端**（`apps/stross-gui/web`），差异只是窄屏竖排 vs 宽屏双栏渲染；所谓「安卓更新了一代」实为移动竖排布局更清爽，且 PC 二进制曾因**增量构建不重嵌入前端资产**而显旧 UI。用户确认 PC UI「受构建逻辑影响存在落后」，且心智模型：**共享 = 推送端，订阅 = 接收端**（方向属系统决策，两侧都不选）。
+
+**改动（前端 `apps/stross-gui/web`，桌面+安卓共享受益）**：
+
+- **桌面布局重做**：`.dual` 由 `5fr/4fr` 双栏改为「设备=窄侧栏（320-400px）+ 接收=主视区（`minmax(0,1fr)`）」；窄屏（≤860px）仍折叠单栏（安卓同款）。卡片头 `pane-head` 改为「标题 + 扫描按钮」、手动地址独立 `.pane-addrow` 行（输入+添加）。消除宽屏大块空荡。
+- **接收面板空状态**：新增 `#recv-empty`（图标 + 「尚未接收共享」+ 引导文案），`setReceiving(false)` 时显示、接收中隐藏；`subscribe.ts` 在 `setReceiving` 里 toggle。
+- **共享（推送）侧去术语/去方向**（此前只清了订阅侧，共享侧遗漏）：
+  - 移除共享弹窗「数据面方向」字段（拉取/推送/双向）；`confirmPublish` 改传 `publishTarget.ep.delivery || 'pull'`（系统/端点决定）。
+  - 弹窗按钮「通告」改「共享」（修正标题「共享」vs 按钮「通告」的不一致）。
+  - 副标题：「端点 = 订阅入口：对端节点在目录里看到它…」→「开启后，局域网内其它设备可以订阅并接收这个内容（共享 = 由本机推送）」。
+  - 「可见性（谁可订阅）」→「谁可以订阅」；「公开/需确认」→「任何人/需我确认（首次询问，之后自动）」。
+- **目录/节点去术语**：`展开即拉取（endpoint_ls，协商端口缺省）`删除；「目录（设备 → 可订阅端点）」→「可订阅的内容」；「该节点暂未共享任何端点」→「该设备暂未共享任何内容」；「文件端点（CLI 订阅）」→「文件（命令行订阅）」；「不可挂载」→「不可用」；「本机设备」空态→「本机暂无可共享的内容」。
+- **头栏/本机卡片**：`本机（我）`→`本机`；`已锚定 · 中继端口 N`→`已就绪`；`ffmpeg`→`推流就绪`（无则 `缺少推流引擎`）；「可被发现」tooltip 去 `mDNS` 技术词。
+- **死代码/一致性**：删 `DELIVERY_LABELS`/`DeliveryKind`（delivery 不再作为用户可见标签）；`.pane-tools`→`.pane-addrow`；清 3 处残留「通告」注释；合并重复 `fieldset legend` 规则。订阅弹窗副标题去「传输=…」改「订阅后将接收对方共享的这个内容」。
+
+**验证**：`check.sh --quick` 全绿（rustfmt/clippy/tsc strict/app.js 同步）；jsdom `test-frontend.mjs` 全过（更新「目录标题（可订阅的内容）」、「订阅弹窗打开（端点信息）」断言）；clean 重build 桌面二进制后截图确认：主界面（接收空状态）、共享弹窗（无方向）、设备目录（可订阅的内容）均达标。手机 APK 重建（JDK 17）使安卓同步新 UI + 上一轮 kernel 去重/门控。
+
+### 第二十一轮（续）——用户实测暴露的两个 Bug 修复
+
+**Bug A：端点「停止共享」崩溃 `there is no reactor running`（kernel/mod.rs:540）**
+- 现象：`cargo run -p stross-gui` 下，手机订阅本机屏幕（引擎 `sess-1` 自动推流）后，点「停止共享」→ `stop_share_by_stream` 在 `tokio::spawn`（优雅停流）处 panic `there is no reactor running, must be called from the context of a Tokio 1.x runtime`，GUI abort。
+- 根因：与 `negotiator_respond` 同族——`endpoint_stop_share` 是**同步** tauri 命令，跑在 GTK 主线程（无 Tokio reactor），`stop_endpoint_share`→`stop_share_by_stream` 内 `tokio::spawn` 需要 runtime。
+- 修复：`endpoint_stop_share` 改 `async`（同 `negotiator_respond` 手法），命令在 Tokio runtime 上执行 → `tokio::spawn` 有 reactor。前端无需改（invoke 对 sync/async 命令一致）。
+- 验证：真机复现还原——手机订阅 PC 屏幕（`端点已自动推流 stream=sess-1`）→ PC 点「停止共享」→ 日志「端点共享停止: screen:0」+ PipeWire 优雅关闭，**GUI 保持存活**（修复前 abort）。
+
+**Bug B：Android 接收屏幕时「全屏」不可用**
+- 现象：手机接收屏幕流点全屏按钮无反应。
+- 根因：`togglePlayerFullscreen` 先查 `win.isFullscreen()`（Android 抛错→沿用本地）再 `win.setFullscreen(next)`——**Android WebView 无 OS setFullscreen（抛错），旧代码在此 `catch { return; }` 提前返回，导致 CSS 层全屏（`.canvas-wrap.fs`）从未应用**。
+- 修复：`togglePlayerFullscreen` 改为**先应用 CSS 层全屏**（`setPlayerFullscreen(next)`），OS 窗口级全屏仅作 best-effort（失败忽略）；`setFullscreen` 抛错不再阻断。手机（real device）复现确认 `isFullscreen()/setFullscreen()` 均抛错，重建 APK 后验证 CSS 全屏生效。
+- 注：「Tauri 窗口级全屏（桌面/Android 一致）」注释有误——Android 无此能力，靠 CSS `.canvas-wrap.fs`（`position:fixed; inset:0`）兜底。
+
+

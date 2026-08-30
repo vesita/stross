@@ -153,8 +153,11 @@ pub async fn endpoint_unpublish(
 }
 
 /// 停止端点活动共享（本机端点树「停止共享」按钮：停流 + 拆除会话，保留通告）。
+/// **async**：`stop_endpoint_share` → `stop_share_by_stream` → `tokio::spawn`
+/// （优雅停流）需要 Tokio 运行时；同步命令跑在 GTK 主线程无 reactor，会
+/// panic「there is no reactor running」。与 `negotiator_respond` 同理。
 #[tauri::command]
-pub fn endpoint_stop_share(
+pub async fn endpoint_stop_share(
     state: State<'_, Arc<Kernel>>,
     endpoint_id: String,
 ) -> Result<(), String> {
@@ -204,8 +207,13 @@ pub async fn endpoint_subscribe_media(
 // ---------------------------------------------------------------------------
 
 /// 应答凭证协商请求（电脑端授权确认弹窗操作后调用）。
+///
+/// **必须 async**：`respond()` 会触发端点 `share()` → `spawn_media_share` 内部
+/// `tokio::spawn`，需要 Tokio runtime 上下文（Rust 核心契约，docs/endpoint-model.md §5 联动）。
+/// 同步 `tauri::command` 在 GTK 主线程执行、无 reactor，会 panic
+/// 「there is no reactor running」；async 命令跑在 tokio runtime 上。
 #[tauri::command]
-pub fn negotiator_respond(
+pub async fn negotiator_respond(
     state: State<'_, NegotiatorHandle>,
     req_id: String,
     allow: bool,

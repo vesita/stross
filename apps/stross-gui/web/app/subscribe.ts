@@ -90,6 +90,9 @@ async function stopReceive(): Promise<void> {
 function setReceiving(r: boolean): void {
   receiving = r;
   if (!r) {
+    // 停止：重置帧/音频块计数——否则 updateRecvOverlay 据 recvFrameCount>0
+    // 会把画布容器留在可见态，导致「停止后播放器面板不关闭」。
+    recvFrameCount = 0;
     recvAudioBlocks = 0;
     recvStreamId = null;
     // 停止接收时退出播放器全屏（若在）
@@ -102,6 +105,9 @@ function setReceiving(r: boolean): void {
   $('recv-meta').textContent = '';
   const stopBtn = $('recv-stop-btn');
   if (stopBtn) stopBtn.classList.toggle('hidden', !r);
+  // 空状态：空闲时显示占位，接收中隐藏（有内容时由画布接管）
+  const empty = $('recv-empty');
+  if (empty) empty.classList.toggle('hidden', r);
   updateRecvOverlay();
 }
 

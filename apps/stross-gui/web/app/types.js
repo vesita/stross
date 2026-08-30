@@ -14,12 +14,6 @@ const VISIBILITY_LABELS = {
     confirm: '需确认',
     private: '私密',
 };
-/** delivery 中文显示。 */
-const DELIVERY_LABELS = {
-    pull: '拉取',
-    push: '推送',
-    both: '双向',
-};
 /** 设备/端点种类中文显示。 */
 const DEVICE_KIND_LABELS = {
     screen: '屏幕',
@@ -31,12 +25,6 @@ const DEVICE_KIND_LABELS = {
     clipboard: '剪贴板',
     file: '文件',
     service: '服务',
-};
-/** 角色英文 → 中文显示（mDNS TXT `roles`）。 */
-const ROLE_LABELS = {
-    sender: '共享',
-    viewer: '接收',
-    relay: '中继',
 };
 /** 查标签：未知 wire 值回退原文（后端枚举可能先于前端扩展）。 */
 function labelOf(map, key) {

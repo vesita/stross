@@ -1,8 +1,8 @@
 "use strict";
 // Stross 前端 —— 初始化与事件绑定（script 全局作用域，按依赖序最后加载）。
 //
-// 界面模型（节点 → 设备 → 端点：通告 + 订阅）：
-//   左栏「设备」：本机设备树（通告/取消通告）+ 局域网设备目录（订阅端点）；
+// 界面模型（节点 → 设备 → 端点：共享 + 订阅）：
+//   左栏「设备」：本机设备树（共享/取消共享）+ 局域网设备目录（订阅端点）；
 //   右栏「接收」：订阅进来的端点流在此播放/停止。
 //
 // 生成 app/ 下的 JS：`npx tsc -p apps/stross-gui/web/tsconfig.json`
@@ -24,11 +24,11 @@ async function init() {
             fb.classList.add('ok');
         }
         else if (info.ffmpeg) {
-            fb.textContent = 'ffmpeg';
+            fb.textContent = '推流就绪';
             fb.classList.add('ok');
         }
         else {
-            fb.textContent = '未检测到 ffmpeg';
+            fb.textContent = '缺少推流引擎';
             fb.classList.add('err');
         }
         restorePrefs();
@@ -58,7 +58,7 @@ function startStatusPolling() {
         // 设备列表周期刷新（refreshDevices 自带 5s TTL + in-flight 守卫：
         // mDNS + 探测 + 聚合在 Rust `scan_devices` 内一次完成；数据未变不重建）
         void refreshDevices();
-        // 本机目录（设备 + 已公开端点）周期刷新——通告状态徽标实时可见
+        // 本机目录（设备 + 已共享端点）周期刷新——共享状态徽标实时可见
         void refreshLocalCatalog();
     }, 2000);
 }
@@ -116,7 +116,7 @@ async function respondApprove(allow) {
     $('approve-modal').classList.add('hidden');
 }
 // ---------------------------------------------------------------- 事件绑定
-// 设备列表事件委托：端点框架操作按钮（data-act：通告/取消通告/订阅）
+// 设备列表事件委托：端点框架操作按钮（data-act：共享/取消共享/订阅）
 $('device-list').addEventListener('click', (e) => {
     const t = e.target;
     const btn = t.closest('[data-act]');
@@ -154,7 +154,7 @@ $('device-list').addEventListener('click', (e) => {
 // 设备接入授权确认（权限自动化：首次人工确认）
 $btn('approve-allow-btn').onclick = () => void respondApprove(true);
 $btn('approve-deny-btn').onclick = () => void respondApprove(false);
-// 端点框架弹窗（通告 / 订阅）
+// 端点框架弹窗（共享 / 订阅）
 $btn('pub-confirm-btn').onclick = () => void confirmPublish();
 $btn('pub-cancel-btn').onclick = () => $('pub-modal').classList.add('hidden');
 $('pub-modal').addEventListener('click', (e) => {

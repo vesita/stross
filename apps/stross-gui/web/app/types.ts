@@ -16,10 +16,6 @@ type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<any>;
 type EndpointKind = 'screen' | 'window' | 'camera' | 'mic' | 'systemAudio' | 'input' | 'clipboard' | 'file' | 'service';
 /** 可见性（Rust `Visibility` wire 值）。 */
 type VisibilityKind = 'public' | 'confirm' | 'private';
-/** 数据面方向（Rust `Delivery` wire 值）。 */
-type DeliveryKind = 'pull' | 'push' | 'both';
-/** 角色（Rust `RoleId` wire 值）。 */
-type RoleKind = 'sender' | 'viewer' | 'relay';
 /** 共享媒体类型（与设备能力徽标一致；端点 kind 的实时媒体子集）。 */
 type ShareMedia = Extract<EndpointKind, 'screen' | 'camera' | 'mic' | 'systemAudio'>;
 
@@ -34,13 +30,6 @@ const VISIBILITY_LABELS: Record<VisibilityKind, string> = {
   private: '私密',
 };
 
-/** delivery 中文显示。 */
-const DELIVERY_LABELS: Record<DeliveryKind, string> = {
-  pull: '拉取',
-  push: '推送',
-  both: '双向',
-};
-
 /** 设备/端点种类中文显示。 */
 const DEVICE_KIND_LABELS: Record<EndpointKind, string> = {
   screen: '屏幕',
@@ -52,13 +41,6 @@ const DEVICE_KIND_LABELS: Record<EndpointKind, string> = {
   clipboard: '剪贴板',
   file: '文件',
   service: '服务',
-};
-
-/** 角色英文 → 中文显示（mDNS TXT `roles`）。 */
-const ROLE_LABELS: Record<RoleKind, string> = {
-  sender: '共享',
-  viewer: '接收',
-  relay: '中继',
 };
 
 /** 查标签：未知 wire 值回退原文（后端枚举可能先于前端扩展）。 */
@@ -162,7 +144,7 @@ interface RemoteStream {
   audio: boolean | TrackInfo | null;
 }
 
-/** L1 端点摘要（Rust `EndpointSummary`，mDNS 摘要层：id/kind/name/可挂载/已通告）。
+/** L1 端点摘要（Rust `EndpointSummary`，mDNS 摘要层：id/kind/name/可挂载/已共享）。
  *  字段是 EndpointManifest 的子集——用 Pick 派生，避免双份定义漂移。 */
 type L1EndpointSummary = Pick<EndpointManifest, 'endpointId' | 'kind' | 'name' | 'available' | 'published'>;
 
@@ -233,16 +215,16 @@ interface PendingRequest {
 
 // —— 端点框架（节点 → 端点；docs/endpoint-model.md） ——
 
-/** 端点清单（单层端点模型，Rust `EndpointManifest` 平铺：可挂载性 + 通告状态）。 */
+/** 端点清单（单层端点模型，Rust `EndpointManifest` 平铺：可挂载性 + 共享状态）。 */
 interface EndpointManifest {
   endpointId: string;
   kind: string;
   name: string;
-  /** load 探测结果：能否被挂载成节点（false = 不可通告、不可订阅）。 */
+  /** load 探测结果：能否被挂载成节点（false = 不可共享、不可订阅）。 */
   available: boolean;
   /** load/share 失败原因（不可用时展示）。 */
   lastError: string | null;
-  /** 是否已通告（未通告 = 仅本机可见）。 */
+  /** 是否已共享（未共享 = 仅本机可见）。 */
   published: boolean;
   visibility: string;
   delivery: string;
@@ -253,12 +235,12 @@ interface EndpointManifest {
   updatedAt: number;
 }
 
-/** 本机目录（Rust `local_catalog`：全部端点，含未通告与不可挂载）。 */
+/** 本机目录（Rust `local_catalog`：全部端点，含未共享与不可挂载）。 */
 interface LocalCatalog {
   endpoints: EndpointManifest[];
 }
 
-/** L2 目录（Rust `EndpointDir`：节点 + 已通告端点；服务端已滤 Private）。 */
+/** L2 目录（Rust `EndpointDir`：节点 + 已共享端点；服务端已滤 Private）。 */
 interface RemoteDir {
   node: { deviceId: string; deviceName: string };
   endpoints: EndpointManifest[];

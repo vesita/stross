@@ -159,7 +159,7 @@
       </div>
     </div>
     <div class="header-right">
-      <label class="disco-toggle" title="可被发现：开启后局域网其它设备经 mDNS 扫描到本机">
+      <label class="disco-toggle" title="开启后，局域网内其它设备可以发现并连接本机">
         <span class="disco-label">可被发现</span>
         <input id="disco-toggle" type="checkbox" />
         <span class="disco-track"><span class="disco-thumb"></span></span>
@@ -173,21 +173,21 @@
   <main>
     <div id="error-box" class="error hidden"></div>
 
-    <!-- ============ 设备（通告/订阅） × 接收 ============
-         组织方式：节点 → 设备 → 端点。左栏「设备」：本机设备树（通告为可订阅端点）
+    <!-- ============ 设备（共享/订阅） × 接收 ============
+         组织方式：节点 → 设备 → 端点。左栏「设备」：本机设备树（共享为可订阅端点）
          + 局域网设备目录（订阅对端端点）；右栏「接收」：订阅进来的流在此播放/停止。 -->
     <div class="dual">
       <!-- ── 左栏：设备 ── -->
       <section class="card" id="device-pane">
         <div class="pane-head">
           <h2>设备</h2>
-          <div class="row pane-tools">
-            <button id="scan-btn" type="button">
-              <svg class="ic"><use href="#i-search" /></svg><span>扫描</span>
-            </button>
-            <input id="manual-addr" type="text" placeholder="设备 IP 或 IP:端口（免 http://）" />
-            <button id="manual-add-btn" type="button">添加</button>
-          </div>
+          <button id="scan-btn" type="button">
+            <svg class="ic"><use href="#i-search" /></svg><span>扫描</span>
+          </button>
+        </div>
+        <div class="pane-addrow">
+          <input id="manual-addr" type="text" placeholder="设备 IP 或 IP:端口" />
+          <button id="manual-add-btn" type="button">添加</button>
         </div>
         <div id="grid-error" class="error hidden"></div>
         <!-- 防火墙自动放行（权限自动化）：检测到 ufw 入站拦截 Stross 端口时提示一键放行 -->
@@ -203,7 +203,7 @@
             <button id="fw-close-btn" class="sm" type="button">忽略</button>
           </div>
         </div>
-        <!-- 本机卡片（设备树：通告/取消通告）+ 局域网设备卡片（目录：订阅端点） -->
+        <!-- 本机卡片（设备树：共享/取消共享）+ 局域网设备卡片（目录：订阅端点） -->
         <div id="device-list"></div>
         <div id="recent-block" class="hidden">
           <h2>手动添加历史</h2>
@@ -215,10 +215,15 @@
       <section class="card" id="recv-pane">
         <div class="pane-head">
           <h2>接收</h2>
-          <span class="hint">订阅的端点流在此播放</span>
           <button id="recv-stop-btn" class="sm hidden" type="button">
             <svg class="ic"><use href="#i-stop" /></svg><span>停止接收</span>
           </button>
+        </div>
+        <!-- 空状态：未接收任何共享时的占位提示（接收中隐藏） -->
+        <div class="recv-empty" id="recv-empty">
+          <span class="recv-empty-ic"><svg class="ic"><use href="#i-monitor" /></svg></span>
+          <p>尚未接收共享</p>
+          <span class="hint">在左侧选择一台设备，订阅它共享的内容后在此播放</span>
         </div>
         <div id="recv-error" class="error hidden"></div>
         <!-- 接收画面：有视频帧时显示，纯音频隐藏 -->
@@ -249,25 +254,19 @@
     </div>
   </main>
 
-  <!-- 通告弹窗（本机设备 → 端点：可见性 / delivery 由公开者声明） -->
+  <!-- 共享弹窗（本机设备 → 端点：可见性由公开者声明；共享=推送端） -->
   <div id="pub-modal" class="modal hidden">
     <div class="modal-box">
-      <h2 id="pub-modal-title">通告设备</h2>
+      <h2 id="pub-modal-title">共享设备</h2>
       <p class="hint" id="pub-modal-sub"></p>
       <fieldset>
-        <legend>可见性（谁可订阅）</legend>
-        <label class="row check-row"><input type="radio" name="pub-vis" value="public" /><span>公开（任何人免确认）</span></label>
-        <label class="row check-row"><input type="radio" name="pub-vis" value="confirm" checked /><span>需确认（首见人工允许，信任后自动）</span></label>
-      </fieldset>
-      <fieldset>
-        <legend>数据面方向（公开者声明）</legend>
-        <label class="row check-row"><input type="radio" name="pub-delivery" value="pull" checked /><span>拉取（订阅方连本机中继观看）</span></label>
-        <label class="row check-row"><input type="radio" name="pub-delivery" value="push" /><span>推送（本机凭凭证推入订阅方中继）</span></label>
-        <label class="row check-row"><input type="radio" name="pub-delivery" value="both" /><span>双向（订阅方可选）</span></label>
+        <legend>谁可以订阅</legend>
+        <label class="row check-row"><input type="radio" name="pub-vis" value="public" /><span>任何人（免确认）</span></label>
+        <label class="row check-row"><input type="radio" name="pub-vis" value="confirm" checked /><span>需我确认（首次询问，之后自动）</span></label>
       </fieldset>
       <div class="row">
         <button id="pub-confirm-btn" class="primary" type="button">
-          <svg class="ic"><use href="#i-radio" /></svg><span>通告</span>
+          <svg class="ic"><use href="#i-radio" /></svg><span>共享</span>
         </button>
         <button id="pub-cancel-btn" type="button">
           <svg class="ic"><use href="#i-x" /></svg><span>取消</span>
@@ -280,11 +279,8 @@
   <!-- 订阅弹窗（对端端点 → 本机接收：握手后走既有 start_receive） -->
   <div id="sub-modal" class="modal hidden">
     <div class="modal-box">
-      <h2 id="sub-modal-title">订阅端点</h2>
+      <h2 id="sub-modal-title">订阅</h2>
       <p class="hint" id="sub-modal-sub"></p>
-      <div class="row">
-        <select id="sub-delivery"></select>
-      </div>
       <div class="row">
         <button id="sub-confirm-btn" class="primary" type="button">
           <svg class="ic"><use href="#i-download" /></svg><span>订阅并接收</span>
@@ -300,7 +296,7 @@
   <!-- 设备接入授权确认弹窗（电脑端：局域网设备申请共享凭证时的首次人工确认） -->
   <div id="approve-modal" class="modal hidden">
     <div class="modal-box">
-      <h2>设备接入请求</h2>
+      <h2>设备请求接入</h2>
       <p class="hint" id="approve-device"></p>
       <p class="hint" id="approve-media"></p>
       <label class="row check-row">

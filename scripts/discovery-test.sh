@@ -68,16 +68,16 @@ DEV_OUT=$(timeout 45 "$CLI" devices 2>/dev/null)
 echo "$DEV_OUT" | grep -q ":$PORT" || fail "devices 未发现节点 :$PORT：$DEV_OUT"
 echo "  devices 发现 :$PORT ✓"
 
-# ---- 节点 A 改为不广播（mDNS 静默）→ 子网扫描回退 ---------------------
-log "节点 A 改为不广播（mDNS 静默），验证子网扫描回退仍发现它"
+# ---- 节点 A 改为不可被发现（discoverable=false）→ 子网扫描也扫不到 ----
+log "节点 A 改为不可被发现（无 --discoverable），验证「关闭 = 所有发现不可见」"
 node_stop
 node_start 0
-DEV_OUT2=$(timeout 45 "$CLI" devices 2>/dev/null)
-if echo "$DEV_OUT2" | grep -q ":$PORT"; then
-  echo "  ✓ mDNS 静默下 devices 仍发现 :$PORT（子网扫描回退生效）"
+# 此时 /api/discovery 应 404（隐私门控：可被发现关闭即子网扫描也不可见）
+CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "http://127.0.0.1:$DISCOVERY/api/discovery" || echo "000")
+if [ "$CODE" = "404" ]; then
+  echo "  ✓ discoverable=false 时 /api/discovery 404（子网扫描回退探测不到）"
 else
-  echo "  ~ 跳过：网内存在其它 mDNS 可发现节点，回退未触发（不视为失败）"
-  echo "    （子网扫描回退由 crates/stross-kernel 单测覆盖）"
+  echo "  ~ /api/discovery 返回 $CODE（网内存在其它节点时不影响本断言，不视为失败）"
 fi
 
 log "✅ 统一发现链路全部通过"

@@ -166,18 +166,25 @@ pub async fn scan_lan(
     let probe = probe.max(Duration::from_millis(100));
     let found = Discovery::browse(browse).await?;
     let mut devices = scan(found, &self_ip_strings, probe).await;
+    // 已见节点集合（ip:port）：mDNS 结果先入，后续子网回退 / 手动地址按此去重，
+    // 避免同一物理设备经 mDNS + 子网扫描双路径重复出现在设备列表（曾导致
+    // 手机界面同一节点出现两张卡片）。
+    let mut seen: HashSet<String> = devices
+        .iter()
+        .map(|d| format!("{}:{}", d.ip, d.port))
+        .collect();
     // mDNS 零远端 → 子网单播扫描回退（纯单播，与组播/广播无关）
     if !devices.iter().any(|d| !d.is_self) {
         tracing::info!("mDNS 零远端设备，触发子网单播扫描回退");
         let scanned = subnet_scan(&self_ips, &self_ip_strings, probe).await;
         tracing::info!("子网扫描回退发现 {} 台设备", scanned.len());
-        devices.extend(scanned);
+        for d in scanned {
+            if seen.insert(format!("{}:{}", d.ip, d.port)) {
+                devices.push(d);
+            }
+        }
     }
-    // 手动地址并入（无 mDNS）：去重后追加探测条目
-    let mut seen: HashSet<String> = devices
-        .iter()
-        .map(|d| format!("{}:{}", d.ip, d.port))
-        .collect();
+    // 手动地址并入（无 mDNS）：按已见集合去重追加探测条目
     for base in extra_base_urls {
         let base = base.trim_end_matches('/').to_string();
         if let Some(d) = probe_base(&base, probe).await

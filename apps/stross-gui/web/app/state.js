@@ -35,13 +35,13 @@ let pendingApprove = null;
 // —— 端点框架状态（节点 → 端点） ——
 /** 本机目录（端点清单；local_catalog 填充，渲染本机端点树）。 */
 let localCatalog = { endpoints: [] };
-/** 通告弹窗目标（null = 未打开）。 */
+/** 共享弹窗目标（null = 未打开）。 */
 let publishTarget = null;
 /** 订阅弹窗目标（远端端点；null = 未打开）。 */
 let subscribeTarget = null;
 /** 远端目录缓存（设备 base → RemoteDir；TTL 内命中直接渲染）。 */
 const remoteDirs = new Map();
-/** 远端目录缓存时间戳（TTL ~20s：对端新通告/取消通告及时可见）。 */
+/** 远端目录缓存时间戳（TTL ~20s：对端新共享/取消共享及时可见）。 */
 const remoteDirAt = new Map();
 /** 远端目录拉取中（按设备 base；防重入）。 */
 const remoteDirLoading = new Set();

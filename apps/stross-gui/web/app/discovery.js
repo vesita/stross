@@ -253,14 +253,14 @@ function renderDeviceList() {
     // 本机卡片已插入 DOM，设备树此刻渲染（构造期容器未入文档，查不到会空渲）
     renderLocalDevices();
     if (!deviceViews.length) {
-        box.appendChild(emptyState('radio', '未发现局域网内其它设备（mDNS）。可手动输入地址添加。'));
+        box.appendChild(emptyState('radio', '未发现局域网内其它设备。可手动输入地址添加。'));
         return;
     }
     for (const dev of deviceViews) {
         box.appendChild(deviceCard(dev));
     }
 }
-/** 本机卡片：节点 → 设备 → 端点（通告为可订阅端点）。恒展开。 */
+/** 本机卡片：节点 → 设备 → 端点（共享为可订阅端点）。恒展开。 */
 function localDeviceCard() {
     const card = document.createElement('div');
     card.className = 'dev-card local expanded';
@@ -274,11 +274,11 @@ function localDeviceCard() {
     body.className = 'card-body';
     const nameLine = document.createElement('span');
     nameLine.className = 'scan-name';
-    nameLine.textContent = '本机（我）';
+    nameLine.textContent = '本机';
     const metaLine = document.createElement('span');
     metaLine.className = 'scan-meta';
     metaLine.id = 'anchor-box';
-    metaLine.textContent = anchor ? `已锚定 · 中继端口 ${anchor.port} · mDNS 广播中` : '锚定中…';
+    metaLine.textContent = anchor ? '已就绪' : '启动中…';
     body.appendChild(nameLine);
     body.appendChild(metaLine);
     head.appendChild(ic);
@@ -286,12 +286,12 @@ function localDeviceCard() {
     card.appendChild(head);
     const detail = document.createElement('div');
     detail.className = 'dev-detail';
-    // 本机设备树（节点 → 设备 → 端点）：通告状态 + 通告/取消通告
+    // 本机设备树（节点 → 设备 → 端点）：共享状态 + 共享/取消共享
     const devBox = document.createElement('div');
     devBox.className = 'dev-dir';
     devBox.dataset.role = 'local-devices';
     const devTitle = document.createElement('h3');
-    devTitle.textContent = '本机设备（通告为端点）';
+    devTitle.textContent = '本机设备';
     devBox.appendChild(devTitle);
     const devList = document.createElement('div');
     devList.className = 'dev-list';
@@ -321,12 +321,6 @@ function deviceCard(dev) {
     const metaLine = document.createElement('span');
     metaLine.className = 'scan-meta';
     metaLine.appendChild(document.createTextNode(dev.meta));
-    if (dev.roles.length) {
-        const chips = document.createElement('span');
-        chips.className = 'chips';
-        dev.roles.forEach((role) => chips.appendChild(roleChip(role)));
-        metaLine.appendChild(chips);
-    }
     body.appendChild(nameLine);
     body.appendChild(metaLine);
     head.appendChild(ic);
@@ -354,10 +348,10 @@ function deviceCard(dev) {
     dirBox.dataset.role = 'remote-dir';
     dirBox.dataset.key = dev.key;
     const dirTitle = document.createElement('h3');
-    dirTitle.textContent = '目录（可订阅端点）';
+    dirTitle.textContent = '可订阅的内容';
     const dirStatus = document.createElement('div');
     dirStatus.className = 'dir-status hint';
-    dirStatus.textContent = '未展开';
+    dirStatus.textContent = '加载中…';
     dirBox.appendChild(dirTitle);
     dirBox.appendChild(dirStatus);
     detail.appendChild(dirBox);
@@ -374,11 +368,6 @@ function deviceCard(dev) {
 function renderLocalCard() {
     const meta = $('anchor-box');
     if (meta) {
-        const transports = anchor && (anchor.srtUrl || anchor.quicUrl)
-            ? (anchor.srtUrl ? ' · SRT' : '') + (anchor.quicUrl ? ' · QUIC' : '')
-            : '';
-        meta.textContent = anchor
-            ? `已锚定 · 中继端口 ${anchor.port} · mDNS 广播中${transports}`
-            : '未锚定';
+        meta.textContent = anchor ? '已就绪' : '未就绪';
     }
 }

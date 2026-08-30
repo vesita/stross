@@ -204,11 +204,13 @@ main {
   padding: 24px 28px 48px;
 }
 
-/* 设备 × 共享流 组合管理：左设备列表 / 右共享流面板（宽屏双栏，窄屏单栏） */
+/* 设备（侧栏） × 接收（主视区） 组合管理：
+   桌面宽屏 = 左「设备」窄侧栏（发现/共享）+ 右「接收」大主视区（订阅流在此播放）。
+   窄屏（安卓/小窗）折叠为单栏竖排（见下）。 */
 .dual {
   display: grid;
-  grid-template-columns: minmax(420px, 5fr) minmax(320px, 4fr);
-  gap: 18px;
+  grid-template-columns: minmax(320px, 400px) minmax(0, 1fr);
+  gap: 20px;
   align-items: start;
 }
 
@@ -222,12 +224,27 @@ main {
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.pane-head h2 {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: 0.01em;
+  text-transform: none;
+}
+.pane-addrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 12px;
 }
-.pane-head h2 { margin: 0; }
-.pane-tools { margin: 0; }
-.pane-tools input { min-width: 0; flex: 1; }
-.pane-tools .grow { flex: 1; min-width: 160px; }
+.pane-addrow input { flex: 1; min-width: 0; }
+.pane-addrow button { flex: none; }
 
 /* ---------------- 卡片 ---------------- */
 
@@ -260,9 +277,10 @@ fieldset {
 }
 legend {
   color: var(--text-2);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  text-transform: none;
   padding: 0 8px;
 }
 
@@ -504,32 +522,6 @@ button.danger:hover:not(:disabled) {
   font-size: 12px;
   font-family: var(--font-mono);
 }
-.card-body .scan-meta .chips { font-family: var(--font-sans); }
-
-.chips { display: inline-flex; gap: 4px; align-items: center; }
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 9px;
-  border-radius: var(--r-pill);
-  font-size: 11px;
-  font-weight: 500;
-  background: rgba(91, 140, 255, 0.12);
-  color: #9db8ff;
-  border: 1px solid rgba(91, 140, 255, 0.25);
-}
-.chip.audio {
-  background: rgba(52, 211, 153, 0.1);
-  color: #6ee7b7;
-  border-color: rgba(52, 211, 153, 0.25);
-}
-.chip.role {
-  background: rgba(148, 163, 184, 0.1);
-  color: var(--text-2);
-  border-color: var(--border);
-}
-.chip .ic { width: 12px; height: 12px; }
 
 .err-text { color: var(--err); }
 
@@ -551,6 +543,34 @@ button.danger:hover:not(:disabled) {
 .empty .ic { width: 22px; height: 22px; opacity: 0.55; }
 .empty p { margin: 0; font-size: 12px; }
 .empty .hint { font-size: 12px; }
+
+/* 接收面板空状态：未接收任何共享时的占位（占满主视区，视觉上有存在感） */
+.recv-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 340px;
+  padding: 40px 24px;
+  text-align: center;
+  color: var(--text-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.012);
+}
+.recv-empty .recv-empty-ic {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  background: rgba(91, 140, 255, 0.1);
+  border: 1px solid rgba(91, 140, 255, 0.22);
+  border-radius: 16px;
+}
+.recv-empty .recv-empty-ic .ic { width: 26px; height: 26px; }
+.recv-empty p { margin: 0; font-size: 14px; color: var(--text-2); }
 
 /* 视图 / 面板切换过渡 */
 .view-enter { animation: fadeUp 0.26s ease; }
@@ -771,72 +791,6 @@ button.danger:hover:not(:disabled) {
 .dev-stream-item .card-ic { width: 28px; height: 28px; }
 .dev-stream-item .card-ic .ic { width: 14px; height: 14px; }
 
-/* ---------------- 共享流面板（右栏） ---------------- */
-
-#share-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.share-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-}
-.share-item.out { border-left: 3px solid var(--accent); }
-.share-item.in { border-left: 3px solid var(--ok); }
-.share-item.error { border-left: 3px solid var(--err); }
-
-.share-arrow {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  font-size: 13px;
-  font-weight: 700;
-}
-.share-item.out .share-arrow { color: #9db8ff; background: rgba(91, 140, 255, 0.14); }
-.share-item.in .share-arrow { color: #6ee7b7; background: rgba(52, 211, 153, 0.12); }
-
-.share-ic {
-  flex: none;
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  border-radius: 9px;
-  color: var(--accent);
-  background: rgba(91, 140, 255, 0.12);
-  border: 1px solid rgba(91, 140, 255, 0.22);
-}
-.share-ic .ic { width: 15px; height: 15px; }
-
-.share-item .card-body { flex: 1; min-width: 0; }
-
-.share-stop {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 10px;
-  font-size: 12px;
-  border-radius: var(--r-md);
-  background: var(--surface-1);
-  border: 1px solid var(--border);
-  color: var(--text-3);
-  cursor: pointer;
-  transition: color 0.16s, border-color 0.16s;
-}
-.share-stop:hover { color: var(--err); border-color: rgba(248, 113, 113, 0.5); }
-.share-stop .ic { width: 13px; height: 13px; }
-
 /* 接收状态行（纯音频流不显示画布） */
 #recv-status-line {
   margin-top: 12px;
@@ -844,25 +798,6 @@ button.danger:hover:not(:disabled) {
   border-top: 1px dashed var(--border);
 }
 #recv-status-line.hidden { display: none; }
-
-/* ---------------- B2 反向外设：共享麦克风 / 接收手机麦克风 ---------------- */
-
-/* 电脑端「接收手机麦克风」面板（本机锚点卡片内） */
-.mic-recv { margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--border); }
-#mic-recv-btn { width: 100%; justify-content: center; }
-.mic-recv-panel { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
-.pin {
-  display: inline-flex;
-  align-items: center;
-  padding: 6px 14px;
-  border-radius: var(--r-pill);
-  font-size: 16px;
-  font-weight: 700;
-  letter-spacing: 2px;
-  color: #6ee7b7;
-  background: rgba(52, 211, 153, 0.1);
-  border: 1px solid rgba(52, 211, 153, 0.3);
-}
 
 /* 弹窗（手机端共享麦克风 / 通用） */
 .modal {
@@ -891,25 +826,6 @@ button.danger:hover:not(:disabled) {
   animation: fadeUp 0.2s ease;
 }
 
-/* 凭证输入/展示框 */
-.modal-box textarea, #mic-recv-token {
-  width: 100%;
-  min-height: 96px;
-  resize: vertical;
-  padding: 10px 12px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-2);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  box-sizing: border-box;
-}
-.modal-box textarea:focus, #mic-recv-token:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
 /* ---------------- 移动端适配（窄屏 / 触屏：设备 × 共享流 界面） ---------------- */
 
 @media (max-width: 720px) {
@@ -932,7 +848,7 @@ button.danger:hover:not(:disabled) {
     min-height: 44px;
     font-size: 15px;
   }
-  select, input[type="text"], textarea { padding: 11px 12px; font-size: 15px; min-height: 44px; }
+  select, input[type="text"] { padding: 11px 12px; font-size: 15px; min-height: 44px; }
   .check { min-height: 44px; }
   .check .ic { width: 18px; height: 18px; }
 
@@ -955,12 +871,6 @@ button.danger:hover:not(:disabled) {
   }
   .dev-stream-item .card-ic { width: 32px; height: 32px; }
 
-  /* 共享流面板：条目触控 + 停止按钮 */
-  .share-item { padding: 12px; gap: 10px; }
-  .share-ic { width: 34px; height: 34px; }
-  .share-arrow { width: 26px; height: 26px; }
-  .share-stop { min-height: 44px; padding: 10px 12px; }
-
   /* 接收画布：满宽、触屏比例 */
   .canvas-wrap { margin: 10px 0; }
   #recv-canvas { max-height: 50vh; }
@@ -972,7 +882,6 @@ button.danger:hover:not(:disabled) {
   /* 弹窗：小屏内边距收紧 + 高弹窗可滚动 */
   .modal { padding: 12px; align-items: flex-start; overflow-y: auto; }
   .modal-box { padding: 16px; max-height: calc(100vh - 24px); overflow-y: auto; }
-  .modal-box textarea, #mic-recv-token { font-size: 14px; min-height: 110px; }
 
   /* 手动添加历史条目 + 删除按钮触控 */
   .url-list li { padding: 12px 14px; font-size: 14px; }
@@ -982,8 +891,8 @@ button.danger:hover:not(:disabled) {
     margin: -8px -6px -8px 0;
     opacity: 1;
   }
-  .pane-tools { gap: 8px; }
-  .pane-tools button { flex: none; }
+  .pane-addrow { gap: 8px; }
+  .pane-addrow button { flex: none; }
 }
 
 /* ---------------- 触屏（粗指针，含 720px 断点外的平板横屏）：控制条常显 ---------------- */
@@ -1075,7 +984,7 @@ button.sm { padding: 6px 12px; font-size: 12.5px; }
 }
 .ep-badge { font-size: 11px; padding: 2px 8px; white-space: nowrap; }
 .ep-act { flex-shrink: 0; }
-/* 端点行右侧操作组：徽标 + 通告/取消通告按钮，整体右对齐，
+/* 端点行右侧操作组：徽标 + 共享/取消共享按钮，整体右对齐，
    窄屏可行内换行而不挤压左侧文本 */
 .ep-actions {
   display: flex;
@@ -1085,14 +994,3 @@ button.sm { padding: 6px 12px; font-size: 12.5px; }
   flex-wrap: wrap;
 }
 .dir-status { font-size: 12px; }
-fieldset {
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: 8px 12px 12px;
-  margin: 10px 0;
-}
-fieldset legend {
-  font-size: 12px;
-  color: var(--text-3);
-  padding: 0 6px;
-}

@@ -82,39 +82,6 @@ function attachErrClose(box) {
     box.appendChild(close);
     box.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
-function fillSelect(sel, items, emptyLabel) {
-    sel.innerHTML = '';
-    if (!items.length) {
-        const o = document.createElement('option');
-        o.value = '';
-        o.textContent = emptyLabel;
-        sel.appendChild(o);
-        return;
-    }
-    for (const it of items) {
-        const o = document.createElement('option');
-        o.value = it.value;
-        o.textContent = it.label;
-        sel.appendChild(o);
-    }
-}
-/** 角色小标签 chip。 */
-function roleChip(role) {
-    const c = document.createElement('span');
-    c.className = 'chip role';
-    c.textContent = roleLabel(role);
-    return c;
-}
-function roleLabel(r) {
-    return labelOf(ROLE_LABELS, r);
-}
-/** 轨道小标签（视频/音频 chip）。 */
-function chipEl(kind, label) {
-    const c = document.createElement('span');
-    c.className = 'chip ' + kind;
-    c.innerHTML = icon(kind === 'audio' ? 'music' : 'video') + '<span>' + label + '</span>';
-    return c;
-}
 /** Tauri 事件监听（__TAURI__.event.listen）。 */
 function listen(event, cb) {
     const api = window.__TAURI__?.event;
@@ -170,26 +137,31 @@ function setPlayerFullscreen(fs) {
     btn.title = fs ? '退出全屏' : '全屏';
     btn.innerHTML = icon(fs ? 'minimize' : 'maximize');
 }
-/** 切换播放器全屏：先查询窗口实际全屏态再取反（状态校准，防失配）。
- *  Tauri 窗口级全屏（桌面/Android 一致；Web 层 Fullscreen API 在
- *  Android WebView 不可靠）。非 Tauri 环境安全 no-op。 */
+/** 切换播放器全屏：先查询窗口实际全屏态再取反（状态校准，防失配），
+ *  然后**先应用 CSS 层全屏**再尝试 OS 窗口级全屏。
+ *  - CSS 层（.canvas-wrap.fs 悬浮层）跨平台可靠；
+ *  - OS 窗口级全屏在 Android WebView 无 `setFullscreen`（Web 层 Fullscreen API
+ *    也不可靠），抛错时不能提前 return——否则全屏按钮点了没反应。
+ *  非 Tauri 环境安全 no-op（仍退化为 CSS 全屏）。 */
 async function togglePlayerFullscreen() {
     const win = window.__TAURI__?.window?.getCurrentWindow();
+    // 读实际窗口全屏态校准（读失败沿用本地状态）
+    let fs = fsActive;
+    if (win) {
+        try {
+            fs = await win.isFullscreen();
+        }
+        catch (_) { /* 查询失败：沿用本地状态 */ }
+    }
+    const next = !fs;
+    // CSS 层全屏先行——即使 OS 窗口级全屏失败也立即生效
+    setPlayerFullscreen(next);
     if (!win)
         return;
-    let fs = fsActive;
-    try {
-        fs = await win.isFullscreen();
-    }
-    catch (_) { /* 查询失败：沿用本地状态 */ }
-    const next = !fs;
     try {
         await win.setFullscreen(next);
     }
-    catch (_) {
-        return;
-    }
-    setPlayerFullscreen(next);
+    catch (_) { /* OS 窗口级全屏不支持（如 Android）：CSS 全屏已生效 */ }
 }
 /** 退出播放器全屏（ESC / 停止接收时调用）。 */
 async function exitPlayerFullscreen() {

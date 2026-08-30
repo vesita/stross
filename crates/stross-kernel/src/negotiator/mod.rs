@@ -52,8 +52,9 @@ mod dto;
 // `stross_kernel::ShareRequest` 等兼容。
 pub use dto::{RelayAddr, ShareGrant, ShareRequest, ShareTokenView};
 
-/// 协商端点默认端口（LAN 可达；防火墙需放行该 TCP 端口）。
-pub const DEFAULT_NEGOTIATOR_PORT: u16 = 18779;
+/// 协商端点默认端口（LAN 可达；防火墙需放行该 TCP 端口）。真源在
+/// [`stross_types::ports`]（`NEGOTIATOR_DISCOVERY`：协商与发现权威同一端口）。
+pub use stross_types::ports::NEGOTIATOR_DISCOVERY as DEFAULT_NEGOTIATOR_PORT;
 /// 等待人工确认的超时（秒）。
 const PENDING_TIMEOUT_SECS: u64 = 60;
 /// 签发凭证默认有效期（秒）。
@@ -793,6 +794,33 @@ pub(crate) async fn handle_endpoints(State(state): State<Arc<ServerState>>) -> J
         endpoints,
     };
     Json(dir)
+}
+
+/// 统一发现清单（`GET /api/discovery`）：本节点权威节点信息（身份 + 能力 +
+/// 中继入口端口），由 [`crate::Kernel::discovery_manifest`] 组装。mDNS 与
+/// 子网扫描都据此收敛到**同一台设备同一个 `relay_port`**，降低用户认知成本。
+#[utoipa::path(
+    get,
+    path = "/api/discovery",
+    tag = "negotiator",
+    responses(
+        (status = 200, description = "本节点统一发现清单（身份+能力+中继入口端口）", body = crate::discovery::DiscoveryResp),
+        (status = 404, description = "本节点未锚定（无中继入口，非可发现节点）", body = dto::ApiError)
+    )
+)]
+pub(crate) async fn handle_discovery(
+    State(state): State<Arc<ServerState>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.app.discovery_manifest() {
+        Some(m) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(m).unwrap_or_default()),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "本节点未锚定中继" })),
+        ),
+    }
 }
 
 fn new_pending_id() -> u64 {

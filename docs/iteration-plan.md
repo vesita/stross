@@ -603,3 +603,42 @@ startReceive 防重入+失败回滚、轮询边界修复、drawReceiveFrame 热�
 **遗留 / 待定**：
 - [ ] P0-1 真机闭环走 USB 网络已可发现；如需 WiFi 也稳定，实施「mDNS 单播兜底」或修复路由器多播；
 - [ ] 手机 App mDNS「只发 PTR 不响应补查」（状态退化）隐患仍存，建议配合重启 App 重新锚定核验（本轮已另作记录）。
+
+---
+
+## 第十七轮（统一发现端口：mDNS 与子网扫描收敛到同一节点，2026-09）
+
+**起因**：延续第十六轮定论——`Su` 路由只拦「下行多播」、**单播双向通**（§8.2）。用户采纳「双发现机制应指向**同一节点**（降低认知成本）」的建议，选定：**协商/发现端口 18779（桌面与 Android GUI 一致）作发现权威**，mDNS 与子网扫描都据此收敛到**同一台设备同一个 `relay_port`**；保留 mDNS 为组播通畅时的首选。
+
+**改动**：
+- **`crates/stross-kernel/src/devices.rs`**：新增 `DiscoveryResp`（权威发现清单：deviceId/name/relayPort/srtPort/quicPort/roles/media/transports/endpoints）+ 发现权威端口常量 `DISCOVERY_PORT=18779`；`subnet_scan`/`scan_probe_host` 改为**单一探 `18779/api/discovery`**，以其 `relay_port` 作设备节点（不再是硬编码 `[18777,8777]`，故能发现自定义中继端口设备且与 mDNS 同节点）。
+- **`crates/stross-kernel/src/kernel/mod.rs`**：新增 `discovery_manifest()`，从 `relay_ports()`+`device_identity()`+`mdns_info()` 组装清单。
+- **`crates/stross-kernel/src/negotiator/*`**：18779 新增 `GET /api/discovery`（`handle_discovery`，读 `Kernel::discovery_manifest`），并入 OpenAPI；CORS 放行 `GET`。
+- **`crates/stross-proto/src/message/endpoint.rs`**：`EndpointSummary` 补 `ToSchema`（供 `DiscoveryResp` 进 OpenAPI）。
+- **`scripts/discovery-test.sh`**（新增）：回归 `/api/discovery` 清单正确性 + mDNS/子网扫描收敛到同一 `relay_port`。
+
+**验证（关键，真机）**：
+- `cargo test -p stross-kernel` 全绿（99 lib）；`cargo clippy --workspace --all-targets -D warnings` 干净；`cargo fmt --check` 通过。
+- PC `/api/discovery` 返回 `relayPort=18777`（与 mDNS 一致）；PC `stross devices` 找到本机 18777 + 手机 8777。
+- **手机→PC 反向**（真机 WiFi，下行多播被拦）：手机 logcat 铁证——
+  `mDNS 零远端设备，触发子网单播扫描回退` → `子网扫描回退发现 3 台设备` → 设备列表出现 `Stross 设备 192.168.11.61:18777`，且 PC 当时**非广播**（无 mDNS），纯靠子网回退 + `/api/discovery`。
+
+**遗留 / 待定**：
+- [ ] 手机端发现的 PC 名在 mDNS（`pico`）与 `/api/discovery`（`Stross 设备`）下不一致——取决于声明名来源（hostname vs identity.device_name），后续统一；
+- [ ] 仅跑 `stross relay`（不启动协商）的**纯中继节点**不在 18779，子网扫描探不到（交由 mDNS 发现）——按用户拍板保留此取舍。
+
+### 本轮的模块收敛 + 版本标记
+
+**用户决策**：把散落的发现代码收敛为 **kernel 内单一 `discovery` 模块（`crates/stross-kernel/src/discovery/`）**，并标记为 **v0.2.0**（本模块契约封盘），以便转去完善其它模块。
+
+- 结构：`discovery/mod.rs`（模块文档 + `pub const DISCOVERY_VERSION = "0.2.0"` + 公共 API 重导出）、`discovery/mdns.rs`（mDNS 通告/浏览，原 `discovery.rs`）、`discovery/aggregate.rs`（扫描聚合 + `DiscoveryResp`/`DISCOVERY_PORT`，原 `devices.rs`）。
+- 删除 `src/devices.rs` 与 `src/discovery.rs`；`lib.rs` 的 `pub mod devices` 移除，扫描聚合的 crate 级重导出改为 `pub use discovery::{...}` 并随 `discovery` feature。
+- 外部消费者（CLI `devices`/`adb status`、GUI `scan_devices` 命令）引用由 `stross_kernel::devices::*` 改为 `stross_kernel::discovery::*`。
+- `Kernel::discovery_manifest` / `negotiator::handle_discovery` 的 DTO 引用改为 `crate::discovery::DiscoveryResp`。
+- 验证：`cargo test -p stross-kernel --lib` 99 全绿（测试挂到 `discovery::aggregate`/`discovery::mdns`）；`cargo clippy --workspace --all-targets -D warnings` 干净；`cargo fmt --check` 通过；`scripts/discovery-test.sh` 通过（含 mDNS 静默→子网回退生效）。
+- **说明**：发现机制与 `Kernel` 强耦合（`discovery_manifest` 读 `relay_ports/device_identity/mdns_info`），故收敛为 kernel 内模块而非独立 crate；若后续要拆独立 crate 需先引入数据提供者 trait（DI）抽象。
+
+### 端口真源收敛（`stross-types::ports`）
+
+- 固定端口（中继 18777 / Android GUI 8777 / 控制面 18778 / 协商+发现 18779 / SRT 33462 / QUIC 33464）**统一为 `stross-types::ports` 单一真源**；kernel 各模块改用 `pub use stross_types::ports::X as Y` 别名保持路径兼容（`relay::DEFAULT_PORT`/`GUI_PORT`、`control::DEFAULT_CTRL_PORT`、`negotiator::DEFAULT_NEGOTIATOR_PORT`、`discovery::DISCOVERY_PORT`、`lib::DEFAULT_SRT/QUIC_PORT`）。
+- **消除局部重复**：发现端口与协商端口是同一服务同一端口，`DISCOVERY_PORT` 与 `DEFAULT_NEGOTIATOR_PORT` 现共同指向 `stross_types::ports::NEGOTIATOR_DISCOVERY`，不再各写一份 `18779`。

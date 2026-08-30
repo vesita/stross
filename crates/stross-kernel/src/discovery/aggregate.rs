@@ -1,22 +1,26 @@
-//! 局域网设备扫描聚合（mDNS 结果 + HTTP 探测 + 视图模型）——**内核层**。
+//! 局域网设备扫描聚合（mDNS 结果 + HTTP 探测 + 视图模型）——**内核层**（discovery 子系统）。
 //!
 //! 分层（docs/layering-architecture.md）：扫描聚合对 CLI `devices`、`adb status`
 //! 与 GUI 设备卡片是同一份逻辑——收敛在此，壳层只做**格式化/渲染**（中文
 //! 标签、卡片布局各自完成，本模块只出结构化数据）。
 //!
-//! 输入：`crate::discovery::Discovery::browse` 原始结果 + 本机 IP + 探测超时；
+//! 输入：`super::Discovery::browse` 原始结果 + 本机 IP + 探测超时；
 //! 输出：[`ScannedDevice`] 列表（已去重、已过滤、已排序、已探测）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use crate::discovery::{Discovered, Discovery};
-use crate::net::local_ips;
+use futures_util::StreamExt;
+
+use super::{Discovered, Discovery};
+use crate::net::{is_fake_or_link_local, local_ips};
 use crate::relay::client as relay_http;
 use serde::{Deserialize, Serialize};
 use stross_proto::message::{
     DiscoveryInfo, EndpointSummary, MediaKind, RoleId, StreamInfo, TransportId,
 };
+use utoipa::ToSchema;
 
 /// 单条流的展示视图（video/audio 布尔投影；`adb status` 复用）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,7 +140,8 @@ pub async fn scan(
 }
 
 /// 完整局域网扫描（CLI `devices` 与 GUI `scan_devices` 命令共用的**唯一**入口）：
-/// mDNS 浏览 → 本机 IP → 探测聚合 → 手动地址并入。
+/// mDNS 浏览 → 本机 IP → 探测聚合 → （mDNS 失效时）子网单播扫描回退 →
+/// 手动地址并入。
 ///
 /// 分层（docs/layering-architecture.md）：browse + `local_ips` + 去重合并
 /// 全部收敛在此，壳层（CLI 命令 / Tauri 命令）只做参数转译，禁止各自拼装
@@ -145,17 +150,31 @@ pub async fn scan(
 /// `browse` mDNS 浏览窗口；`probe` 每设备 HTTP 探测超时（下限 100ms，避免
 /// 壳层误传小值打爆网络）；`extra_base_urls` 手动添加的地址（无 mDNS），
 /// 一并探测并入（按 `ip:port` 去重）。
+///
+/// **mDNS 失效回退**：当 mDNS 浏览未发现任何**远端**设备（路由只掐下行多播、
+/// 单播仍通——见 docs/mdns-android-finding-debug.md §8.2）时，自动触发纯单播
+/// 子网扫描（[`subnet_scan`]），保证在「广播不可用」的网络下仍能发现对端。
+/// 只在 mDNS 零结果才扫描，避免每次刷新都打满网卡。
 pub async fn scan_lan(
     browse: Duration,
     probe: Duration,
     extra_base_urls: Vec<String>,
 ) -> anyhow::Result<Vec<ScannedDevice>> {
-    let found = Discovery::browse(browse).await?;
-    let self_ips: Vec<String> = local_ips().into_iter().map(|ip| ip.to_string()).collect();
+    let raw_ips = local_ips();
+    let self_ips: Vec<IpAddr> = raw_ips.clone();
+    let self_ip_strings: Vec<String> = raw_ips.iter().map(|ip| ip.to_string()).collect();
     let probe = probe.max(Duration::from_millis(100));
-    let mut devices = scan(found, &self_ips, probe).await;
+    let found = Discovery::browse(browse).await?;
+    let mut devices = scan(found, &self_ip_strings, probe).await;
+    // mDNS 零远端 → 子网单播扫描回退（纯单播，与组播/广播无关）
+    if !devices.iter().any(|d| !d.is_self) {
+        tracing::info!("mDNS 零远端设备，触发子网单播扫描回退");
+        let scanned = subnet_scan(&self_ips, &self_ip_strings, probe).await;
+        tracing::info!("子网扫描回退发现 {} 台设备", scanned.len());
+        devices.extend(scanned);
+    }
     // 手动地址并入（无 mDNS）：去重后追加探测条目
-    let mut seen: std::collections::HashSet<String> = devices
+    let mut seen: HashSet<String> = devices
         .iter()
         .map(|d| format!("{}:{}", d.ip, d.port))
         .collect();
@@ -168,6 +187,150 @@ pub async fn scan_lan(
         }
     }
     Ok(devices)
+}
+
+/// 统一发现清单（`GET /api/discovery`，监听于发现权威端口 [`DISCOVERY_PORT`]）：
+/// 每台设备对外只暴露**一个权威节点**——身份 + 能力 + 真实中继入口端口。
+/// mDNS 与子网扫描都据此收敛到**同一台设备同一个 `relay_port`**
+/// （docs/mdns-android-finding-debug.md §8.3-3：mDNS 与单播兜底应指向同一节点，
+/// 降低用户认知成本）。`relayPort` 是设备连接/展示节点，`srtPort/quicPort` 为数据面端口。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryResp {
+    pub device_id: String,
+    pub name: String,
+    /// 中继 HTTP/WS 入口端口（本设备连接/展示节点 = ScannedDevice.port）。
+    pub relay_port: u16,
+    pub srt_port: Option<u16>,
+    pub quic_port: Option<u16>,
+    pub roles: Vec<RoleId>,
+    pub media: Vec<MediaKind>,
+    pub transports: Vec<TransportId>,
+    pub endpoints: Vec<EndpointSummary>,
+}
+
+/// 发现权威端口：协商/发现服务监听于此（桌面与 Android GUI 一致），
+/// 是 mDNS 与子网扫描共同收敛的节点入口。**与协商端口是同一端口**，真源在
+/// [`stross_types::ports::NEGOTIATOR_DISCOVERY`]（此处仅别名，消除局部重复定义）。
+pub use stross_types::ports::NEGOTIATOR_DISCOVERY as DISCOVERY_PORT;
+
+/// 子网扫描回退时探测的发现权威端口：单一 [`DISCOVERY_PORT`]，读到
+/// [`DiscoveryResp`] 后以其 `relay_port` 作设备节点——不再硬编码多个中继端口，
+/// 故能发现自定义中继端口设备，且与 mDNS 指向同一节点。
+/// 子网扫描并行探测的并发上限（控制打满网卡；扫描是回退路径，不求快、求稳）。
+const SCAN_CONCURRENCY: usize = 64;
+
+/// 从本机局域网 IPv4 推得待扫描的子网（/24 网段地址，去重、升序）。
+///
+/// 剔除 fake-IP（Clash TUN 198.18/15）、链路本地（169.254/16）与回环——这些
+/// 都不是可拨号的局域网网段（AGENTS.md §6 已知坑；`local_ips()` 会带出
+/// Android 的 rndis0/vgate0 与 PC 的 TUN fake-IP，此处一律不让它们进入扫描）。
+fn scan_subnets(self_ips: &[IpAddr]) -> Vec<Ipv4Addr> {
+    let mut nets: Vec<Ipv4Addr> = self_ips
+        .iter()
+        .filter_map(|ip| {
+            let IpAddr::V4(v4) = ip else {
+                return None;
+            };
+            if v4.is_loopback() || is_fake_or_link_local(ip) {
+                return None;
+            }
+            Some(Ipv4Addr::new(
+                v4.octets()[0],
+                v4.octets()[1],
+                v4.octets()[2],
+                0,
+            ))
+        })
+        .collect();
+    nets.sort_unstable();
+    nets.dedup();
+    nets
+}
+
+/// 本机各 /24 网段的全部候选主机（.1–.254，跨子网去重；子网已去重）。
+fn scan_hosts(self_ips: &[IpAddr]) -> Vec<Ipv4Addr> {
+    let mut hosts = Vec::new();
+    for net in scan_subnets(self_ips) {
+        let [a, b, c, _] = net.octets();
+        for h in 1u8..=254 {
+            hosts.push(Ipv4Addr::new(a, b, c, h));
+        }
+    }
+    hosts
+}
+
+/// 对单个候选主机单播探测发现权威端口（[`DISCOVERY_PORT`] 18779）：读到
+/// [`DiscoveryResp`] 即以其中继入口端口构造 [`ScannedDevice`]（在线）；
+/// 读不到（未锚定 / 非本框架节点 / 不在发现端口）返回 `None`。
+///
+/// 以清单的 `relay_port` 作为设备**连接/展示节点**，再用同一端口查询中继
+/// `/api/info` + `/api/streams` 填充在线/数据面端口/在线共享（与 mDNS 路径
+/// `scan` 的语义一致——两路径最终指向同一设备同一 `relay_port`）。
+/// 每端口超时截断到 300ms（扫描是打通的快检；对端中继在局域网内应远快于此）。
+async fn scan_probe_host(host: &str, probe: Duration) -> Option<ScannedDevice> {
+    let fast = probe.min(Duration::from_millis(300));
+    let disc: DiscoveryResp = relay_http::get_json(
+        &format!("http://{host}:{DISCOVERY_PORT}/api/discovery"),
+        fast,
+    )
+    .await
+    .ok()?;
+    let mut dev = ScannedDevice {
+        name: disc.name,
+        ip: host.to_string(),
+        port: disc.relay_port,
+        is_self: false,
+        roles: disc.roles,
+        media: disc.media,
+        transports: disc.transports,
+        endpoints: disc.endpoints,
+        online: false,
+        srt_port: disc.srt_port,
+        quic_port: disc.quic_port,
+        streams: Vec::new(),
+    };
+    if let Ok(resp) = relay_http::info(host, dev.port, fast).await {
+        dev.online = true;
+        dev.srt_port = resp.srt_port;
+        dev.quic_port = resp.quic_port;
+    }
+    if let Ok(list) = relay_http::streams(host, dev.port, fast).await {
+        dev.streams = to_views(list);
+    }
+    Some(dev)
+}
+
+/// 子网单播扫描回退（mDNS 组播不可用时）：对本机各 /24 网段主机并发单播
+/// 探测中继入口端口，命中即聚合成 [`ScannedDevice`]。
+///
+/// **纯单播，不依赖组播/广播**——适配「路由只掐下行多播、单播仍通」的网络
+/// （docs/mdns-android-finding-debug.md §8.2：手机收不到下行多播、单播双向正常，
+/// 正是这种网络 mDNS 失效但本方案可用）。`self_ip_strings` 用于把扫到的本机标为
+/// `is_self`（与 mDNS 路径 `scan` 的语义一致）。
+async fn subnet_scan(
+    self_ips: &[IpAddr],
+    self_ip_strings: &[String],
+    probe: Duration,
+) -> Vec<ScannedDevice> {
+    let hosts = scan_hosts(self_ips);
+    if hosts.is_empty() {
+        return Vec::new();
+    }
+    futures_util::stream::iter(hosts)
+        .map(|ip| {
+            let ipstr = ip.to_string();
+            let selfs = self_ip_strings.to_vec();
+            async move {
+                let mut dev = scan_probe_host(&ipstr, probe).await?;
+                dev.is_self = selfs.contains(&ipstr);
+                Some(dev)
+            }
+        })
+        .buffer_unordered(SCAN_CONCURRENCY)
+        .filter_map(|d| async move { d })
+        .collect::<Vec<_>>()
+        .await
 }
 
 /// 手动地址探测（无 mDNS 的设备）：解析 `http://host:port` 基址，探测
@@ -264,5 +427,52 @@ mod tests {
         }]);
         assert_eq!(v[0].watchers, 2);
         assert!(!v[0].video);
+    }
+
+    fn ips(cidrs: &[&str]) -> Vec<IpAddr> {
+        cidrs.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn scan_subnets_dedups_and_filters_unroutable() {
+        // rndis0/vgate0/TUN fake-IP/链路本地/回环均不得进入扫描网段
+        let out = scan_subnets(&ips(&[
+            "192.168.11.61",
+            "192.168.11.60",  // 同 /24 → 去重
+            "10.159.157.104", // USB 共享网 → 保留
+            "198.18.0.5",     // Clash TUN fake-IP → 剔除
+            "169.254.3.4",    // APIPA → 剔除
+            "127.0.0.1",      // 回环 → 剔除
+            "fe80::1",        // IPv6 → 忽略（只扫 IPv4）
+        ]));
+        assert_eq!(
+            out,
+            vec![
+                Ipv4Addr::new(10, 159, 157, 0),
+                Ipv4Addr::new(192, 168, 11, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_hosts_enumerates_24_net_single_subnet() {
+        let out = scan_hosts(&ips(&["192.168.11.61"]));
+        assert_eq!(out.len(), 254, "/24 主机数为 254");
+        assert_eq!(out[0], Ipv4Addr::new(192, 168, 11, 1));
+        assert_eq!(out[253], Ipv4Addr::new(192, 168, 11, 254));
+        assert!(!out.contains(&Ipv4Addr::new(192, 168, 11, 0)));
+    }
+
+    #[test]
+    fn scan_hosts_dedups_across_subnets() {
+        // 两个 IP 同 /24 → 只扫一份（不重复 254 次）
+        let out = scan_hosts(&ips(&["192.168.11.61", "192.168.11.2"]));
+        assert_eq!(out.len(), 254);
+    }
+
+    #[test]
+    fn scan_hosts_empty_when_no_usable_public_ipv4() {
+        // 只有回环 / fake-IP / IPv6 → 无网段可扫（不会自动扫描占位网段）
+        assert!(scan_hosts(&ips(&["127.0.0.1", "198.18.0.5", "fe80::1"])).is_empty());
     }
 }

@@ -10,16 +10,17 @@ use std::sync::Arc;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use super::{ServerState, handle_endpoints, handle_request};
+use super::{ServerState, handle_discovery, handle_endpoints, handle_request};
 
 /// OpenAPI 文档（`/api-docs/openapi.json` + swagger-ui /docs）。
 #[derive(OpenApi)]
 #[openapi(
     paths(
         crate::negotiator::handle_request,
-        crate::negotiator::handle_endpoints
+        crate::negotiator::handle_endpoints,
+        crate::negotiator::handle_discovery
     ),
-    tags((name = "negotiator", description = "凭证自动协商：申请出站凭证 / 目录"))
+    tags((name = "negotiator", description = "凭证自动协商：申请出站凭证 / 目录 / 统一发现"))
 )]
 pub(crate) struct ApiDoc;
 
@@ -39,7 +40,7 @@ pub(super) async fn cors_layer(
     );
     headers.insert(
         axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
-        axum::http::HeaderValue::from_static("POST, OPTIONS"),
+        axum::http::HeaderValue::from_static("POST, GET, OPTIONS"),
     );
     headers.insert(
         axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
@@ -57,7 +58,7 @@ pub(super) async fn cors_layer(
         );
         resp.headers_mut().insert(
             axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
-            axum::http::HeaderValue::from_static("POST, OPTIONS"),
+            axum::http::HeaderValue::from_static("POST, GET, OPTIONS"),
         );
         resp.headers_mut().insert(
             axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
@@ -73,6 +74,7 @@ pub(super) fn router(state: Arc<ServerState>) -> Router {
     Router::new()
         .route("/api/negotiator/request", post(handle_request))
         .route("/api/endpoints", get(handle_endpoints))
+        .route("/api/discovery", get(handle_discovery))
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(axum::middleware::from_fn(cors_layer))
         .with_state(state)
@@ -91,10 +93,17 @@ mod tests {
             "缺少 /api/negotiator/request"
         );
         assert!(paths.contains_key("/api/endpoints"), "缺少 /api/endpoints");
+        assert!(paths.contains_key("/api/discovery"), "缺少 /api/discovery");
         let schemas = json["components"]["schemas"]
             .as_object()
             .expect("应有 schemas");
-        for s in ["ShareRequest", "ShareGrant", "ApiError", "EndpointDir"] {
+        for s in [
+            "ShareRequest",
+            "ShareGrant",
+            "ApiError",
+            "EndpointDir",
+            "DiscoveryResp",
+        ] {
             assert!(schemas.contains_key(s), "缺少 schema {s}");
         }
     }

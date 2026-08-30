@@ -78,7 +78,7 @@ pub async fn start_relay(
 // ---------------------------------------------------------------------------
 
 /// 全量扫描局域网设备（与 CLI `stross devices` 同源
-/// `stross_kernel::devices::scan_lan`：mDNS 浏览 + HTTP 探测聚合 + 手动地址
+/// `stross_kernel::discovery::scan_lan`：mDNS 浏览 + HTTP 探测聚合 + 手动地址
 /// 并入全在库层）。返回含在线共享 / SRT / QUIC 的完整视图，
 /// 前端每轮刷新只需调它，不再自行 fetch `/api/info` `/api/streams`。
 ///
@@ -88,10 +88,10 @@ pub async fn scan_devices(
     probe_ms: u64,
     timeout_ms: Option<u64>,
     extra_base_urls: Vec<String>,
-) -> Result<Vec<stross_kernel::devices::ScannedDevice>, String> {
+) -> Result<Vec<stross_kernel::discovery::ScannedDevice>, String> {
     let browse = std::time::Duration::from_millis(timeout_ms.unwrap_or(2000));
     let probe = std::time::Duration::from_millis(probe_ms);
-    stross_kernel::devices::scan_lan(browse, probe, extra_base_urls)
+    stross_kernel::discovery::scan_lan(browse, probe, extra_base_urls)
         .await
         .map_err(|e| format!("局域网扫描失败: {e}"))
 }

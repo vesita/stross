@@ -22,17 +22,18 @@ use super::api;
 use super::data_plane;
 use super::state::{RelayEvent, RelayState};
 
-/// 默认中继端口（协议约定固定端口，docs：中继 HTTP/WS 18777）。
+/// 默认中继端口（协议约定固定端口，docs：中继 HTTP/WS 18777；真源在
+/// [`stross_types::ports`]，此处仅别名保持路径兼容）。
 ///
 /// CLI `serve` / 独立中继 / 桌面 GUI 用它作为默认；Android GUI 固定用
 /// [`GUI_PORT`]（平台约定，见 AGENTS.md 端口表）。
-pub const DEFAULT_PORT: u16 = 18777;
+pub use stross_types::ports::RELAY_HTTP as DEFAULT_PORT;
 
 /// Android GUI 固定中继端口（AGENTS.md：GUI 中继端口 8777，Android 端固定）。
 ///
 /// 与 [`DEFAULT_PORT`] 分离：协议默认是 18777，8777 是移动端 GUI 的特例，
 /// 二者不应混为一个常量（曾因 `DEFAULT_PORT = 8777` 导致 CLI/协议默认漂移）。
-pub const GUI_PORT: u16 = 8777;
+pub use stross_types::ports::GUI_RELAY_HTTP as GUI_PORT;
 
 /// 中继句柄。
 pub struct RelayHandle {

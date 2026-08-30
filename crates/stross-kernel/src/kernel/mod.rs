@@ -1186,6 +1186,26 @@ impl Kernel {
             .map(|a| (a.port, a.handle.srt_port, a.handle.quic_port))
     }
 
+    /// 统一发现清单（`/api/discovery` 数据源，见 [`crate::discovery::DiscoveryResp`]）：
+    /// 从当前锚定中继 + 身份 + 能力组装。未锚定（无中继入口）返回 `None`（非可发现节点）。
+    /// `name` 用身份名，与 mDNS 广播的展示名一致（mDNS 与子网扫描都指向同一节点）。
+    pub fn discovery_manifest(&self) -> Option<crate::discovery::DiscoveryResp> {
+        let (relay_port, srt_port, quic_port) = self.relay_ports()?;
+        let identity = self.device_identity()?;
+        let info = self.mdns_info(&identity.device_name);
+        Some(crate::discovery::DiscoveryResp {
+            device_id: identity.device_id,
+            name: info.name,
+            relay_port,
+            srt_port,
+            quic_port,
+            roles: info.roles,
+            media: info.media,
+            transports: info.transports,
+            endpoints: info.endpoints,
+        })
+    }
+
     /// 实例已运行秒数（控制面 Status 展示 uptime）。
     pub fn uptime_secs(&self) -> u64 {
         self.started.elapsed().as_secs()

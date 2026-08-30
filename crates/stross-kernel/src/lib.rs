@@ -32,7 +32,6 @@
 
 pub mod bootstrap;
 pub mod control;
-pub mod devices;
 #[cfg(feature = "discovery")]
 pub mod discovery;
 pub mod engine;
@@ -59,7 +58,9 @@ pub use stross_transport::net;
 pub use stross_transport::{DataSession, SessionPacket, Transport, TransportError, TransportStats};
 
 pub use control::{CtrlRequest, CtrlResponse, CtrlServer, DEFAULT_CTRL_PORT};
-pub use devices::{ScannedDevice, StreamView, probe_base, scan, scan_lan, to_views};
+// 发现子系统（discovery v0.2.0）：扫描聚合 + 统一发现清单（需 discovery feature）。
+#[cfg(feature = "discovery")]
+pub use discovery::{ScannedDevice, StreamView, probe_base, scan, scan_lan, to_views};
 pub use engine::SenderEngine;
 pub use error::{Error, RelayOpError, Result, WatchError};
 pub use file_xfer::{ReceivedFile, receive_file, receive_file_session};
@@ -105,6 +106,6 @@ pub use subscriber::{
 /// 展示视图构造帮助函数（`relay_info` / `watch_urls`；兼容重导出见 [`view`]）。
 pub use view::{relay_info, watch_urls};
 
-/// SRT/QUIC 固定传输端口（权限自动化：防火墙只放行已知端口）。
-pub const DEFAULT_SRT_PORT: u16 = 33462;
-pub const DEFAULT_QUIC_PORT: u16 = 33464;
+/// SRT/QUIC 固定传输端口（权限自动化：防火墙只放行已知端口）。真源在
+/// [`stross_types::ports`]，此处仅别名保持路径兼容。
+pub use stross_types::ports::{QUIC as DEFAULT_QUIC_PORT, SRT as DEFAULT_SRT_PORT};

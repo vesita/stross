@@ -20,7 +20,7 @@ use super::ids::{CodecId, MediaKind, TransportId};
 
 /// mDNS 摘要层（L1）：只带 id/kind/name/是否可挂载/是否已通告，绝无协议、
 /// 可见性等详情（详情走 L2 `GET /api/endpoints` 拉取）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointSummary {
     pub endpoint_id: String,

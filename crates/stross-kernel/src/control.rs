@@ -25,8 +25,8 @@ use crate::Kernel;
 use crate::SessionPrefs;
 use crate::negotiator::ShareNegotiator;
 
-/// 控制面默认端口（回环）。
-pub const DEFAULT_CTRL_PORT: u16 = 18778;
+/// 控制面默认端口（回环）；真源在 [`stross_types::ports`]，此处仅别名保持路径兼容。
+pub use stross_types::ports::CTRL as DEFAULT_CTRL_PORT;
 
 /// 接入凭证默认有效期（秒，5 分钟）。
 const fn default_token_ttl() -> u64 {

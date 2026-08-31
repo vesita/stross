@@ -1,7 +1,7 @@
 # 通信模式 v2：控制面协商 + 数据面按 ID 复用
 
-> 状态：**实施中（Phase A/B 已落地，Phase C 待实施）**。
-> **开发策略：允许破坏性更新**——协议/架构可 breaking，开发期全端同步演进，
+> 状态：**已落地（Phase A/B/C 全部完成）**。
+> 开发策略：允许破坏性更新——协议/架构可 breaking，开发期全端同步演进，
 > 不做新旧 wire 兼容层。Phase C 的
 > 帧头裁字段（codec/track 移到协商结果）无需保留 v1 字段。
 > 关联：[plugin-architecture.md](plugin-architecture.md)（可插拔传输基座，本方案在其上演进）·
@@ -18,6 +18,10 @@
   订阅第二路会停掉第一路接收，导致第一路在服务端被「无观众」自动收尾；
 - 停一条流时另一条流被**级联带停**（共享资源/会话拆除耦合）；
 - 每路流独立连接 → 分享/订阅的会话登记、鉴权、keepalive 都要按连接维护，模型重。
+
+> **Phase C 落地后**：以上问题均已解决——接收端多链路（桌面 GUI 可同时订阅
+> 屏幕 + 系统声音并同播）、QUIC 一条连接承载 N 条媒体流（停一路只拆该流，
+> 不级联）、每流独立统计/启停。
 
 ## 2. 目标心智模型
 
@@ -140,13 +144,51 @@ pick/
   pick 规则（默认 Realtime，行为等价）。
 - 验证：kernel 105 单测全绿（含双规则独立运行测试）；`check.sh --quick` 通过。
 
-### Phase C：流级 ID 复用 + 接收端多流（大，真正解锁屏幕+声音同屏）⏳ 待实施
-- QUIC：一条连接内按 stream_id 开多路 media stream（现 control/media 两流 → N 媒体流）；
-- 中继 `[连接][stream_id]` demux 表（原「每流一会话」→「连接内多流」）；
-- 接收端多流 demux + 混音/混画（视频画面 + 音频同播）；
-- 帧头 v2 裁字段（codec/track 移到协商结果，每包只带 id+pts/seq）；
-- 语义 id 派生落地（§6：`derive(endpoint_id, transport_profile, pick_rule)`）。
-- 验证：真机「屏幕+系统声音」同屏播放；停一路不级联；单流回退路径（WS/SRT）不受影响。
+### Phase C：流级 ID 复用 + 接收端多流（大，真正解锁屏幕+声音同屏）✅ 已落地
+
+- **QUIC 连接复用**：一条连接 = 一条节点间链路（[`QuicLink`] 客户端 + 
+  [`QuicServerLink`] 服务端），control stream 上新增 `OpenStream` /
+  `StreamOpened` / `CloseStream` 做**流级登记/确认/拆解**；每条媒体流一条
+  QUIC bi stream（stream 即类型，短 id 映射）。客户端经**进程级链路管理器**
+  （stross-transport `QUIC_LINKS`，按 `(host, port)` 复用）——同进程多个
+  推流/观看会话自动共享一条连接；WS/SRT 保持每流独立连接（单流回退路径
+  不受影响，wire 不变）；
+- **中继 `[连接][stream_id]` demux**：QUIC peer 循环把 control OpenStream ↔
+  accept_bi 媒体流 **FIFO 配对**，维护链路级 `quic_stream_id → (语义 id, 方向)`
+  表；每条流独立 push/watch 任务（`quic_push_stream` / `quic_watch_stream`），
+  停一条只拆该流（CloseStream / 流 EOF），不级联其它流；
+- **接收端多流**：内核接收注册表 Map 化（`Kernel::receivers: HashMap<link_id,
+  Receiver>`，`start_receive_link` / `stop_receive_link` / `receive_links`），
+  每条链独立启停/统计；桌面 GUI 多链路面板（右栏「接收」逐条显示 + 停止），
+  画布显示最近活跃的视频链路，纯音频链只出声不占画面。旧单流 API 落到预留槽
+  `main`（Android 单链播放路径不变）；
+- **帧头 v2 裁字段**：QUIC 媒体流用**紧凑帧头**（`FrameHeader2`：track/flags/
+  pts/seq/len 共 14 字节）——codec 由 OpenStream 协商声明（接收侧按 track 路由，
+  编解码自流内容嗅探）、magic/version/frag 去掉（长度前缀 + 协商提供上下文）；
+  WS/SRT 单流路径保留 v1 24 字节头；
+- **语义 id 派生落地**（§6）：`derive_stream_id(endpoint_id, transport_profile,
+  pick_rule)` 确定性三要素——端点订阅的 grant 流 id = 派生 id（`compose_grant`
+  端点分支），会话幂等（`ensure_session_with_id`），订阅方本地推导 + 一致性校验
+  （不一致仅告警不阻断，兼容旧对端）；
+- 验证：proto/transport/kernel 单测 + 集成测试 `tests/quic_multiplex.rs`
+  （**一条 QUIC 连接 4 条媒体流**：2 推 + 2 看，demux 不串流、停一路不级联、
+  流表正确回收）+ 回归脚本全绿（dual-node-file / share-token / multi-endpoint /
+  quic-stale-stream / srt-push-silence）。真机「屏幕+系统声音」同屏播放待接手机复测。
+
+### 落地差异 / 坑（实施时对蓝图的小修正）
+
+1. **客户端会话「确认门」**：StreamOpened（Welcome/Ready）未达前不吐媒体帧——
+   先到帧留在 QUIC 缓冲（流控）。否则 `connect_watch` 等确认的循环会把先到的
+   首关键帧当杂包吞掉（负载下复现：观看端收不到首帧超时）。
+2. **recv 事件优先**：已确认后 `biased` 事件分支优先（控制/关闭信号不被媒体
+   洪流饿死）——与旧 `QuicDataSession` 的 `biased; control 优先` 语义一致。
+3. **FIFO 配对别写 `(a.pop(), b.pop())` 元组**：元组会**先求值两个 pop**，单侧
+   空时另一侧被提前消费丢弃。先判空再 pop（`while !a.is_empty() && !b.is_empty()`）。
+4. **语义 id 映射可碰撞**：同链路 push+watch 同 stream_id（如测试）会覆盖
+   `semantic → qid` 映射。ack 路由因「登记顺序 = 配对顺序」天然 FIFO 正确；
+   CloseStream 碰撞场景按「最后登记」路由（推送/观看同 id 的边界场景可接受）。
+5. **QUIC 依赖**：中继 peer 循环需直接驱动 quinn 流类型 → stross-kernel 增加
+   `quinn` 直接依赖（传输层仍是实现属主；分层按职责不按依赖）。
 
 ## 6. 决策记录（2026-08 定稿：id 机制两层化）
 
@@ -172,6 +214,6 @@ pick/
 
 ## 7. 收尾（做完后更新）
 
-- 本文档状态改「已落地（第 N 轮）」；
-- `iteration-plan.md` 记录各阶段轮次；
-- `dev-playbook.md` 增补「数据衔接层」「流级 ID 复用」「接收端多流」坑位。
+- 本文档状态已更新为「已落地（Phase A/B/C）」；Phase C 落地差异见 §5 附；
+- `iteration-plan.md` 记录轮次；`dev-playbook.md` 增补「确认门」「FIFO 配对」
+  「链路管理器」坑位。

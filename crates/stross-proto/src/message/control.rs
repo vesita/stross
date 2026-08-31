@@ -40,6 +40,35 @@ pub enum ControlMessage {
     Ready { stream_id: String },
     /// 错误。
     Error { message: String },
+    /// **共享 QUIC 连接上登记一条流**（通信模式 v2 Phase C「连接复用」：
+    /// 一条连接 N 媒体流，替代「每流一会话」的 Hello 语义）。发送方在打开
+    /// 对应媒体 stream 后经 control stream 发送，中继按序关联：
+    ///
+    /// * `role = push`：等价旧 `Hello`（推流端声明开始推流，含标题/轨道/凭证）；
+    /// * `role = watch`：等价旧 `Watch`（观看端请求观看一个流）。
+    ///
+    /// 中继确认后回 [`ControlMessage::StreamOpened`]；流级拆解走
+    /// [`ControlMessage::CloseStream`]（不关连接——其它流不受影响）。
+    OpenStream {
+        stream_id: String,
+        /// 方向：push = 推流（等价 Hello）；watch = 观看（等价 Watch）。
+        role: super::ids::StreamRole,
+        /// push 用：标题（等价 Hello.title）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        video: Option<TrackInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<TrackInfo>,
+        /// push 用：一次性接入凭证（跨设备推流，等价 Hello.share_token）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        share_token: Option<String>,
+    },
+    /// 中继确认 OpenStream（push 等价 Welcome、watch 等价 Ready 的语义；
+    /// 由连接层转换为上层熟悉的消息形态）。
+    StreamOpened { stream_id: String },
+    /// 关闭共享连接上的一条流（流级拆解；不关连接）。
+    CloseStream { stream_id: String },
     /// 流列表（备用，目前主要走 REST）。
     Info { streams: Vec<StreamInfo> },
     /// 能力上报（握手后，供传输/编解码协商）。
@@ -179,6 +208,59 @@ mod tests {
         let text = msg.to_text();
         assert!(text.contains("\"type\":\"watch\""), "text: {text}");
         assert_eq!(ControlMessage::from_text(&text).unwrap(), msg);
+    }
+
+    /// 通信模式 v2 Phase C：共享连接上的流登记（OpenStream / StreamOpened /
+    /// CloseStream）roundtrip；push 形态携带标题/轨道/凭证（等价 Hello）。
+    #[test]
+    fn open_stream_roundtrip() {
+        let push = ControlMessage::OpenStream {
+            stream_id: "ep-screen-ly-rt-a1b2c3d4".into(),
+            role: super::super::ids::StreamRole::Push,
+            title: Some("我的屏幕".into()),
+            video: Some(TrackInfo {
+                codec: CodecId::H264,
+                width: Some(1280),
+                height: Some(720),
+                fps: Some(30),
+                sample_rate: None,
+                channels: None,
+            }),
+            audio: None,
+            share_token: None,
+        };
+        let text = push.to_text();
+        assert!(text.contains("\"type\":\"openStream\""), "text: {text}");
+        assert!(text.contains("\"role\":\"push\""), "text: {text}");
+        let back = ControlMessage::from_text(&text).unwrap();
+        assert_eq!(push, back);
+
+        let watch = ControlMessage::OpenStream {
+            stream_id: "sess-1".into(),
+            role: super::super::ids::StreamRole::Watch,
+            title: None,
+            video: None,
+            audio: None,
+            share_token: None,
+        };
+        let back: ControlMessage = serde_json::from_str(&watch.to_text()).unwrap();
+        assert_eq!(watch, back);
+        assert!(!back.to_text().contains("title"), "watch 形态不带标题");
+
+        let opened = ControlMessage::StreamOpened {
+            stream_id: "sess-1".into(),
+        };
+        assert_eq!(
+            ControlMessage::from_text(&opened.to_text()).unwrap(),
+            opened
+        );
+        let close = ControlMessage::CloseStream {
+            stream_id: "sess-1".into(),
+        };
+        assert_eq!(
+            ControlMessage::from_text(&close.to_text()).unwrap(),
+            close
+        );
     }
 
     #[test]

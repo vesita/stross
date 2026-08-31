@@ -993,4 +993,38 @@ button.sm { padding: 6px 12px; font-size: 12.5px; }
   margin-left: auto;
   flex-wrap: wrap;
 }
+/* —— 多端点链接：接收链路行（#recv-links）——
+   每条链独立状态/统计/停止；停一条不级联其它链（通信模式 v2 Phase C）。 */
+.recv-links { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.recv-link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.recv-link-row .dot { flex-shrink: 0; }
+.recv-link-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.recv-link-name {
+  font-size: 13px;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recv-link-body .meta {
+  margin-top: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recv-link-stop { flex-shrink: 0; }
 .dir-status { font-size: 12px; }

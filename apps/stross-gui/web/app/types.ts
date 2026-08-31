@@ -139,6 +139,13 @@ interface ReceiveStats {
   pacedDropped: number; pacedReanchors: number; pacedHeld: number;
   error: string | null;
 }
+
+/** 一条接收链路的状态视图（Rust `ReceiveLinkView`：linkId + 统计；
+ *  多端点链接——一次可同时接收多条流，每条链独立启停/统计）。 */
+interface ReceiveLinkView {
+  linkId: string;
+  stats: ReceiveStats;
+}
 interface TrackInfo {
   codec: string;
   width: number | null;

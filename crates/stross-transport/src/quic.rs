@@ -1,33 +1,36 @@
-//! QUIC 传输实现（quinn 0.11 + rustls-ring；设计文档 docs/plugin-architecture.md §4.4）。
+//! QUIC 传输实现（quinn 0.11 + rustls-ring；设计文档 docs/plugin-architecture.md §4.4、
+//! 通信模式 v2 docs/comm-mode-v2.md §5 Phase C「连接复用」）。
 //!
-//! QUIC 是 Lossless 契约：一条连接**多路复用**两条双向 stream（控制/媒体分离，
-//! 未来 input/剪贴板可再加一条，NAT 友好、0-RTT 重连）。消费方是原生推流端
-//! （浏览器 http 源无法直连 QUIC/WebTransport）：
-//!
-//! * relay 侧：[`QuicTransport::bind`] 监听（自签名证书，进程内一次生成）
-//! * 推流端：[`Transport::connect`] 拨号 `quic://host:port`（danger 接受自签名）
-//!
-//! ## 线格式（每条 stream 独立，stream 即类型，无需消息类型前缀）
+//! QUIC 是 Lossless 契约。**v2（Phase C）：一条连接 = 一条节点间链路，承载 N 条媒体流**——
+//! 替代 v1「每流一会话」（control/media 双 stream 只服务一条流）：
 //!
 //! * stream 0 = control：消息 = `u32 LE 长度` + JSON 控制消息文本
-//! * stream 1 = media：消息 = `u32 LE 长度` + 24 字节 v2 帧头 + 载荷
+//!   （新增 [`ControlMessage::OpenStream`] / `StreamOpened` / `CloseStream`：
+//!   流级登记 / 确认 / 拆解，互不级联）；
+//! * stream 1..N = 媒体流：每条流一条 QUIC bi stream（stream 即类型，短 id 映射，
+//!   docs/comm-mode-v2.md §6），消息 = `u32 LE 长度` + **v2 紧凑帧头**
+//!   （14 字节：track/flags/pts/seq/len，见 [`stross_proto::frame::Frame2`]）
+//!   + 载荷——codec 由 OpenStream 协商声明，接收侧按 track 路由即可。
 //!
-//! QUIC stream 是可靠字节流（无消息边界、无单消息大小限制）——长度前缀分帧；
-//! 大关键帧整体发送，**不需要** v2 头的 `frag_*` 分片（与 WS 一致）。
+//! 客户端经**进程级链路管理器**（[`QUIC_LINKS`]）复用同 `(host, port)` 的连接：
+//! 多个推流/观看会话共享一条连接（屏幕 + 系统声音同推/同收），停一条只拆该
+//! 媒体流，不级联其它流。WS/SRT 保持每流独立连接（单流回退路径不受影响）。
 //!
 //! 安全模型：自签名 TLS + 客户端接受任意证书——与明文 `ws://` 同级（局域网
 //! 可信模型）。加密仍在（QUIC 强制 TLS），只是不验证身份。
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
-use stross_proto::frame::Frame;
-use stross_proto::message::{ControlMessage, ReliabilityProfile, TransportId};
+use stross_proto::frame::{Frame, Frame2};
+use stross_proto::message::{ControlMessage, ReliabilityProfile, StreamRole, TransportId};
 
 use super::{
     DataSession, PeerAddr, SessionPacket, SessionParams, SharedStats, Transport, TransportError,
@@ -76,6 +79,12 @@ impl Transport for QuicTransport {
         ReliabilityProfile::Lossless
     }
 
+    /// 客户端拨号：经**链路管理器**获取/建立到对端 `(host, port)` 的共享连接，
+    /// 返回一条绑定到新开 QUIC bi stream 的 [`QuicMediaSession`]（首个控制消息
+    /// Hello/Watch 被转换为 OpenStream 登记，媒体帧走 v2 紧凑帧头）。
+    ///
+    /// 上层（[`crate::sender::RelayClient`] / [`crate::watch::connect_watch`]）
+    /// 无需感知复用：多路会话自然共享一条连接。
     async fn connect(
         &self,
         peer: &PeerAddr,
@@ -86,6 +95,63 @@ impl Transport for QuicTransport {
             .and_then(|u| format!("{}:{}", u.host(), u.port()).parse().ok())
             .or_else(|| peer.addr.parse().ok())
             .ok_or_else(|| TransportError::Connect(format!("QUIC 地址解析失败: {}", peer.addr)))?;
+        let link = link_for(addr).await?;
+        tracing::debug!("QUIC 会话挂到共享连接 {addr}（复用）");
+        Ok(Box::new(link.open_media().await))
+    }
+
+    async fn accept(
+        &self,
+        _params: &SessionParams,
+    ) -> Result<Box<dyn DataSession>, TransportError> {
+        Err(TransportError::NotSupported(
+            "quic 服务端请使用 QuicTransport::bind + QuicListenerHandle::accept_link",
+        ))
+    }
+
+    fn stats(&self) -> TransportStats {
+        self.stats.as_ref().clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 客户端：共享连接（QuicLink）+ 媒体会话（QuicMediaSession）+ 链路管理器
+// ---------------------------------------------------------------------------
+
+/// 链路事件（control 循环路由到对应媒体会话）。
+#[derive(Debug, Clone)]
+enum LinkEvent {
+    /// OpenStream 已被中继确认（上层转换为 Welcome / Ready）。
+    Opened,
+    /// 中继错误（OpenStream 被拒等）。
+    Error(String),
+    /// 中继关闭了该流（流结束 / 拆除）。
+    Closed,
+}
+
+/// 一条到对端 `(host, port)` 的共享 QUIC 连接（Phase C 连接复用）。
+///
+/// * 生命周期：强引用只被媒体会话持有——全部会话关闭后 `QuicLink` drop →
+///   quinn 连接关闭 → control 循环退出（循环持 [`Weak`]，无引用环）；
+/// * control 循环：读 control stream，按语义 stream_id 路由 StreamOpened /
+///   CloseStream / Error 到对应会话的事件通道。
+pub struct QuicLink {
+    conn: quinn::Connection,
+    control_tx: Mutex<quinn::SendStream>,
+    /// 流登记互斥：`open_bi + 就绪信号 + OpenStream` 串行——保证对端
+    /// FIFO 配对顺序（accept_bi 与 OpenStream 一一对应，不串流）。
+    open: Mutex<()>,
+    /// quic stream id → 会话事件通道（control 循环路由目标）。
+    sessions: Mutex<HashMap<u64, mpsc::UnboundedSender<LinkEvent>>>,
+    /// 语义 stream_id → quic stream id（StreamOpened/CloseStream 反查）。
+    semantic: Mutex<HashMap<String, u64>>,
+    stats: SharedStats,
+}
+
+impl QuicLink {
+    /// 建立到 `addr` 的 QUIC 连接（客户端约定：先开 control stream 并发送
+    /// 0 长度就绪信号，再进入 control 循环）。
+    async fn connect(addr: SocketAddr) -> Result<Arc<Self>, TransportError> {
         let endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().expect("静态地址"))
             .map_err(|e| TransportError::Io(e.to_string()))?;
         let connecting = endpoint
@@ -94,10 +160,6 @@ impl Transport for QuicTransport {
         let connection = connecting
             .await
             .map_err(|e| TransportError::Connect(format!("QUIC 握手失败: {e}")))?;
-        // 约定：客户端先开 control stream，再开 media stream。
-        // QUIC 流是 lazy 的：open_bi 只分配流 ID，对端 accept_bi 要等首个
-        // STREAM 帧——立即各发一条空消息（长度 0）作为「流就绪」信号，
-        // 服务端 accept 才能及时返回；读端会跳过空消息。
         let (mut control_tx, control_rx) = connection
             .open_bi()
             .await
@@ -106,39 +168,349 @@ impl Transport for QuicTransport {
             .write_all(&0u32.to_le_bytes())
             .await
             .map_err(|e| TransportError::Connect(format!("QUIC control 就绪信号失败: {e}")))?;
-        let (mut media_tx, media_rx) = connection
-            .open_bi()
-            .await
-            .map_err(|e| TransportError::Connect(format!("QUIC 开 media stream 失败: {e}")))?;
-        media_tx
-            .write_all(&0u32.to_le_bytes())
-            .await
-            .map_err(|e| TransportError::Connect(format!("QUIC media 就绪信号失败: {e}")))?;
-        tracing::info!("QUIC 已连接: {addr}");
-        Ok(Box::new(QuicDataSession::new(
-            Some(endpoint), // 客户端持有以保持连接存活
-            connection,
-            control_tx,
-            control_rx,
-            media_tx,
-            media_rx,
-            self.stats.clone(),
-        )))
+        tracing::info!("QUIC 已连接（共享链路）: {addr}");
+        let link = Arc::new(Self {
+            conn: connection,
+            control_tx: Mutex::new(control_tx),
+            open: Mutex::new(()),
+            sessions: Mutex::new(HashMap::new()),
+            semantic: Mutex::new(HashMap::new()),
+            stats: Arc::new(TransportStats::default()),
+        });
+        spawn_control_loop(Arc::downgrade(&link), control_rx);
+        Ok(link)
     }
 
-    async fn accept(
-        &self,
-        _params: &SessionParams,
-    ) -> Result<Box<dyn DataSession>, TransportError> {
-        Err(TransportError::NotSupported(
-            "quic 服务端请使用 QuicTransport::bind + QuicListenerHandle::accept",
-        ))
+    /// 新建一条媒体会话（懒开 bi stream：首个控制消息发送时登记；
+    /// 登记与 OpenStream 串行保证对端 FIFO 配对）。
+    async fn open_media(self: &Arc<Self>) -> QuicMediaSession {
+        let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+        QuicMediaSession {
+            link: self.clone(),
+            tx: Mutex::new(None),
+            rx: Mutex::new(None),
+            events: Mutex::new(ev_rx),
+            semantic: Mutex::new(None),
+            role: Mutex::new(None),
+            registered: AtomicBool::new(false),
+            opened: AtomicBool::new(false),
+            _ev_tx: ev_tx,
+        }
     }
 
-    fn stats(&self) -> TransportStats {
-        self.stats.as_ref().clone()
+    /// 发送控制消息（control stream，长度前缀 JSON）。
+    async fn send_control(&self, msg: ControlMessage) -> Result<(), TransportError> {
+        let text = msg.to_text();
+        let mut tx = self.control_tx.lock().await;
+        write_msg(&mut tx, text.as_bytes()).await?;
+        self.stats.add_sent(LEN_BYTES + text.len());
+        Ok(())
     }
 }
+
+/// 客户端控制循环：读 control stream，按语义 id 路由事件到媒体会话。
+/// 持 [`Weak`]——链路 drop（连接关闭）后循环自然退出，无引用环。
+fn spawn_control_loop(link: Weak<QuicLink>, mut rx: quinn::RecvStream) {
+    tokio::spawn(async move {
+        while let Ok(Some(bytes)) = read_msg(&mut rx).await {
+                    let text = match std::str::from_utf8(&bytes) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    let msg = match ControlMessage::from_text(text) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    let Some(link) = link.upgrade() else {
+                        break;
+                    };
+                    let qid = match &msg {
+                        ControlMessage::StreamOpened { stream_id }
+                        | ControlMessage::CloseStream { stream_id } => {
+                            link.semantic.lock().await.get(stream_id).copied()
+                        }
+                        _ => None,
+                    };
+
+                    match msg {
+                        ControlMessage::StreamOpened { .. } => {
+                            if let Some(qid) = qid
+                                && let Some(tx) = link.sessions.lock().await.get(&qid)
+                            {
+                                let _ = tx.send(LinkEvent::Opened);
+                            }
+                        }
+                        ControlMessage::CloseStream { .. } => {
+                            if let Some(qid) = qid
+                                && let Some(tx) = link.sessions.lock().await.get(&qid)
+                            {
+                                let _ = tx.send(LinkEvent::Closed);
+                            }
+                        }
+                        ControlMessage::Error { message } => {
+                            // 路由给全部未就绪会话（OpenStream 被拒等；
+                            // 已就绪会话忽略——正常媒体流不产生 Error）
+                            for tx in link.sessions.lock().await.values() {
+                                let _ = tx.send(LinkEvent::Error(message.clone()));
+                            }
+                        }
+                        _ => {}
+                    }
+        }
+    });
+}
+
+/// 链路表键：对端地址（host, port）。
+type LinkKey = (String, u16);
+
+/// 进程级链路管理器：`(host, port)` → 共享连接（弱引用；全部会话关闭即回收）。
+static QUIC_LINKS: OnceLock<Mutex<HashMap<LinkKey, Weak<QuicLink>>>> = OnceLock::new();
+
+/// 获取/建立到 `addr` 的共享连接（get-or-create 串行，避免并发重复建连）。
+async fn link_for(addr: SocketAddr) -> Result<Arc<QuicLink>, TransportError> {
+    let key = (addr.ip().to_string(), addr.port());
+    let map = QUIC_LINKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().await;
+    if let Some(link) = guard.get(&key).and_then(Weak::upgrade) {
+        return Ok(link);
+    }
+    let link = QuicLink::connect(addr).await?;
+    guard.insert(key, Arc::downgrade(&link));
+    Ok(link)
+}
+
+/// 绑定到共享连接上一条媒体流的会话（对上层呈现普通 [`DataSession`]）。
+///
+/// * 首个控制消息拦截：`Hello` → `OpenStream{role: Push}`、
+///   `Watch` → `OpenStream{role: Watch}`（经链路 control stream 登记）；
+/// * `Bye` / [`DataSession::close`] → `CloseStream` + 结束 bi stream；
+/// * 媒体帧 → v2 紧凑帧头（[`Frame2`]）写 bi stream；
+/// * `recv`：StreamOpened 事件 → `Welcome`（push）/ `Ready`（watch），
+///   其余 → 紧凑帧解码为 v1 [`Frame`]（codec=0，接收侧不读）。
+pub struct QuicMediaSession {
+    link: Arc<QuicLink>,
+    tx: Mutex<Option<quinn::SendStream>>,
+    rx: Mutex<Option<quinn::RecvStream>>,
+    events: Mutex<mpsc::UnboundedReceiver<LinkEvent>>,
+    semantic: Mutex<Option<String>>,
+    role: Mutex<Option<StreamRole>>,
+    registered: AtomicBool,
+    /// 确认门：StreamOpened（Welcome/Ready）已送达。未确认前不吐媒体帧——
+    /// 先到帧留在 QUIC 缓冲（流控），避免上层等确认时误消费首帧。
+    opened: AtomicBool,
+    /// 持有发送端使链路登记到会话存在期间（Drop 时随会话释放）。
+    _ev_tx: mpsc::UnboundedSender<LinkEvent>,
+}
+
+impl QuicMediaSession {
+    /// 登记本会话（首个控制消息触发；`open_bi + 就绪信号 + OpenStream`
+    /// 在链路 open 互斥下串行——保证对端 FIFO 配对不串流）。
+    async fn register(&self, open: ControlMessage) -> Result<(), TransportError> {
+        let _guard = self.link.open.lock().await;
+        if self.registered.swap(true, Ordering::SeqCst) {
+            return Ok(()); // 已登记（双 send 竞态防御）
+        }
+        let (stream_id, role, title, video, audio, share_token) = match open {
+            ControlMessage::OpenStream {
+                stream_id,
+                role,
+                title,
+                video,
+                audio,
+                share_token,
+            } => (stream_id, role, title, video, audio, share_token),
+            _ => unreachable!("register 只收 OpenStream"),
+        };
+        // 懒开 bi stream（就绪信号让对端 accept_bi 返回）
+        let (tx, rx) = self
+            .link
+            .conn
+            .open_bi()
+            .await
+            .map_err(|e| TransportError::Io(format!("QUIC 开媒体 stream 失败: {e}")))?;
+        let qid: u64 = tx.id().into();
+        let mut tx = tx;
+        tx.write_all(&0u32.to_le_bytes())
+            .await
+            .map_err(|e| TransportError::Io(format!("QUIC 媒体就绪信号失败: {e}")))?;
+        *self.tx.lock().await = Some(tx);
+        *self.rx.lock().await = Some(rx);
+        *self.semantic.lock().await = Some(stream_id.clone());
+        *self.role.lock().await = Some(role);
+        self.link
+            .sessions
+            .lock()
+            .await
+            .insert(qid, self._ev_tx.clone());
+        self.link
+            .semantic
+            .lock()
+            .await
+            .insert(stream_id.clone(), qid);
+        self.link.send_control(ControlMessage::OpenStream {
+            stream_id,
+            role,
+            title,
+            video,
+            audio,
+            share_token,
+        })
+        .await
+    }
+
+    /// 确保已登记（首个媒体帧 / 控制消息之前）。
+    async fn ensure_registered(&self) -> Result<(), TransportError> {
+        if !self.registered.load(Ordering::SeqCst) {
+            // 理论上不会发生（sender/watch 先发控制消息）；防御性错误
+            return Err(TransportError::Protocol(
+                "QUIC 媒体会话未登记（应先发 Hello/Watch）".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// 优雅结束媒体流：CloseStream（如已登记）+ 结束 bi stream。
+    async fn finish(&self) -> Result<(), TransportError> {
+        if let Some(sid) = self.semantic.lock().await.clone() {
+            let _ = self
+                .link
+                .send_control(ControlMessage::CloseStream { stream_id: sid })
+                .await;
+        }
+        if let Some(tx) = self.tx.lock().await.as_mut() {
+            let _ = tx.finish();
+        }
+        Ok(())
+    }
+
+    /// 读一条媒体消息（跳过空就绪信号；`Ok(None)` = 流结束）。
+    async fn recv_media(&self) -> Result<Option<Bytes>, TransportError> {
+        let mut guard = self.rx.lock().await;
+        let Some(rx) = guard.as_mut() else {
+            return Err(TransportError::Protocol("QUIC 媒体会话未登记".into()));
+        };
+        loop {
+            match read_msg(rx).await? {
+                Some(b) if b.is_empty() => continue,
+                other => return Ok(other),
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl DataSession for QuicMediaSession {
+    fn peer_addr(&self) -> Option<std::net::SocketAddr> {
+        Some(self.link.conn.remote_address())
+    }
+
+    async fn send(&self, pkt: SessionPacket) -> Result<(), TransportError> {
+        match pkt {
+            SessionPacket::Control(ControlMessage::Hello {
+                stream_id,
+                title,
+                video,
+                audio,
+                share_token,
+            }) => {
+                if !self.registered.load(Ordering::SeqCst) {
+                    self.register(ControlMessage::OpenStream {
+                        stream_id,
+                        role: StreamRole::Push,
+                        title: Some(title),
+                        video,
+                        audio,
+                        share_token,
+                    })
+                    .await?;
+                }
+                Ok(())
+            }
+            SessionPacket::Control(ControlMessage::Watch { stream_id }) => {
+                if !self.registered.load(Ordering::SeqCst) {
+                    self.register(ControlMessage::OpenStream {
+                        stream_id,
+                        role: StreamRole::Watch,
+                        title: None,
+                        video: None,
+                        audio: None,
+                        share_token: None,
+                    })
+                    .await?;
+                }
+                Ok(())
+            }
+            SessionPacket::Control(ControlMessage::Bye) => self.finish().await,
+            // 本链路不经媒体会话发其它控制（控制走链路的 control stream）
+            SessionPacket::Control(_) => Ok(()),
+            SessionPacket::Media(frame) => {
+                self.ensure_registered().await?;
+                let full = Frame2::from_frame(&frame).to_bytes();
+                let mut tx = self.tx.lock().await;
+                let Some(tx) = tx.as_mut() else {
+                    return Err(TransportError::Protocol("QUIC 媒体会话未登记".into()));
+                };
+                write_msg(tx, &full).await?;
+                self.link.stats.add_sent(LEN_BYTES + full.len());
+                Ok(())
+            }
+        }
+    }
+
+    async fn recv(&self) -> Result<Option<SessionPacket>, TransportError> {
+        // 确认门：StreamOpened（Welcome/Ready）未达前不吐媒体帧——先到帧
+        // 留在 QUIC 缓冲（流控），避免上层（connect_watch 等）等确认时把
+        // 首关键帧当杂包吞掉（负载下复现：观看端收不到首帧超时）。
+        if !self.opened.load(Ordering::SeqCst) {
+            let ev = self.events.lock().await.recv().await;
+            return self.on_event(ev).await;
+        }
+        // 已确认：事件与媒体并取，**事件优先**（同旧实现 biased 控制优先：
+        // 控制消息/关闭信号不被媒体洪流饿死）
+        let mut events = self.events.lock().await;
+        tokio::select! {
+            biased;
+            ev = events.recv() => self.on_event(ev).await,
+            r = self.recv_media() => {
+                let Some(bytes) = r? else { return Ok(None) };
+                self.link.stats.add_recv(LEN_BYTES + bytes.len());
+                let frame = Frame2::to_frame_owned(bytes)
+                    .map_err(|e| TransportError::Protocol(e.to_string()))?;
+                Ok(Some(SessionPacket::Media(frame)))
+            }
+        }
+    }
+
+    async fn close(&self) -> Result<(), TransportError> {
+        self.finish().await
+    }
+}
+
+impl QuicMediaSession {
+    /// 处理一条链路事件（公共：ack 转换 / 错误 / 关闭）。
+    async fn on_event(
+        &self,
+        ev: Option<LinkEvent>,
+    ) -> Result<Option<SessionPacket>, TransportError> {
+        match ev {
+            Some(LinkEvent::Opened) => {
+                self.opened.store(true, Ordering::SeqCst);
+                let role = self.role.lock().await.unwrap_or(StreamRole::Push);
+                let sid = self.semantic.lock().await.clone().unwrap_or_default();
+                Ok(Some(SessionPacket::Control(match role {
+                    StreamRole::Push => ControlMessage::Welcome { stream_id: sid },
+                    StreamRole::Watch => ControlMessage::Ready { stream_id: sid },
+                })))
+            }
+            Some(LinkEvent::Error(message)) => Err(TransportError::Protocol(message)),
+            Some(LinkEvent::Closed) | None => Ok(None),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 服务端：连接（QuicServerLink）——中继 peer 循环的传输原语
+// ---------------------------------------------------------------------------
 
 /// 已绑定的 QUIC 监听句柄。
 pub struct QuicListenerHandle {
@@ -152,8 +524,9 @@ impl QuicListenerHandle {
         self.endpoint.local_addr().expect("已绑定端点")
     }
 
-    /// 接受一个入站连接：等客户端开 control/media 两条 bi stream，包装成会话。
-    pub async fn accept(&mut self) -> Result<Box<dyn DataSession>, TransportError> {
+    /// 接受一个入站**连接**（Phase C：一条连接 = 一条链路，可开 N 媒体流；
+    /// 中继侧 peer 循环消费 [`QuicServerLink`] 的 control / accept_media 原语）。
+    pub async fn accept_link(&mut self) -> Result<QuicServerLink, TransportError> {
         let Some(incoming) = self.endpoint.accept().await else {
             return Err(TransportError::Closed);
         };
@@ -168,134 +541,120 @@ impl QuicListenerHandle {
             .accept_bi()
             .await
             .map_err(|e| TransportError::Io(format!("QUIC 收 control stream 失败: {e}")))?;
-        let (media_tx, media_rx) = connection
-            .accept_bi()
-            .await
-            .map_err(|e| TransportError::Io(format!("QUIC 收 media stream 失败: {e}")))?;
-        tracing::info!("QUIC 入站连接: {peer}");
-        Ok(Box::new(QuicDataSession::new(
-            None, // 服务端 endpoint 由 listener handle 持有
-            connection,
-            control_tx,
-            control_rx,
-            media_tx,
-            media_rx,
-            self.stats.clone(),
-        )))
+        tracing::info!("QUIC 入站连接（链路）: {peer}");
+        Ok(QuicServerLink {
+            inner: Arc::new(QuicServerLinkInner {
+                conn: connection,
+                control_tx: Mutex::new(control_tx),
+                control_rx: Mutex::new(control_rx),
+                stats: self.stats.clone(),
+            }),
+        })
     }
 }
 
-/// QUIC 数据会话：control/media 双 stream 多路复用。
-pub struct QuicDataSession {
-    /// 客户端持有以保持连接存活（Endpoint drop 会关闭连接）；服务端由
-    /// `QuicListenerHandle` 持有，此处为 `None`。
-    _endpoint: Option<quinn::Endpoint>,
+/// 服务端连接（链路）句柄：control 收发 + 媒体流 accept 原语。
+pub struct QuicServerLink {
+    inner: Arc<QuicServerLinkInner>,
+}
+
+/// 服务端连接（链路）内部状态（Arc 包裹：peer 循环与每条流的任务共享）。
+struct QuicServerLinkInner {
     conn: quinn::Connection,
     control_tx: Mutex<quinn::SendStream>,
     control_rx: Mutex<quinn::RecvStream>,
-    media_tx: Mutex<quinn::SendStream>,
-    media_rx: Mutex<quinn::RecvStream>,
     stats: SharedStats,
 }
 
-impl QuicDataSession {
-    pub fn new(
-        endpoint: Option<quinn::Endpoint>,
-        conn: quinn::Connection,
-        control_tx: quinn::SendStream,
-        control_rx: quinn::RecvStream,
-        media_tx: quinn::SendStream,
-        media_rx: quinn::RecvStream,
-        stats: SharedStats,
-    ) -> Self {
+impl Clone for QuicServerLink {
+    fn clone(&self) -> Self {
         Self {
-            _endpoint: endpoint,
-            conn,
-            control_tx: Mutex::new(control_tx),
-            control_rx: Mutex::new(control_rx),
-            media_tx: Mutex::new(media_tx),
-            media_rx: Mutex::new(media_rx),
-            stats,
+            inner: Arc::clone(&self.inner),
         }
     }
 }
 
-#[async_trait]
-impl DataSession for QuicDataSession {
-    fn peer_addr(&self) -> Option<std::net::SocketAddr> {
-        Some(self.conn.remote_address())
+impl QuicServerLink {
+    /// 对端地址（来源感知门控用）。
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.inner.conn.remote_address()
     }
 
-    async fn send(&self, pkt: SessionPacket) -> Result<(), TransportError> {
-        match pkt {
-            SessionPacket::Control(c) => {
-                let text = c.to_text();
-                let mut tx = self.control_tx.lock().await;
-                write_msg(&mut tx, text.as_bytes()).await?;
-                self.stats.add_sent(LEN_BYTES + text.len());
-            }
-            SessionPacket::Media(frame) => {
-                let full = frame.to_bytes();
-                let mut tx = self.media_tx.lock().await;
-                write_msg(&mut tx, &full).await?;
-                self.stats.add_sent(LEN_BYTES + full.len());
-            }
-        }
-        Ok(())
+    /// quinn 连接（`closed()` 监测链路关闭）。
+    pub fn conn(&self) -> &quinn::Connection {
+        &self.inner.conn
     }
 
-    async fn recv(&self) -> Result<Option<SessionPacket>, TransportError> {
-        // 两个分支都直接返回（控制流优先），无需外层 loop
-        tokio::select! {
-            // 偏向 control：控制消息（Welcome/Error）优先处理
-            biased;
-            r = self.recv_control() => {
-                let Some(bytes) = r? else { return Ok(None) };
-                self.stats.add_recv(LEN_BYTES + bytes.len());
-                let text = std::str::from_utf8(&bytes)
-                    .map_err(|e| TransportError::Protocol(e.to_string()))?;
-                let msg = ControlMessage::from_text(text)
-                    .map_err(|e| TransportError::Protocol(e.to_string()))?;
-                Ok(Some(SessionPacket::Control(msg)))
-            }
-            r = self.recv_media() => {
-                let Some(bytes) = r? else { return Ok(None) };
-                self.stats.add_recv(LEN_BYTES + bytes.len());
-                let frame = Frame::from_bytes_owned(bytes)
-                    .map_err(|e| TransportError::Protocol(e.to_string()))?;
-                Ok(Some(SessionPacket::Media(frame)))
+    /// 收一条控制消息（跳过空就绪信号）；`Ok(None)` = 连接关闭。
+    pub async fn recv_control(&self) -> Result<Option<ControlMessage>, TransportError> {
+        let mut guard = self.inner.control_rx.lock().await;
+        loop {
+            match read_msg(&mut guard).await? {
+                Some(b) if b.is_empty() => continue,
+                Some(b) => {
+                    let text = std::str::from_utf8(&b)
+                        .map_err(|e| TransportError::Protocol(e.to_string()))?;
+                    let msg = ControlMessage::from_text(text)
+                        .map_err(|e| TransportError::Protocol(e.to_string()))?;
+                    return Ok(Some(msg));
+                }
+                None => return Ok(None),
             }
         }
     }
 
-    async fn close(&self) -> Result<(), TransportError> {
-        self.conn.close(0u32.into(), b"bye");
+    /// 发送控制消息（StreamOpened / Error / CloseStream）。
+    pub async fn send_control(&self, msg: ControlMessage) -> Result<(), TransportError> {
+        let text = msg.to_text();
+        let mut tx = self.inner.control_tx.lock().await;
+        write_msg(&mut tx, text.as_bytes()).await?;
+        self.inner.stats.add_sent(LEN_BYTES + text.len());
         Ok(())
+    }
+
+    /// 接受下一个媒体 bi stream（客户端就绪信号后返回）。
+    /// 一次只允许一个待决 `accept_bi`（peer 循环 pinned future 复用）。
+    pub async fn accept_media(
+        &self,
+    ) -> Result<(quinn::SendStream, quinn::RecvStream, u64), TransportError> {
+        let (tx, rx) = self
+            .inner
+            .conn
+            .accept_bi()
+            .await
+            .map_err(|e| TransportError::Io(format!("QUIC accept_bi 失败: {e}")))?;
+        let id: u64 = tx.id().into();
+        Ok((tx, rx, id))
     }
 }
 
-impl QuicDataSession {
-    /// 读 control stream 的一条真实消息（跳过空消息就绪信号；持锁跨 await）。
-    async fn recv_control(&self) -> Result<Option<Bytes>, TransportError> {
-        let mut guard = self.control_rx.lock().await;
-        loop {
-            match read_msg(&mut guard).await? {
-                Some(b) if b.is_empty() => continue,
-                other => return Ok(other),
-            }
-        }
-    }
+// ---------------------------------------------------------------------------
+// 分帧助手（长度前缀；与 WS/旧 QUIC 同构）
+// ---------------------------------------------------------------------------
 
-    /// 读 media stream 的一条真实消息。
-    async fn recv_media(&self) -> Result<Option<Bytes>, TransportError> {
-        let mut guard = self.media_rx.lock().await;
-        loop {
-            match read_msg(&mut guard).await? {
-                Some(b) if b.is_empty() => continue,
-                other => return Ok(other),
+/// 读一条媒体消息并解码为 v1 帧（v2 紧凑帧头；跳过空就绪信号；
+/// `Ok(None)` = 流结束）。中继 QUIC 推流任务用。
+pub async fn read_media_frame(rx: &mut quinn::RecvStream) -> Result<Option<Frame>, TransportError> {
+    loop {
+        match read_msg(rx).await? {
+            Some(b) if b.is_empty() => continue,
+            Some(b) => {
+                let f = Frame2::to_frame_owned(b)
+                    .map_err(|e| TransportError::Protocol(e.to_string()))?;
+                return Ok(Some(f));
             }
+            None => return Ok(None),
         }
     }
+}
+
+/// 写一条媒体帧（v2 紧凑帧头）。中继 QUIC 观看任务用。
+pub async fn write_media_frame(
+    tx: &mut quinn::SendStream,
+    frame: &Frame,
+) -> Result<(), TransportError> {
+    let full = Frame2::from_frame(frame).to_bytes();
+    write_msg(tx, &full).await
 }
 
 /// 写一条长度前缀消息。
@@ -475,89 +834,142 @@ impl rustls::client::danger::ServerCertVerifier for SkipVerify {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, TRACK_VIDEO};
+    use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, Frame, MAGIC, TRACK_VIDEO};
 
-    /// 真 UDP loopback 上的 QUIC 双 stream 多路复用 roundtrip。
+    /// 服务端测试用 peer 配对循环：control OpenStream ↔ accept_bi FIFO 配对，
+    /// 与中继 [`crate::relay::data_plane::quic_peer_loop`] 同构的最小版。
+    /// 每条配对后回 `StreamOpened`（客户端 StreamOpened→Welcome/Ready 转换依赖）。
+    /// 返回 (stream_id, SendStream, RecvStream)——调用方持 SendStream 收对端帧。
+    async fn server_pair_loop(
+        link: QuicServerLink,
+        stream_count: usize,
+    ) -> Vec<(String, quinn::SendStream, quinn::RecvStream)> {
+        use std::collections::VecDeque;
+        let mut opens: VecDeque<ControlMessage> = VecDeque::new();
+        let mut streams: VecDeque<(quinn::SendStream, quinn::RecvStream)> = VecDeque::new();
+        let mut accept = Box::pin(link.accept_media());
+        let mut paired: Vec<(String, quinn::SendStream, quinn::RecvStream)> = Vec::new();
+        while paired.len() < stream_count {
+            tokio::select! {
+                msg = link.recv_control() => {
+                    if let Some(m) = msg.expect("control 读失败") {
+                            opens.push_back(m);
+                    }
+                }
+                res = &mut accept => {
+                    if let Ok((tx, rx, _)) = res {
+                        streams.push_back((tx, rx));
+                        accept = Box::pin(link.accept_media());
+                    }
+                }
+            }
+            while !opens.is_empty() && !streams.is_empty() {
+                let open = opens.pop_front().unwrap();
+                let (tx, rx) = streams.pop_front().unwrap();
+                let sid = match &open {
+                    ControlMessage::OpenStream { stream_id, .. } => stream_id.clone(),
+                    _ => unreachable!(),
+                };
+                link.send_control(ControlMessage::StreamOpened {
+                    stream_id: sid.clone(),
+                })
+                .await
+                .unwrap();
+                paired.push((sid, tx, rx));
+            }
+        }
+        paired
+    }
+
+    /// 真 UDP loopback 上的 QUIC **连接复用** roundtrip：
+    /// 客户端一条共享连接开两条媒体流（push + watch 形态），服务端 peer 循环
+    /// 按序配对——两路流独立收帧，互不串流（Phase C 核心语义）。
     #[tokio::test]
-    async fn quic_multiplex_roundtrip() {
+    async fn quic_link_multiplex_two_media_streams() {
         let transport = QuicTransport::new();
         let mut handle = transport
             .bind("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
         let addr = handle.local_addr();
-        // 返回 handle 以保持服务端 endpoint 存活（与 relay 长期持有一致）
         let accept_task = tokio::spawn(async move {
-            let session = handle.accept().await.unwrap();
-            (session, handle)
+            let link = handle.accept_link().await.unwrap();
+            let paired = server_pair_loop(link, 2).await;
+            (paired, handle)
         });
 
+        // 客户端：同一 (host, port) 两条会话共享一条连接
         let peer = PeerAddr {
             transport: TransportId::Quic,
             addr: format!("quic://127.0.0.1:{}", addr.port()),
         };
         let params = SessionParams {
-            session_id: "q1".into(),
+            session_id: "s1".into(),
             profile: ReliabilityProfile::Lossless,
         };
-        let client = transport.connect(&peer, &params).await.unwrap();
-        let (server, _handle) = accept_task.await.unwrap();
+        let s1 = transport.connect(&peer, &params).await.unwrap();
+        let s2 = transport.connect(&peer, &params).await.unwrap();
+        assert!(s1.peer_addr().is_some());
 
-        // 控制消息（Hello）
-        client
-            .send(SessionPacket::Control(ControlMessage::Hello {
-                stream_id: "q1".into(),
-                title: "t".into(),
-                video: None,
-                audio: None,
-                share_token: None,
-            }))
-            .await
-            .unwrap();
-        let pkt = server.recv().await.unwrap().unwrap();
-        assert!(matches!(
-            pkt,
-            SessionPacket::Control(ControlMessage::Hello { .. })
-        ));
+        // push 形态（Hello → OpenStream push；Welcome 回执）
+        s1.send(SessionPacket::Control(ControlMessage::Hello {
+            stream_id: "stream-a".into(),
+            title: "a".into(),
+            video: None,
+            audio: None,
+            share_token: None,
+        }))
+        .await
+        .unwrap();
+        // watch 形态（Watch → OpenStream watch；Ready 回执）
+        s2.send(SessionPacket::Control(ControlMessage::Watch {
+            stream_id: "stream-b".into(),
+        }))
+        .await
+        .unwrap();
 
-        // 大关键帧：QUIC 无单消息大小限制，整体发送（无分片）→ 逐字节一致
-        let big: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
-        client
-            .send(SessionPacket::Media(Frame::new(
-                TRACK_VIDEO,
-                CODEC_H264,
-                FLAG_KEYFRAME,
-                123,
-                big.clone(),
-            )))
-            .await
-            .unwrap();
-        let pkt = server.recv().await.unwrap().unwrap();
-        match pkt {
-            SessionPacket::Media(frame) => {
-                assert_eq!(frame.payload.len(), big.len());
-                assert_eq!(frame.payload.to_vec(), big);
-                assert_eq!(frame.header.pts_ms, 123);
-                assert!(frame.header.is_keyframe());
-            }
-            other => panic!("期望 Media，得到 {other:?}"),
+        let (mut paired, _handle) = accept_task.await.unwrap();
+        assert_eq!(paired.len(), 2, "两条媒体流按序配对");
+        assert_eq!(paired[0].0, "stream-a");
+        assert_eq!(paired[1].0, "stream-b");
+
+        // 每条流独立发帧（紧凑帧头 v2 线上格式；s1 → stream-a、s2 → stream-b）
+        let frames = [
+            Frame::new(TRACK_VIDEO, CODEC_H264, FLAG_KEYFRAME, 0, vec![0xA0; 16]),
+            Frame::new(TRACK_VIDEO, CODEC_H264, FLAG_KEYFRAME, 1, vec![0xA1; 16]),
+        ];
+        s1.send(SessionPacket::Media(frames[0].clone())).await.unwrap();
+        s2.send(SessionPacket::Media(frames[1].clone())).await.unwrap();
+        // 服务端收到两帧：内容逐字节一致（紧凑头解码 → v1 Frame；跳过空就绪信号）
+        for (i, (_sid, _tx, rx)) in paired.iter_mut().enumerate() {
+            let mut rx = rx;
+            let bytes = loop {
+                match read_msg(&mut rx).await.unwrap() {
+                    Some(b) if b.is_empty() => continue,
+                    other => break other.expect("应收到帧消息"),
+                }
+            };
+            let frame = Frame2::to_frame(&bytes).expect("紧凑帧解码");
+            assert_eq!(frame.header.track, TRACK_VIDEO);
+            assert_eq!(frame.header.pts_ms, i as u32);
+            assert_eq!(frame.payload.to_vec(), vec![0xA0 + i as u8; 16]);
         }
 
-        // 服务端 → 客户端：控制回执（反向路径验证）
-        server
-            .send(SessionPacket::Control(ControlMessage::Welcome {
-                stream_id: "q1".into(),
-            }))
-            .await
-            .unwrap();
-        let pkt = client.recv().await.unwrap().unwrap();
+        // 客户端收 Welcome/Ready 回执（StreamOpened 事件转换）
+        let ack1 = s1.recv().await.unwrap().unwrap();
         assert!(matches!(
-            pkt,
+            ack1,
             SessionPacket::Control(ControlMessage::Welcome { .. })
         ));
+        let ack2 = s2.recv().await.unwrap().unwrap();
+        assert!(matches!(
+            ack2,
+            SessionPacket::Control(ControlMessage::Ready { .. })
+        ));
 
-        client.close().await.unwrap();
-        assert!(server.recv().await.unwrap().is_none());
+        // 优雅关闭：CloseStream + 结束流
+        s1.close().await.unwrap();
+        s2.close().await.unwrap();
     }
 
     #[test]
@@ -582,8 +994,7 @@ mod tests {
     }
 
     /// 硬断连（对端被 force-stop，无任何再见包）检测：服务端在 idle 超时内
-    /// 判死连接，`recv` 返回（推流循环据此清理流，修复「中继无感知、流
-    /// 残留」——quinn 默认 idle 30s，人工等半分钟才清）。
+    /// 判死连接，`recv_control` 返回（中继 peer 循环据此清理）。
     #[tokio::test]
     async fn hard_disconnect_released_by_idle_timeout() {
         let endpoint = quinn::Endpoint::server(
@@ -592,7 +1003,7 @@ mod tests {
         )
         .unwrap();
         let server_addr = endpoint.local_addr().unwrap();
-        // 先起服务端 accept 任务（不 await——客户端要并发接入），再连客户端
+        // 服务端：接受连接 + control stream（不读，等 idle 判死）
         let server_task = tokio::spawn(async move {
             let conn = endpoint
                 .accept()
@@ -603,63 +1014,48 @@ mod tests {
                 .await
                 .unwrap();
             let (ctx, crx) = conn.accept_bi().await.unwrap();
-            let (mtx, mrx) = conn.accept_bi().await.unwrap();
-            QuicDataSession::new(
-                None,
-                conn,
-                ctx,
-                crx,
-                mtx,
-                mrx,
-                Arc::new(TransportStats::default()),
-            )
+            (conn, ctx, crx)
         });
 
-        // 客户端：裸 quinn + 与 connect() 相同的握手（就绪信号再 Hello）
+        // 客户端：裸 quinn 建立连接（与 link_for 相同握手），然后整体 drop
+        // （无 close 帧，等同 force-stop / 拔线）
         let client_ep = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
         let conn = client_ep
             .connect_with(client_config().unwrap(), server_addr, "stross")
             .unwrap()
             .await
             .unwrap();
-        let (mut ctx, crx) = conn.open_bi().await.unwrap();
+        let (mut ctx, mut crx) = conn.open_bi().await.unwrap();
         ctx.write_all(&0u32.to_le_bytes()).await.unwrap();
-        let (mut mtx, mrx) = conn.open_bi().await.unwrap();
-        mtx.write_all(&0u32.to_le_bytes()).await.unwrap();
-        let client = QuicDataSession::new(
-            Some(client_ep),
-            conn,
-            ctx,
-            crx,
-            mtx,
-            mrx,
-            Arc::new(TransportStats::default()),
+        let (_conn, _ctx, scrx) = server_task.await.unwrap();
+        let _ = crx;
+        drop(conn);
+        drop(ctx);
+
+        // 服务端 control 读：先消费客户端就绪信号（空消息），
+        // 再等 idle 判死 → 读错误 / 关闭返回（触发清理）
+        let mut scrx = scrx;
+        let ready = read_msg(&mut scrx).await.expect("control 读应成功");
+        assert!(
+            ready.as_ref().is_some_and(|b| b.is_empty()),
+            "首条应为就绪空消息: {ready:?}"
         );
-        client
-            .send(SessionPacket::Control(ControlMessage::Hello {
-                stream_id: "hardkill".into(),
-                title: "t".into(),
-                video: None,
-                audio: None,
-                share_token: None,
-            }))
-            .await
-            .unwrap();
-
-        let server = server_task.await.unwrap();
-        let first = server.recv().await.unwrap().unwrap();
-        assert!(matches!(
-            first,
-            SessionPacket::Control(ControlMessage::Hello { .. })
-        ));
-
-        // 硬断连：直接 drop（无 close 帧，等同 force-stop / 拔线）
-        drop(client);
-
-        let r = tokio::time::timeout(std::time::Duration::from_secs(6), server.recv()).await;
+        let r = tokio::time::timeout(std::time::Duration::from_secs(6), read_msg(&mut scrx)).await;
         match r {
             Ok(Ok(None)) | Ok(Err(_)) => {} // 干净结束或判死错误都触发清理
-            other => panic!("硬断连后 recv 应在 idle 内返回，得到 {other:?}"),
+            other => panic!("硬断连后 control 读应在 idle 内返回，得到 {other:?}"),
         }
+    }
+
+    /// 紧凑帧头 v2 的「magic 不再需要」：Frame2 头与旧 v1 头在线上互斥
+    /// （仅 QUIC 复用连接用 Frame2；WS/SRT 单流路径保留 v1，见 frame.rs 测试）。
+    #[test]
+    fn compact_header_has_no_magic() {
+        let f = Frame::new(TRACK_VIDEO, CODEC_H264, FLAG_KEYFRAME, 0, vec![1u8; 8]);
+        let compact = Frame2::from_frame(&f).to_bytes();
+        assert!(
+            !compact.starts_with(MAGIC),
+            "紧凑头不带 v1 魔数（长度前缀 + 协商声明提供上下文）"
+        );
     }
 }

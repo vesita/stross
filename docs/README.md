@@ -17,7 +17,7 @@
 | [endpoint-model-v2.md](endpoint-model-v2.md) | **端点框架规格（唯一规格源）**：节点→端点→策略三层注册 + 分享/订阅双特性 + 策略组合（序列化+pick） | 权威（已落地） |
 | ~~endpoint-model.md~~ | 端点框架 v1 规格（单层模型 + load/share 契约；已被 v2 演进取代，文件已删除） | 已删除 |
 | [plugin-architecture.md](plugin-architecture.md) | **可插拔传输基座**：Transport trait、ReliabilityProfile、四传输落地 | 权威（阶段 2 已落地） |
-| [comm-mode-v2.md](comm-mode-v2.md) | **通信模式 v2 设计提案**：控制面协商 + 数据面按 id 复用 + 数据衔接层 | 设计提案（待实施） |
+| [comm-mode-v2.md](comm-mode-v2.md) | **通信模式 v2**：控制面协商 + 数据面按 id 复用 + 数据衔接层；Phase A/B/C 全落地（QUIC 连接复用 + 接收端多流 + 紧凑帧头 + 语义 id 派生） | 权威（已落地） |
 | [protocol.md](protocol.md) | 线上协议：24 字节 v2 帧头 + JSON 控制消息 | 权威 |
 | [android-build.md](android-build.md) | **Android 构建实测固化（JDK/工具链/SDK/网络坑 唯一真源）** | 权威 |
 | [platforms.md](platforms.md) | 平台构建与使用（Linux/Windows/Android 快速路径） | 权威（JDK 详见 android-build） |

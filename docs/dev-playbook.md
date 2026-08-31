@@ -152,7 +152,15 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
 - **Android 无窗口级 `setFullscreen`**（`win.isFullscreen()/setFullscreen()` 均抛错）：全屏靠 CSS `.canvas-wrap.fs`（`position:fixed; inset:0`）兜底。`togglePlayerFullscreen` 必须**先应用 CSS 全屏再试 OS 全屏**，不能因 `setFullscreen` 抛错提前 return。
 - 发现「陈旧条目」未清：设备死后手机列表可能仍显示（依赖 mDNS TTL；未做主动超时重探）。**已部分修**：前端 `refreshDevices` 剔 `!d.online`（探测失败即移除），手动地址仍保留；mDNS TTL 窗口内的死节点因此不再长期残留。
 - **推流引擎已并发化**：`kernel.engine`（`Option<RunningStream>`）→ `engines: HashMap<stream_id, RunningStream>`。端点模型允许任意端点并发推（屏幕+系统声音等），不再有「已经在推流中」单流限制；仅同 stream_id 重复才拒。回归测试 `concurrent_streams_both_start`。
-  - **接收端仍单流**：手机/PC 的「接收」面板一次只播放一条流（`start_receive` 切换流会停旧流）。所以 PC 并发推了 screen+audio 两条流，订阅方只看到最后订阅的那条——「屏幕+声音同屏播放」需要**链接复用**（把多路媒体并进一条流 / 运行中加轨），属后续想法。
+- **接收端多链路已落地**（通信模式 v2 Phase C）：`Kernel::receivers: HashMap<link_id, Receiver>`——`start_receive_link`/`stop_receive_link`/`receive_links`/`take_receive_frames_for`；桌面 GUI 右栏「接收」逐条链路显示 + 独立停止，画布显示最近活跃视频链路，纯音频链只出声。**旧单流 API（`start_receive`/`stop_receive`/`receive_status`/`take_receive_frames`）落预留槽 `main` 兼容**（Android 单链播放路径不变）。改接收侧先看这两套 API 的分工。
+- **QUIC 连接复用（Phase C）坑位**（docs/comm-mode-v2.md §5 附）：
+  - **确认门**：`QuicMediaSession` 在 StreamOpened（Welcome/Ready）送达前不吐媒体帧——否则等确认的循环（`connect_watch`）会吞掉先到的首关键帧（负载下必现超时）；
+  - **recv 事件优先**：已确认后 `biased` 事件分支优先（与旧 `QuicDataSession` 一致）；
+  - **FIFO 配对禁止 `(a.pop(), b.pop())` 元组**：元组先求值两个 pop，单侧空时另一侧被提前消费丢弃——先判空再 pop；
+  - 客户端**链路管理器** `QUIC_LINKS`（stross-transport 进程级静态，按 (host,port) 复用）：上层 `RelayClient`/`connect_watch` 零改动自动共享连接；中继 peer 循环（data_plane.rs `quic_peer_loop`）把 control OpenStream ↔ accept_bi FIFO 配对，`[连接][stream_id]` demux；
+  - 紧凑帧头 `Frame2`（14 字节，codec 移 OpenStream 协商）：**仅 QUIC 复用连接**用；WS/SRT 单流路径保留 v1 24 字节头；
+  - 语义 id 派生 `derive_stream_id(endpoint_id, transport_profile, pick_rule)`：端点订阅 grant 流 id 已改派生 id（不再 sess-N），会话幂等 `ensure_session_with_id`；订阅方一致性校验不一致仅告警；
+  - 中继 peer 循环需直接驱动 quinn 流类型 → **stross-kernel 有 `quinn` 直接依赖**（传输层仍属主）。
 - 名称不一致：mDNS `pico`(hostname) vs `/api/discovery` `Stross 设备`(identity.device_name)。
 - Android 屏幕端点（MediaProjection FGS）、摄像头（CameraX）、剪贴板（E 阶段）待扩充。
 - 协议优化排队：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕。

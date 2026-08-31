@@ -174,8 +174,13 @@ $btn('sub-cancel-btn').onclick = () => $('sub-modal').classList.add('hidden');
 $('sub-modal').addEventListener('click', (e) => {
   if (e.target === $('sub-modal')) $('sub-modal').classList.add('hidden');
 });
-// 接收面板：停止接收
+// 接收面板：停止接收（多端点链接：停止全部链路）
 $btn('recv-stop-btn').onclick = () => void stopReceive();
+// 接收链路行：逐条停止（data-link = 链路 id）
+$('recv-links').addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest('[data-link]') as HTMLElement | null;
+  if (btn && btn.dataset.link) void stopReceiveLink(btn.dataset.link);
+});
 // 播放器控制条：全屏 / 停止
 $btn('recv-fs-btn').onclick = () => void togglePlayerFullscreen();
 $btn('recv-fs-stop-btn').onclick = () => void stopReceive();

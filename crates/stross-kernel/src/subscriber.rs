@@ -23,6 +23,7 @@ use crate::relay::client as relay_http;
 use anyhow::Context;
 use serde::Serialize;
 use stross_proto::message::{Delivery, EndpointDir, ShareGrant, ShareRequest, SubscribeSpec};
+use stross_proto::message::derive_stream_id;
 
 use crate::Kernel;
 use crate::bootstrap;
@@ -232,6 +233,21 @@ fn build_subscribe_spec(
             serialize: stross_proto::message::SerializeRule::Passthrough,
             pick: grant.pick_rule.unwrap_or_default(),
         });
+    // 语义 id 一致性校验（docs/comm-mode-v2.md §6「配套改动」）：订阅方用
+    // (端点, 传输档案, pick 规则) 本地推导，与授予的 stream_id 比对——
+    // 同源同版本必然一致（watch 用自己能算出的 id）；旧对端不派生时仅告警，
+    // 仍按授予继续（不阻断订阅）。
+    if let (Some(profile), Some(pick)) = (grant.transport_profile, grant.pick_rule) {
+        let expected = derive_stream_id(endpoint_id, profile, pick);
+        if expected != grant.view.stream_id {
+            tracing::warn!(
+                "订阅 id 一致性校验失败：本地推导 {expected} ≠ 授予 {}（对端版本偏差？仍按授予继续）",
+                grant.view.stream_id
+            );
+        } else {
+            tracing::debug!("订阅 id 一致性校验通过: {expected}");
+        }
+    }
     let relay_url = grant
         .relay
         .as_ref()

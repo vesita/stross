@@ -59,7 +59,7 @@ pub struct ReceiveStats {
     pub error: Option<String>,
 }
 
-/// 本机中继的代理能力：直连锚点失败时，经它级联拉流（跨网段/防火墙兜底）。
+/// 「本机中继的代理能力：直连锚点失败时，经它级联拉流（跨网段/防火墙兜底）。
 ///
 /// 由 `Kernel` 在持有本机 `RelayHandle` 时构造传入；无本机中继则为 `None`
 /// （降级不可用，直连失败即报错）。
@@ -69,6 +69,22 @@ pub struct LocalProxy {
     pub state: RelayState,
     /// 本机中继 WS 基址（`ws://127.0.0.1:<port>`，代理建立后 watch 它）。
     pub ws_base: String,
+}
+
+/// 预留的**单链路接收槽** id：兼容旧单流 API（[`crate::Kernel::start_receive`] /
+/// `stop_receive` / `receive_status` / `take_receive_frames`）与 Android 单链
+/// 播放路径——它们统一落到这个固定槽位，多链路 API（`start_receive_link` 等）
+/// 用自定义 link_id 并存。
+pub const MAIN_RECEIVE_LINK: &str = "main";
+
+/// 一条接收链路的状态视图（多链路 API 返回；GUI 面板逐条展示）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiveLinkView {
+    /// 链路 id（上层自定义；`main` 为旧单流兼容槽）。
+    pub link_id: String,
+    /// 该链路接收统计。
+    pub stats: ReceiveStats,
 }
 
 /// watch 主循环公共核心：连接（含级联兜底）→ 每帧经解读模块 →

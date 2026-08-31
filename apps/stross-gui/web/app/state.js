@@ -16,17 +16,14 @@ let discoverInFlight = false; // 设备流聚合 in-flight
 let discoverCacheAt = 0;
 const DISCOVER_TTL_MS = 3000;
 // —— 订阅（入站接收）状态 ——
-/** 本机是否正在接收（订阅）流。 */
+/** 本机是否正在接收（订阅）流（= recvLinks 非空；多端点链接）。 */
 let receiving = false;
-/** 当前订阅中的流 id（供共享面板定位流信息）。 */
-let recvStreamId = null;
-let recvFrameCount = 0;
-let recvAudioBlocks = 0; // 纯音频流（B2）：收到音频块即视为"有数据"
-let recvError = null;
-/** 接收会话启动时刻（`start_receive` 成功时记录）。流切换/刚启动时新接收器
- *  可能短暂 `!running`（连接窗口）——据此给宽限期，避免过早收尾把 UI 拉回空闲。 */
-let recvStartAt = 0;
-let recvUnlisten = null;
+const recvLinks = new Map();
+/** 画布当前显示的链路（最近收到视频帧的链路；纯音频链不占画面）。 */
+let activeVideoLink = null;
+/** 已订阅端点集合（`host:endpointId`；对端卡片「已订阅 · 接收中」态）。
+ *  旧单变量 `subscribedEndpoint` 只记一条——多端点链接下须为集合。 */
+const subscribedEndpoints = new Set();
 /** 当前接收目标中继（点选设备的锚点；null = 本机锚点）。 */
 let targetRelay = null;
 // —— 播放器（接收画面）状态 ——
@@ -42,9 +39,6 @@ let localCatalog = { endpoints: [] };
 let publishTarget = null;
 /** 订阅弹窗目标（远端端点；null = 未打开）。 */
 let subscribeTarget = null;
-/** 当前已订阅（接收中）的对端端点（host + endpointId）；用于对端卡片
- *  「订阅」键显示接收中态——避免订阅后键仍显示「订阅」（可重复点击误导）。 */
-let subscribedEndpoint = null;
 /** 正在订阅的端点（握手进行中）；「订阅」键显示「正在订阅…」进行态，防重复点击。 */
 let subscribingEndpoint = null;
 /** 远端目录缓存（设备 base → RemoteDir；TTL 内命中直接渲染）。 */

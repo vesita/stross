@@ -5481,6 +5481,7 @@ dependencies = [
  "axum",
  "futures-util",
  "mdns",
+ "quinn",
  "reqwest",
  "serde",
  "serde_json",

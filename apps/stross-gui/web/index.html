@@ -225,6 +225,8 @@
           <span class="hint">在左侧选择一台设备，订阅它共享的内容后在此播放</span>
         </div>
         <div id="recv-error" class="error hidden"></div>
+        <!-- 多端点链接：接收链路列表（一次可同时接收多条流；每条链独立状态/停止） -->
+        <div id="recv-links" class="recv-links"></div>
         <!-- 接收画面：有视频帧时显示，纯音频隐藏 -->
         <div class="canvas-wrap hidden" id="recv-canvas-wrap">
           <canvas id="recv-canvas" width="640" height="360"></canvas>

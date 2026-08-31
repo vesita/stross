@@ -198,12 +198,9 @@ impl RelayServer {
         let app = api::router(state.clone());
 
         data_plane::spawn_accept_loop(srt_listener, state.clone(), shutdown_tx.subscribe(), "SRT");
-        data_plane::spawn_accept_loop(
-            quic_listener,
-            state.clone(),
-            shutdown_tx.subscribe(),
-            "QUIC",
-        );
+        // QUIC：通信模式 v2 Phase C 连接复用——一条连接 N 媒体流（链路级
+        // peer 循环 + [连接][stream_id] demux），不再走每流一会话的 handle_connect。
+        data_plane::spawn_quic_accept_loop(quic_listener, state.clone(), shutdown_tx.subscribe());
 
         let task = tokio::spawn(async move {
             // ConnectInfo：WS 升级处提取对端地址（来源感知门控用）

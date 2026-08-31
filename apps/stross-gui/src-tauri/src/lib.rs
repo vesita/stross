@@ -74,6 +74,9 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         start_receive,
         stop_receive,
         receive_status,
+        start_receive_link,
+        stop_receive_link,
+        receive_links,
         negotiator_respond,
         #[cfg(all(not(mobile), target_os = "linux"))]
         firewall_status,

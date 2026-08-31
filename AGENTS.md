@@ -174,8 +174,12 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
   提交（`.js` 是 tsc 产物）。
 - **推流引擎已并发化**：kernel `engines: HashMap<stream_id, RunningStream>`（原单引擎，
   曾有「已经在推流中」限制）。端点模型允许任意端点并发推（屏幕+系统声音）；
-  仅同一 stream_id 重复才拒。**接收端仍单流**（一次播一条流，`start_receive` 会停旧流）——
-  「屏幕+声音同屏」需通信模式 v2（docs/comm-mode-v2.md）。
+  仅同一 stream_id 重复才拒。
+- **接收端多链路已落地**（通信模式 v2 Phase C，docs/comm-mode-v2.md）：内核
+  `receivers: HashMap<link_id, Receiver>` + 桌面 GUI 多路订阅（右栏「接收」逐条
+  链路独立启停/统计）；旧单流 API 落预留槽 `main` 兼容（Android 单链不变）。
+  QUIC 连接复用：一条连接 N 媒体流（`OpenStream` 流级登记 + 中继 `[连接][stream_id]`
+  demux + 紧凑帧头 v2），WS/SRT 保持每流独立连接。
 - **离线节点剔除**：前端 `refreshDevices` 剔 `!d.online`（`/api/info` 探测失败即移除），
   避免 mDNS TTL 未到期时残留「已关闭节点」；手动地址不可达分支保留。
 - **同步 tauri 命令不得 `tokio::spawn`**：`endpoint_stop_share`、`negotiator_respond`

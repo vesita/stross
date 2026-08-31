@@ -37,6 +37,144 @@ pub const VERSION: u8 = 2;
 /// 头部固定长度。
 pub const HEADER_LEN: usize = 24;
 
+// ---------------------------------------------------------------------------
+// v2 紧凑帧头（通信模式 v2 Phase C「字段简化」，docs/comm-mode-v2.md §2/§5）
+// ---------------------------------------------------------------------------
+
+/// v2 紧凑帧头（QUIC 复用连接上的媒体流专用）。
+///
+/// ```text
+/// +-------+-------+---------+---------+---------+
+/// | flags | track | pts_ms  | seq     | len     |
+/// |  u8   |  u8   | u32 LE  | u32 LE  | u32 LE  |
+/// +-------+-------+---------+---------+---------+
+/// | 1     | 1     | 4       | 4       | 4       |
+/// ```
+///
+/// 相比 v1 24 字节头的裁字段：
+/// * **codec 移到协商结果**（OpenStream 声明，接收侧按 track 路由即可，
+///   编解码自流内容嗅探——SPS/PPS / ADTS 头）；
+/// * **magic/version 去掉**（QUIC 复用连接 + 长度前缀已提供上下文与分帧；
+///   开发期允许破坏性更新，全端同步演进）；
+/// * **frag 分片字段去掉**（QUIC 整帧发送，无单消息大小限制，与 WS 一致）。
+///
+/// 每包只带 `track + flags + pts/seq + len`（14 字节）；流身份（语义 id）由
+/// QUIC stream 承载（stream 即类型，短 id 映射见 docs/comm-mode-v2.md §6）。
+/// v1 24 字节头保留给 WS/SRT 单流连接（单流回退路径不受影响）。
+pub const HEADER2_LEN: usize = 14;
+
+/// v2 紧凑帧头（track/flags/pts/seq/len；codec 由协商声明，无 magic/version）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameHeader2 {
+    pub track: u8,
+    pub flags: u8,
+    pub pts_ms: u32,
+    pub seq: u32,
+    pub len: u32,
+}
+
+impl FrameHeader2 {
+    /// 编码为 14 字节（track, flags, pts, seq, len 小端）。
+    pub fn encode(&self) -> [u8; HEADER2_LEN] {
+        let mut buf = [0u8; HEADER2_LEN];
+        buf[0] = self.track;
+        buf[1] = self.flags;
+        buf[2..6].copy_from_slice(&self.pts_ms.to_le_bytes());
+        buf[6..10].copy_from_slice(&self.seq.to_le_bytes());
+        buf[10..14].copy_from_slice(&self.len.to_le_bytes());
+        buf
+    }
+
+    /// 从缓冲区解析（长度不足返回 [`FrameError::TooShort`]）。
+    pub fn decode(buf: &[u8]) -> Result<Self, FrameError> {
+        if buf.len() < HEADER2_LEN {
+            return Err(FrameError::TooShort(buf.len()));
+        }
+        Ok(Self {
+            track: buf[0],
+            flags: buf[1],
+            pts_ms: u32::from_le_bytes(buf[2..6].try_into().unwrap()),
+            seq: u32::from_le_bytes(buf[6..10].try_into().unwrap()),
+            len: u32::from_le_bytes(buf[10..14].try_into().unwrap()),
+        })
+    }
+}
+
+/// v2 紧凑帧（头 + 载荷）；codec 置 0（由协商声明，消费侧不读）。
+#[derive(Debug, Clone)]
+pub struct Frame2 {
+    pub header: FrameHeader2,
+    pub payload: Bytes,
+}
+
+impl Frame2 {
+    /// 从 v1 [`Frame`] 构造 v2 紧凑帧（只保留 track/flags/pts/seq/len）。
+    pub fn from_frame(f: &Frame) -> Self {
+        Self {
+            header: FrameHeader2 {
+                track: f.header.track,
+                flags: f.header.flags,
+                pts_ms: f.header.pts_ms,
+                seq: f.header.seq,
+                len: f.payload.len() as u32,
+            },
+            payload: f.payload.clone(),
+        }
+    }
+
+    /// 编码为完整线上消息（头 + 载荷）。
+    pub fn to_bytes(&self) -> Bytes {
+        let mut out = Vec::with_capacity(HEADER2_LEN + self.payload.len());
+        out.extend_from_slice(&self.header.encode());
+        out.extend_from_slice(&self.payload);
+        out.into()
+    }
+
+    /// 从线上消息解码为 v1 [`Frame`]（codec=0，消费侧不读；track/flags 保留）。
+    pub fn to_frame(buf: &[u8]) -> Result<Frame, FrameError> {
+        let header = FrameHeader2::decode(buf)?;
+        let total = HEADER2_LEN + header.len as usize;
+        if buf.len() < total {
+            return Err(FrameError::TooShort(buf.len()));
+        }
+        Ok(Frame {
+            header: FrameHeader {
+                track: header.track,
+                codec: 0,
+                flags: header.flags,
+                pts_ms: header.pts_ms,
+                seq: header.seq,
+                frag_idx: 0,
+                frag_cnt: 0,
+                len: header.len,
+            },
+            payload: Bytes::copy_from_slice(&buf[HEADER2_LEN..total]),
+        })
+    }
+
+    /// 零拷贝解码（`buf` 已读入的完整消息；载荷共享底层内存）。
+    pub fn to_frame_owned(buf: Bytes) -> Result<Frame, FrameError> {
+        let header = FrameHeader2::decode(&buf)?;
+        let total = HEADER2_LEN + header.len as usize;
+        if buf.len() < total {
+            return Err(FrameError::TooShort(buf.len()));
+        }
+        Ok(Frame {
+            header: FrameHeader {
+                track: header.track,
+                codec: 0,
+                flags: header.flags,
+                pts_ms: header.pts_ms,
+                seq: header.seq,
+                frag_idx: 0,
+                frag_cnt: 0,
+                len: header.len,
+            },
+            payload: buf.slice(HEADER2_LEN..total),
+        })
+    }
+}
+
 // ---- track ----
 pub const TRACK_VIDEO: u8 = 0;
 pub const TRACK_AUDIO: u8 = 1;
@@ -262,6 +400,49 @@ mod tests {
         assert!(h2.is_start());
         assert!(!h2.is_end());
         assert!(!h2.is_whole());
+    }
+
+    #[test]
+    fn header2_roundtrip_and_field_cut() {
+        // 紧凑头：14 字节（v1 24 字节裁掉 codec/magic/version/frag）
+        let h2 = FrameHeader2 {
+            track: TRACK_AUDIO,
+            flags: FLAG_CONFIG,
+            pts_ms: 99,
+            seq: 7,
+            len: 1234,
+        };
+        let buf = h2.encode();
+        assert_eq!(buf.len(), HEADER2_LEN);
+        assert_eq!(HEADER2_LEN, 14, "紧凑头固定 14 字节（< v1 的 24）");
+        let back = FrameHeader2::decode(&buf).unwrap();
+        assert_eq!(h2, back);
+        assert!(FrameHeader2::decode(&buf[..10]).is_err(), "长度不足拒绝");
+    }
+
+    #[test]
+    fn frame2_v1_roundtrip_preserves_track_flags_pts_seq() {
+        // v1 帧 → v2 紧凑线上消息 → v1 帧：track/flags/pts/seq 保留，codec 置 0
+        let f = Frame::with_seq(TRACK_VIDEO, CODEC_H264, FLAG_KEYFRAME, 123, 9, vec![1u8, 2, 3, 4]);
+        let compact = Frame2::from_frame(&f);
+        assert_eq!(compact.header.track, TRACK_VIDEO);
+        assert_eq!(compact.header.flags, FLAG_KEYFRAME);
+        assert_eq!(compact.header.pts_ms, 123);
+        assert_eq!(compact.header.seq, 9);
+        let wire = compact.to_bytes();
+        assert_eq!(wire.len(), HEADER2_LEN + 4);
+        let back = Frame2::to_frame(&wire).unwrap();
+        assert_eq!(back.header.track, TRACK_VIDEO);
+        assert_eq!(back.header.flags, FLAG_KEYFRAME);
+        assert_eq!(back.header.pts_ms, 123);
+        assert_eq!(back.header.seq, 9);
+        assert_eq!(back.header.codec, 0, "codec 由协商声明，紧凑头不携带");
+        assert!(back.header.is_keyframe());
+        assert_eq!(back.payload.to_vec(), vec![1u8, 2, 3, 4]);
+        // 零拷贝路径等价
+        let back2 = Frame2::to_frame_owned(wire.clone()).unwrap();
+        assert_eq!(back2.header, back.header);
+        assert_eq!(back2.payload.to_vec(), back.payload.to_vec());
     }
 
     #[test]

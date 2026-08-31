@@ -66,7 +66,7 @@ use crate::engine::SenderEngine;
 use crate::error::{Error, Result};
 use crate::lock::MutexExt;
 use crate::negotiator::DeviceIdentity;
-use crate::receiver::{LocalProxy, Receiver};
+use crate::receiver::{LocalProxy, MAIN_RECEIVE_LINK, Receiver};
 use crate::relay::{DEFAULT_PORT, RelayEvent, RelayHandle, RelayServer};
 use crate::view;
 use stross_proto::message::Platform;
@@ -147,7 +147,11 @@ pub struct Kernel {
     /// 端点共享启动后无任何观看者的接入窗口（订阅者从未接入时兜底停止）。
     share_idle_delay: Duration,
     /// 接收播放：WS 收流 → 抖动缓冲 → 播放/解码（Android 走 raw 帧路径）。
-    receiver: Mutex<Option<Arc<Receiver>>>,
+    /// 接收链路注册表：link_id → 接收会话。**多端点链接**（通信模式 v2
+    /// Phase C「接收端多流化」）：一次可同时接收多条流（如屏幕 + 系统声音
+    /// 同播），每条链独立启停 / 统计，停一条不级联其它链。旧单流 API
+    /// （`start_receive` 等）与 Android 播放路径统一落到预留槽 `main`。
+    receivers: Mutex<HashMap<String, Arc<Receiver>>>,
     /// 本机持久化身份（`load_or_create_identity` 注入；用于 mDNS 实例名
     /// 唯一化——多设备同端口广播不再同名串扰）。
     identity: Mutex<Option<DeviceIdentity>>,
@@ -216,7 +220,7 @@ impl Kernel {
             active_shares: Mutex::new(HashMap::new()),
             share_stop_delay: Duration::from_secs(4),
             share_idle_delay: Duration::from_secs(10),
-            receiver: Mutex::new(None),
+            receivers: Mutex::new(HashMap::new()),
             identity: Mutex::new(None),
             started: std::time::Instant::now(),
         }
@@ -846,10 +850,41 @@ impl Kernel {
         sinks: &[String],
         prefs: &SessionPrefs,
     ) -> Result<Session> {
+        let id = format!("sess-{:x}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        self.build_session(id, src, sinks, prefs)
+    }
+
+    /// 显式 id 会话（幂等；通信模式 v2 语义 id 派生路径，
+    /// docs/comm-mode-v2.md §6「配套改动」）：已存在同 id 会话时直接返回
+    /// （不重复建、不重复预授权），否则按 id 创建并预授权数据面。
+    ///
+    /// 语义 id = `derive(endpoint_id, transport_profile, pick_rule)`（确定性）：
+    /// 同端点必然同 id → 订阅收敛（同流复用）与停流隔离（互不级联）的结构基础。
+    pub fn ensure_session_with_id(
+        &self,
+        id: &str,
+        src: &str,
+        sinks: &[String],
+        prefs: &SessionPrefs,
+    ) -> Result<Session> {
+        if let Some(s) = self.sessions.get(id) {
+            return Ok(s);
+        }
+        self.build_session(id.to_string(), src, sinks, prefs)
+    }
+
+    /// 会话构建公共核心（`create_session` 生成随机 id、`ensure_session_with_id`
+    /// 用派生 id，均走本函数）：校验 → 访问码 → 数据面预授权 → 登记 → 事件。
+    fn build_session(
+        &self,
+        id: String,
+        src: &str,
+        sinks: &[String],
+        prefs: &SessionPrefs,
+    ) -> Result<Session> {
         if sinks.is_empty() {
             return Err(Error::Message("会话至少需要一个接收端（sinks）".into()));
         }
-        let id = format!("sess-{:x}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let requires_pin = prefs.access_code.is_some();
         if requires_pin {
             self.auth.set_code(&id, prefs.access_code.as_deref());
@@ -1291,6 +1326,9 @@ impl Kernel {
     /// 交给上层（GUI 绘制）；同时只允许一个接收会话。`audio_out` 决定音频去向
     /// （设备播放 / 丢弃）。Android 请用 [`Kernel::start_receive_raw`]
     /// （编码帧 → Kotlin MediaCodec）。
+    ///
+    /// **旧单流兼容**：落到预留槽 [`MAIN_RECEIVE_LINK`]（启新链前先停旧链）；
+    /// 多端点并发接收请用 [`Kernel::start_receive_link`]。
     #[cfg(not(target_os = "android"))]
     pub async fn start_receive(
         &self,
@@ -1298,15 +1336,9 @@ impl Kernel {
         stream_id: String,
         audio_out: AudioOut,
     ) -> Result<Arc<Receiver>> {
-        {
-            let guard = self.receiver.lock_poisoned();
-            if let Some(r) = guard.as_ref() {
-                r.stop(); // 先停旧的
-            }
-        }
-        let r = Receiver::start(relay_url, stream_id, audio_out, self.local_proxy()).await?;
-        *self.receiver.lock_poisoned() = Some(r.clone());
-        Ok(r)
+        self.stop_receive_link(MAIN_RECEIVE_LINK);
+        self.start_receive_link(MAIN_RECEIVE_LINK.to_string(), relay_url, stream_id, audio_out)
+            .await
     }
 
     /// 开始接收 `relay_url` 上的 `stream_id`（WS watch → 抖动缓冲 → **不解码**）。
@@ -1318,22 +1350,121 @@ impl Kernel {
         relay_url: String,
         stream_id: String,
     ) -> Result<Arc<Receiver>> {
-        {
-            let guard = self.receiver.lock_poisoned();
-            if let Some(r) = guard.as_ref() {
-                r.stop(); // 先停旧的
-            }
+        self.stop_receive_link(MAIN_RECEIVE_LINK);
+        self.start_receive_raw_link(MAIN_RECEIVE_LINK.to_string(), relay_url, stream_id)
+            .await
+    }
+
+    /// 停止接收（旧单流兼容：只停预留槽 `main`，不影响其它链路）。
+    pub fn stop_receive(&self) {
+        self.stop_receive_link(MAIN_RECEIVE_LINK);
+    }
+
+    /// 取出当前接收会话的解码帧通道（每会话一次；`main` 槽）。
+    pub fn take_receive_frames(&self) -> Option<mpsc::Receiver<RenderedFrame>> {
+        self.take_receive_frames_for(MAIN_RECEIVE_LINK)
+    }
+
+    /// 取出当前接收会话的编码帧通道（`start_receive_raw`；每会话一次；`main` 槽）。
+    pub fn take_receive_raw_frames(&self) -> Option<mpsc::Receiver<Frame>> {
+        self.take_receive_raw_frames_for(MAIN_RECEIVE_LINK)
+    }
+
+    /// 取出链路 `link_id` 的解码帧通道（每会话一次；多端点链接 GUI 播放路径用）。
+    pub fn take_receive_frames_for(&self, link_id: &str) -> Option<mpsc::Receiver<RenderedFrame>> {
+        self.receivers
+            .lock_poisoned()
+            .get(link_id)
+            .and_then(|r| r.take_frames())
+    }
+
+    /// 取出链路 `link_id` 的编码帧通道（每会话一次；Android 播放路径用）。
+    pub fn take_receive_raw_frames_for(&self, link_id: &str) -> Option<mpsc::Receiver<Frame>> {
+        self.receivers
+            .lock_poisoned()
+            .get(link_id)
+            .and_then(|r| r.take_raw_frames())
+    }
+
+    /// 当前接收统计（`main` 槽；旧单流兼容）。
+    pub fn receive_status(&self) -> crate::receiver::ReceiveStats {
+        self.receivers
+            .lock_poisoned()
+            .get(MAIN_RECEIVE_LINK)
+            .map(|r| r.stats())
+            .unwrap_or_default()
+    }
+
+    /// Android 播放路径回写：Kotlin `PlaybackPlugin` 每解码一帧回调一次（`main` 槽）。
+    pub fn note_android_decoded_frame(&self) {
+        if let Some(r) = self.receivers.lock_poisoned().get(MAIN_RECEIVE_LINK) {
+            r.note_decoded_video();
         }
-        let r = Receiver::start_raw(relay_url, stream_id, self.local_proxy()).await?;
-        *self.receiver.lock_poisoned() = Some(r.clone());
+    }
+
+    // -----------------------------------------------------------------------
+    // 多端点链接接收（通信模式 v2 Phase C「接收端多流化」）
+    // -----------------------------------------------------------------------
+
+    /// 开始接收 `relay_url` 上的 `stream_id`，登记为链路 `link_id`（多端点
+    /// 链接：同进程可同时接收多条流，如屏幕 + 系统声音同播）。
+    ///
+    /// * 每条链独立启停 / 统计（[`Kernel::stop_receive_link`] /
+    ///   [`Kernel::receive_links`]），停一条不级联其它链；
+    /// * 同 `link_id` 重复启动 = 重启该链（先停旧链，幂等）；
+    /// * 旧单流 API 的预留槽 `main` 也经本函数实现（兼容语义见
+    ///   [`Kernel::start_receive`]）。
+    ///
+    /// `audio_out` 决定音频去向（设备播放 / 丢弃）。Android 请用
+    /// [`Kernel::start_receive_raw_link`]（编码帧 → Kotlin MediaCodec）。
+    #[cfg(not(target_os = "android"))]
+    pub async fn start_receive_link(
+        &self,
+        link_id: String,
+        relay_url: String,
+        stream_id: String,
+        audio_out: AudioOut,
+    ) -> Result<Arc<Receiver>> {
+        self.stop_receive_link(&link_id);
+        let r = Receiver::start(relay_url, stream_id, audio_out, self.local_proxy()).await?;
+        self.receivers.lock_poisoned().insert(link_id, r.clone());
         Ok(r)
     }
 
-    /// 停止接收。
-    pub fn stop_receive(&self) {
-        if let Some(r) = self.receiver.lock_poisoned().take() {
+    /// 开始接收 `relay_url` 上的 `stream_id`（**不解码**：编码帧经
+    /// [`Kernel::take_receive_raw_frames`] 交给上层），登记为链路 `link_id`。
+    pub async fn start_receive_raw_link(
+        &self,
+        link_id: String,
+        relay_url: String,
+        stream_id: String,
+    ) -> Result<Arc<Receiver>> {
+        self.stop_receive_link(&link_id);
+        let r = Receiver::start_raw(relay_url, stream_id, self.local_proxy()).await?;
+        self.receivers.lock_poisoned().insert(link_id, r.clone());
+        Ok(r)
+    }
+
+    /// 停止指定链路的接收（其它链路不受影响；不存在时静默成功）。
+    pub fn stop_receive_link(&self, link_id: &str) {
+        if let Some(r) = self.receivers.lock_poisoned().remove(link_id) {
             r.stop();
         }
+    }
+
+    /// 全部接收链路快照（link_id + 统计；GUI 面板逐条展示）。
+    pub fn receive_links(&self) -> Vec<crate::receiver::ReceiveLinkView> {
+        let guard = self.receivers.lock_poisoned();
+        let mut v: Vec<_> = guard
+            .iter()
+            .map(|(link_id, r)| crate::receiver::ReceiveLinkView {
+                link_id: link_id.clone(),
+                stats: r.stats(),
+            })
+            .collect();
+        drop(guard);
+        v.sort_by(|a, b| a.link_id.cmp(&b.link_id));
+        v
     }
 
     /// 本机中继的代理能力（观看直连失败时级联兜底）；本机中继未启动时为 `None`。
@@ -1342,38 +1473,6 @@ impl Kernel {
             state: a.handle.state(),
             ws_base: crate::transport::RelayUrl::ws("127.0.0.1", a.port, None).to_string(),
         })
-    }
-
-    /// 取出当前接收会话的解码帧通道（每会话一次）。
-    pub fn take_receive_frames(&self) -> Option<mpsc::Receiver<RenderedFrame>> {
-        self.receiver
-            .lock_poisoned()
-            .as_ref()
-            .and_then(|r| r.take_frames())
-    }
-
-    /// 取出当前接收会话的编码帧通道（`start_receive_raw`；每会话一次）。
-    pub fn take_receive_raw_frames(&self) -> Option<mpsc::Receiver<Frame>> {
-        self.receiver
-            .lock_poisoned()
-            .as_ref()
-            .and_then(|r| r.take_raw_frames())
-    }
-
-    /// 当前接收统计。
-    pub fn receive_status(&self) -> crate::receiver::ReceiveStats {
-        self.receiver
-            .lock_poisoned()
-            .as_ref()
-            .map(|r| r.stats())
-            .unwrap_or_default()
-    }
-
-    /// Android 播放路径回写：Kotlin `PlaybackPlugin` 每解码一帧回调一次。
-    pub fn note_android_decoded_frame(&self) {
-        if let Some(r) = self.receiver.lock_poisoned().as_ref() {
-            r.note_decoded_video();
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -1654,6 +1753,30 @@ mod tests {
             k.create_session("a", &[], &SessionPrefs::default())
                 .is_err()
         );
+    }
+
+    /// 显式 id 会话幂等（docs/comm-mode-v2.md §6「配套改动」）：
+    /// 语义 id 派生路径重复建会话返回既有会话，不重复登记。
+    #[tokio::test]
+    async fn ensure_session_with_id_is_idempotent() {
+        let k = Kernel::new(Platform::Desktop);
+        let prefs = SessionPrefs::default();
+        let s1 = k
+            .ensure_session_with_id("ep-screen-ly-rt-x", "local", &["local".into()], &prefs)
+            .unwrap();
+        assert_eq!(s1.id, "ep-screen-ly-rt-x");
+        // 同 id 二次调用：返回既有会话，不新增
+        let s2 = k
+            .ensure_session_with_id("ep-screen-ly-rt-x", "local", &["local".into()], &prefs)
+            .unwrap();
+        assert_eq!(s2.id, s1.id);
+        assert_eq!(k.sessions().len(), 1, "幂等：同 id 不重复建会话");
+        // 不同派生 id → 各自会话（不同端点互不干扰）
+        let s3 = k
+            .ensure_session_with_id("ep-mic-ly-rt-y", "local", &["local".into()], &prefs)
+            .unwrap();
+        assert_ne!(s3.id, s1.id);
+        assert_eq!(k.sessions().len(), 2);
     }
 
     #[tokio::test]
@@ -1954,5 +2077,173 @@ mod tests {
         // 再关闭 → 清单重新不可见
         k.set_discoverable(false);
         assert!(k.discovery_manifest().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 多端点链接接收（通信模式 v2 Phase C「接收端多流化」）
+    // -----------------------------------------------------------------------
+
+    /// 推流辅助：WS 建流 + 关键帧（载荷带区分字节，供断言「哪条流」）。
+    async fn push_keyframe_payload(base: &str, stream_id: &str, payload: Vec<u8>) -> Box<dyn crate::DataSession> {
+        use crate::transport::{PeerAddr, SessionParams, Transport};
+        use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_VIDEO};
+        use stross_proto::message::ControlMessage;
+        let transport = crate::transport::ws::WsTransport::new();
+        let peer = PeerAddr {
+            transport: stross_proto::message::TransportId::Ws,
+            addr: format!("{base}/ws/push"),
+        };
+        let params = SessionParams {
+            session_id: stream_id.into(),
+            profile: ReliabilityProfile::Lossless,
+        };
+        let push = transport.connect(&peer, &params).await.unwrap();
+        push.send(crate::SessionPacket::Control(ControlMessage::Hello {
+            stream_id: stream_id.into(),
+            title: "多链路测试流".into(),
+            video: None,
+            audio: None,
+            share_token: None,
+        }))
+        .await
+        .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), push.recv()).await {
+                Ok(Ok(Some(crate::SessionPacket::Control(ControlMessage::Welcome { .. })))) => break,
+                Ok(Ok(Some(_))) => continue,
+                Ok(Ok(None)) => panic!("推流连接提前关闭"),
+                Ok(Err(e)) => panic!("推流 recv 错误: {e}"),
+                Err(_) => panic!("等 Welcome 超时"),
+            }
+        }
+        push.send(crate::SessionPacket::Media(Frame::new(
+            TRACK_VIDEO,
+            CODEC_H264,
+            FLAG_KEYFRAME,
+            0,
+            payload,
+        )))
+        .await
+        .unwrap();
+        push
+    }
+
+    /// 等编码帧通道出现载荷等于 `expect` 的关键帧（区分流归属）。
+    async fn recv_raw_payload(
+        rx: &mut tokio::sync::mpsc::Receiver<Frame>,
+        expect: &[u8],
+        label: &str,
+    ) {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(f)) if f.payload.as_ref() == expect => break,
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("链路 {label} 通道提前关闭"),
+                Err(_) => panic!("链路 {label} 收期望载荷超时"),
+            }
+        }
+    }
+
+    /// 多端点链接：同进程同时接收两条流（不同 link_id），每条链独立收帧 /
+    /// 统计 / 停止——停一条不级联另一条；旧单流 API（main 槽）保持
+    /// 「启新停旧」兼容语义。
+    #[tokio::test]
+    async fn multi_link_receive_independent_start_stop() {
+        let handle = crate::relay::RelayServer::start(0).await.unwrap();
+        let base = format!("ws://127.0.0.1:{}", handle.port);
+        let kernel = Kernel::new(Platform::Desktop);
+
+        let push_a = push_keyframe_payload(&base, "stream-a", vec![0xaa; 8]).await;
+        let push_b = push_keyframe_payload(&base, "stream-b", vec![0xbb; 8]).await;
+
+        // 两条链路并发接收（多端点链接：不再「第二路停第一路」）
+        let ra = kernel
+            .start_receive_raw_link("link-a".into(), base.clone(), "stream-a".into())
+            .await
+            .expect("链路 a 启动");
+        let rb = kernel
+            .start_receive_raw_link("link-b".into(), base.clone(), "stream-b".into())
+            .await
+            .expect("链路 b 启动");
+        let mut fa = ra.take_raw_frames().expect("链路 a 帧通道");
+        let mut fb = rb.take_raw_frames().expect("链路 b 帧通道");
+
+        // 每条链收到各自流的关键帧（互不串流）
+        recv_raw_payload(&mut fa, &[0xaa; 8], "a").await;
+        recv_raw_payload(&mut fb, &[0xbb; 8], "b").await;
+
+        // 链路注册表：两条都在
+        let links = kernel.receive_links();
+        assert_eq!(links.len(), 2, "两条链路并存");
+        assert!(links.iter().all(|l| l.stats.running), "两条都在接收中");
+
+        // 停链路 a：链路 b 不受影响（不级联）
+        kernel.stop_receive_link("link-a");
+        let links = kernel.receive_links();
+        assert_eq!(links.len(), 1, "停一条后只剩链路 b");
+        assert_eq!(links[0].link_id, "link-b");
+        assert!(links[0].stats.running);
+        // 链路 b 仍能继续收帧（再推一帧）
+        push_b
+            .send(crate::SessionPacket::Media(stross_proto::frame::Frame::new(
+                stross_proto::frame::TRACK_VIDEO,
+                stross_proto::frame::CODEC_H264,
+                stross_proto::frame::FLAG_KEYFRAME,
+                1,
+                vec![0xbb; 8],
+            )))
+            .await
+            .unwrap();
+        recv_raw_payload(&mut fb, &[0xbb; 8], "b").await;
+        assert!(kernel.receive_links()[0].stats.received >= 2, "链路 b 持续收帧");
+
+        // 停链路 b：注册表清空
+        kernel.stop_receive_link("link-b");
+        assert!(kernel.receive_links().is_empty());
+
+        drop(push_a);
+        drop(push_b);
+        handle.stop().await;
+    }
+
+    /// 旧单流 API 兼容：`start_receive_raw` 落 main 槽，启新停旧；`stop_receive`
+    /// 只停 main，不影响多链路并存。
+    #[tokio::test]
+    async fn legacy_main_slot_keeps_stop_old_semantics() {
+        let handle = crate::relay::RelayServer::start(0).await.unwrap();
+        let base = format!("ws://127.0.0.1:{}", handle.port);
+        let kernel = Kernel::new(Platform::Desktop);
+
+        let _push1 = push_keyframe_payload(&base, "legacy-1", vec![0x11; 4]).await;
+        let _push2 = push_keyframe_payload(&base, "legacy-2", vec![0x22; 4]).await;
+
+        // 先启一条多链路（并存验证：旧 API 不清它）
+        let r_extra = kernel
+            .start_receive_raw_link("extra".into(), base.clone(), "legacy-1".into())
+            .await
+            .unwrap();
+        let mut fx = r_extra.take_raw_frames().unwrap();
+        recv_raw_payload(&mut fx, &[0x11; 4], "extra").await;
+
+        // 旧 API：main 槽启新停旧
+        kernel
+            .start_receive_raw(base.clone(), "legacy-1".into())
+            .await
+            .unwrap();
+        let r1 = kernel.start_receive_raw(base.clone(), "legacy-2".into()).await.unwrap();
+        let _ = r1; // 第二次启动应停掉第一次（main 槽单链）
+        let links = kernel.receive_links();
+        assert_eq!(links.len(), 2, "main + extra 并存");
+        let main_stats = links.iter().find(|l| l.link_id == "main").unwrap();
+        assert_eq!(main_stats.stats.received, 0, "main 槽收到的是 legacy-2 流（新链）");
+
+        // stop_receive 只停 main，extra 不受影响
+        kernel.stop_receive();
+        let links = kernel.receive_links();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_id, "extra");
+        kernel.stop_receive_link("extra");
+        assert!(kernel.receive_links().is_empty());
+        handle.stop().await;
     }
 }

@@ -45,7 +45,9 @@ Object.defineProperty(window.navigator, 'clipboard', {
 // —— mock：Tauri invoke 调用记录 ——
 const calls = [];
 let streamRunning = false; // 与 start_stream/stop_stream 联动（真实行为）
-let mockRecvEnded = false; // B6 测试：流结束 → receive_status 返回 running=false 且已收帧
+let mockRecvEnded = false; // B6 测试：流结束 → receive_links 返回 running=false 且已收帧
+// 多端点链接：接收链路注册表（linkId → 存活）；receive_links 回放
+const recvLinksMock = new Map();
 let fwMissing = ['18779/tcp', '33464/udp']; // 防火墙自检回放（缺 SRT? 实际缺两个）
 let scanReturnOverride = null; // [5] 手动添加场景：scan_devices 返回空列表
 // —— 端点框架状态（本机共享：deviceId → {visibility, delivery}，供 local_catalog 回放） ——
@@ -125,6 +127,20 @@ const invoke = async (cmd, args) => {
         : { running: true, received: 0, decodedVideo: 0, audioBlocks: 0, dropped: 0, error: null };
     case 'stop_receive':
       return undefined;
+    // —— 多端点链接（通信模式 v2 Phase C）：链路级启停 + 全量统计 ——
+    case 'start_receive_link':
+      recvLinksMock.set(args.linkId, true);
+      return undefined;
+    case 'stop_receive_link':
+      recvLinksMock.delete(args.linkId);
+      return undefined;
+    case 'receive_links':
+      return [...recvLinksMock.keys()].map((linkId) => ({
+        linkId,
+        stats: mockRecvEnded
+          ? { running: false, received: 30, decodedVideo: 30, audioBlocks: 0, dropped: 0, pacedDropped: 0, pacedReanchors: 0, pacedHeld: 0, error: null }
+          : { running: true, received: 0, decodedVideo: 0, audioBlocks: 0, dropped: 0, pacedDropped: 0, pacedReanchors: 0, pacedHeld: 0, error: null },
+      }));
     // —— 端点框架（节点 → 设备 → 端点） ——
     case 'local_catalog': {
       // 单层端点模型：平铺清单（available/lastError/published 自标注）
@@ -166,6 +182,21 @@ const invoke = async (cmd, args) => {
             subscribers: 0,
             updatedAt: 0,
           },
+          {
+            endpointId: 'sysaudio:0',
+            kind: 'systemAudio',
+            name: '系统声',
+            available: true,
+            lastError: null,
+            published: true,
+            visibility: 'confirm',
+            delivery: 'pull',
+            transports: [{ transport: 'quic', priority: 0 }, { transport: 'ws', priority: 1 }],
+            codecs: ['aac'],
+            state: 'idle',
+            subscribers: 0,
+            updatedAt: 0,
+          },
         ],
       };
     case 'endpoint_publish': {
@@ -186,7 +217,12 @@ const invoke = async (cmd, args) => {
       localEpState.delete(args.endpointId);
       return undefined;
     case 'endpoint_subscribe_media':
-      return { delivery: 'pull', relayUrl: 'ws://192.168.1.52:9002', streamId: 'sess-sub' };
+      // 多端点链接：不同端点返回不同流 id（供链路并存验证）
+      return {
+        delivery: 'pull',
+        relayUrl: 'ws://192.168.1.52:9002',
+        streamId: args.endpointId === 'sysaudio:0' ? 'sess-sub-audio' : 'sess-sub',
+      };
     case 'discoverable_status':
       // 「可被发现」开关：refreshDiscoverable 依赖返回 Settings 对象
       return { discoverable: false };
@@ -292,11 +328,13 @@ $('sub-confirm-btn').click();
 await sleep(400);
 const subCalls = calls.filter((c) => c.cmd === 'endpoint_subscribe_media');
 check('endpoint_subscribe_media 被调用（endpointId=screen:0, 端口缺省）', subCalls.some((c) => c.args.endpointId === 'screen:0'), JSON.stringify(subCalls[0]?.args));
-const rc = calls.filter((c) => c.cmd === 'start_receive');
-check('订阅握手后走 start_receive（streamId=sess-sub）', rc.some((c) => c.args.stream === 'sess-sub'), JSON.stringify(rc[rc.length - 1]?.args));
+const rc = calls.filter((c) => c.cmd === 'start_receive_link');
+check('订阅握手后走 start_receive_link（streamId=sess-sub）', rc.some((c) => c.args.stream === 'sess-sub'), JSON.stringify(rc[rc.length - 1]?.args));
 check('接收目标 = 握手返回的 wsBase', rc.some((c) => c.args.relay === 'ws://192.168.1.52:9002'), JSON.stringify(rc[rc.length - 1]?.args));
+check('链路 id = host/endpointId（多端点链接键）', rc.some((c) => c.args.linkId === '192.168.1.51/screen:0'), JSON.stringify(rc[rc.length - 1]?.args));
 check('接收状态行显示（订阅中）', !$('recv-status-line').classList.contains('hidden'));
 check('「停止接收」按钮出现', !$('recv-stop-btn').classList.contains('hidden'));
+check('接收链路行渲染（1 条）', document.querySelectorAll('#recv-links .recv-link-row').length === 1, `行数 ${document.querySelectorAll('#recv-links .recv-link-row').length}`);
 // 订阅键状态：订阅达成后对端端点的「订阅」键应变为「已订阅 · 接收中」（不再停留「订阅」）
 await sleep(100);
 const cardAfterSub = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
@@ -307,11 +345,12 @@ console.log('\n[3b] 断流自愈：流结束后接收 UI 自动回到空闲态')
 {
   mockRecvEnded = true;
   await sleep(2500); // 轮询间隔 1s，等 2 轮
-  check('B6: 断流后自动调用 stop_receive', calls.filter((c) => c.cmd === 'stop_receive').length >= 1, `stop 次数 ${calls.filter((c) => c.cmd === 'stop_receive').length}`);
+  check('B6: 断流后自动调用 stop_receive_link', calls.filter((c) => c.cmd === 'stop_receive_link').length >= 1, `stop 次数 ${calls.filter((c) => c.cmd === 'stop_receive_link').length}`);
   check('B6: 接收状态行隐藏（回到未接收）', $('recv-status-line').classList.contains('hidden'));
   check('B6: 等待浮层隐藏', $('recv-overlay').classList.contains('hidden'));
   check('B6: 停止按钮隐藏', $('recv-stop-btn').classList.contains('hidden'));
   check('B6: 播放器画布容器隐藏（画布不残留）', $('recv-canvas-wrap').classList.contains('hidden'));
+  check('B6: 接收链路行清空', document.querySelectorAll('#recv-links .recv-link-row').length === 0, `行数 ${document.querySelectorAll('#recv-links .recv-link-row').length}`);
   // 断流后（共享关闭事件）：对端端点键应还原为「订阅」（清「已订阅 · 接收中」态）
   await sleep(200);
   const cardAfterEnd = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
@@ -344,7 +383,49 @@ console.log('\n[3c] 播放器全屏：按钮切换窗口全屏态 + 画布容器
   stopBtn.click();
   await sleep(60);
   check('全屏中停止接收 → 退出全屏', winFullscreen === false, `winFullscreen=${winFullscreen}`);
-  check('停止按钮走 stop_receive', calls.filter((c) => c.cmd === 'stop_receive').length >= 2);
+  // 此时链路为空（[3b] 已自动收尾）：停止按钮 = 退出全屏兜底（链路级停止在 [3d] 覆盖）
+}
+
+console.log('\n[3d] 多端点链接：第二条链路并存，逐条停止互不级联');
+{
+  // [3b] 已自动收尾（链路空）。重新订阅「屏幕」→ 链路 1
+  let card = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
+  let dir = card?.querySelector('[data-role="remote-dir"]');
+  dir?.querySelector('[data-act="subscribe-endpoint"]')?.click();
+  await sleep(100);
+  $('sub-confirm-btn').click();
+  await sleep(400);
+  check('订阅屏幕 → 链路 1 行', document.querySelectorAll('#recv-links .recv-link-row').length === 1, `行数 ${document.querySelectorAll('#recv-links .recv-link-row').length}`);
+  // 再订阅「系统声」→ 链路 2（多端点链接：并存，不停止链路 1）
+  card = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
+  dir = card?.querySelector('[data-role="remote-dir"]');
+  const sysBtn = Array.from(dir?.querySelectorAll('[data-act="subscribe-endpoint"]') || []).find((b) => b.dataset.endpoint === 'sysaudio:0');
+  sysBtn?.click();
+  await sleep(100);
+  $('sub-confirm-btn').click();
+  await sleep(400);
+  const rows2 = document.querySelectorAll('#recv-links .recv-link-row');
+  check('两条链路并存（屏幕 + 系统声同播）', rows2.length === 2, `行数 ${rows2.length}`);
+  check('链路 2 行名含「系统声」', Array.from(rows2).some((r) => r.textContent.includes('系统声')));
+  check('第二条订阅未停止第一条（两条 start_receive_link 之间无链路 1 的停止）', (() => {
+    const starts = calls.map((c, i) => ({ c, i })).filter((x) => x.c.cmd === 'start_receive_link');
+    const prevIdx = starts[starts.length - 2]?.i ?? -1;
+    const between = calls
+      .slice(prevIdx + 1, starts[starts.length - 1].i)
+      .filter((c) => c.cmd === 'stop_receive_link' && c.args.linkId === '192.168.1.51/screen:0');
+    return between.length === 0;
+  })(), JSON.stringify(calls.filter((c) => c.cmd === 'stop_receive_link')));
+  // 逐条停止：停「屏幕」链路 → 「系统声」仍渲染（不级联）
+  const stopScreen = Array.from(document.querySelectorAll('#recv-links .recv-link-stop')).find((b) => b.dataset.link === '192.168.1.51/screen:0');
+  stopScreen?.click();
+  await sleep(300);
+  const rows3 = document.querySelectorAll('#recv-links .recv-link-row');
+  check('停屏幕链路后系统声链路仍在（不级联）', rows3.length === 1 && rows3[0].textContent.includes('系统声'), `行数 ${rows3.length}`);
+  // 停止全部（头按钮）→ 回到未接收
+  $('recv-stop-btn').click();
+  await sleep(300);
+  check('停止全部后回到未接收', $('recv-status-line').classList.contains('hidden') && document.querySelectorAll('#recv-links .recv-link-row').length === 0);
+  recvLinksMock.clear();
 }
 
 console.log('\n[4] 遗留广播/凭证/共享流 UI 已移除（统一走共享/订阅）');

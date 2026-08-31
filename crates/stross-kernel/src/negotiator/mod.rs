@@ -34,14 +34,14 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use stross_proto::message::{
-    Delivery, EndpointDir, EndpointManifest, EndpointNode, EndpointStrategy, MediaKind,
-    TransportId, Visibility,
+    derive_stream_id, Delivery, EndpointDir, EndpointManifest, EndpointNode, EndpointStrategy,
+    MediaKind, TransportId, Visibility,
 };
 use stross_proto::time::unix_secs;
 use tokio::sync::oneshot;
 
 use crate::Kernel;
-use crate::kernel::SubscribeCtx;
+use crate::kernel::{SessionPrefs, SubscribeCtx};
 use crate::lock::MutexExt;
 
 mod api;
@@ -710,9 +710,36 @@ fn compose_grant(
             }),
         });
     }
-    let view = app
-        .issue_share_token_for(title, media, Some(DEFAULT_GRANT_TTL_SECS))
-        .map_err(|e| e.to_user_string())?;
+    // 数据面流 id 来源（订阅驱动 pull，docs/comm-mode-v2.md §6「配套改动」）：
+    // * 端点语义 → **语义 id 派生**：`derive(endpoint_id, transport_profile,
+    //   pick_rule)` 确定性三要素——订阅方本地可推导、同端点收敛同流、
+    //   停一路不级联；pull 不需要凭证，token 为空；
+    // * 旧语义（无端点，B2 凭证式接入如「接收手机麦克风」）→ 内核签发
+    //   sess-N + 一次性凭证（保持现状）。
+    let view = match endpoint {
+        None => app
+            .issue_share_token_for(title, media, Some(DEFAULT_GRANT_TTL_SECS))
+            .map_err(|e| e.to_user_string())?,
+        Some(m) => {
+            let sid = derive_stream_id(&m.endpoint_id, m.transport_profile, m.pick_rule);
+            app.ensure_session_with_id(
+                &sid,
+                "local",
+                &["local".into()],
+                &SessionPrefs {
+                    title,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| e.to_user_string())?;
+            ShareTokenView {
+                token: String::new(),
+                stream_id: sid,
+                pin: String::new(),
+                expires_at: 0,
+            }
+        }
+    };
     // 订阅驱动（docs/endpoint-model-v2.md §4 定稿）：数据流一律由订阅方发起并
     // 主动取（pull），共享方只在本地中继发布、不做任何主动出站推送。delivery
     // 定稿恒为 Pull（保留枚举 wire 兼容——对端旧版本字段仍可解析，但本端
@@ -1178,6 +1205,65 @@ mod tests {
             "pull 复用：第二个订阅者拿同一流 id"
         );
         assert_eq!(g2.delivery, Some(Delivery::Pull));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 语义 id 派生（docs/comm-mode-v2.md §6）：端点订阅的 grant 流 id =
+    /// `derive(endpoint_id, transport_profile, pick_rule)` 确定性三要素——
+    /// 同端点必然同 id（结构性订阅收敛），且该 id 已建内核会话
+    /// （受控中继预授权接入的基础）。
+    #[tokio::test]
+    async fn endpoint_grant_stream_id_is_derived_and_session_exists() {
+        let dir = tmp_dir("derived");
+        let app = Arc::new(desktop_kernel());
+        app.publish_endpoint(
+            "mic:builtin",
+            Visibility::Public,
+            Delivery::Pull,
+            None,
+            None,
+        )
+        .expect("公开麦克风端点");
+        let neg = ShareNegotiator {
+            app: app.clone(),
+            store: Arc::new(TrustStore::load(&dir)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            task: tokio::spawn(async {}),
+            port: 0,
+        };
+        let g1 = neg
+            .grant(
+                "dev-a".into(),
+                "设备A".into(),
+                Some("mic:builtin".into()),
+                None,
+                None,
+            )
+            .unwrap();
+        let m = app.endpoint_manifest("mic:builtin").unwrap();
+        let expected = derive_stream_id(&m.endpoint_id, m.transport_profile, m.pick_rule);
+        assert_eq!(
+            g1.view.stream_id, expected,
+            "端点订阅流 id = 语义派生 id（{}）",
+            expected
+        );
+        assert!(g1.view.token.is_empty(), "订阅驱动 pull 不需要凭证");
+        assert!(
+            app.has_session(&expected),
+            "派生 id 已建内核会话（受控中继可预授权接入）"
+        );
+        // 无活动共享时再次 grant → 同 id（确定性派生 + 会话幂等，不产生新会话）
+        let g2 = neg
+            .grant(
+                "dev-b".into(),
+                "设备B".into(),
+                Some("mic:builtin".into()),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(g2.view.stream_id, expected, "确定性派生：同端点同 id");
+        assert_eq!(app.sessions().len(), 1, "会话幂等：派生 id 不重复建会话");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

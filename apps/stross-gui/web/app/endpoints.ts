@@ -258,11 +258,7 @@ function renderRemoteDir(dev: DeviceView, dir: RemoteDir): void {
       hint.className = 'hint';
       hint.textContent = '文件（命令行订阅）';
       row.appendChild(hint);
-    } else if (
-      subscribedEndpoint &&
-      subscribedEndpoint.host === deviceHostOf(dev) &&
-      subscribedEndpoint.endpointId === ep.endpointId
-    ) {
+    } else if (subscribedEndpoints.has(deviceHostOf(dev) + '/' + ep.endpointId)) {
       // 当前订阅中的端点：「订阅」键改为接收中态（订阅键状态可见，避免可重复点击）
       const badge = document.createElement('span');
       badge.className = 'badge ep-badge live';
@@ -345,15 +341,20 @@ async function confirmSubscribe(): Promise<void> {
     })) as MediaSubscribeOutcome;
     subscribingEndpoint = null; // 握手成功：转入「已订阅 · 接收中」态
     $('sub-modal').classList.add('hidden');
-    // 订阅达成：把接收目标指向握手返回的入口，走既有接收链路
+    // 订阅达成：把接收目标指向握手返回的入口，走既有接收链路（多端点链接：
+    // 不停止其它链路——屏幕 + 系统声音可同时订阅同播）
     targetRelay = { wsBase: r.relayUrl, srtUrl: null, quicUrl: null };
-    await startReceive(r.streamId);
-    // 仅当接收真正启动才标记已订阅：否则订阅握手成功但 startReceive 失败
+    const ok = await startReceiveLink({
+      host: subscribeTarget.host,
+      endpointId: subscribeTarget.ep.endpointId,
+      endpointName: subscribeTarget.ep.name,
+      streamId: r.streamId,
+    });
+    // 仅当接收真正启动才标记已订阅：否则订阅握手成功但接收启动失败
     // （如无中继）时，对端卡片会错显「已订阅 · 接收中」而实际未接收。
-    subscribedEndpoint =
-      receiving
-        ? { host: subscribeTarget.host, endpointId: subscribeTarget.ep.endpointId }
-        : null;
+    if (ok) {
+      subscribedEndpoints.add(subscribeTarget.host + '/' + subscribeTarget.ep.endpointId);
+    }
     // 重渲染设备列表：订阅键 → 「已订阅 · 接收中」（不再停留「订阅」）
     renderDeviceList();
   } catch (e) {

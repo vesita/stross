@@ -14,6 +14,7 @@ use std::sync::{OnceLock, RwLock};
 
 use jni::JNIEnv;
 use jni::objects::JObject;
+use tauri::Emitter;
 use tauri::Manager;
 
 /// `spawn_android_playback` 启动时注入的 AppHandle（解码统计回写用）。
@@ -51,5 +52,20 @@ pub extern "system" fn Java_dev_stross_sender_PlaybackPlugin_nativeDecodedFrame<
     };
     if let Some(sta) = app.try_state::<std::sync::Arc<stross_kernel::Kernel>>() {
         sta.note_android_decoded_frame_on(link.as_deref().unwrap_or(""));
+    }
+}
+
+/// Kotlin `PlaybackPlugin`（返回键退出原生全屏）直调：通知前端恢复全屏态
+/// （fsActive=false、重定位 surface）。本函数只发一个 Tauri 事件，不阻塞。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_stross_sender_PlaybackPlugin_nativeFullscreenExited<'local>(
+    _env: JNIEnv<'local>,
+    _this: JObject<'local>,
+) {
+    if let Some(app) = APP.get() {
+        let _ = app.emit(
+            "native-fullscreen-changed",
+            serde_json::json!({ "active": false }),
+        );
     }
 }

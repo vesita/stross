@@ -205,6 +205,14 @@ async function exitPlayerFullscreen(): Promise<void> {
   if (IS_ANDROID) void syncAndroidSurface();
 }
 
+/** 原生返回键退出全屏（Android）→ 前端同步恢复全屏态并重定位 surface。 */
+async function handleNativeFullscreenChanged(active: boolean): Promise<void> {
+  if (active) return;
+  if (!IS_ANDROID) return;
+  setPlayerFullscreen(false);
+  void syncAndroidSurface();
+}
+
 // ---------------------------------------------------------------- 移动端 Tab 切换
 
 /** 切换全局主视图模式（设备与共享管理 vs 消费播放台）——经过状态机派发。 */

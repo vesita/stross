@@ -56,10 +56,18 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
     private val host: Activity = activity
     companion object {
         private const val TAG = "StrossPlay"
+        /** 当前实例引用（MainActivity 返回键退出全屏时经此通知前端）。 */
+        @JvmStatic
+        var instance: PlaybackPlugin? = null
+            private set
         /** 视频输入队列上界：解码跟不上时丢帧，避免积压无限膨胀（内存有界）。 */
         private const val VIDEO_QUEUE_CAP = 8
         /** `dequeueInputBuffer` 超时：解码器忙时到此即丢帧（不再阻塞 5s）。 */
         private const val INPUT_TIMEOUT_US = 2_000L
+    }
+
+    init {
+        instance = this
     }
 
     @InvokeArg
@@ -116,6 +124,13 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
     // ------------------------------------------------------------------
 
     private external fun nativeDecodedFrame()
+
+    /** 原生返回键退出全屏时通知前端（fsActive=false、重定位 surface）。 */
+    fun notifyFullscreenExited() {
+        try { nativeFullscreenExited() } catch (e: Throwable) { Log.w(TAG, "notifyFullscreenExited JNI 失败: ${e.message}") }
+    }
+
+    private external fun nativeFullscreenExited()
 
     // ------------------------------------------------------------------
     // 生命周期

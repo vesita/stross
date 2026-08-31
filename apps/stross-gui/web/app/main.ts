@@ -271,6 +271,11 @@ if (diagCloseBtn) diagCloseBtn.onclick = () => toggleDiagnosticsDrawer();
 initPlayerGestures();
 initFSMUI();
 
+// 原生返回键退出全屏（Android）→ 前端同步恢复全屏态。
+void listen<{ active: boolean }>('native-fullscreen-changed', (p) => {
+  void handleNativeFullscreenChanged(p.active);
+});
+
 // 尺寸/方向变化时重定位原生播放 Surface（Android Surface 路径；幂等）。
 window.addEventListener('resize', () => { void syncAndroidSurface(); });
 window.addEventListener('orientationchange', () => { void syncAndroidSurface(); });

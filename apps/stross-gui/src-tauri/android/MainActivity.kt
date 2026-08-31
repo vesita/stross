@@ -37,6 +37,9 @@ class MainActivity : TauriActivity() {
     /** 当前有效 surface（surfaceCreated 后非空；surfaceDestroyed 后置空）。 */
     private val surfaceRef = AtomicReference<Surface?>()
 
+    /** 最近一次非全屏播放区矩形（物理 px；退出全屏后恢复定位）。 */
+    private var lastPlayerRect: Rect? = null
+
     /** Surface 是否可用（已创建且未销毁）。 */
     fun isSurfaceReady(): Boolean {
         val s = surfaceRef.get() ?: return false
@@ -130,7 +133,8 @@ class MainActivity : TauriActivity() {
         sv.bringToFront()
     }
 
-    /** 显示 SurfaceView 并定位到播放区矩形（物理 px，DecorView 坐标系）。 */
+    /** 显示 SurfaceView 并定位到播放区矩形（物理 px，DecorView 坐标系）。
+     *  记录为「最近播放区」，供退出全屏后恢复。 */
     fun showPlaybackSurface(rect: Rect) {
         val sv = playbackSurfaceView ?: return
         val params = FrameLayout.LayoutParams(rect.width(), rect.height()).apply {
@@ -140,6 +144,7 @@ class MainActivity : TauriActivity() {
         sv.layoutParams = params
         if (sv.visibility != View.VISIBLE) sv.visibility = View.VISIBLE
         sv.bringToFront()
+        lastPlayerRect = rect
     }
 
     /** 隐藏 SurfaceView（退出播放 / 暂停）。 */
@@ -171,6 +176,27 @@ class MainActivity : TauriActivity() {
     fun exitPlaybackFullscreen() {
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         playbackFullscreen = false
+    }
+
+    /**
+     * 系统返回键：全屏时**优先退出全屏**（保持 activity 存活、surface 有效），
+     * 而不是默认行为（finish activity、销毁 surface → 解码器向其渲染崩溃）。
+     * 退出后通知前端恢复全屏态（fsActive=false、重定位 surface）。
+     */
+    override fun onBackPressed() {
+        if (playbackFullscreen) {
+            exitPlaybackFullscreenForBack()
+            return
+        }
+        super.onBackPressed()
+    }
+
+    /** 返回键触发的全屏退出：恢复系统栏 + 定向回 unspecified + 恢复播放区矩形。 */
+    private fun exitPlaybackFullscreenForBack() {
+        exitPlaybackFullscreen()
+        try { requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED } catch (_: Exception) {}
+        lastPlayerRect?.let { showPlaybackSurface(it) } ?: showPlaybackSurfaceFullWindow()
+        PlaybackPlugin.instance?.notifyFullscreenExited()
     }
 
     override fun onDestroy() {

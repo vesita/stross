@@ -86,3 +86,28 @@
 
 **诊断手法**：`adb logcat -s StrossSurface`（surface 生命周期）+ `-s StrossPlay`
 （关键帧/解码器就绪/输出格式）。`surfaceChanged 1080x2378→990x557` 即前端定位生效。
+
+## 全屏退出崩溃（2026-09-01 会话）
+
+**症状**：原生全屏可进，但没有可点的退出控件（Surface 置顶盖住 WebView 控制条）；
+按系统返回键退出时**崩溃**（`FORTIFY: pthread_mutex_lock called on a destroyed mutex`
++ `BufferQueue has been abandoned`）。
+
+**根因**：返回键默认行为 = `finish` activity → SurfaceView 的 surface 被销毁，而
+MediaCodec 解码器仍在（Rust 接收会话继续喂帧）向其渲染 → 向已废弃 buffer queue
+渲染 → 原生 mutex 竞态崩溃。
+
+**修法**：
+1. **`MainActivity.onBackPressed` 全屏时优先退出全屏**（恢复系统栏 + 定向回
+   unspecified + 恢复播放区矩形），保持 activity 存活、surface 有效——既不崩溃，
+   也给了「退出全屏」的功能（返回键）。
+2. **退出全屏通知前端**：Kotlin `notifyFullscreenExited` → JNI
+   `nativeFullscreenExited`（mobile_jni.rs）→ 发 Tauri 事件
+   `native-fullscreen-changed {active:false}` → 前端 `handleNativeFullscreenChanged`
+   复位 `fsActive`、撤 `.fs`、重定位 surface。
+3. `MainActivity` 记录 `lastPlayerRect`（showPlaybackSurface(rect) 时存），退出全屏
+   后恢复定位。
+
+**要点**：Android 原生全屏下，Surface 硬件 overlay 永远盖在 WebView 之上——WebView
+内控制条不可点。**退出全屏只能靠系统返回键/手势**（或原生再画退出按钮）。返回键
+必须被拦截为「退出全屏」，不能落到默认 finish。

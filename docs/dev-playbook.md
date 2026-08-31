@@ -158,6 +158,7 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
   - 原生 Surface 置顶后**其区域内 WebView 元素不可点击**（触摸被 Surface 消费）：播放区内 hover-controls 在手机无 hover 已不可用，不构成回归；`stage-head` 头部在播放区外仍可点；
   - **全屏走原生**（Surface 铺满 + 隐藏系统栏，`set_native_fullscreen`），CSS `.canvas-wrap.fs` 只保桌面路径；
   - Android 判定「有画面」靠 `receive_links` 的 `decodedVideo` 统计（canvas 像素回调不再有帧），并要在 poll 里把有解码帧的链路设为 `activeVideoLink`（原 `onVideoFrame` 赋值在 Surface 路径失效）。
+  - **原生全屏退出只能走系统返回键**（Surface 硬件 overlay 盖住 WebView 控制条，控制条不可点）：`MainActivity.onBackPressed` 全屏时**拦截为退出全屏**（恢复系统栏+恢复播放区矩形），保持 activity 存活——返回键默认 behavior 是 `finish` activity、销毁 surface → 解码器向其渲染 → `pthread_mutex_lock on destroyed mutex` 崩溃。退出后经 JNI `nativeFullscreenExited` 发事件让前端复位 `fsActive` 并重定位 surface。
 - **PC 侧屏幕采集经 Wayland portal 需交互授权**：无桌面交互（自动化会话）时 portal consent 卡住 → 采集不产帧 → 端到端视频验证拿不到帧。验证 PC→手机显示需真实桌面会话授权（或改用 CLI-only 的 file 端点；file 端点无前端订阅 UI，只能命令行）。
 - 发现「陈旧条目」未清：设备死后手机列表可能仍显示（依赖 mDNS TTL；未做主动超时重探）。**已部分修**：前端 `refreshDevices` 剔 `!d.online`（探测失败即移除），手动地址仍保留；mDNS TTL 窗口内的死节点因此不再长期残留。
 - **推流引擎已并发化**：`kernel.engine`（`Option<RunningStream>`）→ `engines: HashMap<stream_id, RunningStream>`。端点模型允许任意端点并发推（屏幕+系统声音等），不再有「已经在推流中」单流限制；仅同 stream_id 重复才拒。回归测试 `concurrent_streams_both_start`。

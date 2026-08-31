@@ -51,8 +51,9 @@
 ## 关键坑（再踩必看）
 
 - **`decorView` 不能直接 `addView`**（类型 `View`），要 `as ViewGroup`。
-- **SurfaceView 别用 GONE 起**：surface 会被销毁，MediaCodec 不能配置；用 1×1
-  VISIBLE 占位。
+- **SurfaceView 用 GONE 起 + `SurfaceHolder.Callback`**：GONE 时无 surface（不可配置），
+  播放一开始**给真实尺寸**（铺满窗口）才触发 `surfaceCreated`；解码器等 surface
+  就绪再配置。（曾用 1×1 VISIBLE 占位——本机不触发 surface 创建，务必别走那条。）
 - **`releaseOutputBuffer(idx, true)` 渲染**（false 是丢弃/不渲染）——Surface 输出
   下必须 `true` 才出画面。
 - **Surface 在 WebView 之外、release 无 CDP**：release 只能人眼验证；debug 有 CDP
@@ -67,3 +68,21 @@
 
 ① PC→手机播放流畅、非黑屏；② 全屏（原生）正确、系统栏隐藏、上下黑边/等比；
 ③ 退出播放 Surface 隐藏、回到 WebView UI；④ 反向（手机→PC）仍正常；⑤ 音频同步。
+
+## 真机实测修的两个根因（2026-09-01 会话）
+
+**症状**：手机订阅后无画面（解码器从未建、`surfaceCreated` 从不回调）。
+
+1. **1×1 `SurfaceView` 不触发 surface 创建**（本机实测 `surfaceCreated` 从不回调，
+   `holder.surface` invalid）。根因：SurfaceView 置 `GONE` 或极小尺寸（1×1）时
+   SurfaceFlinger 不为其建 surface。**修法**：播放开始时给真实尺寸（铺满窗口），
+   surface 创建后再由前端按播放区矩形重定位；用 `SurfaceHolder.Callback` 跟踪
+   `surfaceCreated/Destroyed`，解码器在 surface 就绪后才配置。
+2. **前端在缓冲期隐藏 surface 形成死锁**：`syncAndroidSurface` 原来把「显示 surface」
+   门在 `decodedVideo > 0`（首发画面），而解码需要 surface 先存在——于是表面一直
+   不显示、解码永不启动。**修法**：按「视频链路」而非「已出画面」决定显示——订阅
+   时记录端点 `kind`（screen/camera→`link.video`），视频链路在缓冲期就显示 surface
+   （发播放区矩形），纯音频链路才隐藏。
+
+**诊断手法**：`adb logcat -s StrossSurface`（surface 生命周期）+ `-s StrossPlay`
+（关键帧/解码器就绪/输出格式）。`surfaceChanged 1080x2378→990x557` 即前端定位生效。

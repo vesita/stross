@@ -334,6 +334,7 @@ async function confirmSubscribe(): Promise<void> {
       endpointId: subscribeTarget.ep.endpointId,
       endpointName: subscribeTarget.ep.name,
       streamId: r.streamId,
+      kind: subscribeTarget.ep.kind,
     });
     if (ok) {
       subscribedEndpoints.add(subscribeTarget.host + '/' + subscribeTarget.ep.endpointId);

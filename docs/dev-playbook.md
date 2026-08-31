@@ -152,7 +152,8 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
 - **Android 无窗口级 `setFullscreen`**（`win.isFullscreen()/setFullscreen()` 均抛错）：全屏靠 CSS `.canvas-wrap.fs`（`position:fixed; inset:0`）兜底。`togglePlayerFullscreen` 必须**先应用 CSS 全屏再试 OS 全屏**，不能因 `setFullscreen` 抛错提前 return。
 - **Android 播放 = 硬件 Surface 渲染**（MediaCodec→SurfaceView，后端 canvas 像素路径已弃）：前端隐藏 canvas，原生 `SurfaceView` 接管。坑位（详见 dev-notes/2026-09-01-android-surface-rendering.md）：
   - `codec.configure(fmt, surface, null, 0)` 输出到 Surface；输出 buffer 用 `releaseOutputBuffer(idx, **true**)` 渲染（false 不出画面）；
-  - `SurfaceView` 别用 `GONE` 起（销毁 surface → 解码器配置不到）；用 1×1 `VISIBLE` 占位常持有效 surface；
+  - `SurfaceView` 用 `GONE` 起 + `SurfaceHolder.Callback`：GONE 无 surface，播放一开始**给真实尺寸**（铺满窗口）才触发 `surfaceCreated`；解码器等 surface 就绪再配置。**别用 1×1 VISIBLE 占位**——本机不触发 surface 创建（曾实测黑屏根因）；
+  - **前端别把「显示 surface」门在 `decodedVideo>0`**：解码需要 surface 先存在 → 死锁（表面永不显示、解码永不启动）。按「视频链路」而非「已出画面」决定显示（订阅时记录端点 kind，视频链路缓冲期就发播放区矩形）；
   - `window.decorView` 是 `View`，`addView` 先 `as ViewGroup`；
   - 原生 Surface 置顶后**其区域内 WebView 元素不可点击**（触摸被 Surface 消费）：播放区内 hover-controls 在手机无 hover 已不可用，不构成回归；`stage-head` 头部在播放区外仍可点；
   - **全屏走原生**（Surface 铺满 + 隐藏系统栏，`set_native_fullscreen`），CSS `.canvas-wrap.fs` 只保桌面路径；

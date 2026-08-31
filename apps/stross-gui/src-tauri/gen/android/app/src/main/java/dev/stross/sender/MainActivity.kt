@@ -4,22 +4,28 @@ import android.content.Context
 import android.graphics.Rect
 import android.net.wifi.WifiManager
 import android.os.Bundle
+import android.util.Log
+import android.view.Surface
+import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import androidx.activity.enableEdgeToEdge
 import android.widget.FrameLayout
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Stross 主 Activity（由 `scripts/setup-android.sh` 复制进生成的 Android 工程）。
- *
- * 注意：`TauriActivity` 由 tauri-codegen 自动生成到本包名下；
- * 原生插件由 Rust 侧 `register_android_plugin` 自动实例化并注册，无需在此手动添加。
  *
  * **原生播放 SurfaceView**（Surface 渲染，替代 WebView-canvas 像素路径）：
  * `MediaCodec` 解码器直接画到这里的 `SurfaceView` 的 Surface，GPU 直出、零像素
  * 搬运。它程序化加到窗口 `DecorView` 顶层（`setZOrderOnTop(true)` 硬件 overlay，
  * 保证盖在 WebView 之上），初始 `GONE`；播放时按前端上报的矩形定位并 `VISIBLE`，
  * 退出时 `GONE`。全屏由原生把 SurfaceView 铺满 + 隐藏系统栏，不走 WebView CSS。
+ *
+ * **Surface 生命周期**：用 `SurfaceHolder.Callback` 跟踪 surface 创建/销毁——
+ * SurfaceView 置 `GONE` 会销毁 surface（媒体解码器因此要等新 surface 重建）。
+ * [`PlaybackPlugin`] 经 [`playbackSurface`]/[`isSurfaceReady`] 取当前有效 surface，
+ * 在 `surfaceCreated` 后才创建解码器。
  */
 class MainActivity : TauriActivity() {
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -27,6 +33,18 @@ class MainActivity : TauriActivity() {
     /** 原生播放 SurfaceView（视频硬件加速直渲染）。`PlaybackPlugin` 经此取 Surface。 */
     var playbackSurfaceView: SurfaceView? = null
         private set
+
+    /** 当前有效 surface（surfaceCreated 后非空；surfaceDestroyed 后置空）。 */
+    private val surfaceRef = AtomicReference<Surface?>()
+
+    /** Surface 是否可用（已创建且未销毁）。 */
+    fun isSurfaceReady(): Boolean {
+        val s = surfaceRef.get() ?: return false
+        return try { s.isValid } catch (_: Exception) { false }
+    }
+
+    /** 当前有效 surface（可能为 null）。 */
+    fun playbackSurface(): Surface? = surfaceRef.get()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -46,15 +64,36 @@ class MainActivity : TauriActivity() {
         createPlaybackSurface()
     }
 
-    /** 程序化创建 SurfaceView：加到 DecorView 顶层、硬件 overlay、小占位（保持
-     *  surface 始终有效，供 MediaCodec 随时配置；前端随后按播放区矩形重定位）。 */
+    /** 程序化创建 SurfaceView：加到 DecorView 顶层、硬件 overlay、初始 GONE。
+     *  surface 经 `SurfaceHolder.Callback` 创建/销毁后同步到 [`surfaceRef`]，
+     *  解码器在 [`isSurfaceReady`] 后才配置。 */
     private fun createPlaybackSurface() {
         val sv = SurfaceView(this).apply {
             setZOrderOnTop(true) // 位于窗口内容之上（WebView 顶层）
             setZOrderMediaOverlay(false)
+            visibility = View.GONE
+            holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    Log.i("StrossSurface", "surfaceCreated")
+                    surfaceRef.set(holder.surface)
+                }
+
+                override fun surfaceChanged(
+                    holder: SurfaceHolder,
+                    format: Int,
+                    width: Int,
+                    height: Int,
+                ) {
+                    Log.i("StrossSurface", "surfaceChanged ${width}x$height")
+                    surfaceRef.set(holder.surface)
+                }
+
+                override fun surfaceDestroyed(holder: SurfaceHolder) {
+                    Log.i("StrossSurface", "surfaceDestroyed")
+                    surfaceRef.set(null)
+                }
+            })
         }
-        // 用 FrameLayout 布局参数：初始 1×1 占位（GONE 会销毁 surface，故用 VISIBLE
-        // + 极小尺寸保持在角上不可见，始终提供有效 surface）
         (window.decorView as android.view.ViewGroup).addView(sv, FrameLayout.LayoutParams(1, 1))
         sv.bringToFront()
         playbackSurfaceView = sv
@@ -74,6 +113,19 @@ class MainActivity : TauriActivity() {
     fun showPlaybackSurface() {
         val sv = playbackSurfaceView ?: return
         sv.layoutParams = FrameLayout.LayoutParams(1, 1)
+        if (sv.visibility != View.VISIBLE) sv.visibility = View.VISIBLE
+        sv.bringToFront()
+    }
+
+    /** 播放开始时显示 SurfaceView 并给到**真实尺寸**（铺满窗口）——确保 surface
+     *  创建（1×1 在本机不触发 surfaceCreated）。前端随后上报播放区矩形重定位，
+     *  避免盖住整个 UI 的时间被拉长。 */
+    fun showPlaybackSurfaceFullWindow() {
+        val sv = playbackSurfaceView ?: return
+        sv.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+        )
         if (sv.visibility != View.VISIBLE) sv.visibility = View.VISIBLE
         sv.bringToFront()
     }

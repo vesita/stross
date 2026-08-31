@@ -137,12 +137,24 @@ function hasActiveVideo() {
         return false;
     return (link.frames ?? 0) > 0 || (link.decodedVideo ?? 0) > 0;
 }
+/** 当前应为原生 Surface 接管画面的视频链路（缓冲期即确定为视频链路）。 */
+function androidVideoLink() {
+    const active = activeVideoLink ? recvLinks.get(activeVideoLink) : null;
+    if (active && active.video)
+        return active;
+    for (const l of recvLinks.values())
+        if (l.video)
+            return l;
+    return null;
+}
 /** 全局视图切换：进入消费播放台时，Android 把播放区矩形交给原生 Surface；
- *  离开/停止接收时隐藏原生 Surface。多次调用幂等（native 幂等定位/隐藏）。 */
+ *  视频链路在缓冲期就显示（否则 surface 被隐藏→解码器无法建，形成死锁）；
+ *  纯音频链路/停止时隐藏。多次调用幂等。 */
 async function syncAndroidSurface() {
     if (!IS_ANDROID)
         return;
-    if (!receiving || !hasActiveVideo()) {
+    const vlink = androidVideoLink();
+    if (!receiving || !vlink) {
         await hideActiveSurface();
         return;
     }
@@ -179,6 +191,7 @@ async function startReceiveLink(opts) {
             startedAt: Date.now(),
             frames: 0,
             audioBlocks: 0,
+            video: opts.kind === 'screen' || opts.kind === 'camera',
             status: 'starting',
             error: null,
         });
@@ -246,7 +259,7 @@ function dotClass(status) {
 }
 function statusText(link) {
     switch (link.status) {
-        case 'live': return link.frames > 0 ? '接收中' : '音频播放中';
+        case 'live': return (link.frames ?? 0) > 0 || (link.decodedVideo ?? 0) > 0 ? '接收中' : '音频播放中';
         case 'error': return '错误';
         case 'ended': return '已结束';
         default: return '等待流数据…';
@@ -280,9 +293,11 @@ function renderRecvLinks() {
         meta.className = 'meta';
         const fpsText = (link.displayFps ? ` · 显示 ~${link.displayFps}fps` : '') +
             (link.decodeFps ? ` · 解码 ~${link.decodeFps}fps` : '');
+        // Android Surface 路径无 canvas 帧，用解码帧数代替「收到 X 帧」。
+        const gotFrames = IS_ANDROID ? (link.decodedVideo ?? 0) : link.frames;
         meta.textContent = link.error
             ? '错误：' + link.error
-            : `${statusText(link)} · 收到 ${link.frames} 帧${fpsText} · 音频 ${link.audioBlocks} 块`;
+            : `${statusText(link)} · 收到 ${gotFrames} 帧${fpsText} · 音频 ${link.audioBlocks} 块`;
         body.appendChild(name);
         body.appendChild(meta);
         const stop = document.createElement('button');
@@ -348,10 +363,13 @@ function updateRecvOverlay() {
     // Android Surface 路径无帧经 Channel 回传，用解码帧数判定「有画面」；
     // 桌面沿用帧数（canvas 绘制）。
     const hasFrames = !!active && (active.frames > 0 || (active.decodedVideo ?? 0) > 0);
+    // Android：视频链路在缓冲期就显示 canvas-wrap（保证原生 Surface 有有效定位矩形），
+    // 纯音频链路隐藏。
+    const videoShown = IS_ANDROID ? !!androidVideoLink() : hasFrames;
     const hasAudio = Array.from(recvLinks.values()).some((l) => l.audioBlocks > 0);
-    $('recv-overlay').classList.toggle('hidden', !receiving || hasFrames || (active ? active.audioBlocks > 0 : false));
-    $('recv-canvas-wrap').classList.toggle('hidden', !hasFrames);
-    showAudioVisualizer(receiving && !hasFrames && hasAudio);
+    $('recv-overlay').classList.toggle('hidden', !receiving || videoShown || (active ? active.audioBlocks > 0 : false));
+    $('recv-canvas-wrap').classList.toggle('hidden', !videoShown);
+    showAudioVisualizer(receiving && !videoShown && hasAudio);
     void syncAndroidSurface();
 }
 /** AI 智能布局与遥测状态计算。 */
@@ -473,7 +491,7 @@ async function pollReceiveLinks() {
                     continue;
                 }
             }
-            else if (link.frames > 0 || s.audioBlocks > 0) {
+            else if ((link.frames ?? 0) > 0 || (link.decodedVideo ?? 0) > 0 || (s.audioBlocks ?? 0) > 0) {
                 link.status = 'live';
             }
             else {

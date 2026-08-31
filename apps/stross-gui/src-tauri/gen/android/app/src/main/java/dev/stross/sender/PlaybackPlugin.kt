@@ -136,9 +136,10 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
         invoke.resolve(JSObject().apply { put("started", true) })
     }
 
-    /** 显示 `MainActivity` 的 SurfaceView（不定位——前端随后上报播放区矩形）。 */
+    /** 显示 `MainActivity` 的 SurfaceView（播放开始时给到真实尺寸，保证 surface
+     *  创建；前端随后上报播放区矩形重定位）。 */
     private fun showSurfaceView() {
-        (host as? MainActivity)?.showPlaybackSurface()
+        (host as? MainActivity)?.showPlaybackSurfaceFullWindow()
     }
 
     // ------------------------------------------------------------------
@@ -227,7 +228,6 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
         try {
             val bytes = Base64.decode(args.d, Base64.NO_WRAP)
             val csd = args.csd?.let { Base64.decode(it, Base64.NO_WRAP) }
-            if (args.csd != null) Log.i(TAG, "feedVideo 收到关键帧 csd w=${args.w} h=${args.h} len=${bytes.size}")
             val job = VideoJob(bytes, args.k, args.c, args.p, args.w, args.h, csd)
             // 有界队列：满时**有选择地丢帧**（优先丢非关键帧，保关键帧对齐）。
             // 队列满且新帧关键帧时清队重入（重建参考），否则丢弃该帧。
@@ -354,16 +354,17 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
         return true
     }
 
-    /** 阻塞等待 `MainActivity` 的 Surface 就绪（有限重试，成功返回非 null）。 */
+    /** 阻塞等待 `MainActivity` 的 Surface 就绪（surfaceCreated 回调置位；有限重试）。
+     *  成功返回当前有效 surface；超时返回 null（解码线程丢弃该帧，等下一关键帧重试）。 */
     private fun acquireSurface(): Surface? {
         val act = host as? MainActivity ?: run { Log.w(TAG, "acquireSurface: host 不是 MainActivity"); return null }
-        for (i in 0 until 40) {
-            val holder = act.playbackSurfaceView?.holder ?: continue
-            val s = try { holder.surface } catch (e: Exception) { Log.w(TAG, "holder.surface 异常: ${e.message}"); null }
+        for (i in 0 until 80) {
+            val s = act.playbackSurface()
             if (s != null && s.isValid) return s
+            if (i % 16 == 0) Log.w(TAG, "acquireSurface 等待 surface 就绪: $i")
             try { Thread.sleep(25) } catch (_: InterruptedException) { return null }
         }
-        Log.w(TAG, "acquireSurface 超时（1s）")
+        Log.w(TAG, "acquireSurface 超时（2s），等下一关键帧重试")
         return null
     }
 

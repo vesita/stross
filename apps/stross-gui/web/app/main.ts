@@ -271,4 +271,8 @@ if (diagCloseBtn) diagCloseBtn.onclick = () => toggleDiagnosticsDrawer();
 initPlayerGestures();
 initFSMUI();
 
+// 尺寸/方向变化时重定位原生播放 Surface（Android Surface 路径；幂等）。
+window.addEventListener('resize', () => { void syncAndroidSurface(); });
+window.addEventListener('orientationchange', () => { void syncAndroidSurface(); });
+
 void init();

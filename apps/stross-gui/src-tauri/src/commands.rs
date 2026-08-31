@@ -52,6 +52,73 @@ pub async fn set_screen_orientation(
     Ok(())
 }
 
+/// 把原生播放 Surface 定位到前端播放区矩形（物理 px；Android，桌面安全 no-op）。
+#[tauri::command]
+pub async fn set_playback_surface_bounds(
+    app: tauri::AppHandle,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let handle = app.state::<crate::mobile::PlaybackPluginHandle>().0.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = handle.run_mobile_plugin::<serde_json::Value>(
+                "setSurfaceBounds",
+                serde_json::json!({ "x": x, "y": y, "w": w, "h": h }),
+            );
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (&app, x, y, w, h);
+    }
+    Ok(())
+}
+
+/// 原生全屏：Surface 铺满 + 隐藏系统栏（Android；桌面安全 no-op）。
+#[tauri::command]
+pub async fn set_native_fullscreen(app: tauri::AppHandle, active: bool) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let handle = app.state::<crate::mobile::PlaybackPluginHandle>().0.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = handle.run_mobile_plugin::<serde_json::Value>(
+                "setNativeFullscreen",
+                serde_json::json!({ "active": active }),
+            );
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (&app, active);
+    }
+    Ok(())
+}
+
+/// 隐藏原生播放 Surface（Android；桌面安全 no-op）。
+#[tauri::command]
+pub async fn hide_playback_surface(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let handle = app.state::<crate::mobile::PlaybackPluginHandle>().0.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ =
+                handle.run_mobile_plugin::<serde_json::Value>("hideSurface", serde_json::json!({}));
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (&app,);
+    }
+    Ok(())
+}
+
 /// 设置「可被发现」，并持久化到 settings.json（重启保持）。
 #[tauri::command]
 pub fn set_discoverable(

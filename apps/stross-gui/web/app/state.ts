@@ -43,6 +43,9 @@ interface RecvLinkState {
   /** poll 差分游标（frames / decodedVideo 上次采样值）。 */
   lastFrames?: number;
   lastDecoded?: number;
+  /** 已解码视频帧数（receive_links 轮询回写；Android Surface 路径据它判断
+   *  「有画面」——canvas 像素路径不再有帧经 Channel 回传）。 */
+  decodedVideo?: number;
   /** 上次 poll 时刻（fps 差分按实际间隔归一化）。 */
   lastPollAt?: number;
   /** 帧率滑动窗口（最近 4 次 poll 差分；平均后显示，差分 0 不覆盖历史）。 */

@@ -1,13 +1,17 @@
-//! Android 播放桥（1f-3）：编码帧 → Kotlin MediaCodec 薄壳 → Rust 转换缩放 →
-//! 前端 canvas。
+//! Android 播放桥：编码帧 → Kotlin MediaCodec 薄壳 → **SurfaceView 硬件直渲染**。
 //!
-//! 职责划分（解码跟不上接收的根治方向）：
+//! 渲染路径（根治 WebView-canvas 像素路径的 CPU+内存双瓶颈）：
+//! [`spawn_android_playback`] 把接收到的编码帧（视频/音频）喂给 Kotlin
+//! `PlaybackPlugin`。视频经 MediaCodec **解码器输出到原生 `SurfaceView` 的
+//! Surface**（GPU 直出、零像素搬运——不再 YUV→RGBA→二进制通道→canvas）；
+//! 音频经 ADTS→AAC→AudioTrack 出声。前端隐藏 canvas，原生 SurfaceView 接管。
 //!
+//! 职责划分：
 //! * **Rust**（本文件 + [`mobile_jni`]）：Annex-B/SPS 解析（[`stross_endpoint::nal`]）、
-//!   csd（SPS/PPS）与尺寸提取、积压跳帧、YUV→RGBA 转换缩放
-//!   （[`stross_endpoint::yuv`]）、base64 事件规整、解码统计回写。
-//! * **Kotlin**（`PlaybackPlugin.kt`）：只剩 MediaCodec 生命周期与编解码 buffer
-//!   搬运（系统 API 薄壳），不再做任何位级解析 / 像素转换。
+//!   csd（SPS/PPS）与尺寸提取、积压跳帧、解码统计回写（经 `mobile_jni`
+//!   的 `note_android_decoded_frame_on`，多端点链接路由到正确链路）。
+//! * **Kotlin**（`PlaybackPlugin.kt`）：MediaCodec/AudioTrack 生命周期与编解码
+//!   buffer 搬运，解码输出到 Surface。
 //!
 //! 帧消息格式（Rust → Kotlin，JSON）：
 //! `{"d": "<base64>", "k": bool, "c": bool, "p": pts_ms, "csd": "<base64 SPS+PPS>", "w": int, "h": int}`
@@ -107,6 +111,7 @@ impl AndroidCapture {
     }
 }
 
+#[async_trait::async_trait]
 impl CaptureBackend for AndroidCapture {
     fn descriptor(&self) -> CapabilityDescriptor {
         CapabilityDescriptor {
@@ -120,7 +125,7 @@ impl CaptureBackend for AndroidCapture {
         }
     }
 
-    fn start(&self, cfg: &StreamConfig, tx: mpsc::Sender<Frame>) -> anyhow::Result<()> {
+    async fn start(&self, cfg: &StreamConfig, tx: mpsc::Sender<Frame>) -> anyhow::Result<()> {
         *self.tx.lock().unwrap() = Some(tx);
         *self.status.lock().unwrap() = CaptureStatus::default();
 
@@ -236,11 +241,13 @@ const DROP_BACKLOG: usize = 8;
 
 /// 启动 Android 播放链路：
 ///
-/// 1. 注册 JNI 桥全局 AppHandle（`mobile_jni::init`）——Kotlin 解码线程随后
-///    经 JNI 直调 Rust（`nativeSubmitYuvFrame`：YUV→RGBA 缩放 + base64 事件）。
-/// 2. 通知 Kotlin `PlaybackPlugin.startPlayback`（建解码器 + AudioTrack）。
-/// 3. 消费 `rx` 里的编码帧：视频帧 →（Rust 解析 SPS 尺寸/csd）`feedVideo`、
-///    音频帧 → `feedAudio`；积压超过 [`DROP_BACKLOG`] 时跳非关键帧追实时。
+/// 1. 注册 JNI 桥全局 AppHandle（`mobile_jni::init`）并记录活动链路
+///    （`set_active_link`）——Kotlin 解码线程每渲染一帧经 JNI 回调
+///    `nativeDecodedFrame` 写解码统计到本链路。
+/// 2. 通知 Kotlin `PlaybackPlugin.startPlayback`（显示 SurfaceView、建 AudioTrack）。
+/// 3. 消费 `rx` 里的编码帧：视频帧 →（Rust 解析 SPS 尺寸/csd）`feedVideo`
+///    （MediaCodec 输出到 Surface 硬件渲染）、音频帧 → `feedAudio`；
+///    积压超过 [`DROP_BACKLOG`] 时跳非关键帧追实时。
 ///
 /// 接收结束（rx 关闭）时通知 Kotlin 释放解码器 / AudioTrack。
 static ACTIVE_PLAYBACK_COUNT: std::sync::atomic::AtomicUsize =
@@ -250,9 +257,16 @@ pub fn spawn_android_playback(
     app: &AppHandle<Wry>,
     rx: mpsc::Receiver<Frame>,
     audio: AudioOut,
+    _on_frame: Channel<Vec<u8>>,
+    link_id: String,
 ) -> tokio::task::JoinHandle<()> {
     #[cfg(target_os = "android")]
-    mobile_jni::init(app);
+    {
+        mobile_jni::init(app);
+        // 活动链路路由：Kotlin 每解码一帧经 JNI 回调 `nativeDecodedFrame`，Rust
+        // 据此把解码统计写回本链路（多端点链接）。
+        mobile_jni::set_active_link(&link_id);
+    }
     let handle = app.state::<PlaybackPluginHandle>().0.clone();
     ACTIVE_PLAYBACK_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
@@ -315,5 +329,8 @@ pub fn spawn_android_playback(
                 .run_mobile_plugin::<serde_json::Value>("stopPlayback", serde_json::json!({}));
             tracing::info!("全部 Android 播放链路结束，已释放解码器与 AudioTrack");
         }
+        // 清空当前活动链路路由（本链路收尾）
+        #[cfg(target_os = "android")]
+        mobile_jni::clear_active_link();
     })
 }

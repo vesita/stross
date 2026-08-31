@@ -78,6 +78,9 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         stop_receive_link,
         receive_links,
         set_screen_orientation,
+        set_playback_surface_bounds,
+        set_native_fullscreen,
+        hide_playback_surface,
         negotiator_respond,
         #[cfg(all(not(mobile), target_os = "linux"))]
         firewall_status,

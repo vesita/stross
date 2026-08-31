@@ -43,7 +43,7 @@ async-trait = "0.1"
 # lamco-pipewire = pipewire 采集（低层 API，KWin 协商 + SHM/CPU 路径），
 # lamco-portal = xdg-desktop-portal ScreenCast 会话；ashpd 用于选源。
 ashpd = "0.13"
-lamco-pipewire = "0.6.11"
+lamco-pipewire = "0.6.13"
 lamco-portal = "0.4.5"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.23.1"

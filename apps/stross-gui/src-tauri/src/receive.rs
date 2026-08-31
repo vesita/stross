@@ -85,7 +85,6 @@ pub async fn start_receive_link(
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        let _ = &on_frame;
         state
             .start_receive_raw_link(link_id.clone(), relay, stream)
             .await
@@ -94,7 +93,10 @@ pub async fn start_receive_link(
             Some(r) => r,
             None => return Err("接收链路已启动但没有编码帧通道".into()),
         };
-        let h = crate::mobile::spawn_android_playback(&app, frames, audio);
+        // 播放链路：Surface 直渲染（Kotlin MediaCodec → SurfaceView），解码统计经
+        // JNI 回 Rust 写到本链路。
+        let h =
+            crate::mobile::spawn_android_playback(&app, frames, audio, on_frame, link_id.clone());
         let mut guard = ANDROID_PLAYBACK_LINKS.lock().unwrap();
         if let Some(old) = guard.insert(link_id, h) {
             old.abort();
@@ -160,7 +162,6 @@ pub async fn start_receive(
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        let _ = &on_frame; // Android 播放不经显示通道（Kotlin MediaCodec 自渲染）
         // 1) 停旧接收：关闭旧编码帧通道 → 旧播放链循环结束并调用 stopPlayback。
         state.stop_receive();
         // 2) 等旧播放链收尾（stopPlayback 完成）再启新链——消灭同插件竞态。
@@ -179,7 +180,7 @@ pub async fn start_receive(
             Some(r) => r,
             None => return Err("接收会话已启动但没有编码帧通道".into()),
         };
-        let h = crate::mobile::spawn_android_playback(&app, frames, audio);
+        let h = crate::mobile::spawn_android_playback(&app, frames, audio, on_frame, "main".into());
         ANDROID_PLAYBACK_LINKS
             .lock()
             .unwrap()

@@ -3087,9 +3087,9 @@ dependencies = [
 
 [[package]]
 name = "lamco-pipewire"
-version = "0.6.11"
+version = "0.6.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aabebfcbbcc5c16d9e587f5d8c1468c42d93000c7f01bfb31efb19c205fc00f2"
+checksum = "f184ada837636b715661cb97aaf646e18f758a544f2bd5b2554c1cadf7cac8e9"
 dependencies = [
  "futures",
  "libc",
@@ -5457,6 +5457,7 @@ name = "stross-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.23.1",
  "jni 0.21.1",
  "serde",

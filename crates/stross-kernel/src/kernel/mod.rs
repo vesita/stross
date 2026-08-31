@@ -1407,6 +1407,19 @@ impl Kernel {
         }
     }
 
+    /// Android 播放路径回写（多端点链接路由）：把解码统计记到指定链路 `link_id`；
+    /// 空字符串回落 `main` 槽（旧单流兼容）。
+    pub fn note_android_decoded_frame_on(&self, link_id: &str) {
+        let id = if link_id.is_empty() {
+            MAIN_RECEIVE_LINK
+        } else {
+            link_id
+        };
+        if let Some(r) = self.receivers.lock_poisoned().get(id) {
+            r.note_decoded_video();
+        }
+    }
+
     // -----------------------------------------------------------------------
     // 多端点链接接收（通信模式 v2 Phase C「接收端多流化」）
     // -----------------------------------------------------------------------

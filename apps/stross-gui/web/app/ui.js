@@ -173,6 +173,21 @@ async function togglePlayerFullscreen() {
     const next = !fs;
     // CSS 层全屏先行——即使 OS 窗口级全屏失败也立即生效
     setPlayerFullscreen(next);
+    // Android Surface 路径：原生 SurfaceView 铺满 + 隐藏系统栏接管全屏
+    if (IS_ANDROID && hasActiveVideo()) {
+        try {
+            await call('set_native_fullscreen', { active: next });
+        }
+        catch { }
+        if (!next) {
+            // 退出全屏：恢复系统栏后把 Surface 重新定位回播放区
+            try {
+                await call('set_screen_orientation', { orientation: 'unspecified' });
+            }
+            catch { }
+            void syncAndroidSurface();
+        }
+    }
     if (!win)
         return;
     try {
@@ -185,6 +200,12 @@ async function exitPlayerFullscreen() {
     if (!fsActive)
         return;
     const win = window.__TAURI__?.window?.getCurrentWindow();
+    if (IS_ANDROID) {
+        try {
+            await call('set_native_fullscreen', { active: false });
+        }
+        catch { }
+    }
     if (!win)
         return;
     try {
@@ -192,6 +213,8 @@ async function exitPlayerFullscreen() {
     }
     catch { }
     setPlayerFullscreen(false);
+    if (IS_ANDROID)
+        void syncAndroidSurface();
 }
 // ---------------------------------------------------------------- 移动端 Tab 切换
 /** 切换全局主视图模式（设备与共享管理 vs 消费播放台）——经过状态机派发。 */

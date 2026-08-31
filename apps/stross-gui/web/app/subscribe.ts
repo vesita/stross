@@ -54,7 +54,8 @@ function recvLinkName(host: string, endpointName: string): string {
 // requestAnimationFrame 节流绘制（丢中间帧，显示管线不积压）。
 // ---------------------------------------------------------------------------
 
-/** 待绘帧（RAF 消费；只保留最新，到达率高于显示刷新率时丢中间帧）。 */
+/** 待绘帧（RAF 消费；只保留最新，到达率高于显示刷新率时丢中间帧）。
+ *  桌面与 Android 统一走二进制 Channel 的 STRF-RGBA（`drawReceiveFrame`）。 */
 let pendingFrame: { w: number; h: number; rgba: Uint8Array } | null = null;
 let drawLoopStarted = false;
 
@@ -73,30 +74,12 @@ function ensureVideoDrawLoop(): void {
   requestAnimationFrame(tick);
 }
 
-// Android 兼容路径：Kotlin MediaCodec 解码帧经 JNI 回 Rust，base64
-// `receive-frame` 事件推前端（`mobile_jni.rs`）。同一 RAF 节流绘制。
-let recvFrameUnlisten: (() => void) | null = null;
+// Android 解码在 Kotlin MediaCodec，**输出到原生 SurfaceView 硬件直渲染**
+// （Surface 路径，零像素搬运）——前端隐藏 canvas，原生 Surface 接管；
+// 前端据 `receive_links` 的解码帧数统计判定「有画面」并同步原生 Surface 定位。
+// 桌面走二进制 Channel 的 STRF-RGBA（`drawReceiveFrame`）。
 
-async function ensureRecvFrameListener(): Promise<void> {
-  if (recvFrameUnlisten) return;
-  recvFrameUnlisten = await listen(
-    'receive-frame',
-    (p: { linkId?: string; pts: number; width: number; height: number; data: string }) => {
-      const link = (p.linkId ? recvLinks.get(p.linkId) : null) || Array.from(recvLinks.values())[0];
-      if (!link) return;
-      link.frames += 1;
-      activeVideoLink = link.linkId;
-      const bin = atob(p.data);
-      if (bin.length !== p.width * p.height * 4) return;
-      const u8 = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-      pendingFrame = { w: p.width, h: p.height, rgba: u8 };
-      updateRecvOverlay();
-    },
-  );
-}
-
-/** 二进制帧载荷解析（Rust `pack_frame`：magic "STRF" + w + h + pts 各 u32 LE，后接 RGBA）。 */
+/** 二进制帧载荷解析（magic "STRF" + w + h + pts 各 u32 LE，后接 RGBA）。 */
 function onVideoFrame(linkId: string, payload: Uint8Array): void {
   const link = recvLinks.get(linkId);
   if (!link) return;
@@ -110,13 +93,61 @@ function onVideoFrame(linkId: string, payload: Uint8Array): void {
   pendingFrame = { w, h, rgba: payload.subarray(16) };
 }
 
-/** 创建一条链路的二进制帧通道（tauri v2 `core.Channel`；Android 分支 Rust 忽略）。 */
+/** 创建一条链路的二进制帧通道（tauri v2 `core.Channel`；桌面/Android 同为 STRF-RGBA）。 */
 function newFrameChannel(linkId: string): unknown {
   const ChannelCtor = (window as unknown as WindowWithTauri).__TAURI__?.core?.Channel;
   if (!ChannelCtor) throw new Error('当前页面缺少 Tauri Channel 支持');
   const ch = new ChannelCtor();
   ch.onmessage = (payload: Uint8Array) => onVideoFrame(linkId, payload);
   return ch;
+}
+
+/** 关闭原生播放 Surface（Android Surface 路径；桌面安全 no-op）。 */
+async function hideActiveSurface(): Promise<void> {
+  if (!IS_ANDROID) return;
+  try {
+    await call('hide_playback_surface');
+  } catch {}
+}
+
+/** 通知原生把 Surface 定位到 `#recv-canvas-wrap` 播放区（物理 px）。
+ *  仅 Android；画布隐藏时元素 rect 失效，应在画布可见状态下调用。 */
+async function syncAndroidSurfaceBounds(): Promise<void> {
+  if (!IS_ANDROID) return;
+  const el = $('recv-canvas-wrap');
+  if (!el) return;
+  const r = el.getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) return;
+  const dpr = window.devicePixelRatio || 1;
+  try {
+    await call('set_playback_surface_bounds', {
+      x: Math.round(r.left * dpr),
+      y: Math.round(r.top * dpr),
+      w: Math.round(r.width * dpr),
+      h: Math.round(r.height * dpr),
+    });
+  } catch {}
+}
+
+/** 当前是否有活跃的视频链路（有解码帧或有画布帧）。 */
+function hasActiveVideo(): boolean {
+  const link = activeVideoLink ? recvLinks.get(activeVideoLink) : null;
+  if (!link) return false;
+  return (link.frames ?? 0) > 0 || (link.decodedVideo ?? 0) > 0;
+}
+
+/** 全局视图切换：进入消费播放台时，Android 把播放区矩形交给原生 Surface；
+ *  离开/停止接收时隐藏原生 Surface。多次调用幂等（native 幂等定位/隐藏）。 */
+async function syncAndroidSurface(): Promise<void> {
+  if (!IS_ANDROID) return;
+  if (!receiving || !hasActiveVideo()) {
+    await hideActiveSurface();
+    return;
+  }
+  // fsActive 时 surface 由 `set_native_fullscreen` 全屏接管，此处不再重定位。
+  if (!fsActive) {
+    await syncAndroidSurfaceBounds();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -144,9 +175,6 @@ async function startReceiveLink(opts: {
   try {
     const onFrame = newFrameChannel(linkId);
     await call('start_receive_link', { linkId, relay, stream: opts.streamId, audio: 'device', onFrame });
-    if (IS_ANDROID) {
-      await ensureRecvFrameListener();
-    }
     started = true;
     recvLinks.set(linkId, {
       linkId,
@@ -322,7 +350,9 @@ function syncRecvUI(): void {
 /** 接收等待浮层。 */
 function updateRecvOverlay(): void {
   const active = activeVideoLink ? recvLinks.get(activeVideoLink) : null;
-  const hasFrames = !!active && active.frames > 0;
+  // Android Surface 路径无帧经 Channel 回传，用解码帧数判定「有画面」；
+  // 桌面沿用帧数（canvas 绘制）。
+  const hasFrames = !!active && (active.frames > 0 || (active.decodedVideo ?? 0) > 0);
   const hasAudio = Array.from(recvLinks.values()).some((l) => l.audioBlocks > 0);
   $('recv-overlay').classList.toggle(
     'hidden',
@@ -330,6 +360,7 @@ function updateRecvOverlay(): void {
   );
   $('recv-canvas-wrap').classList.toggle('hidden', !hasFrames);
   showAudioVisualizer(receiving && !hasFrames && hasAudio);
+  void syncAndroidSurface();
 }
 
 /** AI 智能布局与遥测状态计算。 */
@@ -340,7 +371,7 @@ function calcSmartLayout(): void {
 
   const totalLinks = recvLinks.size;
   const activeVideo = activeVideoLink ? recvLinks.get(activeVideoLink) : null;
-  const hasVideo = !!activeVideo && activeVideo.frames > 0;
+  const hasVideo = !!activeVideo && ((activeVideo.frames ?? 0) > 0 || (activeVideo.decodedVideo ?? 0) > 0);
   const audioCount = Array.from(recvLinks.values()).filter((l) => l.audioBlocks > 0 || l.name.includes('声音') || l.name.includes('麦克风')).length;
 
   const label = $('ai-layout-label');
@@ -405,6 +436,11 @@ async function pollReceiveLinks(): Promise<void> {
       const s = byId.get(link.linkId)?.stats || (IS_ANDROID ? byId.get('main')?.stats : undefined);
       if (!s) continue;
       link.audioBlocks = s.audioBlocks;
+      link.decodedVideo = s.decodedVideo as number;
+      // 有画面链路自动设为当前视频链路（Android Surface 路径无帧回调，靠解码统计判定）
+      if ((link.decodedVideo ?? 0) > 0 || (link.frames ?? 0) > 0) {
+        activeVideoLink = link.linkId;
+      }
       const now = Date.now();
       const dtSec = (now - (link.lastPollAt || now)) / 1000;
       link.lastPollAt = now;
@@ -446,6 +482,7 @@ async function pollReceiveLinks(): Promise<void> {
       }
     }
     renderRecvLinks();
+    void syncAndroidSurface();
   } catch (e) {
     console.warn('[stross] receive_links 轮询失败', e);
   }

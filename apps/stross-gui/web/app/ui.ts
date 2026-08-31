@@ -175,6 +175,17 @@ async function togglePlayerFullscreen(): Promise<void> {
   const next = !fs;
   // CSS 层全屏先行——即使 OS 窗口级全屏失败也立即生效
   setPlayerFullscreen(next);
+  // Android Surface 路径：原生 SurfaceView 铺满 + 隐藏系统栏接管全屏
+  if (IS_ANDROID && hasActiveVideo()) {
+    try {
+      await call('set_native_fullscreen', { active: next });
+    } catch {}
+    if (!next) {
+      // 退出全屏：恢复系统栏后把 Surface 重新定位回播放区
+      try { await call('set_screen_orientation', { orientation: 'unspecified' }); } catch {}
+      void syncAndroidSurface();
+    }
+  }
   if (!win) return;
   try {
     await win.setFullscreen(next);
@@ -185,9 +196,13 @@ async function togglePlayerFullscreen(): Promise<void> {
 async function exitPlayerFullscreen(): Promise<void> {
   if (!fsActive) return;
   const win = (window as unknown as WindowWithTauri).__TAURI__?.window?.getCurrentWindow();
+  if (IS_ANDROID) {
+    try { await call('set_native_fullscreen', { active: false }); } catch {}
+  }
   if (!win) return;
   try { await win.setFullscreen(false); } catch {}
   setPlayerFullscreen(false);
+  if (IS_ANDROID) void syncAndroidSurface();
 }
 
 // ---------------------------------------------------------------- 移动端 Tab 切换

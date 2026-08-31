@@ -150,6 +150,14 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
 - `negotiator_respond` 已改 **async**（同步 tauri 命令在 GTK 主线程调 `tokio::spawn` 无 reactor → panic）。
 - **凡同步 tauri 命令可能走到 `tokio::spawn`/`tokio::time`/`tokio::net` 都必须改 async**：`endpoint_stop_share` 已改（`stop_share_by_stream` 内 `tokio::spawn` 优雅停流）。前端 invoke 对 sync/async 命令一致，无需改前端。
 - **Android 无窗口级 `setFullscreen`**（`win.isFullscreen()/setFullscreen()` 均抛错）：全屏靠 CSS `.canvas-wrap.fs`（`position:fixed; inset:0`）兜底。`togglePlayerFullscreen` 必须**先应用 CSS 全屏再试 OS 全屏**，不能因 `setFullscreen` 抛错提前 return。
+- **Android 播放 = 硬件 Surface 渲染**（MediaCodec→SurfaceView，后端 canvas 像素路径已弃）：前端隐藏 canvas，原生 `SurfaceView` 接管。坑位（详见 dev-notes/2026-09-01-android-surface-rendering.md）：
+  - `codec.configure(fmt, surface, null, 0)` 输出到 Surface；输出 buffer 用 `releaseOutputBuffer(idx, **true**)` 渲染（false 不出画面）；
+  - `SurfaceView` 别用 `GONE` 起（销毁 surface → 解码器配置不到）；用 1×1 `VISIBLE` 占位常持有效 surface；
+  - `window.decorView` 是 `View`，`addView` 先 `as ViewGroup`；
+  - 原生 Surface 置顶后**其区域内 WebView 元素不可点击**（触摸被 Surface 消费）：播放区内 hover-controls 在手机无 hover 已不可用，不构成回归；`stage-head` 头部在播放区外仍可点；
+  - **全屏走原生**（Surface 铺满 + 隐藏系统栏，`set_native_fullscreen`），CSS `.canvas-wrap.fs` 只保桌面路径；
+  - Android 判定「有画面」靠 `receive_links` 的 `decodedVideo` 统计（canvas 像素回调不再有帧），并要在 poll 里把有解码帧的链路设为 `activeVideoLink`（原 `onVideoFrame` 赋值在 Surface 路径失效）。
+- **PC 侧屏幕采集经 Wayland portal 需交互授权**：无桌面交互（自动化会话）时 portal consent 卡住 → 采集不产帧 → 端到端视频验证拿不到帧。验证 PC→手机显示需真实桌面会话授权（或改用 CLI-only 的 file 端点；file 端点无前端订阅 UI，只能命令行）。
 - 发现「陈旧条目」未清：设备死后手机列表可能仍显示（依赖 mDNS TTL；未做主动超时重探）。**已部分修**：前端 `refreshDevices` 剔 `!d.online`（探测失败即移除），手动地址仍保留；mDNS TTL 窗口内的死节点因此不再长期残留。
 - **推流引擎已并发化**：`kernel.engine`（`Option<RunningStream>`）→ `engines: HashMap<stream_id, RunningStream>`。端点模型允许任意端点并发推（屏幕+系统声音等），不再有「已经在推流中」单流限制；仅同 stream_id 重复才拒。回归测试 `concurrent_streams_both_start`。
 - **接收端多链路已落地**（通信模式 v2 Phase C）：`Kernel::receivers: HashMap<link_id, Receiver>`——`start_receive_link`/`stop_receive_link`/`receive_links`/`take_receive_frames_for`；桌面 GUI 右栏「接收」逐条链路显示 + 独立停止，画布显示最近活跃视频链路，纯音频链只出声。**旧单流 API（`start_receive`/`stop_receive`/`receive_status`/`take_receive_frames`）落预留槽 `main` 兼容**（Android 单链播放路径不变）。改接收侧先看这两套 API 的分工。

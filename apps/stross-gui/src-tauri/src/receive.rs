@@ -100,7 +100,9 @@ pub fn stop_receive_link(state: State<'_, Arc<Kernel>>, link_id: String) {
 
 /// 全部接收链路快照（linkId + 统计；前端面板逐条展示）。
 #[tauri::command]
-pub fn receive_links(state: State<'_, Arc<Kernel>>) -> Vec<stross_kernel::receiver::ReceiveLinkView> {
+pub fn receive_links(
+    state: State<'_, Arc<Kernel>>,
+) -> Vec<stross_kernel::receiver::ReceiveLinkView> {
     state.receive_links()
 }
 

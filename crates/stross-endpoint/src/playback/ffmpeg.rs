@@ -369,7 +369,15 @@ fn pacer_loop(
                 .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
         };
         match recv {
-            Ok(f) => sched.push(f, Instant::now()),
+            Ok(f) => {
+                let now = Instant::now();
+                sched.push(f, now);
+                // 过水位丢队尾（延迟控制器，已接线）：队尾 play 时刻晚于
+                // now + target_delay → 丢最新帧追平实时（发送端过快 / 时钟
+                // 漂移；正常流零丢帧零加时）。此前仅 schedule.rs 单测覆盖、
+                // 从未在本线程调用（死代码），`paced_dropped` 恒 0。
+                sched.drop_over_watermark(now);
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue, // 空转：顶部补发到期帧
             Err(_) => break, // 通道关闭（writer 已退出）
         }
@@ -929,13 +937,16 @@ mod tests {
         let mut rendered = 0u32;
         let mut first_at: Option<Duration> = None;
         let mut last_at = Duration::ZERO;
-        while let Ok(Some(_f)) =
-            tokio::time::timeout(Duration::from_millis(800), out_rx.recv()).await
-        {
+        // 首帧窗口放宽到 2s：整机高负载（全 workspace 并行、多个 ffmpeg
+        // 子进程抢核）下子进程启动 + 首帧解码可能超过 800ms，是既有 flake
+        // 根因；首帧到达后收紧回 800ms 判定帧间节奏。
+        let mut window = Duration::from_millis(2000);
+        while let Ok(Some(_f)) = tokio::time::timeout(window, out_rx.recv()).await {
             rendered += 1;
             let elapsed = start.elapsed();
             if first_at.is_none() {
                 first_at = Some(elapsed);
+                window = Duration::from_millis(800);
             }
             last_at = elapsed;
         }
@@ -957,6 +968,48 @@ mod tests {
             );
         }
         assert_eq!(s.paced_dropped, 0, "33ms 间距未超水位不应丢帧: {s:?}");
+    }
+
+    /// 延迟控制器接线验证：直接驱动 `pacer_loop`（合成 RGBA 帧，不经解码
+    /// 子进程），发送端过快（到达节拍 ≪ pts 节拍）应触发「过水位丢队尾」，
+    /// `paced_dropped` 真实生效。此前 `drop_over_watermark` 从未被 pacer
+    /// 调用（仅 schedule.rs 单测覆盖），接线后本测试防回退。
+    #[test]
+    fn pacer_loop_wires_watermark_drop() {
+        let (tx, rx) = std::sync::mpsc::channel::<RenderedFrame>();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::channel::<RenderedFrame>(64);
+        let stats = Arc::new(Mutex::new(PlaybackStats::default()));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let pacer = std::thread::Builder::new()
+            .name("test-pacer".into())
+            .spawn({
+                let stats = stats.clone();
+                let stopped = stopped.clone();
+                move || pacer_loop(rx, out_tx, VideoPacing::default(), stats, stopped)
+            })
+            .unwrap();
+        // 20 帧、pts 33ms 间距、1ms 到达间隔：队尾 play 时刻按 33ms/帧
+        // 增长、到达时刻按 1ms/帧增长 → 约第 6 帧起越过 150ms 水位被丢
+        for i in 0..20u32 {
+            tx.send(RenderedFrame {
+                pts_ms: i * 33,
+                width: 2,
+                height: 2,
+                rgba: vec![0u8; 16],
+            })
+            .unwrap();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // 等 pacer 消化完（最后一帧 play 时刻 ≈ 首帧 + 627ms）
+        std::thread::sleep(Duration::from_millis(900));
+        let s = stats.lock().unwrap();
+        assert!(
+            s.paced_dropped > 0,
+            "发送端过快应触发过水位丢帧（接线验证）: {s:?}"
+        );
+        stopped.store(true, Ordering::Relaxed);
+        drop(tx); // 断连 → pacer 的 recv 返回 Err → 退出循环
+        let _ = pacer.join();
     }
 
     #[tokio::test]

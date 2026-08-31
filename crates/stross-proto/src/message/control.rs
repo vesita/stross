@@ -257,10 +257,7 @@ mod tests {
         let close = ControlMessage::CloseStream {
             stream_id: "sess-1".into(),
         };
-        assert_eq!(
-            ControlMessage::from_text(&close.to_text()).unwrap(),
-            close
-        );
+        assert_eq!(ControlMessage::from_text(&close.to_text()).unwrap(), close);
     }
 
     #[test]

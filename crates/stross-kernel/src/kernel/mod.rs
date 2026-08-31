@@ -1337,8 +1337,13 @@ impl Kernel {
         audio_out: AudioOut,
     ) -> Result<Arc<Receiver>> {
         self.stop_receive_link(MAIN_RECEIVE_LINK);
-        self.start_receive_link(MAIN_RECEIVE_LINK.to_string(), relay_url, stream_id, audio_out)
-            .await
+        self.start_receive_link(
+            MAIN_RECEIVE_LINK.to_string(),
+            relay_url,
+            stream_id,
+            audio_out,
+        )
+        .await
     }
 
     /// 开始接收 `relay_url` 上的 `stream_id`（WS watch → 抖动缓冲 → **不解码**）。
@@ -2084,7 +2089,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// 推流辅助：WS 建流 + 关键帧（载荷带区分字节，供断言「哪条流」）。
-    async fn push_keyframe_payload(base: &str, stream_id: &str, payload: Vec<u8>) -> Box<dyn crate::DataSession> {
+    async fn push_keyframe_payload(
+        base: &str,
+        stream_id: &str,
+        payload: Vec<u8>,
+    ) -> Box<dyn crate::DataSession> {
         use crate::transport::{PeerAddr, SessionParams, Transport};
         use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_VIDEO};
         use stross_proto::message::ControlMessage;
@@ -2109,7 +2118,9 @@ mod tests {
         .unwrap();
         loop {
             match tokio::time::timeout(Duration::from_secs(5), push.recv()).await {
-                Ok(Ok(Some(crate::SessionPacket::Control(ControlMessage::Welcome { .. })))) => break,
+                Ok(Ok(Some(crate::SessionPacket::Control(ControlMessage::Welcome { .. })))) => {
+                    break;
+                }
                 Ok(Ok(Some(_))) => continue,
                 Ok(Ok(None)) => panic!("推流连接提前关闭"),
                 Ok(Err(e)) => panic!("推流 recv 错误: {e}"),
@@ -2185,17 +2196,22 @@ mod tests {
         assert!(links[0].stats.running);
         // 链路 b 仍能继续收帧（再推一帧）
         push_b
-            .send(crate::SessionPacket::Media(stross_proto::frame::Frame::new(
-                stross_proto::frame::TRACK_VIDEO,
-                stross_proto::frame::CODEC_H264,
-                stross_proto::frame::FLAG_KEYFRAME,
-                1,
-                vec![0xbb; 8],
-            )))
+            .send(crate::SessionPacket::Media(
+                stross_proto::frame::Frame::new(
+                    stross_proto::frame::TRACK_VIDEO,
+                    stross_proto::frame::CODEC_H264,
+                    stross_proto::frame::FLAG_KEYFRAME,
+                    1,
+                    vec![0xbb; 8],
+                ),
+            ))
             .await
             .unwrap();
         recv_raw_payload(&mut fb, &[0xbb; 8], "b").await;
-        assert!(kernel.receive_links()[0].stats.received >= 2, "链路 b 持续收帧");
+        assert!(
+            kernel.receive_links()[0].stats.received >= 2,
+            "链路 b 持续收帧"
+        );
 
         // 停链路 b：注册表清空
         kernel.stop_receive_link("link-b");
@@ -2230,12 +2246,18 @@ mod tests {
             .start_receive_raw(base.clone(), "legacy-1".into())
             .await
             .unwrap();
-        let r1 = kernel.start_receive_raw(base.clone(), "legacy-2".into()).await.unwrap();
+        let r1 = kernel
+            .start_receive_raw(base.clone(), "legacy-2".into())
+            .await
+            .unwrap();
         let _ = r1; // 第二次启动应停掉第一次（main 槽单链）
         let links = kernel.receive_links();
         assert_eq!(links.len(), 2, "main + extra 并存");
         let main_stats = links.iter().find(|l| l.link_id == "main").unwrap();
-        assert_eq!(main_stats.stats.received, 0, "main 槽收到的是 legacy-2 流（新链）");
+        assert_eq!(
+            main_stats.stats.received, 0,
+            "main 槽收到的是 legacy-2 流（新链）"
+        );
 
         // stop_receive 只停 main，extra 不受影响
         kernel.stop_receive();

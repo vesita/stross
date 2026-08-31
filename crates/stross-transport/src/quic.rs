@@ -27,7 +27,7 @@ use std::sync::{Arc, OnceLock, Weak};
 use async_trait::async_trait;
 use bytes::Bytes;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use stross_proto::frame::{Frame, Frame2};
 use stross_proto::message::{ControlMessage, ReliabilityProfile, StreamRole, TransportId};
@@ -213,49 +213,49 @@ impl QuicLink {
 fn spawn_control_loop(link: Weak<QuicLink>, mut rx: quinn::RecvStream) {
     tokio::spawn(async move {
         while let Ok(Some(bytes)) = read_msg(&mut rx).await {
-                    let text = match std::str::from_utf8(&bytes) {
-                        Ok(t) => t,
-                        Err(_) => continue,
-                    };
-                    let msg = match ControlMessage::from_text(text) {
-                        Ok(m) => m,
-                        Err(_) => continue,
-                    };
-                    let Some(link) = link.upgrade() else {
-                        break;
-                    };
-                    let qid = match &msg {
-                        ControlMessage::StreamOpened { stream_id }
-                        | ControlMessage::CloseStream { stream_id } => {
-                            link.semantic.lock().await.get(stream_id).copied()
-                        }
-                        _ => None,
-                    };
+            let text = match std::str::from_utf8(&bytes) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let msg = match ControlMessage::from_text(text) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let Some(link) = link.upgrade() else {
+                break;
+            };
+            let qid = match &msg {
+                ControlMessage::StreamOpened { stream_id }
+                | ControlMessage::CloseStream { stream_id } => {
+                    link.semantic.lock().await.get(stream_id).copied()
+                }
+                _ => None,
+            };
 
-                    match msg {
-                        ControlMessage::StreamOpened { .. } => {
-                            if let Some(qid) = qid
-                                && let Some(tx) = link.sessions.lock().await.get(&qid)
-                            {
-                                let _ = tx.send(LinkEvent::Opened);
-                            }
-                        }
-                        ControlMessage::CloseStream { .. } => {
-                            if let Some(qid) = qid
-                                && let Some(tx) = link.sessions.lock().await.get(&qid)
-                            {
-                                let _ = tx.send(LinkEvent::Closed);
-                            }
-                        }
-                        ControlMessage::Error { message } => {
-                            // 路由给全部未就绪会话（OpenStream 被拒等；
-                            // 已就绪会话忽略——正常媒体流不产生 Error）
-                            for tx in link.sessions.lock().await.values() {
-                                let _ = tx.send(LinkEvent::Error(message.clone()));
-                            }
-                        }
-                        _ => {}
+            match msg {
+                ControlMessage::StreamOpened { .. } => {
+                    if let Some(qid) = qid
+                        && let Some(tx) = link.sessions.lock().await.get(&qid)
+                    {
+                        let _ = tx.send(LinkEvent::Opened);
                     }
+                }
+                ControlMessage::CloseStream { .. } => {
+                    if let Some(qid) = qid
+                        && let Some(tx) = link.sessions.lock().await.get(&qid)
+                    {
+                        let _ = tx.send(LinkEvent::Closed);
+                    }
+                }
+                ControlMessage::Error { message } => {
+                    // 路由给全部未就绪会话（OpenStream 被拒等；
+                    // 已就绪会话忽略——正常媒体流不产生 Error）
+                    for tx in link.sessions.lock().await.values() {
+                        let _ = tx.send(LinkEvent::Error(message.clone()));
+                    }
+                }
+                _ => {}
+            }
         }
     });
 }
@@ -347,15 +347,16 @@ impl QuicMediaSession {
             .lock()
             .await
             .insert(stream_id.clone(), qid);
-        self.link.send_control(ControlMessage::OpenStream {
-            stream_id,
-            role,
-            title,
-            video,
-            audio,
-            share_token,
-        })
-        .await
+        self.link
+            .send_control(ControlMessage::OpenStream {
+                stream_id,
+                role,
+                title,
+                video,
+                audio,
+                share_token,
+            })
+            .await
     }
 
     /// 确保已登记（首个媒体帧 / 控制消息之前）。
@@ -938,13 +939,16 @@ mod tests {
             Frame::new(TRACK_VIDEO, CODEC_H264, FLAG_KEYFRAME, 0, vec![0xA0; 16]),
             Frame::new(TRACK_VIDEO, CODEC_H264, FLAG_KEYFRAME, 1, vec![0xA1; 16]),
         ];
-        s1.send(SessionPacket::Media(frames[0].clone())).await.unwrap();
-        s2.send(SessionPacket::Media(frames[1].clone())).await.unwrap();
+        s1.send(SessionPacket::Media(frames[0].clone()))
+            .await
+            .unwrap();
+        s2.send(SessionPacket::Media(frames[1].clone()))
+            .await
+            .unwrap();
         // 服务端收到两帧：内容逐字节一致（紧凑头解码 → v1 Frame；跳过空就绪信号）
         for (i, (_sid, _tx, rx)) in paired.iter_mut().enumerate() {
-            let mut rx = rx;
             let bytes = loop {
-                match read_msg(&mut rx).await.unwrap() {
+                match read_msg(rx).await.unwrap() {
                     Some(b) if b.is_empty() => continue,
                     other => break other.expect("应收到帧消息"),
                 }
@@ -1025,7 +1029,7 @@ mod tests {
             .unwrap()
             .await
             .unwrap();
-        let (mut ctx, mut crx) = conn.open_bi().await.unwrap();
+        let (mut ctx, crx) = conn.open_bi().await.unwrap();
         ctx.write_all(&0u32.to_le_bytes()).await.unwrap();
         let (_conn, _ctx, scrx) = server_task.await.unwrap();
         let _ = crx;

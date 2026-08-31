@@ -34,8 +34,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use stross_proto::message::{
-    derive_stream_id, Delivery, EndpointDir, EndpointManifest, EndpointNode, EndpointStrategy,
-    MediaKind, TransportId, Visibility,
+    Delivery, EndpointDir, EndpointManifest, EndpointNode, EndpointStrategy, MediaKind,
+    TransportId, Visibility, derive_stream_id,
 };
 use stross_proto::time::unix_secs;
 use tokio::sync::oneshot;

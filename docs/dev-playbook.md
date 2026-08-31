@@ -161,6 +161,9 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
   - 紧凑帧头 `Frame2`（14 字节，codec 移 OpenStream 协商）：**仅 QUIC 复用连接**用；WS/SRT 单流路径保留 v1 24 字节头；
   - 语义 id 派生 `derive_stream_id(endpoint_id, transport_profile, pick_rule)`：端点订阅 grant 流 id 已改派生 id（不再 sess-N），会话幂等 `ensure_session_with_id`；订阅方一致性校验不一致仅告警；
   - 中继 peer 循环需直接驱动 quinn 流类型 → **stross-kernel 有 `quinn` 直接依赖**（传输层仍属主）。
+- **播放侧 PTS 调度（pacer）**：
+  - 过水位丢队尾延迟控制器 `drop_over_watermark` **已接线**进 `pacer_loop`（ffmpeg.rs）——此前是死代码（仅 schedule.rs 单测调用），`paced_dropped` 恒 0；改 pacer 循环时**别删那次调用**，防回退测试 `pacer_loop_wires_watermark_drop`（合成帧直驱，不经解码子进程）；
+  - 既有 flaky 测试 `video_pacing_holds_burst_and_emits_on_schedule`：**首帧窗口 2s**（整机高负载下 ffmpeg 子进程启动+首帧解码可能超 800ms，全 workspace 并行偶发红），首帧后收紧 800ms 判帧间节奏——别把首帧窗口改回 800ms；若该测试仍偶发先隔离重跑确认，勿误判为播放器回归。
 - 名称不一致：mDNS `pico`(hostname) vs `/api/discovery` `Stross 设备`(identity.device_name)。
 - Android 屏幕端点（MediaProjection FGS）、摄像头（CameraX）、剪贴板（E 阶段）待扩充。
 - 协议优化排队：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕。

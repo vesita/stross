@@ -423,7 +423,14 @@ mod tests {
     #[test]
     fn frame2_v1_roundtrip_preserves_track_flags_pts_seq() {
         // v1 帧 → v2 紧凑线上消息 → v1 帧：track/flags/pts/seq 保留，codec 置 0
-        let f = Frame::with_seq(TRACK_VIDEO, CODEC_H264, FLAG_KEYFRAME, 123, 9, vec![1u8, 2, 3, 4]);
+        let f = Frame::with_seq(
+            TRACK_VIDEO,
+            CODEC_H264,
+            FLAG_KEYFRAME,
+            123,
+            9,
+            vec![1u8, 2, 3, 4],
+        );
         let compact = Frame2::from_frame(&f);
         assert_eq!(compact.header.track, TRACK_VIDEO);
         assert_eq!(compact.header.flags, FLAG_KEYFRAME);

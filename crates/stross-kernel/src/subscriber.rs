@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use crate::relay::client as relay_http;
 use anyhow::Context;
 use serde::Serialize;
-use stross_proto::message::{Delivery, EndpointDir, ShareGrant, ShareRequest, SubscribeSpec};
 use stross_proto::message::derive_stream_id;
+use stross_proto::message::{Delivery, EndpointDir, ShareGrant, ShareRequest, SubscribeSpec};
 
 use crate::Kernel;
 use crate::bootstrap;

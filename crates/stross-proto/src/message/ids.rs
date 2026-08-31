@@ -209,7 +209,11 @@ mod tests {
         );
         assert_ne!(
             a,
-            derive_stream_id("screen:0", ReliabilityProfile::Lossy, PickRule::StrictOrdered),
+            derive_stream_id(
+                "screen:0",
+                ReliabilityProfile::Lossy,
+                PickRule::StrictOrdered
+            ),
             "解析规则不同必须派生不同 id"
         );
         // 端点不同 → 不同 id
@@ -224,14 +228,23 @@ mod tests {
     fn derive_stream_id_is_url_safe_and_bounded() {
         for (ep, profile, pick) in [
             ("screen:0", ReliabilityProfile::Lossy, PickRule::Realtime),
-            ("file:备注.txt", ReliabilityProfile::Lossless, PickRule::StrictOrdered),
+            (
+                "file:备注.txt",
+                ReliabilityProfile::Lossless,
+                PickRule::StrictOrdered,
+            ),
             ("mic:builtin", ReliabilityProfile::Lossy, PickRule::Realtime),
-            ("a/b\\c d e::f", ReliabilityProfile::Adaptive, PickRule::None),
+            (
+                "a/b\\c d e::f",
+                ReliabilityProfile::Adaptive,
+                PickRule::None,
+            ),
             ("系统声音", ReliabilityProfile::Lossy, PickRule::Realtime),
         ] {
             let id = derive_stream_id(ep, profile, pick);
             assert!(
-                id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_'),
+                id.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_'),
                 "派生 id 必须 URL 安全: {id}"
             );
             assert!(id.len() <= 80, "派生 id 长度受控: {id}");

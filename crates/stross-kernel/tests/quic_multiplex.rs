@@ -35,10 +35,7 @@ fn hello(stream_id: &str, title: &str) -> ControlMessage {
 }
 
 /// 从观看会话读到载荷等于 `expect` 的关键帧（跳过控制消息/其它帧）。
-async fn recv_until_payload(
-    session: &dyn stross_kernel::DataSession,
-    expect: &[u8],
-) -> bool {
+async fn recv_until_payload(session: &dyn stross_kernel::DataSession, expect: &[u8]) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_secs(5), session.recv()).await {
@@ -61,22 +58,36 @@ async fn quic_one_connection_multiple_streams_demux_no_cascade() {
     let quic = format!("quic://127.0.0.1:{}", handle.quic_port.expect("QUIC 监听"));
 
     // 推流端：两条会话（同一连接——链路管理器按 (host, port) 复用）
-    let (_push_a, tx_a) = RelayClient::connect(&quic, hello("stream-a", "屏幕")).await.unwrap();
-    let (_push_b, tx_b) = RelayClient::connect(&quic, hello("stream-b", "系统声")).await.unwrap();
+    let (_push_a, tx_a) = RelayClient::connect(&quic, hello("stream-a", "屏幕"))
+        .await
+        .unwrap();
+    let (_push_b, tx_b) = RelayClient::connect(&quic, hello("stream-b", "系统声"))
+        .await
+        .unwrap();
 
     // 观看端：两条会话（同一条连接——与推流端同一连接：4 条流共享 1 连接）
     let watch_a = connect_watch(&quic, "stream-a").await.unwrap();
     let watch_b = connect_watch(&quic, "stream-b").await.unwrap();
 
     // 两路各推一个关键帧（载荷区分归属）
-    tx_a
-        .send(Frame::new(TRACK_VIDEO, CODEC_H264, FLAG_KEYFRAME, 0, vec![0xAA; 8]))
-        .await
-        .unwrap();
-    tx_b
-        .send(Frame::new(TRACK_VIDEO, CODEC_H264, FLAG_KEYFRAME, 1, vec![0xBB; 8]))
-        .await
-        .unwrap();
+    tx_a.send(Frame::new(
+        TRACK_VIDEO,
+        CODEC_H264,
+        FLAG_KEYFRAME,
+        0,
+        vec![0xAA; 8],
+    ))
+    .await
+    .unwrap();
+    tx_b.send(Frame::new(
+        TRACK_VIDEO,
+        CODEC_H264,
+        FLAG_KEYFRAME,
+        1,
+        vec![0xBB; 8],
+    ))
+    .await
+    .unwrap();
 
     // demux 不串流：每路观看端只收到自己流的关键帧
     assert!(
@@ -97,10 +108,15 @@ async fn quic_one_connection_multiple_streams_demux_no_cascade() {
     );
 
     // stream-b 仍可继续推/收
-    tx_b
-        .send(Frame::new(TRACK_VIDEO, CODEC_H264, FLAG_KEYFRAME, 2, vec![0xBB; 8]))
-        .await
-        .unwrap();
+    tx_b.send(Frame::new(
+        TRACK_VIDEO,
+        CODEC_H264,
+        FLAG_KEYFRAME,
+        2,
+        vec![0xBB; 8],
+    ))
+    .await
+    .unwrap();
     assert!(
         recv_until_payload(watch_b.as_ref(), &[0xBB; 8]).await,
         "另一路流不受影响（不级联）"

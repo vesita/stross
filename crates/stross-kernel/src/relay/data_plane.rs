@@ -283,16 +283,14 @@ async fn quic_peer_loop(link: crate::transport::quic::QuicServerLink, state: Rel
                         audio,
                         share_token,
                     };
-                    tokio::spawn(async move {
-                        quic_push_stream(link, state, open, tx, rx).await
-                    });
+                    tokio::spawn(async move { quic_push_stream(link, state, open, tx, rx).await });
                 }
                 stross_proto::message::StreamRole::Watch => {
                     let state = state.clone();
                     let link = link.clone();
-                    tokio::spawn(async move {
-                        quic_watch_stream(link, state, stream_id, tx, rx).await
-                    });
+                    tokio::spawn(
+                        async move { quic_watch_stream(link, state, stream_id, tx, rx).await },
+                    );
                 }
             }
         }
@@ -445,7 +443,10 @@ async fn quic_watch_stream(
     // 补发最近关键帧（新观看者立即对齐 GOP；同 handle_watch）
     let mut video_started = false;
     if let Some(kf) = last_kf {
-        if crate::transport::quic::write_media_frame(&mut tx, &kf).await.is_err() {
+        if crate::transport::quic::write_media_frame(&mut tx, &kf)
+            .await
+            .is_err()
+        {
             drop(brx);
             state.emit(RelayEvent::WatchersChanged {
                 stream_id: stream_id.clone(),
@@ -477,7 +478,10 @@ async fn quic_watch_stream(
         {
             video_started = true;
         }
-        if crate::transport::quic::write_media_frame(&mut tx, &frame).await.is_err() {
+        if crate::transport::quic::write_media_frame(&mut tx, &frame)
+            .await
+            .is_err()
+        {
             break;
         }
     }

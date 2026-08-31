@@ -1696,8 +1696,9 @@ mod tests {
 
     /// 测试用假后端：记录是否被调用。
     struct MockBackend(std::sync::atomic::AtomicBool);
+    #[async_trait::async_trait]
     impl CaptureBackend for MockBackend {
-        fn start(&self, _cfg: &StreamConfig, _tx: mpsc::Sender<Frame>) -> anyhow::Result<()> {
+        async fn start(&self, _cfg: &StreamConfig, _tx: mpsc::Sender<Frame>) -> anyhow::Result<()> {
             self.0.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }

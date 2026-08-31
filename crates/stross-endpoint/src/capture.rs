@@ -15,6 +15,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use stross_proto::frame::Frame;
@@ -35,6 +36,7 @@ pub struct CaptureStatus {
 }
 
 /// 采集后端：把本机媒体源变成协议帧流。
+#[async_trait]
 pub trait CaptureBackend: Send + Sync {
     /// 能力描述（能力广播 / 协商用；默认实现返回未知）。
     ///
@@ -45,8 +47,10 @@ pub trait CaptureBackend: Send + Sync {
     /// 启动采集，帧送入 `tx`。
     ///
     /// 返回 `Ok` 只代表采集已发起；真实是否就绪由 [`CaptureBackend::status`] 回报
-    /// （Android 需要等待系统授权 / 投影就绪）。
-    fn start(&self, cfg: &StreamConfig, tx: mpsc::Sender<Frame>) -> anyhow::Result<()>;
+    /// （Android 需要等待系统授权 / 投影就绪）。**Wayland 屏幕共享**会在本方法内
+    /// `await` portal/pipewire 探测到原生分辨率（缩放交给 ffmpeg swscale），
+    /// 故返回 `Ok` 表示 ffmpeg 已按原生尺寸起动。
+    async fn start(&self, cfg: &StreamConfig, tx: mpsc::Sender<Frame>) -> anyhow::Result<()>;
     /// 停止采集。
     fn stop(&self);
     /// 当前采集状态。
@@ -85,6 +89,27 @@ impl FfmpegBackend {
             status: Arc::new(Mutex::new(CaptureStatus::default())),
         }
     }
+
+    /// 把已起动会话装入本后端（取走错误通道转发到状态、置 `started`）。
+    fn install_session(&self, session: StreamSession) -> anyhow::Result<()> {
+        let mut session = session;
+        // Wayland 采集错误（portal 拒绝 / 协商失败）→ CaptureStatus.error；
+        // 流会随 ffmpeg stdin 关闭自然结束
+        if let Some(mut error_rx) = session.take_error_rx() {
+            let status = self.status.clone();
+            tokio::spawn(async move {
+                while let Some(e) = error_rx.recv().await {
+                    tracing::warn!("采集错误: {e}");
+                    status.lock().unwrap().error = Some(e);
+                }
+            });
+        }
+        let mut status = self.status.lock().unwrap();
+        status.started = true;
+        status.error = None;
+        *self.session.lock().unwrap() = Some(session);
+        Ok(())
+    }
 }
 
 impl Default for FfmpegBackend {
@@ -93,6 +118,7 @@ impl Default for FfmpegBackend {
     }
 }
 
+#[async_trait]
 impl CaptureBackend for FfmpegBackend {
     fn descriptor(&self) -> CapabilityDescriptor {
         CapabilityDescriptor {
@@ -111,24 +137,15 @@ impl CaptureBackend for FfmpegBackend {
         }
     }
 
-    fn start(&self, cfg: &StreamConfig, tx: mpsc::Sender<Frame>) -> anyhow::Result<()> {
-        let mut session = StreamSession::spawn(cfg, tx)?;
-        // Wayland 采集错误（portal 拒绝 / 协商失败）→ CaptureStatus.error；
-        // 流会随 ffmpeg stdin 关闭自然结束
-        if let Some(mut error_rx) = session.take_error_rx() {
-            let status = self.status.clone();
-            tokio::spawn(async move {
-                while let Some(e) = error_rx.recv().await {
-                    tracing::warn!("采集错误: {e}");
-                    status.lock().unwrap().error = Some(e);
-                }
-            });
+    async fn start(&self, cfg: &StreamConfig, tx: mpsc::Sender<Frame>) -> anyhow::Result<()> {
+        // Wayland 屏幕共享需先探测原生分辨率再起 ffmpeg（缩放交给 swscale），
+        // 走异步的 `StreamSession::spawn_wayland`；其余采集走同步 `spawn`。
+        #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
+        if crate::pipeline::is_wayland_screen(cfg) {
+            let session = crate::pipeline::StreamSession::spawn_wayland(cfg, tx).await?;
+            return self.install_session(session);
         }
-        let mut status = self.status.lock().unwrap();
-        status.started = true;
-        status.error = None;
-        *self.session.lock().unwrap() = Some(session);
-        Ok(())
+        self.install_session(StreamSession::spawn(cfg, tx)?)
     }
 
     fn stop(&self) {

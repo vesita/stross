@@ -57,7 +57,7 @@ impl SenderEngine {
         };
         let (client, tx) = RelayClient::connect(&url, cfg.hello()).await?;
         // 采集启动失败时回滚已建立的推流连接，避免留下半开会话
-        if let Err(e) = backend.start(&cfg, tx) {
+        if let Err(e) = backend.start(&cfg, tx).await {
             client.stop().await;
             if let Some(r) = relay {
                 r.stop().await;

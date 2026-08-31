@@ -179,19 +179,24 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
   必须用 `eval` 直接 `.click()`：`document.querySelector('[data-act="subscribe-endpoint"][data-endpoint="screen:0"]').click()`。
   且订阅后面板切到「消费播放台」，设备列表重渲染会把远端目录从 DOM 移除——再订下一条前要重新
   `call('loadRemoteDir', ...)`。
-- **性能诊断（第 32 轮实测，未改码）**：
-  - **帧率 ~7fps 不是手机消费瓶颈（初判已修正）**：Android 接收走 `kernel::receiver::receive_raw_loop`，
-    消费通道是 `try_send`（满即丢、不反压）+ `dropped` 计数；实测 `dropped=0` 且 `received≈7fps`
-    → 手机端 base64 `feedVideo` 不背压、不是瓶颈。~7fps 是**源产帧率**（静止屏伤害驱动 + 
-    `recv_frame_timeout(30ms)` 阻塞 + `interval` 节流 → 采集循环只给 ffmpeg ~7fps）。
-  - **判定前提**：要确认动态屏下传输/编码上限，需动态画面（播放视频/高频刷新终端）复测
-    「手机端 received/显示」能否到 ~30fps——此为帧率瓶颈是否真成立的判定前置。
-  - **移动端 `feedVideo` 仍走 base64+JSON 事件**：与桌面 `Channel<Vec<u8>>` 不对称。这是**降低 IPC/前端
-    开销的基建优化**（对动态屏高帧率更稳），但**不会提升静止屏帧率**，别当帧率修复做。
-  - **高功耗**：静止屏下 `stross serve` 仍 ~45–65% CPU（`top -H` 见一根 hot tokio worker ~78%）。
-    `wayland.rs` 采集循环无视屏幕变化、按 `interval` 持续把上一帧送 ffmpeg 编码；另 `recv_frame_timeout`
-    是阻塞 std mpsc 在 tokio worker 上（疑即 78% 来源，改非阻塞 poll 或挪 blocking 线程比改节流更直接）。
-    pipewire 日志偶见 `SPA_CHUNK_FLAG_CORRUPTED`。
+- **性能诊断（第 32 轮定位，第 33 轮已修复）**：
+  - **帧率 ~7fps 的根因（已纠正）**：不是手机消费瓶颈（`try_send`/`dropped=0`），也**不是
+    网络/编码**（ffmpeg 仅 3.8%、在等输入），而是 **serve 侧 `bgra_to_yuv420p_scaled`（纯 Rust
+    双线性，debug 未优化 ~85ms/帧）**。取证：PC 看自己中继（loopback）也只有 ~5.6fps（排除网络）；
+    serve 85.9% vs ffmpeg 3.8%。
+  - **修复（第 33 轮）**：**缩放交给 ffmpeg swscale**——喂 ffmpeg 原生 BGRA +
+    `-vf scale=WxH,format=yuv420p`。serve 只做 stride 规整拷贝。为此需**先探测原生尺寸再起
+    ffmpeg**（`-video_size` 必须一致），故 `wayland::start` 改为两段式（回传尺寸→等 stdin），
+    新增异步 `StreamSession::spawn_wayland`，`CaptureBackend::start` 改 `#[async_trait]` async。
+    实测：serve 85.9%→**3.5%**，PC 源 5.6→**~23fps**，ffmpeg 61%（成新瓶颈），手机显示 ~11fps。
+  - **下一杠杆**：PC 上 30fps 需 **GPU/VAAPI 编码**（encode 现在才是瓶颈）；手机显示 ~11fps 是
+    独立的 Android `receive-frame` base64→WebView 路径（二进制 Channel + 重打 APK 是后续）。
+  - **测试方法坑**：手动 CDP 调 `startReceiveLink()` 只起手机本地接收器，**不触发 PC
+    `on_subscribed`→`share`→push**（端点 idle、中继报「流不存在」）。必须走**真实订阅按钮**
+    （`subscribe-endpoint` + `#sub-confirm-btn`）。`[data-endpoint="screen:0"]` 的冒号要加引号。
+  - **移动端 `feedVideo` 仍走 base64+JSON 事件**：与桌面 `Channel<Vec<u8>>` 不对称，是降低
+    IPC/前端开销的基建优化（对高帧率更稳），但**不会提升静止屏帧率**。
+  - pipewire 日志偶见 `SPA_CHUNK_FLAG_CORRUPTED`（未定论，待查）。
   - **Android 音频待复测**：订阅系统声音后手机 `feedAudio` 大量上报但 `audioBlocks/audioBlocksIn` 恒 0；
     logcat 反复 `AudioTrackShared: Track invalidated` + `writeFramesHelper getNextBuffer failed -11`；
     且（08-30）`PlaybackPlugin.startAudioTrack` 的 `AudioTrack.write` 有 native crash 栈。疑似 WIP 新增

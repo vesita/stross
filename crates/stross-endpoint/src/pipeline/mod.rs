@@ -30,7 +30,7 @@ use std::time::{Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use stross_proto::frame::{CODEC_AAC, CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO};
 
@@ -82,49 +82,22 @@ impl StreamSession {
         let mut video = None;
         let mut audio = None;
         #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
-        let mut wayland = None;
+        let wayland = None; // 常规路径无 Wayland 采集（wayland 走 spawn_wayland）
         let (error_tx, error_rx) = mpsc::channel(4);
 
         if cfg.video.is_some() {
-            // Wayland 会话的屏幕共享：portal+pipewire 采集（Rust 侧喂帧）→
-            // ffmpeg rawvideo stdin → H.264 stdout（读循环与常规路径一致）
-            #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
-            let wayland_screen = {
-                matches!(cfg.video, Some(VideoSource::Screen))
-                    && crate::share::screen::wayland::is_wayland_session()
-            };
-            #[cfg(not(all(target_os = "linux", feature = "wayland-capture")))]
-            let wayland_screen = false;
-
-            if wayland_screen {
-                // 仅 wayland-capture feature 编译此分支（lamco/ashpd 依赖门控）
-                #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
-                {
-                    let args = rawvideo_video_command(cfg)?;
-                    let mut child = spawn_ffmpeg_piped(&args)?;
-                    let stdout = child.stdout.take().context("视频进程没有 stdout")?;
-                    let stdin = child.stdin.take().context("视频进程没有 stdin")?;
-                    let tx2 = tx.clone();
-                    let ff = first_frame.clone();
-                    tokio::spawn(read_video_loop(stdout, tx2, started, ff));
-                    wayland = Some(crate::share::screen::wayland::start(cfg, stdin, error_tx));
-                    video = Some(child);
-                }
-                #[cfg(not(all(target_os = "linux", feature = "wayland-capture")))]
-                {
-                    // feature 未启用时 wayland_screen 恒为 false，不可达
-                    unreachable!("wayland-capture feature 未启用");
-                }
-            } else {
-                let args = video_command(cfg)?;
-                let mut child = spawn_ffmpeg(&args)?;
-                let stdout = child.stdout.take().context("视频进程没有 stdout")?;
-                let tx2 = tx.clone();
-                let ff = first_frame.clone();
-                tokio::spawn(read_video_loop(stdout, tx2, started, ff));
-                video = Some(child);
-                drop(error_tx); // 无 Wayland 采集：错误通道关闭
-            }
+            // 常规视频路径（X11 / Windows / lavfi / 摄像头）：ffmpeg 采集。
+            // **Wayland 屏幕共享不走这里**——它需先探测原生分辨率再起 ffmpeg
+            // （缩放交给 swscale），由 [`Self::spawn_wayland`] 处理（见
+            // [`crate::capture::FfmpegBackend::start`] 的按需路由）。
+            let args = video_command(cfg)?;
+            let mut child = spawn_ffmpeg(&args)?;
+            let stdout = child.stdout.take().context("视频进程没有 stdout")?;
+            let tx2 = tx.clone();
+            let ff = first_frame.clone();
+            tokio::spawn(read_video_loop(stdout, tx2, started, ff));
+            video = Some(child);
+            drop(error_tx); // 无 Wayland 采集：错误通道关闭
         }
 
         if cfg.audio.is_some() {
@@ -169,6 +142,84 @@ impl StreamSession {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
+    }
+
+    /// 启动 **Wayland 屏幕共享** 的推流会话（异步）。
+    ///
+    /// 与 [`Self::spawn`] 的差别：Wayland 屏幕采集需在 portal/pipewire 建立后
+    /// **先探测原生分辨率**，再据此构建 ffmpeg 输入参数（`-video_size` 必须与
+    /// 采集尺寸一致）并起动 ffmpeg，最后把其 stdin 经 oneshot 送回采集任务开始喂帧。
+    /// **缩放/转格式交给 ffmpeg swscale**（[`args::wayland_rawvideo_command`]），
+    /// Rust 侧只按 stride 规整拷贝原生 BGRA（见 [`crate::share::screen::wayland`]）。
+    /// 仅 Linux + `wayland-capture` feature 编译；调用方应先用
+    /// [`is_wayland_screen`] 判定。
+    #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
+    pub async fn spawn_wayland(cfg: &StreamConfig, tx: mpsc::Sender<Frame>) -> Result<Self> {
+        if !ffmpeg_available() {
+            bail!("未找到 ffmpeg。请安装 ffmpeg，或设置 STROSS_FFMPEG 指向可执行文件。");
+        }
+        if cfg.video.is_none() {
+            bail!("spawn_wayland 需要视频源（Wayland 屏幕共享）");
+        }
+        let started = Instant::now();
+        let started_wall = SystemTime::now();
+        let first_frame = Arc::new(std::sync::Mutex::new(None));
+        let mut audio = None;
+        let (error_tx, error_rx) = mpsc::channel(4);
+
+        // 音频（与 spawn 一致）
+        if cfg.audio.is_some() {
+            let args = audio_command(cfg)?;
+            let mut child = spawn_ffmpeg(&args)?;
+            let stdout = child.stdout.take().context("音频进程没有 stdout")?;
+            let tx2 = tx.clone();
+            tokio::spawn(read_audio_loop(stdout, tx2, started));
+            audio = Some(child);
+        }
+
+        // Wayland 两段式：采集任务先回传原生分辨率
+        let (stdin_tx, stdin_rx) = oneshot::channel();
+        let (wayland, native_rx) = crate::share::screen::wayland::start(cfg, stdin_rx, error_tx);
+        let (src_w, src_h) = native_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Wayland 采集未返回分辨率（portal 已关闭）"))?;
+
+        // 拿到原生尺寸后再起 ffmpeg（输入尺寸一致，缩放走 swscale）
+        let args = args::wayland_rawvideo_command(cfg, src_w, src_h)?;
+        let mut child = spawn_ffmpeg_piped(&args)?;
+        let stdout = child.stdout.take().context("视频进程没有 stdout")?;
+        let stdin = child.stdin.take().context("视频进程没有 stdin")?;
+        let tx2 = tx.clone();
+        let ff = first_frame.clone();
+        tokio::spawn(read_video_loop(stdout, tx2, started, ff));
+        // 送 stdin：采集任务随即开始喂帧
+        let _ = stdin_tx.send(stdin);
+
+        Ok(Self {
+            video: Some(child),
+            audio,
+            wayland: Some(wayland),
+            error_rx: Some(error_rx),
+            started,
+            started_wall,
+            first_frame,
+            tx,
+        })
+    }
+}
+
+/// 是否为「Wayland 屏幕共享」路径（决定用 [`StreamSession::spawn_wayland`]
+/// 而非 [`StreamSession::spawn`]）。仅 Linux + `wayland-capture` feature 下为真。
+pub fn is_wayland_screen(cfg: &StreamConfig) -> bool {
+    #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
+    {
+        matches!(cfg.video, Some(VideoSource::Screen))
+            && crate::share::screen::wayland::is_wayland_session()
+    }
+    #[cfg(not(all(target_os = "linux", feature = "wayland-capture")))]
+    {
+        let _ = cfg;
+        false
     }
 }
 

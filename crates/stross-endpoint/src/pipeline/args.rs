@@ -318,6 +318,47 @@ pub fn rawvideo_video_command(cfg: &StreamConfig) -> Result<Vec<String>> {
     Ok(args)
 }
 
+/// Wayland 屏幕采集的视频命令（**原生分辨率 BGRA 输入 + ffmpeg swscale 缩放**）：
+/// Rust 侧直接把 pipewire 的**原生 BGRA 帧**喂给 stdin，缩放/转格式全部交给
+/// ffmpeg 的 swscale（SIMD，不受本 crate debug 构建影响）。此前在 Rust 里用
+/// 双线性做 1080p→720p，纯 Rust 未优化下 ~85ms/帧，是单帧吞吐瓶颈。
+///
+/// `native_w/native_h`：portal 返回的**采集源原生分辨率**（须在起 ffmpeg 前
+/// 由 [`crate::share::screen::wayland`] 探测到，故本命令在采集就绪后才构建）。
+/// 编码参数与常规视频路径一致（Annex-B H.264，SPS/PPS 重复在关键帧前）。
+pub fn wayland_rawvideo_command(
+    cfg: &StreamConfig,
+    native_w: u32,
+    native_h: u32,
+) -> Result<Vec<String>> {
+    let q = &cfg.quality;
+    let mut args = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "warning".into(),
+        "-nostdin".into(),
+        "-f".into(),
+        "rawvideo".into(),
+        "-pix_fmt".into(),
+        "bgra".into(),
+        "-video_size".into(),
+        format!("{native_w}x{native_h}"),
+        "-framerate".into(),
+        q.fps.to_string(),
+        "-i".into(),
+        "pipe:0".into(),
+        // 缩放+转格式走 swscale（快、多线程）；目标是 quality 编码分辨率
+        "-vf".into(),
+        format!("scale={}x{},format=yuv420p", q.width, q.height),
+    ];
+    if let Some(d) = cfg.duration_secs {
+        args.push("-t".into());
+        args.push(d.to_string());
+    }
+    args.extend(video_encode_args(q));
+    Ok(args)
+}
+
 /// 构建音频子进程的完整命令行。
 pub fn audio_command(cfg: &StreamConfig) -> Result<Vec<String>> {
     let a = cfg.audio.as_ref().context("没有音频源")?;

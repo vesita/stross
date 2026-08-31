@@ -15,7 +15,7 @@ async function init() {
         return;
     }
     try {
-        const info = (await call('app_info'));
+        const info = await call('app_info');
         IS_ANDROID = info.platform === 'android';
         $('ver-badge').textContent = 'v' + info.version;
         const fb = $('ffmpeg-badge');
@@ -34,15 +34,11 @@ async function init() {
         restorePrefs();
         deviceViews = [];
         await loadDevices();
-        // 免先连：先渲染本机卡片骨架（含锚点状态位），
-        // 再自动锚定本机（受控中继 + mDNS 广播）→ 扫描设备与在线共享
         void renderDeviceList();
         await ensureAnchor();
         startStatusPolling();
         void refreshDevices();
-        // 「可被发现」开关：启动读运行时状态 + 变更即提交内核
         await refreshDiscoverable();
-        // 权限自动化：防火墙自检（缺放行则提示一键放行）+ 协商授权事件桥
         void checkFirewall();
         void listen('negotiator-request', (req) => onApproveRequest(req));
     }
@@ -55,21 +51,18 @@ function startStatusPolling() {
     if (statusTimer !== null)
         return;
     statusTimer = window.setInterval(() => {
-        // 设备列表周期刷新（refreshDevices 自带 5s TTL + in-flight 守卫：
-        // mDNS + 探测 + 聚合在 Rust `scan_devices` 内一次完成；数据未变不重建）
         void refreshDevices();
-        // 本机目录（设备 + 已共享端点）周期刷新——共享状态徽标实时可见
         void refreshLocalCatalog();
     }, 2000);
 }
 // ---------------------------------------------------------------- 设备能力
 async function loadDevices() {
-    devices = (await call('list_devices'));
+    devices = await call('list_devices');
 }
 // ---------------------------------------------------------------- 可被发现
 /** 读取运行时「可被发现」状态并同步开关 UI。 */
 async function refreshDiscoverable() {
-    const s = (await call('discoverable_status'));
+    const s = await call('discoverable_status');
     $input('disco-toggle').checked = s.discoverable;
 }
 /** 设置「可被发现」（提交内核 + 持久化）。 */
@@ -79,19 +72,15 @@ async function setDiscoverable(on) {
     }
     catch (e) {
         showGridError('设置可被发现失败：' + errMsg(e));
-        // 回读还原开关（失败时以真实状态为准）
         void refreshDiscoverable();
     }
 }
 // ---------------------------------------------------------------- 权限自动化
-/** 本端（共享方）收到订阅请求：展示授权确认弹窗（首次人工确认，信任门控）。
- *  共享方=内容源，主客体：是【有设备想订阅】你共享的内容，不是「设备接入」。 */
+/** 本端（共享方）收到订阅请求：展示授权确认弹窗（首次人工确认，信任门控）。 */
 function onApproveRequest(req) {
     pendingApprove = req;
     $('approve-device').textContent =
         `设备「${req.deviceName}」（${req.deviceId.slice(0, 12)}…）`;
-    // 端点语义下 media 是目标端点 kind（如 screen）；优先展示端点名（中文），
-    // 否则把 MediaKind 序列化名（camelCase）映射成中文标签——避免显示「未知媒体」。
     const mediaLabel = req.endpointName ||
         (req.media.length
             ? req.media.map((m) => labelOf(DEVICE_KIND_LABELS, m)).join('、')
@@ -101,10 +90,7 @@ function onApproveRequest(req) {
     $('approve-status').textContent = '';
     $('approve-modal').classList.remove('hidden');
 }
-/** 应答协商请求：允许（可勾选记住）或拒绝。允许后服务端签发授予并通知申请方。
- *  订阅驱动定稿（docs/endpoint-model-v2.md §4）：公开方（共享方）在此仅放行订阅，
- *  流由公开方在本地中继发布，订阅方主动连公开方中继 watch 取流（pull），
- *  无 push 出站路径——本端不等待/不接收。 */
+/** 应答协商请求：允许（可勾选记住）或拒绝。 */
 async function respondApprove(allow) {
     if (!pendingApprove)
         return;
@@ -168,15 +154,21 @@ $('pub-modal').addEventListener('click', (e) => {
     if (e.target === $('pub-modal'))
         $('pub-modal').classList.add('hidden');
 });
+const pubClose = $('pub-modal-close');
+if (pubClose)
+    pubClose.onclick = () => $('pub-modal').classList.add('hidden');
 $btn('sub-confirm-btn').onclick = () => void confirmSubscribe();
 $btn('sub-cancel-btn').onclick = () => $('sub-modal').classList.add('hidden');
 $('sub-modal').addEventListener('click', (e) => {
     if (e.target === $('sub-modal'))
         $('sub-modal').classList.add('hidden');
 });
-// 接收面板：停止接收（多端点链接：停止全部链路）
+const subClose = $('sub-modal-close');
+if (subClose)
+    subClose.onclick = () => $('sub-modal').classList.add('hidden');
+// 接收面板：停止接收
 $btn('recv-stop-btn').onclick = () => void stopReceive();
-// 接收链路行：逐条停止（data-link = 链路 id）
+// 接收链路行：逐条停止
 $('recv-links').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-link]');
     if (btn && btn.dataset.link)
@@ -187,7 +179,7 @@ $btn('recv-fs-btn').onclick = () => void togglePlayerFullscreen();
 $btn('recv-fs-stop-btn').onclick = () => void stopReceive();
 // 双击画面切换全屏
 $('recv-canvas').addEventListener('dblclick', () => void togglePlayerFullscreen());
-// ESC 退出全屏（Tauri 窗口全屏不拦截 ESC，需前端处理）
+// ESC 退出全屏
 window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape')
         void exitPlayerFullscreen();
@@ -197,7 +189,7 @@ $btn('fw-allow-btn').onclick = () => void allowFirewall();
 $btn('fw-close-btn').onclick = () => $('fw-banner').classList.add('hidden');
 $btn('scan-btn').onclick = () => void scanRelays();
 $btn('manual-add-btn').onclick = () => void addManualRelay();
-// 「可被发现」开关：切换即提交内核（并让本机锚定广播/停止广播）
+// 「可被发现」开关
 $input('disco-toggle').addEventListener('change', (e) => {
     void setDiscoverable(e.target.checked);
 });
@@ -208,4 +200,58 @@ $input('manual-addr').addEventListener('keydown', (e) => {
         void addManualRelay();
     }
 });
+// 全局视图切换导航
+const navBtnManage = $('nav-btn-manage');
+const navBtnConsume = $('nav-btn-consume');
+if (navBtnManage) {
+    navBtnManage.onclick = () => switchView('manage');
+}
+if (navBtnConsume) {
+    navBtnConsume.onclick = () => switchView('consume');
+}
+// 消费舞台返回管理视图按钮
+const stageBackBtn = $('stage-back-btn');
+if (stageBackBtn) {
+    stageBackBtn.onclick = () => switchView('manage');
+}
+const emptyGoManageBtn = $('empty-go-manage-btn');
+if (emptyGoManageBtn) {
+    emptyGoManageBtn.onclick = () => switchView('manage');
+}
+// 移动端分段导航兼容
+const tabDevBtn = $('tab-devices-btn');
+const tabRecvBtn = $('tab-recv-btn');
+if (tabDevBtn) {
+    tabDevBtn.onclick = () => switchView('manage');
+}
+if (tabRecvBtn) {
+    tabRecvBtn.onclick = () => switchView('consume');
+}
+// 移动端快速跳转到接收面板
+const mobJumpBtn = $('mobile-recv-jump-btn');
+if (mobJumpBtn) {
+    mobJumpBtn.onclick = () => {
+        switchView('consume');
+        $('recv-pane')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+}
+// 设备搜索/过滤输入框事件
+const filterInput = $('dev-filter-input');
+const filterClear = $('dev-filter-clear');
+if (filterInput) {
+    filterInput.addEventListener('input', () => {
+        deviceFilterQuery = filterInput.value.trim().toLowerCase();
+        if (filterClear)
+            filterClear.classList.toggle('hidden', !deviceFilterQuery);
+        renderDeviceList();
+    });
+}
+if (filterClear && filterInput) {
+    filterClear.addEventListener('click', () => {
+        filterInput.value = '';
+        deviceFilterQuery = '';
+        filterClear.classList.add('hidden');
+        renderDeviceList();
+    });
+}
 void init();

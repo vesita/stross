@@ -152,7 +152,7 @@ async function togglePlayerFullscreen() {
         try {
             fs = await win.isFullscreen();
         }
-        catch (_) { /* 查询失败：沿用本地状态 */ }
+        catch { }
     }
     const next = !fs;
     // CSS 层全屏先行——即使 OS 窗口级全屏失败也立即生效
@@ -162,7 +162,7 @@ async function togglePlayerFullscreen() {
     try {
         await win.setFullscreen(next);
     }
-    catch (_) { /* OS 窗口级全屏不支持（如 Android）：CSS 全屏已生效 */ }
+    catch { }
 }
 /** 退出播放器全屏（ESC / 停止接收时调用）。 */
 async function exitPlayerFullscreen() {
@@ -174,8 +174,29 @@ async function exitPlayerFullscreen() {
     try {
         await win.setFullscreen(false);
     }
-    catch (_) { /* ignore */ }
+    catch { }
     setPlayerFullscreen(false);
+}
+// ---------------------------------------------------------------- 移动端 Tab 切换
+/** 切换全局主视图模式（设备与共享管理 vs 消费播放台）。 */
+function switchView(mode) {
+    activeViewMode = mode;
+    const viewManage = $('view-manage');
+    const viewConsume = $('view-consume');
+    if (viewManage)
+        viewManage.classList.toggle('active', mode === 'manage');
+    if (viewConsume)
+        viewConsume.classList.toggle('active', mode === 'consume');
+    const btnManage = $('nav-btn-manage');
+    const btnConsume = $('nav-btn-consume');
+    if (btnManage)
+        btnManage.classList.toggle('active', mode === 'manage');
+    if (btnConsume)
+        btnConsume.classList.toggle('active', mode === 'consume');
+}
+/** 兼容旧移动端分段 Tab。 */
+function switchMobileTab(tab) {
+    switchView(tab === 'recv' ? 'consume' : 'manage');
 }
 // ---------------------------------------------------------------- 提示
 function showFatal(msg) {
@@ -205,4 +226,63 @@ function showRecvError(msg) {
 function hideRecvError() {
     $('recv-error').classList.add('hidden');
 }
-// 「已锚定」徽标已移除（语义不明；锚定失败仍经 grid-error 提示，不影响接收）。
+/** 浮动 Toast 吐司提示。 */
+function showToast(msg, kind = 'info', durationMs = 3000) {
+    const container = $('toast-container');
+    if (!container)
+        return;
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${kind}`;
+    const iconName = kind === 'ok' ? 'check-circle' : kind === 'err' ? 'x' : 'info';
+    toast.innerHTML = `<span class="toast-ic">${icon(iconName)}</span><span class="toast-msg">${msg}</span>`;
+    container.appendChild(toast);
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(10px)';
+        setTimeout(() => toast.remove(), 250);
+    }, durationMs);
+}
+/** 复制文本到剪贴板并弹出 Toast 提示。 */
+async function copyText(text, label = '已复制') {
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+        }
+        else {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+        }
+        showToast(label, 'ok');
+    }
+    catch {
+        showToast('复制失败', 'err');
+    }
+}
+/** 控制纯音频可视化显示/隐藏。 */
+function showAudioVisualizer(active, title, sub) {
+    const viz = $('recv-audio-viz');
+    if (!viz)
+        return;
+    if (active) {
+        if (title)
+            $('recv-audio-title').textContent = title;
+        if (sub)
+            $('recv-audio-sub').textContent = sub;
+        viz.classList.remove('hidden');
+    }
+    else {
+        viz.classList.add('hidden');
+    }
+}
+const winObj = window;
+winObj.showToast = showToast;
+winObj.copyText = copyText;
+winObj.showAudioVisualizer = showAudioVisualizer;
+winObj.switchView = switchView;
+winObj.switchMobileTab = switchMobileTab;

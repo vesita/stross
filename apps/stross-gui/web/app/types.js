@@ -62,7 +62,7 @@ const KIND_ICONS = {
     camera: 'camera',
     mic: 'mic',
     systemAudio: 'speaker',
-    file: 'download',
+    file: 'file',
 };
 /** 设备类型 → 图标名（未知类型回退 server）。 */
 function deviceKindIcon(kind) {

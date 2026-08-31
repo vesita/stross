@@ -67,15 +67,15 @@ const RECV_MAX_W: u32 = 720;
 /// **等待旧链收尾**（多链路 API `start_receive_link` 在 Android 上返回
 /// 明确错误——多端点链接为桌面路径，通信模式 v2 Phase C）。
 #[cfg(target_os = "android")]
-static ANDROID_PLAYBACK: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>> =
-    std::sync::Mutex::new(None);
-
-/// 桌面多链路接收：开始接收并登记为链路 `linkId`，解码帧经 `onFrame` 二进制
-/// 通道（[`Channel`]）推给前端——多条链路（屏幕 + 系统声音同播）并存，每条链
-/// 独立启停/统计（通信模式 v2 Phase C「接收端多流化」）。
-/// Android 播放链为单链（MediaCodec 插件竞态），本命令在 Android 返回明确错误。
+static ANDROID_PLAYBACK_LINKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+/// 多链路接收（桌面 + Android 统一支持）：开始接收并登记为链路 `linkId`。
+/// * 桌面：解码帧经 `onFrame` 二进制通道直推前端 canvas。
+/// * Android：编码帧经 `mobile_jni` 与 `PlaybackPlugin`（MediaCodec 视频 + AudioTrack 音频），支持音画多流并发消费。
 #[tauri::command]
 pub async fn start_receive_link(
+    app: tauri::AppHandle,
     state: State<'_, Arc<Kernel>>,
     link_id: String,
     relay: String,
@@ -85,11 +85,25 @@ pub async fn start_receive_link(
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        let _ = (state, link_id, relay, stream, audio, on_frame);
-        return Err("Android 播放链为单链：多端点链接暂仅桌面（通信模式 v2 Phase C）".into());
+        let _ = &on_frame;
+        state
+            .start_receive_raw_link(link_id.clone(), relay, stream)
+            .await
+            .map_err(|e| e.to_user_string())?;
+        let frames = match state.take_receive_raw_frames_for(&link_id) {
+            Some(r) => r,
+            None => return Err("接收链路已启动但没有编码帧通道".into()),
+        };
+        let h = crate::mobile::spawn_android_playback(&app, frames, audio);
+        let mut guard = ANDROID_PLAYBACK_LINKS.lock().unwrap();
+        if let Some(old) = guard.insert(link_id, h) {
+            old.abort();
+        }
+        Ok(())
     }
     #[cfg(not(target_os = "android"))]
     {
+        let _ = &app;
         let ch = on_frame;
         state
             .start_receive_link(link_id.clone(), relay, stream, audio)
@@ -99,11 +113,6 @@ pub async fn start_receive_link(
             Some(r) => r,
             None => return Err("接收链路已启动但没有帧通道".into()),
         };
-        // 帧转发：RGBA 双线性缩放（端点层 `rgba_scaled`，计算在 Rust）到
-        // 宽度 ≤ 720 → 二进制通道（显示可跳帧，不反压）。**二进制 Channel**
-        // 替代 base64+JSON 事件（此前 1.5MB/帧字符串跨进程 IPC + 前端
-        // atob/逐字节拷贝——「解码帧率高、播放帧率低」的显示管线瓶颈）：
-        // `Raw(Vec<u8>)` 直传，前端 `Uint8Array` 零拷贝绘制。
         tokio::spawn(async move {
             while let Some(f) = frames.recv().await {
                 let Some((w, h, data)) =
@@ -120,8 +129,16 @@ pub async fn start_receive_link(
 
 /// 停止指定链路（其它链路不受影响；多端点链接）。
 #[tauri::command]
-pub fn stop_receive_link(state: State<'_, Arc<Kernel>>, link_id: String) {
+pub fn stop_receive_link(_app: tauri::AppHandle, state: State<'_, Arc<Kernel>>, link_id: String) {
     state.stop_receive_link(&link_id);
+    #[cfg(target_os = "android")]
+    {
+        let _ = &app;
+        let mut guard = ANDROID_PLAYBACK_LINKS.lock().unwrap();
+        if let Some(h) = guard.remove(&link_id) {
+            h.abort();
+        }
+    }
 }
 
 /// 全部接收链路快照（linkId + 统计；前端面板逐条展示）。
@@ -149,9 +166,9 @@ pub async fn start_receive(
         // 2) 等旧播放链收尾（stopPlayback 完成）再启新链——消灭同插件竞态。
         //    先取出句柄再 await：否则 `if let` 内临时 MutexGuard 跨 await 持有
         //    （非 Send）→ 命令 future 不满足 tauri 的 Send 约束，编译失败。
-        let prev_handle = ANDROID_PLAYBACK.lock().unwrap().take();
+        let prev_handle = ANDROID_PLAYBACK_LINKS.lock().unwrap().remove("main");
         if let Some(prev) = prev_handle {
-            let _ = prev.await;
+            let _ = prev.abort();
         }
         // 3) 启新接收会话 + 新播放链，句柄入 static 供下次序列化。
         state
@@ -163,7 +180,10 @@ pub async fn start_receive(
             None => return Err("接收会话已启动但没有编码帧通道".into()),
         };
         let h = crate::mobile::spawn_android_playback(&app, frames, audio);
-        *ANDROID_PLAYBACK.lock().unwrap() = Some(h);
+        ANDROID_PLAYBACK_LINKS
+            .lock()
+            .unwrap()
+            .insert("main".into(), h);
         Ok(())
     }
     #[cfg(not(target_os = "android"))]

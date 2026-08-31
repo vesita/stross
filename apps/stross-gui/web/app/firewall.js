@@ -6,13 +6,13 @@ async function checkFirewall() {
     if (IS_ANDROID)
         return;
     try {
-        const st = (await call('firewall_status'));
+        const st = await call('firewall_status');
         if (st.missing && st.missing.length > 0) {
             $('fw-missing').textContent = st.missing.join('、');
             $('fw-banner').classList.remove('hidden');
         }
     }
-    catch (_) { /* 非 Linux / 未安装 ufw：静默忽略 */ }
+    catch { }
 }
 /** 一键放行：polkit 弹一次系统授权，自动添加精确放行规则。 */
 async function allowFirewall() {

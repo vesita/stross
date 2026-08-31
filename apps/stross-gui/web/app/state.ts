@@ -16,6 +16,9 @@ let discoverInFlight = false;          // 设备流聚合 in-flight
 let discoverCacheAt = 0;
 const DISCOVER_TTL_MS = 3000;
 
+// —— 移动端选项卡状态 ——
+let currentMobileTab: MobileTab = 'devices';
+
 // —— 订阅（入站接收）状态 ——
 /** 本机是否正在接收（订阅）流（= recvLinks 非空；多端点链接）。 */
 let receiving = false;
@@ -100,3 +103,7 @@ let deviceViews: DeviceView[] = [];
 let expandedDevice: string | null = null;
 /** 流 id → 流信息缓存（接收传输自动选择按 video/audio 类型决策）。 */
 const remoteStreams = new Map<string, RemoteStream>();
+/** 设备搜索过滤关键词（为空时显示全部）。 */
+let deviceFilterQuery = '';
+/** 全局主视图模式（管理界面 Manage vs 消费播放台 Consume）。 */
+let activeViewMode: 'manage' | 'consume' = 'manage';

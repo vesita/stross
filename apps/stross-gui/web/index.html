@@ -8,8 +8,7 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- 内联 SVG 图标雪碧图：统一 stroke 风格线性图标（替代 emoji），
-       通过 <svg class="ic"><use href="#i-xxx"/></svg> 引用。 -->
+  <!-- 内联 SVG 图标雪碧图：统一 stroke 风格线性图标，通过 <svg class="ic"><use href="#i-xxx"/></svg> 引用 -->
   <svg class="svg-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
     <symbol id="i-logo" viewBox="0 0 24 24">
       <path d="M2 16.1A5 5 0 0 1 5.9 20" />
@@ -146,6 +145,50 @@
       <path d="M3 16h3a2 2 0 0 1 2 2v3" />
       <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
     </symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24">
+      <polyline points="6 9 12 15 18 9" />
+    </symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 24 24">
+      <polyline points="9 18 15 12 9 6" />
+    </symbol>
+    <symbol id="i-sparkles" viewBox="0 0 24 24">
+      <path d="M12 3v3m0 12v3M3 12h3m12 0h3m-2.8-6.2-2.1 2.1M6.9 17.1l-2.1 2.1m14.2 0-2.1-2.1M6.9 6.9 4.8 4.8" />
+    </symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    </symbol>
+    <symbol id="i-soundwave" viewBox="0 0 24 24">
+      <path d="M2 10v4M6 6v12M10 3v18M14 8v8M18 5v14M22 10v4" />
+    </symbol>
+    <symbol id="i-laptop" viewBox="0 0 24 24">
+      <rect x="2" y="3" width="20" height="14" rx="2" />
+      <path d="M2 20h20" />
+    </symbol>
+    <symbol id="i-smartphone" viewBox="0 0 24 24">
+      <rect x="5" y="2" width="14" height="20" rx="2" />
+      <line x1="12" y1="18" x2="12.01" y2="18" />
+    </symbol>
+    <symbol id="i-file" viewBox="0 0 24 24">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+    </symbol>
+    <symbol id="i-filter" viewBox="0 0 24 24">
+      <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+    </symbol>
+    <symbol id="i-info" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="16" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12.01" y2="8" />
+    </symbol>
+    <symbol id="i-check-circle" viewBox="0 0 24 24">
+      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+      <polyline points="22 4 12 14.01 9 11.01" />
+    </symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24">
+      <polygon points="12 2 2 7 12 12 22 7 12 2" />
+      <polyline points="2 17 12 22 22 17" />
+      <polyline points="2 12 12 17 22 12" />
+    </symbol>
   </svg>
 
   <header>
@@ -158,6 +201,20 @@
         <span class="subtitle">局域网设备共享</span>
       </div>
     </div>
+
+    <!-- 全局视图模式切换：[ 📡 设备与共享 (管理) | 🎬 消费播放台 (消费) ] -->
+    <nav class="view-switcher" id="view-switcher" aria-label="视图模式切换">
+      <button id="nav-btn-manage" class="nav-switch-btn active" type="button" data-view="manage">
+        <svg class="ic"><use href="#i-radio" /></svg>
+        <span>设备与共享</span>
+      </button>
+      <button id="nav-btn-consume" class="nav-switch-btn" type="button" data-view="consume">
+        <svg class="ic"><use href="#i-monitor" /></svg>
+        <span>消费播放台</span>
+        <span id="consume-badge" class="nav-badge hidden">0</span>
+      </button>
+    </nav>
+
     <div class="header-right">
       <label class="disco-toggle" title="开启后，局域网内其它设备可以发现并连接本机">
         <span class="disco-label">可被发现</span>
@@ -168,15 +225,21 @@
       <span id="ver-badge" class="badge muted">v-</span>
     </div>
   </header>
+    <!-- 移动端快速跳转接收条（接收中且在小屏下悬浮展示） -->
+    <div id="mobile-recv-bar" class="mobile-recv-bar hidden">
+      <div class="mobile-recv-info">
+        <span class="dot live"></span>
+        <span id="mobile-recv-text">正在接收流…</span>
+      </div>
+      <button id="mobile-recv-jump-btn" class="sm primary" type="button">
+        <svg class="ic"><use href="#i-eye" /></svg><span>查看画面</span>
+      </button>
+    </div>
 
-  <main>
-    <div id="error-box" class="error hidden"></div>
-
-    <!-- ============ 设备（共享/订阅） × 接收 ============
-         组织方式：节点 → 设备 → 端点。左栏「设备」：本机设备树（共享为可订阅端点）
-         + 局域网设备目录（订阅对端端点）；右栏「接收」：订阅进来的流在此播放/停止。 -->
-    <div class="dual">
-      <!-- ── 左栏：设备 ── -->
+    <!-- ============ 管理界面 (Manage Studio) vs 消费界面 (Consume Stage) ============ -->
+    <div class="view-container">
+      <!-- ── 1. 管理界面：设备资产、共享配置、目录发现 ── -->
+      <div id="view-manage" class="view-panel active">
       <section class="card" id="device-pane">
         <div class="pane-head">
           <h2>设备</h2>
@@ -185,8 +248,22 @@
           </button>
         </div>
         <div class="pane-addrow">
-          <input id="manual-addr" type="text" placeholder="设备 IP 或 IP:端口" />
-          <button id="manual-add-btn" type="button">添加</button>
+          <div class="search-input-wrap">
+            <svg class="ic"><use href="#i-search" /></svg>
+            <input id="manual-addr" type="text" placeholder="输入设备 IP 或 IP:端口" />
+          </div>
+          <button id="manual-add-btn" type="button" class="btn-compact">
+            <svg class="ic"><use href="#i-link" /></svg><span>添加</span>
+          </button>
+        </div>
+        <div class="pane-filterrow" id="pane-filterrow">
+          <div class="filter-input-wrap">
+            <svg class="ic"><use href="#i-filter" /></svg>
+            <input id="dev-filter-input" type="text" placeholder="搜索设备名称或 IP…" />
+            <button id="dev-filter-clear" class="filter-clear-btn hidden" type="button" title="清除搜索">
+              <svg class="ic"><use href="#i-x" /></svg>
+            </button>
+          </div>
         </div>
         <div id="grid-error" class="error hidden"></div>
         <!-- 防火墙自动放行（权限自动化）：检测到 ufw 入站拦截 Stross 端口时提示一键放行 -->
@@ -209,21 +286,34 @@
           <ul id="recent-list" class="url-list"></ul>
         </div>
       </section>
+      </div>
 
-      <!-- ── 右栏：接收（订阅的端点流）── -->
-      <section class="card" id="recv-pane">
-        <div class="pane-head">
-          <h2>接收</h2>
-          <button id="recv-stop-btn" class="sm hidden" type="button">
-            <svg class="ic"><use href="#i-stop" /></svg><span>停止接收</span>
-          </button>
-        </div>
-        <!-- 空状态：未接收任何共享时的占位提示（接收中隐藏） -->
-        <div class="recv-empty" id="recv-empty">
-          <span class="recv-empty-ic"><svg class="ic"><use href="#i-monitor" /></svg></span>
-          <p>尚未接收共享</p>
-          <span class="hint">在左侧选择一台设备，订阅它共享的内容后在此播放</span>
-        </div>
+      <!-- ── 2. 消费界面：沉浸式播放舞台、音视频多轨混音与遥测 ── -->
+      <div id="view-consume" class="view-panel">
+        <section class="card stage-card" id="recv-pane">
+          <div class="pane-head stage-head">
+            <div class="stage-title-wrap">
+              <h2>消费播放台</h2>
+              <span id="stage-live-badge" class="badge ok hidden">正在播放</span>
+            </div>
+            <div class="stage-actions">
+              <button id="stage-back-btn" class="sm" type="button" title="返回设备列表管理">
+                <svg class="ic"><use href="#i-radio" /></svg><span>管理设备</span>
+              </button>
+              <button id="recv-stop-btn" class="sm danger hidden" type="button">
+                <svg class="ic"><use href="#i-stop" /></svg><span>停止全部</span>
+              </button>
+            </div>
+          </div>
+          <!-- 空状态：未接收任何共享时的占位提示（接收中隐藏） -->
+          <div class="recv-empty" id="recv-empty">
+            <span class="recv-empty-ic"><svg class="ic"><use href="#i-monitor" /></svg></span>
+            <p>暂无活跃的串流</p>
+            <span class="hint">在「设备与共享」中选择任意设备的屏幕、麦克风或声音进行订阅</span>
+            <button id="empty-go-manage-btn" class="primary sm" type="button" style="margin-top: 8px;">
+              <svg class="ic"><use href="#i-search" /></svg><span>浏览局域网设备</span>
+            </button>
+          </div>
         <div id="recv-error" class="error hidden"></div>
         <!-- 多端点链接：接收链路列表（一次可同时接收多条流；每条链独立状态/停止） -->
         <div id="recv-links" class="recv-links"></div>
@@ -246,26 +336,67 @@
             </button>
           </div>
         </div>
+        <!-- 音频流可视化：纯音频接收时展示动态声波 -->
+        <div class="audio-viz-wrap hidden" id="recv-audio-viz">
+          <div class="audio-viz-pulse">
+            <div class="audio-viz-ring ring-1"></div>
+            <div class="audio-viz-ring ring-2"></div>
+            <div class="audio-viz-icon">
+              <svg class="ic"><use href="#i-speaker" /></svg>
+            </div>
+          </div>
+          <div class="audio-waves" id="audio-waves">
+            <span class="wave-bar"></span><span class="wave-bar"></span><span class="wave-bar"></span>
+            <span class="wave-bar"></span><span class="wave-bar"></span><span class="wave-bar"></span>
+            <span class="wave-bar"></span><span class="wave-bar"></span><span class="wave-bar"></span>
+          </div>
+          <div class="audio-viz-title" id="recv-audio-title">音频流播放中</div>
+          <div class="audio-viz-sub hint" id="recv-audio-sub">低延迟音频接收 · 原生输出</div>
+        </div>
         <div class="status-line hidden" id="recv-status-line">
           <span class="dot idle" id="recv-dot"></span>
           <span id="recv-status">未接收</span>
         </div>
         <div id="recv-meta" class="meta"></div>
       </section>
+      </div>
     </div>
-  </main>
 
   <!-- 共享弹窗（本机设备 → 端点：可见性由公开者声明；共享=推送端） -->
   <div id="pub-modal" class="modal hidden">
     <div class="modal-box">
-      <h2 id="pub-modal-title">共享设备</h2>
-      <p class="hint" id="pub-modal-sub"></p>
-      <fieldset>
+      <div class="modal-head">
+        <div class="modal-title-wrap">
+          <span class="modal-ic"><svg class="ic"><use href="#i-radio" /></svg></span>
+          <div>
+            <h2 id="pub-modal-title">共享设备</h2>
+            <p class="hint" id="pub-modal-sub"></p>
+          </div>
+        </div>
+        <button id="pub-modal-close" class="modal-close-btn" type="button" title="关闭">
+          <svg class="ic"><use href="#i-x" /></svg>
+        </button>
+      </div>
+      <fieldset class="modal-fieldset">
         <legend>谁可以订阅</legend>
-        <label class="row check-row"><input type="radio" name="pub-vis" value="public" /><span>任何人（免确认）</span></label>
-        <label class="row check-row"><input type="radio" name="pub-vis" value="confirm" checked /><span>需我确认（首次询问，之后自动）</span></label>
+        <div class="vis-options">
+          <label class="row check-row vis-card">
+            <input type="radio" name="pub-vis" value="public" />
+            <div class="vis-card-content">
+              <span class="vis-card-name">公开（免确认）</span>
+              <span class="hint">局域网内其它设备可直接订阅并接收</span>
+            </div>
+          </label>
+          <label class="row check-row vis-card">
+            <input type="radio" name="pub-vis" value="confirm" checked />
+            <div class="vis-card-content">
+              <span class="vis-card-name">需确认（人工确认）</span>
+              <span class="hint">首次订阅需本机人工确认，可勾选记住设备</span>
+            </div>
+          </label>
+        </div>
       </fieldset>
-      <div class="row">
+      <div class="row modal-actions">
         <button id="pub-confirm-btn" class="primary" type="button">
           <svg class="ic"><use href="#i-radio" /></svg><span>共享</span>
         </button>
@@ -280,9 +411,19 @@
   <!-- 订阅弹窗（对端端点 → 本机接收：握手后走既有 start_receive） -->
   <div id="sub-modal" class="modal hidden">
     <div class="modal-box">
-      <h2 id="sub-modal-title">订阅</h2>
-      <p class="hint" id="sub-modal-sub"></p>
-      <div class="row">
+      <div class="modal-head">
+        <div class="modal-title-wrap">
+          <span class="modal-ic sub"><svg class="ic"><use href="#i-download" /></svg></span>
+          <div>
+            <h2 id="sub-modal-title">订阅</h2>
+            <p class="hint" id="sub-modal-sub"></p>
+          </div>
+        </div>
+        <button id="sub-modal-close" class="modal-close-btn" type="button" title="关闭">
+          <svg class="ic"><use href="#i-x" /></svg>
+        </button>
+      </div>
+      <div class="row modal-actions">
         <button id="sub-confirm-btn" class="primary" type="button">
           <svg class="ic"><use href="#i-download" /></svg><span>订阅并接收</span>
         </button>
@@ -297,14 +438,21 @@
   <!-- 订阅授权确认弹窗（一端想订阅本端共享的内容时的人工确认；本端=共享方内容源） -->
   <div id="approve-modal" class="modal hidden">
     <div class="modal-box">
-      <h2>有设备想订阅你的内容</h2>
-      <p class="hint" id="approve-device"></p>
-      <p class="hint" id="approve-media"></p>
-      <label class="row check-row">
+      <div class="modal-head">
+        <div class="modal-title-wrap">
+          <span class="modal-ic auth"><svg class="ic"><use href="#i-shield" /></svg></span>
+          <div>
+            <h2>有设备想订阅你的内容</h2>
+            <p class="hint" id="approve-device"></p>
+            <p class="hint" id="approve-media"></p>
+          </div>
+        </div>
+      </div>
+      <label class="row check-row remember-row">
         <input type="checkbox" id="approve-remember" checked />
         <span>记住此设备（下次自动允许，不再询问）</span>
       </label>
-      <div class="row">
+      <div class="row modal-actions">
         <button id="approve-allow-btn" class="primary" type="button">
           <svg class="ic"><use href="#i-check" /></svg><span>允许</span>
         </button>
@@ -316,6 +464,9 @@
       <div id="approve-error" class="error hidden"></div>
     </div>
   </div>
+
+  <!-- 浮动通知吐司提示框 -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
   <!-- 前端脚本：app/ 目录按依赖序加载（script 全局作用域共享，勿改顺序；
        types.js 必须是第一个——类型/标签/字符串联合的单一真源） -->

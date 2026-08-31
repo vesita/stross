@@ -14,21 +14,13 @@ function normAddr(addr) {
         a = 'http://' + a;
     return a.replace(/\/+$/, '');
 }
-/** link-local / 回环地址（fe80::/10、169.254/16、127.0.0.1、::1）：不可达或
- *  仅本机可见，剔除出设备列表（Android 锚点回退回环时扫描会回显 127.0.0.1）。 */
-function isLinkLocalIp(ip) {
-    return (ip === '127.0.0.1' ||
-        ip === '::1' ||
-        /^fe80:/i.test(ip) ||
-        /^169\.254\./.test(ip));
-}
 /** 局域网设备探测超时（ms；Rust 侧聚合按此探测每台设备）。
  *  缩短以加快节点状态刷新（上线/下线及时可见）；LAN 内 1.5s 足以完成探测。 */
 const PROBE_TIMEOUT_MS = 1500;
 /** 免先连核心：自动锚定本机（`start_relay` 幂等，启动受控中继 + mDNS 广播）。 */
 async function ensureAnchor() {
     try {
-        const info = (await call('start_relay'));
+        const info = await call('start_relay');
         anchor = {
             port: info.port,
             urls: info.urls,
@@ -63,7 +55,7 @@ async function addManualRelay() {
     saveRecent(addr);
     // 探测中继是否可达（/api/streams 是受控/普通中继都提供的只读端点）
     try {
-        const ok = (await call('probe_relay', { base: addr }));
+        const ok = await call('probe_relay', { base: addr });
         if (!ok)
             throw new Error('中继不可达（无 /api/streams）');
     }
@@ -94,9 +86,8 @@ function getRecent() {
     try {
         return JSON.parse(localStorage.getItem(LS_RECENT) || '[]');
     }
-    catch {
-        return [];
-    }
+    catch { }
+    return [];
 }
 function saveRecent(url) {
     const list = getRecent().filter((u) => u !== url);
@@ -164,10 +155,10 @@ async function refreshDevices(force = false) {
         return;
     scanInFlight = true;
     try {
-        const devs = (await call('scan_devices', {
+        const devs = await call('scan_devices', {
             probeMs: PROBE_TIMEOUT_MS,
             extraBaseUrls: manualRelays.map((a) => a.replace(/\/+$/, '')),
-        }));
+        });
         // 本机条目（isSelf，按回环探测）：同步锚点 SRT/QUIC 端口
         const local = devs.find((d) => d.isSelf) || null;
         if (local && local.online && anchor) {
@@ -176,8 +167,7 @@ async function refreshDevices(force = false) {
         }
         // 远端设备卡片（探测已在 Rust 完成：含在线共享 / SRT / QUIC）
         // 仅保留 `online`（能探测到 /api/info）的设备——剔除离线/已关闭的节点，
-        // 避免 mDNS TTL 未到期时手机/PC 列表残留「已关闭的节点」卡片（如关掉
-        // 电脑后手机仍显示 pico）。手动地址不可达的场景由下方 manualRelays 分支单独保留。
+        // 避免 mDNS TTL 未到期时手机/PC 列表残留「已关闭的节点」卡片。
         const cards = devs
             .filter((d) => !d.isSelf)
             .filter((d) => d.online)
@@ -227,8 +217,6 @@ async function refreshDevices(force = false) {
             renderDeviceList();
         }
         // 对端目录随扫描周期刷新：正在展开的卡片及时反映对端「新共享/取消共享」
-        // （断连/共享状态变化不再依赖手动折叠再展开才可见；loadRemoteDir 自带
-        //   TTL + in-flight 守卫，不会每 2s 打一次对端）。
         const expandedDev = expandedDevice
             ? deviceViews.find((d) => d.key === expandedDevice)
             : null;
@@ -266,7 +254,15 @@ function renderDeviceList() {
         box.appendChild(emptyState('radio', '未发现局域网内其它设备。可手动输入地址添加。'));
         return;
     }
-    for (const dev of deviceViews) {
+    const filtered = deviceFilterQuery
+        ? deviceViews.filter((d) => d.name.toLowerCase().includes(deviceFilterQuery) ||
+            d.meta.toLowerCase().includes(deviceFilterQuery))
+        : deviceViews;
+    if (deviceFilterQuery && !filtered.length) {
+        box.appendChild(emptyState('filter', `未找到与「${deviceFilterQuery}」匹配的设备`));
+        return;
+    }
+    for (const dev of filtered) {
         box.appendChild(deviceCard(dev));
     }
 }
@@ -320,9 +316,11 @@ function deviceCard(dev) {
     head.className = 'dev-head';
     head.setAttribute('role', 'button');
     head.tabIndex = 0;
+    const isPhone = /android|phone|手机/i.test(dev.name) || /android/i.test(dev.meta);
+    const iconName = dev.manual ? 'link' : isPhone ? 'phone' : 'monitor';
     const ic = document.createElement('span');
     ic.className = 'card-ic';
-    ic.innerHTML = icon(dev.manual ? 'link' : 'radio');
+    ic.innerHTML = icon(iconName);
     const body = document.createElement('span');
     body.className = 'card-body';
     const nameLine = document.createElement('span');
@@ -330,17 +328,20 @@ function deviceCard(dev) {
     nameLine.textContent = dev.name;
     const metaLine = document.createElement('span');
     metaLine.className = 'scan-meta';
-    metaLine.appendChild(document.createTextNode(dev.meta));
+    metaLine.appendChild(document.createTextNode(dev.meta + (dev.manual ? '（手动）' : '')));
     body.appendChild(nameLine);
     body.appendChild(metaLine);
+    const chevron = document.createElement('span');
+    chevron.className = 'dev-chevron';
+    chevron.innerHTML = icon('chevron-right');
     head.appendChild(ic);
     head.appendChild(body);
+    head.appendChild(chevron);
     const toggle = () => {
         expandedDevice = expandedDevice === dev.key ? null : dev.key;
         renderDeviceList();
     };
-    head.addEventListener('click', (e) => {
-        // 麦克风操作按钮在 detail 内，不冒泡到 head
+    head.addEventListener('click', () => {
         toggle();
     });
     head.addEventListener('keydown', (e) => {
@@ -368,13 +369,12 @@ function deviceCard(dev) {
     if (expandedDevice === dev.key) {
         // 展开即拉取对端目录（幂等：缓存命中直接渲染）。
         // 延后一帧：卡片此刻尚未插入 DOM，立即渲染查不到容器。
-        setTimeout(() => loadRemoteDir(dev), 0);
+        setTimeout(() => void loadRemoteDir(dev), 0);
     }
     card.appendChild(detail);
     return card;
 }
-/** 刷新本机卡片锚点状态行（锚定成功后调用；SRT/QUIC 就绪状态在
- *  `refreshAnchorPorts` 拉取后二次刷新）。 */
+/** 刷新本机卡片锚点状态行。 */
 function renderLocalCard() {
     const meta = $('anchor-box');
     if (meta) {

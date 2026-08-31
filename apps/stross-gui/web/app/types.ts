@@ -5,8 +5,46 @@
 // （docs/layering-architecture.md：前端不持有端口等常量，wire 形状以 Rust 为真源，
 // 这里仅做类型镜像 + 展示标签）。加载顺序：types.js 必须先于其它 app/*.js。
 
+/** Tauri 窗口 API 类型。 */
+interface TauriWindow {
+  isFullscreen(): Promise<boolean>;
+  setFullscreen(fullscreen: boolean): Promise<void>;
+}
+
+/** Tauri Core API 类型。 */
+interface TauriCore {
+  invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+  Channel?: new () => {
+    onmessage?: (payload: Uint8Array) => void;
+  };
+}
+
+/** Tauri Event API 类型。 */
+interface TauriEvent {
+  listen: <T>(event: string, cb: (e: { payload: T }) => void) => Promise<() => void>;
+}
+
+/** Tauri 全局命名空间。 */
+interface TauriApi {
+  core?: TauriCore;
+  event?: TauriEvent;
+  window?: {
+    getCurrentWindow: () => TauriWindow;
+  };
+}
+
+/** 全局 window 扩展。 */
+interface WindowWithTauri extends Window {
+  __TAURI__?: TauriApi;
+  showToast?: (msg: string, kind?: 'ok' | 'err' | 'info', durationMs?: number) => void;
+  copyText?: (text: string, label?: string) => Promise<void>;
+  showAudioVisualizer?: (active: boolean, title?: string, sub?: string) => void;
+  switchView?: (mode: 'manage' | 'consume') => void;
+  switchMobileTab?: (tab: string) => void;
+}
+
 /** Tauri invoke 的弱类型契约（与 Rust 命令面逐步收紧）。 */
-type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<any>;
+type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 // ---------------------------------------------------------------------------
 // 字符串字面量联合（与 Rust 枚举 wire 值一一对应；单一真源）
@@ -18,6 +56,8 @@ type EndpointKind = 'screen' | 'window' | 'camera' | 'mic' | 'systemAudio' | 'in
 type VisibilityKind = 'public' | 'confirm' | 'private';
 /** 共享媒体类型（与设备能力徽标一致；端点 kind 的实时媒体子集）。 */
 type ShareMedia = Extract<EndpointKind, 'screen' | 'camera' | 'mic' | 'systemAudio'>;
+/** 移动端当前选中的 Tab。 */
+type MobileTab = 'devices' | 'recv';
 
 // ---------------------------------------------------------------------------
 // 标签映射（wire 值 → 中文展示；未知值回退原文）
@@ -91,7 +131,7 @@ const KIND_ICONS: Partial<Record<EndpointKind, string>> = {
   camera: 'camera',
   mic: 'mic',
   systemAudio: 'speaker',
-  file: 'download',
+  file: 'file',
 };
 
 /** 设备类型 → 图标名（未知类型回退 server）。 */

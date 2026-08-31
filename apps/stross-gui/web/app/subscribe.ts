@@ -52,9 +52,6 @@ function recvLinkName(host: string, endpointName: string): string {
 // ---------------------------------------------------------------------------
 // 视频帧显示路径（桌面多链路）：每链路一个二进制 Channel → 只存最新帧 →
 // requestAnimationFrame 节流绘制（丢中间帧，显示管线不积压）。
-// 此前是 receive-frame 事件 + base64（1.5MB/帧字符串跨进程 IPC + 前端
-// atob/逐字节拷贝），且每帧重建链路 DOM——「解码帧率高、播放帧率低」
-// 的显示管线瓶颈所在，已整体替换。
 // ---------------------------------------------------------------------------
 
 /** 待绘帧（RAF 消费；只保留最新，到达率高于显示刷新率时丢中间帧）。 */
@@ -77,8 +74,7 @@ function ensureVideoDrawLoop(): void {
 }
 
 // Android 兼容路径：Kotlin MediaCodec 解码帧经 JNI 回 Rust，base64
-// `receive-frame` 事件推前端（`mobile_jni.rs`；桌面已改二进制 Channel，
-// 不再发事件）。同一 RAF 节流绘制，不每帧重建 DOM。
+// `receive-frame` 事件推前端（`mobile_jni.rs`）。同一 RAF 节流绘制。
 let recvFrameUnlisten: (() => void) | null = null;
 
 async function ensureRecvFrameListener(): Promise<void> {
@@ -86,16 +82,16 @@ async function ensureRecvFrameListener(): Promise<void> {
   recvFrameUnlisten = await listen(
     'receive-frame',
     (p: { linkId?: string; pts: number; width: number; height: number; data: string }) => {
-      const linkId = p.linkId || 'main';
-      const link = recvLinks.get(linkId);
-      if (!link) return; // 已停止链路的迟到帧
+      const link = (p.linkId ? recvLinks.get(p.linkId) : null) || Array.from(recvLinks.values())[0];
+      if (!link) return;
       link.frames += 1;
-      activeVideoLink = linkId;
+      activeVideoLink = link.linkId;
       const bin = atob(p.data);
-      if (bin.length !== p.width * p.height * 4) return; // 尺寸突变帧防御
+      if (bin.length !== p.width * p.height * 4) return;
       const u8 = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
       pendingFrame = { w: p.width, h: p.height, rgba: u8 };
+      updateRecvOverlay();
     },
   );
 }
@@ -103,22 +99,20 @@ async function ensureRecvFrameListener(): Promise<void> {
 /** 二进制帧载荷解析（Rust `pack_frame`：magic "STRF" + w + h + pts 各 u32 LE，后接 RGBA）。 */
 function onVideoFrame(linkId: string, payload: Uint8Array): void {
   const link = recvLinks.get(linkId);
-  if (!link) return; // 已停止链路的迟到帧
+  if (!link) return;
   link.frames += 1;
-  // 画布显示最近活跃的视频链路（多视频链并存时后者接管画面）
   activeVideoLink = linkId;
   if (payload.length < 16) return;
   const dv = new DataView(payload.buffer, payload.byteOffset, payload.length);
   if (dv.getUint32(0, true) !== 0x53545246) return; // "STRF"
   const w = dv.getUint32(4, true);
   const h = dv.getUint32(8, true);
-  // pts = dv.getUint32(12, true)（统计走 receive_links，此处不另记）
   pendingFrame = { w, h, rgba: payload.subarray(16) };
 }
 
 /** 创建一条链路的二进制帧通道（tauri v2 `core.Channel`；Android 分支 Rust 忽略）。 */
 function newFrameChannel(linkId: string): unknown {
-  const ChannelCtor = (window as any).__TAURI__?.core?.Channel;
+  const ChannelCtor = (window as unknown as WindowWithTauri).__TAURI__?.core?.Channel;
   if (!ChannelCtor) throw new Error('当前页面缺少 Tauri Channel 支持');
   const ch = new ChannelCtor();
   ch.onmessage = (payload: Uint8Array) => onVideoFrame(linkId, payload);
@@ -130,7 +124,7 @@ function newFrameChannel(linkId: string): unknown {
 // ---------------------------------------------------------------------------
 
 /** 开始接收流并登记为链路（不停止其它链路；同链路重复订阅 = 幂等重启）。
- *  返回是否真正启动（握手成功但接收启动失败时调用方不标记已订阅）。 */
+ *  返回是否真正启动。 */
 async function startReceiveLink(opts: {
   host: string;
   endpointId: string;
@@ -145,25 +139,13 @@ async function startReceiveLink(opts: {
     showRecvError('无可用接收目标（本机锚点未就绪）');
     return false;
   }
-  // 同链路重启：先停旧的（Rust 会话 + 前端状态一次清理）
   if (recvLinks.has(linkId)) await stopReceiveLink(linkId);
   let started = false;
   try {
-    // 二进制帧通道：桌面 start_receive_link 推送解码帧；Android 分支
-    // start_receive 忽略（Kotlin MediaCodec 自渲染，前端无帧流）。
     const onFrame = newFrameChannel(linkId);
+    await call('start_receive_link', { linkId, relay, stream: opts.streamId, audio: 'device', onFrame });
     if (IS_ANDROID) {
-      // Android 单链播放：先清前端旧链路，再走旧命令（内部停旧接收并等旧
-      // 播放链收尾——防同一 Kotlin 插件上 start/stop 竞态，真机崩溃点）。
-      for (const id of [...recvLinks.keys()]) {
-        recvLinks.delete(id);
-        subscribedEndpoints.delete(id);
-      }
-      activeVideoLink = null;
-      await call('start_receive', { relay, stream: opts.streamId, audio: 'device', onFrame });
-      await ensureRecvFrameListener(); // Android：解码帧经 receive-frame 事件
-    } else {
-      await call('start_receive_link', { linkId, relay, stream: opts.streamId, audio: 'device', onFrame });
+      await ensureRecvFrameListener();
     }
     started = true;
     recvLinks.set(linkId, {
@@ -180,16 +162,18 @@ async function startReceiveLink(opts: {
     syncRecvUI();
     renderRecvLinks();
     void pollReceiveLinks();
+    // 订阅达成自动切入消费播放台
+    switchView('consume');
+    const recvPane = $('recv-pane');
+    if (recvPane && window.innerWidth <= 900) {
+      setTimeout(() => recvPane.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+    }
     return true;
   } catch (e) {
     if (started) {
       try {
-        if (IS_ANDROID) {
-          await call('stop_receive');
-        } else {
-          await call('stop_receive_link', { linkId });
-        }
-      } catch (_) { /* ignore */ }
+        await call('stop_receive_link', { linkId });
+      } catch {}
     }
     showRecvError('接收失败：' + errMsg(e));
     syncRecvUI();
@@ -200,20 +184,14 @@ async function startReceiveLink(opts: {
 /** 停止指定链路（其它链路不受影响）。 */
 async function stopReceiveLink(linkId: string): Promise<void> {
   try {
-    if (IS_ANDROID) {
-      // Android 单链：播放链由旧 stop_receive 收尾（Kotlin stopPlayback）
-      await call('stop_receive');
-    } else {
-      await call('stop_receive_link', { linkId });
-    }
-  } catch (_) { /* ignore */ }
+    await call('stop_receive_link', { linkId });
+  } catch {}
   recvLinks.delete(linkId);
   subscribedEndpoints.delete(linkId);
   if (activeVideoLink === linkId) activeVideoLink = null;
   syncRecvUI();
   renderRecvLinks();
   if (recvLinks.size === 0) {
-    // 全部链路停止：清画面 + 退出播放器全屏
     const ctx = canvasCtx();
     if (ctx) ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     void exitPlayerFullscreen();
@@ -224,7 +202,6 @@ async function stopReceiveLink(linkId: string): Promise<void> {
 async function stopReceive(): Promise<void> {
   const ids = [...recvLinks.keys()];
   for (const id of ids) await stopReceiveLink(id);
-  // 无链路时也兜底退出播放器全屏（旧行为：停止接收 = 退出播放器全屏）
   if (ids.length === 0) void exitPlayerFullscreen();
 }
 
@@ -256,7 +233,17 @@ function renderRecvLinks(): void {
   container.innerHTML = '';
   for (const link of recvLinks.values()) {
     const row = document.createElement('div');
-    row.className = 'recv-link-row';
+    const isActive = activeVideoLink === link.linkId;
+    row.className = 'recv-link-row' + (isActive ? ' active-stream' : '');
+    row.onclick = (e) => {
+      if ((e.target as HTMLElement).closest('.recv-link-stop')) return;
+      if (link.frames > 0) {
+        activeVideoLink = link.linkId;
+        renderRecvLinks();
+        updateRecvOverlay();
+      }
+    };
+
     const dot = document.createElement('span');
     dot.className = 'dot ' + dotClass(link.status);
     const body = document.createElement('span');
@@ -288,7 +275,7 @@ function renderRecvLinks(): void {
   syncRecvUI();
 }
 
-/** 同步接收面板外壳：空状态 / 头按钮 / 状态行摘要（链路行由 renderRecvLinks 管）。 */
+/** 同步接收面板外壳：空状态 / 头按钮 / 状态行摘要。 */
 function syncRecvUI(): void {
   receiving = recvLinks.size > 0;
   const line = $('recv-status-line');
@@ -299,23 +286,50 @@ function syncRecvUI(): void {
   $('recv-meta').textContent = '';
   const stopBtn = $('recv-stop-btn');
   if (stopBtn) stopBtn.classList.toggle('hidden', !receiving);
-  // 空状态：空闲时显示占位，接收中隐藏（有内容时由画布接管）
+  // 消费播放台正在播放徽标
+  const stageLiveBadge = $('stage-live-badge');
+  if (stageLiveBadge) stageLiveBadge.classList.toggle('hidden', !receiving);
+
+  // 全局消费视区徽标更新
+  const consumeBadge = $('consume-badge');
+  if (consumeBadge) {
+    consumeBadge.textContent = String(n);
+    consumeBadge.classList.toggle('hidden', n === 0);
+  }
+  const tabBadge = $('tab-recv-badge');
+  if (tabBadge) {
+    tabBadge.textContent = String(n);
+    tabBadge.classList.toggle('hidden', n === 0);
+  }
+  // 移动端快速跳转条
+  const mobBar = $('mobile-recv-bar');
+  if (mobBar) {
+    mobBar.classList.toggle('hidden', !receiving);
+    if (receiving) {
+      const activeLink = activeVideoLink ? recvLinks.get(activeVideoLink) : Array.from(recvLinks.values())[0];
+      const txt = $('mobile-recv-text');
+      if (txt) {
+        txt.textContent = activeLink ? `正在接收：${activeLink.name}` : `正在接收（${recvLinks.size} 条链路）`;
+      }
+    }
+  }
+  // 空状态
   const empty = $('recv-empty');
   if (empty) empty.classList.toggle('hidden', receiving);
   updateRecvOverlay();
 }
 
-/** 接收等待浮层：接收中且活跃视频链路既无视频帧也无音频块（纯音频流 B2：
- *  有音频即算有数据）。 */
+/** 接收等待浮层。 */
 function updateRecvOverlay(): void {
   const active = activeVideoLink ? recvLinks.get(activeVideoLink) : null;
   const hasFrames = !!active && active.frames > 0;
+  const hasAudio = Array.from(recvLinks.values()).some((l) => l.audioBlocks > 0);
   $('recv-overlay').classList.toggle(
     'hidden',
     !receiving || hasFrames || (active ? active.audioBlocks > 0 : false),
   );
-  // 画布仅在收到视频帧时显示（纯音频链路不占画面区）
   $('recv-canvas-wrap').classList.toggle('hidden', !hasFrames);
+  showAudioVisualizer(receiving && !hasFrames && hasAudio);
 }
 
 // ---------------------------------------------------------------------------
@@ -330,15 +344,12 @@ async function pollReceiveLinks(): Promise<void> {
     return;
   }
   try {
-    const links = (await call('receive_links')) as ReceiveLinkView[];
+    const links = await call<ReceiveLinkView[]>('receive_links');
     const byId = new Map(links.map((l) => [l.linkId, l]));
     for (const link of recvLinks.values()) {
-      const s = byId.get(link.linkId)?.stats;
-      if (!s) continue; // 内核侧已无该链（防御；正常路径 stop 才删）
+      const s = byId.get(link.linkId)?.stats || (IS_ANDROID ? byId.get('main')?.stats : undefined);
+      if (!s) continue;
       link.audioBlocks = s.audioBlocks;
-      // 帧率估算（poll 间隔差分 / 实际秒数归一化）：解码 fps（Rust
-      // decodedVideo 累计）与显示 fps（前端实际接收/绘制）同屏对比——
-      // 修复显示管线后两者趋近；差分可能为负（流切换重计数），钳制为 0。
       const now = Date.now();
       const dtSec = (now - (link.lastPollAt || now)) / 1000;
       link.lastPollAt = now;
@@ -347,8 +358,6 @@ async function pollReceiveLinks(): Promise<void> {
       const fps = dtSec > 0 ? Math.round((link.frames - (link.lastFrames || 0)) / dtSec) : 0;
       link.lastDecoded = s.decodedVideo;
       link.lastFrames = link.frames;
-      // 滑动平均（最近 4 次）：瞬时差分 0（流暂停/脉冲到达的 poll 间隙）不
-      // 抹掉历史帧率；持续播放时平均值 ≈ 真实帧率。
       const win = (samples: number[] | undefined, v: number): number[] =>
         (samples || []).concat(v).slice(-4);
       const avg = (samples: number[]): number =>
@@ -359,9 +368,6 @@ async function pollReceiveLinks(): Promise<void> {
       link.decodeSamples = decodeWin;
       if (dfps >= 0) link.decodeFps = Math.round(avg(decodeWin));
       if (fps >= 0) link.displayFps = Math.round(avg(fpsWin));
-      // 曾收到数据后停（帧/解码/音频块）→ 真结束，立即收尾；
-      // 从未收到数据（新流连接窗口）→ 给宽限期，仍未运行再判定结束——
-      // 否则过早收尾把 UI 拉回空闲，对端端点也回落「订阅」。
       const hadData =
         link.frames > 0 || link.audioBlocks > 0 || s.received > 0 || s.decodedVideo > 0;
       if (s.error) {
@@ -386,7 +392,6 @@ async function pollReceiveLinks(): Promise<void> {
     }
     renderRecvLinks();
   } catch (e) {
-    // 轮询失败不中断链路（下轮重试）；留诊断日志便于排查连续失败
     console.warn('[stross] receive_links 轮询失败', e);
   }
   if (recvLinks.size > 0) {
@@ -394,14 +399,11 @@ async function pollReceiveLinks(): Promise<void> {
   }
 }
 
-/** 流已结束（非错误）的收尾：停止该链路并回到空闲态（仅该链路）。
- *  修复：此前只要绘制过帧就永远显示「进行中」，断流后 UI 卡死。 */
+/** 流已结束（非错误）的收尾：停止该链路并回到空闲态。 */
 async function endReceiveLink(linkId: string): Promise<void> {
   if (!recvLinks.has(linkId)) return;
   const host = hostOfLink(linkId);
   await stopReceiveLink(linkId);
-  // 对端卡片「订阅」键还原（清订阅态），并即时刷下目录——共享方/网络关闭
-  // 导致流结束是「关闭共享」事件，订阅方即时响应撤下该端点。
   renderDeviceList();
   const dev = deviceViews.find((d) => d.base && deviceHostOf(d) === host);
   if (dev) void loadRemoteDir(dev, true);

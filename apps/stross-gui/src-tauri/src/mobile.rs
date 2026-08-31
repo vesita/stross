@@ -243,6 +243,9 @@ const DROP_BACKLOG: usize = 8;
 ///    音频帧 → `feedAudio`；积压超过 [`DROP_BACKLOG`] 时跳非关键帧追实时。
 ///
 /// 接收结束（rx 关闭）时通知 Kotlin 释放解码器 / AudioTrack。
+static ACTIVE_PLAYBACK_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub fn spawn_android_playback(
     app: &AppHandle<Wry>,
     rx: mpsc::Receiver<Frame>,
@@ -251,6 +254,7 @@ pub fn spawn_android_playback(
     #[cfg(target_os = "android")]
     mobile_jni::init(app);
     let handle = app.state::<PlaybackPluginHandle>().0.clone();
+    ACTIVE_PLAYBACK_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     // 启动 Kotlin 播放器（同步等待 resolve；放 blocking 线程避免冻结 runtime）
     {
@@ -262,7 +266,6 @@ pub fn spawn_android_playback(
             );
         });
     }
-
     // 编码帧 → Kotlin（放 blocking 线程：run_mobile_plugin 同步阻塞）
     tokio::task::spawn_blocking(move || {
         let mut rx = rx;
@@ -312,9 +315,11 @@ pub fn spawn_android_playback(
                 let _ = handle.run_mobile_plugin::<serde_json::Value>("feedAudio", payload);
             }
         }
-        // 接收结束：通知 Kotlin 释放解码器 / AudioTrack
-        let _ =
-            handle.run_mobile_plugin::<serde_json::Value>("stopPlayback", serde_json::json!({}));
-        tracing::info!("Android 播放链路结束");
+        // 接收结束：只有当全部链路结束时，才通知 Kotlin 释放解码器 / AudioTrack
+        if ACTIVE_PLAYBACK_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            let _ = handle
+                .run_mobile_plugin::<serde_json::Value>("stopPlayback", serde_json::json!({}));
+            tracing::info!("全部 Android 播放链路结束，已释放解码器与 AudioTrack");
+        }
     })
 }

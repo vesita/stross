@@ -85,7 +85,7 @@ pub extern "system" fn Java_dev_stross_sender_PlaybackPlugin_nativeSubmitYuvFram
             serde_json::json!({ "pts": pts, "width": tw, "height": th, "data": data }),
         );
         // 解码统计回写（Android 解码在 Kotlin 侧，此处与桌面解码线程同口径）
-        if let Some(sta) = app.try_state::<stross_kernel::Kernel>() {
+        if let Some(sta) = app.try_state::<std::sync::Arc<stross_kernel::Kernel>>() {
             sta.note_android_decoded_frame();
         }
     }

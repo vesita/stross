@@ -177,6 +177,9 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
 
     /** 视频解码线程：消费队列 → MediaCodec → YUV → JNI → Rust。 */
     private fun startVideoThread() {
+        if (videoThread != null && videoThread?.isAlive == true) {
+            return
+        }
         videoThread = Thread {
             try {
                 Log.i(TAG, "视频解码线程启动")
@@ -288,6 +291,9 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
     // ------------------------------------------------------------------
 
     private fun startAudioTrack() {
+        if (audioTrack != null && audioThread != null && audioThread?.isAlive == true) {
+            return
+        }
         val minBuf = AudioTrack.getMinBufferSize(
             audioSampleRate,
             AudioFormat.CHANNEL_OUT_STEREO,

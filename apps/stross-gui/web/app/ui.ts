@@ -95,32 +95,34 @@ function canvasCtx(): CanvasRenderingContext2D | null {
   return c.getContext('2d');
 }
 
-/** 绘制热路径缓存：RGBA 缓冲与 ImageData 复用（尺寸不变时零重复分配）。
- *  `ImageData` 构造引用传入的 Uint8ClampedArray（不拷贝），两者同内存。 */
-let recvRgbaBuf: Uint8ClampedArray<ArrayBuffer> | null = null;
+/** 绘制热路径缓存：ImageData 复用（尺寸不变时零重复分配）。
+ *  `ImageData` 构造引用传入的 Uint8ClampedArray（不拷贝）；尺寸不变时
+ *  `data.set` 拷贝像素到复用缓冲（不依赖 Channel 载荷的生命周期）。 */
 let recvImg: ImageData | null = null;
 /** 当前视频位图尺寸（0 = 尚无帧）；供全屏自动旋转判断横/竖屏方向。 */
 let recvVideoW = 0;
 let recvVideoH = 0;
 
 /** 把 RGBA 帧画到 canvas（宽度自适应，等比缩放）。
- *  `data` 为 base64 字符串（Rust 侧编码，桌面/Android 统一；atob 原生解码）。 */
-function drawReceiveFrame(w: number, h: number, data: string): void {
+ *  `rgba` 为 Uint8Array（Rust 侧二进制 Channel 直传，无 base64/atob/
+ *  逐字节拷贝——显示管线热路径）。 */
+function drawReceiveFrame(w: number, h: number, rgba: Uint8Array): void {
   const ctx = canvasCtx();
   if (!ctx) return;
   const canvas = ctx.canvas;
   if (canvas.width !== w) canvas.width = w;
   if (canvas.height !== h) canvas.height = h;
-  const bin = atob(data);
   // 尺寸突变帧防御：字节数不符则跳过（否则 ImageData 构造抛 RangeError，
   // 且发生在事件回调内无捕获，会中断整帧处理）
-  if (bin.length !== w * h * 4) return;
-  if (!recvRgbaBuf || recvRgbaBuf.length !== bin.length) {
-    recvRgbaBuf = new Uint8ClampedArray(bin.length);
-  }
-  for (let i = 0; i < bin.length; i++) recvRgbaBuf[i] = bin.charCodeAt(i);
+  if (rgba.length !== w * h * 4) return;
   if (!recvImg || recvImg.width !== w || recvImg.height !== h) {
-    recvImg = new ImageData(recvRgbaBuf, w, h);
+    recvImg = new ImageData(
+      new Uint8ClampedArray(rgba.buffer as ArrayBuffer, rgba.byteOffset, rgba.length),
+      w,
+      h,
+    );
+  } else {
+    recvImg.data.set(rgba);
   }
   ctx.putImageData(recvImg, 0, 0);
   // 控制条信息区：帧显示尺寸（仅变化时写 DOM）

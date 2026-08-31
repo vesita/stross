@@ -6,11 +6,44 @@ use std::sync::Arc;
 
 use stross_kernel::Kernel;
 use tauri::State;
-// 桌面接收路径 emit base64 帧载荷需要（Android 走 mobile_jni，不经此模块）。
+use tauri::ipc::Channel;
+
+/// 桌面回传帧二进制头（Channel 载荷前缀）：magic + width + height + pts，
+/// 各 u32 小端，后接 RGBA 像素（w×h×4）。前端 DataView 解析后零拷贝绘制。
 #[cfg(not(target_os = "android"))]
-use base64::Engine as _;
+const FRAME_MAGIC: u32 = 0x5354_5246; // "STRF"
 #[cfg(not(target_os = "android"))]
-use tauri::Emitter;
+fn pack_frame(w: u32, h: u32, pts: u32, rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 + rgba.len());
+    out.extend_from_slice(&FRAME_MAGIC.to_le_bytes());
+    out.extend_from_slice(&w.to_le_bytes());
+    out.extend_from_slice(&h.to_le_bytes());
+    out.extend_from_slice(&pts.to_le_bytes());
+    out.extend_from_slice(rgba);
+    out
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod tests {
+    use super::*;
+
+    /// 二进制帧头布局（前端 DataView 按小端解析，布局回归防护）：
+    /// [0..4] magic "STRF"、[4..8] w、[8..12] h、[12..16] pts，后接 RGBA。
+    #[test]
+    fn pack_frame_header_layout() {
+        let rgba = vec![7u8; 720 * 405 * 4];
+        let out = pack_frame(720, 405, 1000, &rgba);
+        assert_eq!(out.len(), 16 + rgba.len());
+        assert_eq!(
+            u32::from_le_bytes(out[0..4].try_into().unwrap()),
+            FRAME_MAGIC
+        );
+        assert_eq!(u32::from_le_bytes(out[4..8].try_into().unwrap()), 720);
+        assert_eq!(u32::from_le_bytes(out[8..12].try_into().unwrap()), 405);
+        assert_eq!(u32::from_le_bytes(out[12..16].try_into().unwrap()), 1000);
+        assert_eq!(&out[16..], &rgba[..]);
+    }
+}
 
 /// 桌面回传帧最大宽度。双线性缩放下 720p 显示够用（全屏放大仍清晰），
 /// 且 720×405 RGBA ≈ 1.2MB/帧（≈ 2.5× 原 480 上限）控制 IPC 流量；
@@ -18,12 +51,12 @@ use tauri::Emitter;
 #[cfg(not(target_os = "android"))]
 const RECV_MAX_W: u32 = 720;
 
-/// 开始接收 `relay` 上的 `stream`，解码帧缩放后经 `receive-frame` 事件推到前端。
+/// 开始接收 `relay` 上的 `stream`，解码帧缩放后经 `onFrame` 二进制通道推到前端。
 /// `audio` 决定音频去向：`device` 扬声器播放 / `discard` 静音。
 ///
 /// 平台差异（1f-3）：桌面用 ffmpeg 子进程解码（PlaybackSink）；Android 无
 /// ffmpeg，走编码帧转发 → Kotlin MediaCodec 解码（`mobile::spawn_android_playback`），
-/// 前端事件与绘制完全一致。
+/// 显示帧经 `mobile_jni` 的 `receive-frame` 事件（与桌面不同路径）。
 /// 当前 Android 播放链（`spawn_android_playback` 的 blocking 任务句柄）。
 ///
 /// 单条链 = 一个 Kotlin `PlaybackPlugin`（MediaCodec/AudioTrack）。连续订阅
@@ -37,26 +70,27 @@ const RECV_MAX_W: u32 = 720;
 static ANDROID_PLAYBACK: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>> =
     std::sync::Mutex::new(None);
 
-/// 桌面多链路接收：开始接收并登记为链路 `linkId`，解码帧经 `receive-frame`
-/// 事件（载荷含 `linkId`）推给前端——多条链路（屏幕 + 系统声音同播）并存，
-/// 每条链独立启停/统计（通信模式 v2 Phase C「接收端多流化」）。
+/// 桌面多链路接收：开始接收并登记为链路 `linkId`，解码帧经 `onFrame` 二进制
+/// 通道（[`Channel`]）推给前端——多条链路（屏幕 + 系统声音同播）并存，每条链
+/// 独立启停/统计（通信模式 v2 Phase C「接收端多流化」）。
 /// Android 播放链为单链（MediaCodec 插件竞态），本命令在 Android 返回明确错误。
 #[tauri::command]
 pub async fn start_receive_link(
-    app: tauri::AppHandle,
     state: State<'_, Arc<Kernel>>,
     link_id: String,
     relay: String,
     stream: String,
     audio: stross_endpoint::playback::AudioOut,
+    on_frame: Channel<Vec<u8>>,
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        let _ = (app, state, link_id, relay, stream, audio);
+        let _ = (state, link_id, relay, stream, audio, on_frame);
         return Err("Android 播放链为单链：多端点链接暂仅桌面（通信模式 v2 Phase C）".into());
     }
     #[cfg(not(target_os = "android"))]
     {
+        let ch = on_frame;
         state
             .start_receive_link(link_id.clone(), relay, stream, audio)
             .await
@@ -66,8 +100,10 @@ pub async fn start_receive_link(
             None => return Err("接收链路已启动但没有帧通道".into()),
         };
         // 帧转发：RGBA 双线性缩放（端点层 `rgba_scaled`，计算在 Rust）到
-        // 宽度 ≤ 720 → 事件（显示可跳帧，不反压）。载荷统一为 base64 字符串
-        // （桌面/Android 同格式）；`linkId` 供前端多链路路由到对应画布/统计。
+        // 宽度 ≤ 720 → 二进制通道（显示可跳帧，不反压）。**二进制 Channel**
+        // 替代 base64+JSON 事件（此前 1.5MB/帧字符串跨进程 IPC + 前端
+        // atob/逐字节拷贝——「解码帧率高、播放帧率低」的显示管线瓶颈）：
+        // `Raw(Vec<u8>)` 直传，前端 `Uint8Array` 零拷贝绘制。
         tokio::spawn(async move {
             while let Some(f) = frames.recv().await {
                 let Some((w, h, data)) =
@@ -75,17 +111,7 @@ pub async fn start_receive_link(
                 else {
                     continue;
                 };
-                let data = base64::engine::general_purpose::STANDARD.encode(data);
-                let _ = app.emit(
-                    "receive-frame",
-                    serde_json::json!({
-                        "linkId": link_id,
-                        "pts": f.pts_ms,
-                        "width": w,
-                        "height": h,
-                        "data": data,
-                    }),
-                );
+                let _ = ch.send(pack_frame(w, h, f.pts_ms, &data));
             }
         });
         Ok(())
@@ -113,9 +139,11 @@ pub async fn start_receive(
     relay: String,
     stream: String,
     audio: stross_endpoint::playback::AudioOut,
+    on_frame: Channel<Vec<u8>>,
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
+        let _ = &on_frame; // Android 播放不经显示通道（Kotlin MediaCodec 自渲染）
         // 1) 停旧接收：关闭旧编码帧通道 → 旧播放链循环结束并调用 stopPlayback。
         state.stop_receive();
         // 2) 等旧播放链收尾（stopPlayback 完成）再启新链——消灭同插件竞态。
@@ -140,6 +168,8 @@ pub async fn start_receive(
     }
     #[cfg(not(target_os = "android"))]
     {
+        let _ = &app; // Android 分支（Kotlin 播放）才用 app
+        let ch = on_frame;
         state
             .start_receive(relay, stream, audio)
             .await
@@ -148,12 +178,8 @@ pub async fn start_receive(
             Some(r) => r,
             None => return Err("接收会话已启动但没有帧通道".into()),
         };
-        // 帧转发：RGBA 双线性缩放（端点层 `rgba_scaled`，计算在 Rust）到
-        // 宽度 ≤ 720 → 事件（显示可跳帧，不反压）。
-        // 载荷统一为 base64 字符串（桌面/Android 同格式）：serde 直序列化
-        // Vec<u8> 会输出每字节一个数字的 JSON 数组（720×405×4 ≈ 116 万元素，
-        // ~5.7MB/帧），base64 字符串 ~4 倍紧凑且前端 atob 原生解码。
-        // `linkId` 恒为 `main`（旧单流兼容槽；前端多链路路由统一按 linkId）。
+        // 帧转发：同 `start_receive_link` 的二进制通道路径（旧单流 `main`
+        // 槽位复用同一显示管线；`on_frame` 由前端逐链路创建）。
         tokio::spawn(async move {
             while let Some(f) = frames.recv().await {
                 let Some((w, h, data)) =
@@ -161,17 +187,7 @@ pub async fn start_receive(
                 else {
                     continue;
                 };
-                let data = base64::engine::general_purpose::STANDARD.encode(data);
-                let _ = app.emit(
-                    "receive-frame",
-                    serde_json::json!({
-                        "linkId": "main",
-                        "pts": f.pts_ms,
-                        "width": w,
-                        "height": h,
-                        "data": data,
-                    }),
-                );
+                let _ = ch.send(pack_frame(w, h, f.pts_ms, &data));
             }
         });
         Ok(())

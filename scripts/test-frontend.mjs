@@ -120,6 +120,7 @@ const invoke = async (cmd, args) => {
     case 'capture_status':
       return { active: false, started: false, error: null };
     case 'start_receive':
+      lastFrameChannel = args.onFrame || null;
       return undefined;
     case 'receive_status':
       return mockRecvEnded
@@ -130,6 +131,7 @@ const invoke = async (cmd, args) => {
     // —— 多端点链接（通信模式 v2 Phase C）：链路级启停 + 全量统计 ——
     case 'start_receive_link':
       recvLinksMock.set(args.linkId, true);
+      lastFrameChannel = args.onFrame || null;
       return undefined;
     case 'stop_receive_link':
       recvLinksMock.delete(args.linkId);
@@ -235,8 +237,18 @@ const invoke = async (cmd, args) => {
 // —— mock：Tauri 事件（negotiator-request 等）触发句柄 ——
 const eventHandlers = {};
 let winFullscreen = false; // 播放器全屏 mock：setFullscreen 写入，isFullscreen 读取
+// 最近一次 start_receive_link/start_receive 收到的二进制帧通道（显示管线测试用）
+let lastFrameChannel = null;
 window.__TAURI__ = {
-  core: { invoke },
+  core: {
+    invoke,
+    Channel: class MockChannel {
+      constructor() {
+        this.id = 'mock-ch-' + (MockChannel._n = (MockChannel._n || 0) + 1);
+        this.onmessage = null;
+      }
+    },
+  },
   event: {
     listen: (evt, cb) => {
       eventHandlers[evt] = cb;
@@ -426,6 +438,44 @@ console.log('\n[3d] 多端点链接：第二条链路并存，逐条停止互不
   await sleep(300);
   check('停止全部后回到未接收', $('recv-status-line').classList.contains('hidden') && document.querySelectorAll('#recv-links .recv-link-row').length === 0);
   recvLinksMock.clear();
+}
+
+console.log('\n[3e] 显示管线改造：二进制 Channel 帧 → 计数正确且无 DOM 破坏');
+{
+  // 重新订阅「屏幕」→ 建立新链路（mock 记录其帧通道）
+  let card = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
+  card?.querySelector('[data-role="remote-dir"]')?.querySelector('[data-act="subscribe-endpoint"]')?.click();
+  await sleep(100);
+  $('sub-confirm-btn').click();
+  await sleep(400);
+  check('订阅后帧通道已建立（start_receive_link 收到 onFrame）', !!lastFrameChannel, `lastFrameChannel=${lastFrameChannel}`);
+  // 推送一帧：magic "STRF" + 720×405 + pts=100 + RGBA（全 0）
+  const frame = (pts) => {
+    const p = new Uint8Array(16 + 720 * 405 * 4);
+    const dv = new DataView(p.buffer);
+    dv.setUint32(0, 0x53545246, true);
+    dv.setUint32(4, 720, true);
+    dv.setUint32(8, 405, true);
+    dv.setUint32(12, pts, true);
+    return p;
+  };
+  lastFrameChannel.onmessage(frame(100));
+  await sleep(1300); // RAF 绘制 + 1s 统计轮询渲染链路行
+  const rowAfter1 = document.querySelector('#recv-links .recv-link-row');
+  check('推 1 帧后链路行显示「收到 1 帧」', !!rowAfter1 && rowAfter1.textContent.includes('收到 1 帧'), rowAfter1?.textContent || '行丢失');
+  check('行数仍为 1（帧处理不破坏 DOM）', document.querySelectorAll('#recv-links .recv-link-row').length === 1);
+  // 连续推送 3 帧（模拟 30fps 突发，RAF 只画最新）→ 计数累积不崩
+  lastFrameChannel.onmessage(frame(133));
+  lastFrameChannel.onmessage(frame(166));
+  lastFrameChannel.onmessage(frame(200));
+  await sleep(1300);
+  const rowAfter4 = document.querySelector('#recv-links .recv-link-row');
+  check('累计 4 帧后显示「收到 4 帧」', !!rowAfter4 && rowAfter4.textContent.includes('收到 4 帧'), rowAfter4?.textContent || '行丢失');
+  // 清理：停止全部
+  $('recv-stop-btn').click();
+  await sleep(300);
+  recvLinksMock.clear();
+  lastFrameChannel = null;
 }
 
 console.log('\n[4] 遗留广播/凭证/共享流 UI 已移除（统一走共享/订阅）');

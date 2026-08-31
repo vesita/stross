@@ -28,7 +28,7 @@ interface RecvLinkState {
   streamId: string;
   /** 链路启动时刻（宽限期判定用：新链可能短暂 !running 连接窗口）。 */
   startedAt: number;
-  /** 已绘制视频帧数（receive-frame 事件路由）。 */
+  /** 已接收视频帧数（桌面二进制 Channel / Android receive-frame 事件路由）。 */
   frames: number;
   /** 音频块数（receive_links 轮询回写）。 */
   audioBlocks: number;

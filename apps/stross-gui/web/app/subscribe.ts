@@ -50,9 +50,35 @@ function recvLinkName(host: string, endpointName: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// receive-frame 事件路由（全局监听一次；载荷带 linkId，旧单链为 main）
+// 视频帧显示路径（桌面多链路）：每链路一个二进制 Channel → 只存最新帧 →
+// requestAnimationFrame 节流绘制（丢中间帧，显示管线不积压）。
+// 此前是 receive-frame 事件 + base64（1.5MB/帧字符串跨进程 IPC + 前端
+// atob/逐字节拷贝），且每帧重建链路 DOM——「解码帧率高、播放帧率低」
+// 的显示管线瓶颈所在，已整体替换。
 // ---------------------------------------------------------------------------
 
+/** 待绘帧（RAF 消费；只保留最新，到达率高于显示刷新率时丢中间帧）。 */
+let pendingFrame: { w: number; h: number; rgba: Uint8Array } | null = null;
+let drawLoopStarted = false;
+
+/** 启动绘制循环（全局一次）：每显示帧画一次最新待绘帧。 */
+function ensureVideoDrawLoop(): void {
+  if (drawLoopStarted) return;
+  drawLoopStarted = true;
+  const tick = (): void => {
+    if (pendingFrame) {
+      const f = pendingFrame;
+      pendingFrame = null;
+      drawReceiveFrame(f.w, f.h, f.rgba);
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+// Android 兼容路径：Kotlin MediaCodec 解码帧经 JNI 回 Rust，base64
+// `receive-frame` 事件推前端（`mobile_jni.rs`；桌面已改二进制 Channel，
+// 不再发事件）。同一 RAF 节流绘制，不每帧重建 DOM。
 let recvFrameUnlisten: (() => void) | null = null;
 
 async function ensureRecvFrameListener(): Promise<void> {
@@ -64,12 +90,39 @@ async function ensureRecvFrameListener(): Promise<void> {
       const link = recvLinks.get(linkId);
       if (!link) return; // 已停止链路的迟到帧
       link.frames += 1;
-      // 画布显示最近活跃的视频链路（多视频链并存时后者接管画面）
       activeVideoLink = linkId;
-      drawReceiveFrame(p.width, p.height, p.data);
-      renderRecvLinks();
+      const bin = atob(p.data);
+      if (bin.length !== p.width * p.height * 4) return; // 尺寸突变帧防御
+      const u8 = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      pendingFrame = { w: p.width, h: p.height, rgba: u8 };
     },
   );
+}
+
+/** 二进制帧载荷解析（Rust `pack_frame`：magic "STRF" + w + h + pts 各 u32 LE，后接 RGBA）。 */
+function onVideoFrame(linkId: string, payload: Uint8Array): void {
+  const link = recvLinks.get(linkId);
+  if (!link) return; // 已停止链路的迟到帧
+  link.frames += 1;
+  // 画布显示最近活跃的视频链路（多视频链并存时后者接管画面）
+  activeVideoLink = linkId;
+  if (payload.length < 16) return;
+  const dv = new DataView(payload.buffer, payload.byteOffset, payload.length);
+  if (dv.getUint32(0, true) !== 0x53545246) return; // "STRF"
+  const w = dv.getUint32(4, true);
+  const h = dv.getUint32(8, true);
+  // pts = dv.getUint32(12, true)（统计走 receive_links，此处不另记）
+  pendingFrame = { w, h, rgba: payload.subarray(16) };
+}
+
+/** 创建一条链路的二进制帧通道（tauri v2 `core.Channel`；Android 分支 Rust 忽略）。 */
+function newFrameChannel(linkId: string): unknown {
+  const ChannelCtor = (window as any).__TAURI__?.core?.Channel;
+  if (!ChannelCtor) throw new Error('当前页面缺少 Tauri Channel 支持');
+  const ch = new ChannelCtor();
+  ch.onmessage = (payload: Uint8Array) => onVideoFrame(linkId, payload);
+  return ch;
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +149,9 @@ async function startReceiveLink(opts: {
   if (recvLinks.has(linkId)) await stopReceiveLink(linkId);
   let started = false;
   try {
+    // 二进制帧通道：桌面 start_receive_link 推送解码帧；Android 分支
+    // start_receive 忽略（Kotlin MediaCodec 自渲染，前端无帧流）。
+    const onFrame = newFrameChannel(linkId);
     if (IS_ANDROID) {
       // Android 单链播放：先清前端旧链路，再走旧命令（内部停旧接收并等旧
       // 播放链收尾——防同一 Kotlin 插件上 start/stop 竞态，真机崩溃点）。
@@ -104,9 +160,10 @@ async function startReceiveLink(opts: {
         subscribedEndpoints.delete(id);
       }
       activeVideoLink = null;
-      await call('start_receive', { relay, stream: opts.streamId, audio: 'device' });
+      await call('start_receive', { relay, stream: opts.streamId, audio: 'device', onFrame });
+      await ensureRecvFrameListener(); // Android：解码帧经 receive-frame 事件
     } else {
-      await call('start_receive_link', { linkId, relay, stream: opts.streamId, audio: 'device' });
+      await call('start_receive_link', { linkId, relay, stream: opts.streamId, audio: 'device', onFrame });
     }
     started = true;
     recvLinks.set(linkId, {
@@ -119,7 +176,7 @@ async function startReceiveLink(opts: {
       status: 'starting',
       error: null,
     });
-    await ensureRecvFrameListener();
+    ensureVideoDrawLoop();
     syncRecvUI();
     renderRecvLinks();
     void pollReceiveLinks();

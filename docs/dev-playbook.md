@@ -164,6 +164,11 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
 - **播放侧 PTS 调度（pacer）**：
   - 过水位丢队尾延迟控制器 `drop_over_watermark` **已接线**进 `pacer_loop`（ffmpeg.rs）——此前是死代码（仅 schedule.rs 单测调用），`paced_dropped` 恒 0；改 pacer 循环时**别删那次调用**，防回退测试 `pacer_loop_wires_watermark_drop`（合成帧直驱，不经解码子进程）；
   - 既有 flaky 测试 `video_pacing_holds_burst_and_emits_on_schedule`：**首帧窗口 2s**（整机高负载下 ffmpeg 子进程启动+首帧解码可能超 800ms，全 workspace 并行偶发红），首帧后收紧 800ms 判帧间节奏——别把首帧窗口改回 800ms；若该测试仍偶发先隔离重跑确认，勿误判为播放器回归。
+- **播放显示管线（「解码帧率高、播放帧率低」根因，第三十轮已修）**：
+  - **桌面帧传输走 tauri `Channel<Vec<u8>>` 二进制**（`receive.rs::pack_frame` 16 字节头 `STRF+w+h+pts` + RGBA，前端 DataView 解析零拷贝）——**别改回 base64+JSON 事件**（1.5MB/帧字符串跨进程 IPC + 前端 atob/逐字节拷贝 = 瓶颈）；`on_frame` 是**非 Option** 的 `Channel` 参数（`Option<Channel>` 走通用 CommandArg 要求 Deserialize，编译不过）；
+  - **前端 RAF 节流**：帧回调（Channel/事件）只存 `pendingFrame` 最新帧，`requestAnimationFrame` 里画（丢中间帧、不积压）；**禁止在帧回调里调 `renderRecvLinks()`**（每帧 DOM 重建是主线程大开销，第三十轮移除）；
+  - **Android 显示仍走 `receive-frame` base64 事件**（`mobile_jni.rs` Kotlin 解码 → JNI → Rust 事件），前端双路径（`ensureRecvFrameListener` + `newFrameChannel`）——改一边别忘了另一边；
+  - `rgba_scaled`（stross-endpoint convert/rgba.rs）是 **12 位定点双线性**（热路径 720p→720×405 ≈ 1ms/帧，改回浮点慢 ~6×）；
 - 名称不一致：mDNS `pico`(hostname) vs `/api/discovery` `Stross 设备`(identity.device_name)。
 - Android 屏幕端点（MediaProjection FGS）、摄像头（CameraX）、剪贴板（E 阶段）待扩充。
 - 协议优化排队：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕。

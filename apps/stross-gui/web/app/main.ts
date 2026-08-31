@@ -257,4 +257,18 @@ if (filterClear && filterInput) {
   });
 }
 
+// 播放器 AI 工具条与手势初始化
+const aspectBtn = $('player-aspect-btn');
+if (aspectBtn) aspectBtn.onclick = () => cycleAspectRatio();
+const quickAspectBtn = $('recv-aspect-quick-btn');
+if (quickAspectBtn) quickAspectBtn.onclick = () => cycleAspectRatio();
+
+const telemetryPill = $('player-telemetry-pill');
+if (telemetryPill) telemetryPill.onclick = () => toggleDiagnosticsDrawer();
+const diagCloseBtn = $('diag-close-btn');
+if (diagCloseBtn) diagCloseBtn.onclick = () => toggleDiagnosticsDrawer();
+
+initPlayerGestures();
+initFSMUI();
+
 void init();

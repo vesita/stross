@@ -41,8 +41,11 @@ interface WindowWithTauri extends Window {
   showAudioVisualizer?: (active: boolean, title?: string, sub?: string) => void;
   switchView?: (mode: 'manage' | 'consume') => void;
   switchMobileTab?: (tab: string) => void;
+  cycleAspectRatio?: () => void;
+  setAspectRatio?: (mode: 'fit' | 'cover' | 'fill' | 'original') => void;
+  initPlayerGestures?: () => void;
+  toggleDiagnosticsDrawer?: () => void;
 }
-
 /** Tauri invoke 的弱类型契约（与 Rust 命令面逐步收紧）。 */
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 

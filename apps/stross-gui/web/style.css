@@ -914,6 +914,240 @@ button.sm .ic { width: 14px; height: 14px; }
 .canvas-wrap.fs #recv-canvas {
   max-height: 100vh;
 }
+/* ---------------- AI 智能布局与遥测工具条 ---------------- */
+
+.player-ai-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 12px;
+  margin: 10px 0 6px 0;
+  border-radius: var(--r-md);
+  background: rgba(15, 20, 32, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  animation: fadeIn 0.25s ease;
+}
+
+.ai-pill-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(14, 165, 233, 0.12);
+  border: 1px solid rgba(14, 165, 233, 0.25);
+  box-shadow: 0 0 12px rgba(14, 165, 233, 0.2);
+}
+.ai-badge .ic { width: 13px; height: 13px; }
+
+.aspect-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-2);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.aspect-toggle-btn:hover {
+  color: var(--text-1);
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+.aspect-toggle-btn .ic { width: 13px; height: 13px; }
+
+.ai-telemetry-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-2);
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.ai-telemetry-pill:hover {
+  color: var(--text-1);
+  border-color: rgba(16, 185, 129, 0.3);
+  background: rgba(16, 185, 129, 0.08);
+}
+.ai-telemetry-pill .ic.chevron { width: 12px; height: 12px; opacity: 0.6; }
+.telemetry-divider { opacity: 0.4; }
+.health-ok { color: #10b981; font-weight: 600; }
+
+/* ---------------- AI 智能诊断浮层 ---------------- */
+
+.player-diag-drawer {
+  margin: 8px 0 12px 0;
+  padding: 14px;
+  border-radius: var(--r-md);
+  background: linear-gradient(180deg, rgba(17, 24, 39, 0.95), rgba(15, 20, 32, 0.95));
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(14, 165, 233, 0.3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 20px rgba(14, 165, 233, 0.15);
+  animation: fadeUp 0.25s ease;
+}
+
+.diag-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.diag-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.diag-title .ic { width: 16px; height: 16px; color: var(--accent); }
+
+.icon-btn-sm {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.icon-btn-sm:hover { color: var(--text-1); background: rgba(255, 255, 255, 0.12); }
+.icon-btn-sm .ic { width: 14px; height: 14px; }
+
+.diag-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.diag-item {
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.diag-lbl { font-size: 10.5px; color: var(--text-3); }
+.diag-val { font-size: 12px; font-weight: 500; color: var(--text-1); font-family: var(--font-mono); }
+.diag-val.ok { color: #10b981; }
+
+.diag-tip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: rgba(14, 165, 233, 0.08);
+  border: 1px solid rgba(14, 165, 233, 0.18);
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.diag-tip .ic { width: 14px; height: 14px; color: var(--accent); flex: none; }
+
+/* ---------------- 手势 HUD 浮层 ---------------- */
+
+.player-gesture-hud {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 22px;
+  border-radius: var(--r-lg);
+  background: rgba(10, 14, 23, 0.88);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 20px rgba(14, 165, 233, 0.2);
+  pointer-events: none;
+  animation: fadeIn 0.15s ease;
+  min-width: 140px;
+}
+
+.gesture-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(14, 165, 233, 0.15);
+  border: 1px solid rgba(14, 165, 233, 0.3);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+}
+.gesture-icon .ic { width: 22px; height: 22px; }
+
+.gesture-bar-wrap {
+  width: 100px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.15);
+  overflow: hidden;
+}
+.gesture-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #0ea5e9, #38bdf8);
+  border-radius: 3px;
+  transition: width 0.08s ease-out;
+}
+.gesture-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  font-family: var(--font-mono);
+}
+
+/* ---------------- 画面比例模式 ---------------- */
+
+.canvas-wrap.aspect-fit #recv-canvas {
+  object-fit: contain;
+  width: 100%;
+  max-height: 75vh;
+}
+.canvas-wrap.aspect-cover #recv-canvas {
+  object-fit: cover;
+  width: 100%;
+  height: 75vh;
+}
+.canvas-wrap.aspect-fill #recv-canvas {
+  object-fit: fill;
+  width: 100%;
+  height: 75vh;
+}
+.canvas-wrap.aspect-original #recv-canvas {
+  object-fit: none;
+  width: auto;
+  max-width: 100%;
+}
 
 /* ---------------- 纯音频流可视化 ---------------- */
 

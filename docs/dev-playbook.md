@@ -171,5 +171,31 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
   - `rgba_scaled`（stross-endpoint convert/rgba.rs）是 **12 位定点双线性**（热路径 720p→720×405 ≈ 1ms/帧，改回浮点慢 ~6×）；
   - **接收面板帧率统计**（第三十一轮）：链路行「解码 ~Nfps · 显示 ~Nfps」= poll 差分按实际间隔归一化 + **最近 4 次滑动平均**——瞬时差分 0（流暂停的 poll 间隙）会抹掉历史，别改回瞬时差分；「解码高、显示低」即显示管线瓶颈的直观信号。
 - 名称不一致：mDNS `pico`(hostname) vs `/api/discovery` `Stross 设备`(identity.device_name)。
+- **PC 侧要「分享」不必起 GUI**：`serve` 已 `seed_platform_endpoints`（三件套注册、默认未通告），
+  用控制面公开即可让手机订阅：
+  `stross ctrl endpoint publish --device screen:0 --visibility public --delivery pull`。
+  （`serve` 不起控制面端口时 `stross ctrl` 连 `ws://127.0.0.1:18778/ws/ctrl` 需 serve 在跑。）
+- **手机端订阅按钮 bounds=[0,0]（视口外/折叠卡片）**：`phone-cdp.mjs click` 会因 `visible=false` 拒点，
+  必须用 `eval` 直接 `.click()`：`document.querySelector('[data-act="subscribe-endpoint"][data-endpoint="screen:0"]').click()`。
+  且订阅后面板切到「消费播放台」，设备列表重渲染会把远端目录从 DOM 移除——再订下一条前要重新
+  `call('loadRemoteDir', ...)`。
+- **性能诊断（第 32 轮实测，未改码）**：
+  - **帧率 ~7fps 不是手机消费瓶颈（初判已修正）**：Android 接收走 `kernel::receiver::receive_raw_loop`，
+    消费通道是 `try_send`（满即丢、不反压）+ `dropped` 计数；实测 `dropped=0` 且 `received≈7fps`
+    → 手机端 base64 `feedVideo` 不背压、不是瓶颈。~7fps 是**源产帧率**（静止屏伤害驱动 + 
+    `recv_frame_timeout(30ms)` 阻塞 + `interval` 节流 → 采集循环只给 ffmpeg ~7fps）。
+  - **判定前提**：要确认动态屏下传输/编码上限，需动态画面（播放视频/高频刷新终端）复测
+    「手机端 received/显示」能否到 ~30fps——此为帧率瓶颈是否真成立的判定前置。
+  - **移动端 `feedVideo` 仍走 base64+JSON 事件**：与桌面 `Channel<Vec<u8>>` 不对称。这是**降低 IPC/前端
+    开销的基建优化**（对动态屏高帧率更稳），但**不会提升静止屏帧率**，别当帧率修复做。
+  - **高功耗**：静止屏下 `stross serve` 仍 ~45–65% CPU（`top -H` 见一根 hot tokio worker ~78%）。
+    `wayland.rs` 采集循环无视屏幕变化、按 `interval` 持续把上一帧送 ffmpeg 编码；另 `recv_frame_timeout`
+    是阻塞 std mpsc 在 tokio worker 上（疑即 78% 来源，改非阻塞 poll 或挪 blocking 线程比改节流更直接）。
+    pipewire 日志偶见 `SPA_CHUNK_FLAG_CORRUPTED`。
+  - **Android 音频待复测**：订阅系统声音后手机 `feedAudio` 大量上报但 `audioBlocks/audioBlocksIn` 恒 0；
+    logcat 反复 `AudioTrackShared: Track invalidated` + `writeFramesHelper getNextBuffer failed -11`；
+    且（08-30）`PlaybackPlugin.startAudioTrack` 的 `AudioTrack.write` 有 native crash 栈。疑似 WIP 新增
+    低延迟 AudioTrack（`FLAG_LOW_LATENCY` + `PERFORMANCE_MODE_LOW_LATENCY` + `minBuf*2`）在这台设备
+    兼容问题，需稳定音频源复测确认是否新回归（本轮 PC 系统声音源静默，未定论）。
 - Android 屏幕端点（MediaProjection FGS）、摄像头（CameraX）、剪贴板（E 阶段）待扩充。
 - 协议优化排队：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕。

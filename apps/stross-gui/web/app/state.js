@@ -66,5 +66,68 @@ let expandedDevice = null;
 const remoteStreams = new Map();
 /** 设备搜索过滤关键词（为空时显示全部）。 */
 let deviceFilterQuery = '';
-/** 全局主视图模式（管理界面 Manage vs 消费播放台 Consume）。 */
+const uiFSM = {
+    appStage: 'idle',
+    playerMode: 'empty',
+    viewMode: 'manage',
+    aspectRatio: 'fit',
+    isFullscreen: false,
+    activeModal: 'none',
+};
+const fsmListeners = new Set();
+function subscribeUIFSM(listener) {
+    fsmListeners.add(listener);
+    listener(uiFSM);
+    return () => fsmListeners.delete(listener);
+}
+function dispatchUIAction(action) {
+    switch (action.type) {
+        case 'SWITCH_VIEW':
+            uiFSM.viewMode = action.mode;
+            activeViewMode = action.mode;
+            break;
+        case 'SET_ASPECT_RATIO':
+            uiFSM.aspectRatio = action.mode;
+            break;
+        case 'SET_FULLSCREEN':
+            uiFSM.isFullscreen = action.active;
+            fsActive = action.active;
+            break;
+        case 'OPEN_MODAL':
+            uiFSM.activeModal = action.modal;
+            break;
+        case 'CLOSE_MODAL':
+            uiFSM.activeModal = 'none';
+            break;
+        case 'SYNC_LINKS':
+            break;
+    }
+    const total = recvLinks.size;
+    receiving = total > 0;
+    if (total === 0) {
+        uiFSM.appStage = uiFSM.viewMode === 'consume' ? 'idle' : 'managing';
+        uiFSM.playerMode = 'empty';
+    }
+    else {
+        uiFSM.appStage = 'streaming';
+        const activeVideo = activeVideoLink ? recvLinks.get(activeVideoLink) : null;
+        const hasVideo = !!activeVideo && activeVideo.frames > 0;
+        const hasAudio = Array.from(recvLinks.values()).some((l) => l.audioBlocks > 0);
+        if (!hasVideo && !hasAudio) {
+            uiFSM.playerMode = 'buffering';
+        }
+        else if (hasVideo && hasAudio) {
+            uiFSM.playerMode = 'audioVisualMix';
+        }
+        else if (hasVideo) {
+            uiFSM.playerMode = 'videoOnly';
+        }
+        else {
+            uiFSM.playerMode = 'audioOnly';
+        }
+    }
+    for (const fn of fsmListeners) {
+        fn(uiFSM);
+    }
+}
 let activeViewMode = 'manage';

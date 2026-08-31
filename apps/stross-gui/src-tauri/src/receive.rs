@@ -133,7 +133,7 @@ pub fn stop_receive_link(_app: tauri::AppHandle, state: State<'_, Arc<Kernel>>, 
     state.stop_receive_link(&link_id);
     #[cfg(target_os = "android")]
     {
-        let _ = &app;
+        let _ = &_app;
         let mut guard = ANDROID_PLAYBACK_LINKS.lock().unwrap();
         if let Some(h) = guard.remove(&link_id) {
             h.abort();

@@ -1,13 +1,19 @@
 package dev.stross.sender
 
 import android.app.Activity
+import android.content.pm.ActivityInfo
+import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.os.Build
 import android.util.Base64
 import android.util.Log
+import android.view.WindowManager
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -44,7 +50,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 @TauriPlugin
 class PlaybackPlugin(activity: Activity) : Plugin(activity) {
-
+    private val host: Activity = activity
     companion object {
         private const val TAG = "StrossPlay"
         /** MediaCodec 输出格式常量（与 Rust `Yuv420Layout` 枚举对应）。 */
@@ -99,14 +105,15 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
     private var vSliceH = 0
     private val vLock = Any()
 
-    // 音频
+    // 音频与焦点
     private var aDecoder: MediaCodec? = null
     private var audioTrack: AudioTrack? = null
     private val audioQueue = LinkedBlockingQueue<ByteArray>()
     private var audioThread: Thread? = null
     private var audioSampleRate = 48_000
     private var audioChannels = 2
-
+    private var audioManager: AudioManager? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
     // ------------------------------------------------------------------
     // JNI（Rust mobile_jni.rs）：YUV → RGBA 缩放 → base64 事件 → 统计
     // ------------------------------------------------------------------
@@ -129,11 +136,35 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
     fun startPlayback(invoke: Invoke) {
         val args = invoke.parseArgs(StartArgs::class.java)
         running.set(true)
+        setKeepScreenOn(true)
         if (args.audio) {
+            requestAudioFocus()
             startAudioTrack()
         }
         startVideoThread()
         invoke.resolve(JSObject().apply { put("started", true) })
+    }
+
+    @InvokeArg
+    class OrientationArgs {
+        var orientation: String = "unspecified"
+    }
+
+    @Command
+    fun setOrientation(invoke: Invoke) {
+        val args = invoke.parseArgs(OrientationArgs::class.java)
+        try {
+            host.runOnUiThread {
+                when (args.orientation) {
+                    "landscape" -> host.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    "portrait" -> host.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                    else -> host.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "设置屏幕方向异常: ${e.message}")
+        }
+        invoke.resolve(JSObject().apply { put("success", true) })
     }
 
     @Command
@@ -271,14 +302,28 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
     /** 用 Rust 解析好的 csd（SPS+PPS）与宽高创建 AVC 解码器——不再解析 SPS。 */
     private fun createVideoDecoder(csd: ByteArray, w: Int, h: Int) {
         releaseVideoDecoder()
-        val width = if (w > 0) w else 1280
-        val height = if (h > 0) h else 720
+        val width = if (w > 0) w else 1920
+        val height = if (h > 0) h else 1080
         val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
             setByteBuffer("csd-0", ByteBuffer.wrap(csd))
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try { setInteger("low-latency", 1) } catch (_: Exception) {}
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try { setInteger("priority", 0) } catch (_: Exception) {}
+            }
         }
         val codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        codec.configure(fmt, null, null, 0)
+        try {
+            codec.configure(fmt, null, null, 0)
+        } catch (e: Exception) {
+            Log.w(TAG, "解码器首选配置失败，降级标准配置: ${e.message}")
+            val safeFmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+                setByteBuffer("csd-0", ByteBuffer.wrap(csd))
+            }
+            codec.configure(safeFmt, null, null, 0)
+        }
         codec.start()
         vDecoder = codec
         vWidth = 0
@@ -308,6 +353,7 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
                     .build()
             )
             .setAudioFormat(
@@ -318,11 +364,16 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
                     .build()
             )
             .setBufferSizeInBytes(minBuf * 2)
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                }
+            }
             .build()
         audioTrack = track
         track.play()
         audioThread = Thread { audioWriteLoop() }.apply { start() }
-        Log.i(TAG, "AudioTrack 就绪")
+        Log.i(TAG, "AudioTrack 就绪（低延迟模式）")
     }
 
     private fun audioWriteLoop() {
@@ -418,38 +469,84 @@ class PlaybackPlugin(activity: Activity) : Plugin(activity) {
         5 -> 32000; 6 -> 24000; 7 -> 22050; 8 -> 16000; 9 -> 12000
         10 -> 11025; 11 -> 8000; 12 -> 7350; else -> null
     }
-
-    // ------------------------------------------------------------------
-    // 清理
-    // ------------------------------------------------------------------
-
     private fun stopEverything() {
+        setKeepScreenOn(false)
+        releaseAudioFocus()
         synchronized(vLock) {
             releaseVideoDecoder()
         }
         videoQueue.clear()
-        // 音频：清队 + 停线程 + 释放
         audioQueue.clear()
         audioThread?.interrupt()
         audioThread = null
-        try {
-            aDecoder?.stop()
-        } catch (_: Exception) {
-        }
-        try {
-            aDecoder?.release()
-        } catch (_: Exception) {
-        }
+        try { aDecoder?.stop() } catch (_: Exception) {}
+        try { aDecoder?.release() } catch (_: Exception) {}
         aDecoder = null
-        try {
-            audioTrack?.stop()
-        } catch (_: Exception) {
-        }
-        try {
-            audioTrack?.release()
-        } catch (_: Exception) {
-        }
+        try { audioTrack?.stop() } catch (_: Exception) {}
+        try { audioTrack?.release() } catch (_: Exception) {}
         audioTrack = null
+    }
+
+    private fun setKeepScreenOn(enable: Boolean) {
+        try {
+            host.runOnUiThread {
+                if (enable) {
+                    host.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    host.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "屏幕常亮设置异常: ${e.message}")
+        }
+    }
+
+    private fun requestAudioFocus() {
+        try {
+            if (audioManager == null) {
+                audioManager = host.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            }
+            val am = audioManager ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build()
+                    )
+                    .setOnAudioFocusChangeListener { focusChange ->
+                        when (focusChange) {
+                            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                                try { audioTrack?.setVolume(0.25f) } catch (_: Exception) {}
+                            }
+                            AudioManager.AUDIOFOCUS_GAIN -> {
+                                try { audioTrack?.setVolume(1.0f) } catch (_: Exception) {}
+                            }
+                            AudioManager.AUDIOFOCUS_LOSS,
+                            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                                try { audioTrack?.setVolume(0.0f) } catch (_: Exception) {}
+                            }
+                        }
+                    }
+                    .build()
+                audioFocusRequest = req
+                am.requestAudioFocus(req)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "音频焦点请求异常: ${e.message}")
+        }
+    }
+
+    private fun releaseAudioFocus() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                audioFocusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }
+                audioFocusRequest = null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "音频焦点释放异常: ${e.message}")
+        }
     }
 
     private fun releaseVideoDecoder() {

@@ -28,6 +28,30 @@ pub fn discoverable_status(state: State<'_, Arc<Kernel>>) -> stross_kernel::Sett
     }
 }
 
+/// 设置屏幕旋转方向（Android 下调用 Kotlin 插件，桌面安全 no-op）。
+#[tauri::command]
+pub async fn set_screen_orientation(
+    app: tauri::AppHandle,
+    orientation: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let handle = app.state::<crate::mobile::PlaybackPluginHandle>().0.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = handle.run_mobile_plugin::<serde_json::Value>(
+                "setOrientation",
+                serde_json::json!({ "orientation": orientation }),
+            );
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (&app, orientation);
+    }
+    Ok(())
+}
+
 /// 设置「可被发现」，并持久化到 settings.json（重启保持）。
 #[tauri::command]
 pub fn set_discoverable(

@@ -401,6 +401,7 @@ GStreamer 流水线。
 
 | 轮次 | 一句话 |
 |---|---|
+| 第三十二轮 | **PC-安卓双端真机联调 + 性能诊断**：打通「PC serve 公开屏幕/系统声音 → 手机订阅播放」与「手机共享麦克风 → 电脑订阅」两条链路（Android 播放/采集/并发多链路/人工确认授权全通）；实测定位：帧率 ~7fps 为**源静止屏产帧少**（手机消费 `try_send`/不背压、`dropped=0`，非 base64 消费瓶颈——初判已修正），`serve` 静止屏仍 ~45–65% CPU（hot tokio worker 线程 ~78%）为**功耗异常点**；出优化预案（静止降频 / 动态画面复测定帧率上限 / 排 SPA_CHUNK_FLAG_CORRUPTED） |
 | 第七轮 | 统一化重构：stross-core→stross-kernel 吸收 stross-app，单一 Kernel 门面 + stross-bridge 独立 |
 | 第八轮 | UI 收敛「通告+订阅」+ 内核推流状态修复 |
 | 第九轮 | 端点插件区 + Wayland 屏幕采集 |
@@ -425,6 +426,117 @@ GStreamer 流水线。
 | 第三十轮 | **原生播放器显示管线排查与修复（「解码帧率高、播放帧率低」根因）**：桌面帧传输 base64+JSON 事件 → tauri `Channel<Vec<u8>>` 二进制（`pack_frame` 16 字节头 + RGBA，前端零拷贝）；前端 RAF 节流只画最新帧（丢中间帧、不积压）+ 移除每帧 `renderRecvLinks` DOM 重建 + atob/逐字节拷贝移除；`rgba_scaled` 浮点 → 12 位定点双线性（720p 缩放 7ms→1ms/帧）；Android 播放显示保持 `receive-frame` 事件路径（mobile_jni 不动）；新增 `pack_frame` 头布局单测 + jsdom [3e] 帧推送断言；调研结论：显示管线瓶颈在 IPC/绘制而非播放内核，libmpv/fork mpv 不解决该问题（见 dev-playbook） |
 | 第二十九轮 | 播放侧 PTS 调度接线与测试加固：过水位丢队尾延迟控制器 `drop_over_watermark` 接入 `pacer_loop`（此前死代码、`paced_dropped` 恒 0，现真实生效），新增接线测试 `pacer_loop_wires_watermark_drop`（合成帧直驱 pacer_loop 防回退）；既有 flaky 测试 `video_pacing_holds_burst_and_emits_on_schedule` 首帧窗口 800ms→2s（整机高负载下 ffmpeg 子进程启动+首帧解码可能超 800ms，全 workspace 并行偶发红），帧间判定保持 800ms；两次全 workspace 全绿 |
 | 第二十八轮 | **通信模式 v2 Phase C 全落地**：语义 id 派生（`derive_stream_id` 确定性三要素 + `ensure_session_with_id` 幂等 + 订阅方一致性校验）；接收端多链路（内核 `receivers: HashMap` + per-link 启停/统计 + 桌面 GUI 多路订阅面板，旧单流 API 落 `main` 槽兼容）；QUIC 连接复用（一条连接 N 媒体流，客户端链路管理器 + 中继 `[连接][stream_id]` demux peer 循环 + `OpenStream`/`StreamOpened`/`CloseStream` 流级控制）；紧凑帧头 v2（14 字节，codec 移协商）；集成测试 `quic_multiplex.rs`（1 连接 4 流 demux 不串流/停一路不级联）+ 回归脚本全绿 || 第二十七轮 | **契约上移 stross-types（内核约定特性落地）**：端点 SPI（`Endpoint`/`ShareEndpoint`/`SubscribeEndpoint`/`MediaSourceEndpoint`/`EndpointApp`/`SubscribeCtx` + 数据契约 `StreamConfig`/`VideoSource`/`AudioSourceConfig`/`Quality`/`FilePushOptions` + `impl_media_source_endpoint!` 宏）迁入 `stross_types::contract` 单一真源；端点 `contract.rs` 变重导出 shim；`EndpointApp::spawn_task` 提供 fire-and-forget 载体（契约层零 tokio）；内核/端点两端只依赖共享契约与 wire 层 |
+
+## 第三十二轮：PC-安卓双端联调 + 性能诊断（帧率瓶颈 / 高功耗）+ 优化预案
+
+> 本轮未改动代码（用户先出方案）。真机：OPPO PLC110（Android 16，serial
+> `3B6F5ME8GCL4660T`，WiFi 192.168.11.60），PC enp6s0=192.168.11.61。
+> 复现脚本见下方「复现路径」。
+
+### 双端链路打通（已真机验证）
+
+**链路 1：电脑共享 → 手机订阅播放**（端到端通）
+
+- **PC 侧**：`stross serve --discoverable` 只起 kernel+中继+协商+控制面，**不注册采集端点**
+  （`endpoint ls` 返回 `endpoints: []`）；需经控制面公开才能被订阅：
+  `stross ctrl endpoint publish --device screen:0` / `--device sysaudio:builtin`
+  （`serve` 与控制面共用 `seed_platform_endpoints`，屏幕/麦克风/系统声音三件套已注册、默认未通告）。
+- **手机侧**：CDP 驱动 `loadRemoteDir(dev, true)` 拉目录 → 点「订阅」→ 确认 →
+  订阅「屏幕」**视频播放成功**（`收到 N 帧 · 显示 ~fps` 递增）→ 再订阅「系统声音」**并发 2 链路**正常。
+
+**链路 2：手机共享 → 电脑订阅**（端到端通）
+
+- **手机侧**：授予 `RECORD_AUDIO`（真机已授权，appops RECORD_AUDIO=allow）→ GUI 点「麦克风→共享」
+  → 确认（默认 visibility=confirm「需确认」）→ 手机端 `mic:builtin` 变 `published=true, state=active`。
+- **PC 侧**：`stross endpoint ls --host 192.168.11.60 --port 18779` 见 `mic:builtin`（published=true,
+  visibility=confirm）→ `stross endpoint subscribe --endpoint mic:builtin --host 192.168.11.60
+  --data-dir /tmp/stross-sub` → 手机弹「有设备想订阅你的内容…麦克风」确认（`approve-allow-btn` 允许）
+  → PC 得到 `已订阅媒体端点 relay=ws://192.168.11.60:8777 stream=mic-builtin-ly-rt-4f63ef83`。
+- **验证**：手机中继 `/api/streams` 列出 `mic-builtin-ly-rt-4f63ef83`（AAC 48kHz 立体声，watchers≥1）；
+  PC 与手机 8777 建立 ESTABLISHED TCP 连接（pull 观看）。`confirm` 可见性 + 人工确认的「允许/拒绝」链路亦通。
+- 注：`visibility=confirm` 需手机人工确认（对已信任设备可 `记住此设备` 自动放行）。
+
+**结论**：**Android 播放器（链路 1）+ Android 采集/推流（链路 2）+ 并发多链路 + 人工确认授权** WIP
+功能全部是通的，用户体验瓶颈在性能，不在功能。
+
+### 帧率定位（实测 + 代码核实；**修正初判**）
+
+| 环节 | 实测 | 结论 |
+|---|---|---|
+| 编码器 libx264 720p@30/2500k | **4.5% CPU** | 不是瓶颈 |
+| `stross serve` 总进程 | ~45–65% CPU | 高，但主要耗在一根 hot tokio worker 线程 |
+| `serve` 内 hot tokio 线程（`top -H`） | **~78% CPU** | 功耗异常点（应为采集/转发循环） |
+| 手机 wire 层 `received` | 每 2s +14 ≈ **7fps** | 源产帧率（静止屏） |
+| 手机侧 `dropped` | **0** | 手机消费**没有**积压 |
+
+链路：`wayland 采集(1920×1080, 8.3MB/帧) → 缩放 720p → ffmpeg 编码 → 中继 → 手机 recv/feed`。
+
+**关键核实（修正）**：Android 接收侧走 `kernel::receiver::receive_raw_loop`，向消费通道是
+**`try_send`（满即丢，不反压）**，丢帧计数 `dropped`。实测 `dropped=0` 且 `received≈7fps`
+→ **手机端 base64 feedVideo 消费路径不是瓶颈、也没有背压**。
+（若消费是瓶颈，`received` 会 30fps、`dropped` 会>0——与实测不符。）
+
+因此 ~7fps 是**源产帧率**：屏幕基本静止时，`wayland.rs` 采集循环（伤害驱动停发新帧 + `recv_frame_timeout(30ms)`
+阻塞 + `interval` 节流）实际只给 ffmpeg **~7fps**，整个管道在源的产帧速率下运行。
+→ **帧率低主要是「源静止屏产帧少」+ 采集循环节流，不是内核传输/编码/手机消费瓶颈。**
+（要判定动态屏下传输能到多少 fps，需动态画面复测，暂未验证明——见优化预案 3。）
+
+### 高功耗实测
+
+`serve` 总 ~45–65% CPU，静止屏下仍有一根 tokio worker 线程 **~78%**（`top -H`，可能即
+`wayland.rs` 采集循环或帧转发）。`wayland.rs` 采集循环**无视屏幕是否变化**，按 `interval(1/fps)`
+持续把上一帧（缩放后）送 ffmpeg 编码；静止时也全量缩放+编码+转发 → 烧 CPU/带宽/手机解码功耗。
+另日志出现 `lamco_pipewire: Stream 0: buffer marked SPA_CHUNK_FLAG_CORRUPTED`（采集判损坏帧）。
+
+### 优化预案（内核算力，按优先级）
+
+1. **静止画面降频（首推，直接砍功耗）**：`wayland.rs` 改**伤害驱动**——仅屏幕变化时送帧给编码器；
+   静止时用**低频 keepalive**（如 1–2fps 重发最后一帧）保持流存活即可（`PUSH_SILENCE_TIMEOUT` 10s，
+   GOP 关键帧 2s 一次、新观看端随时可接入）。→ 静止场景 serve CPU 应大幅下降，且不损失动态画面帧率。
+   注意：不能完全停发（`PUSH_SILENCE_TIMEOUT` 判失联 → 拆流），keepalive 频率要 >10s 周期。
+   前置：先核减是否有 **`recv_frame_timeout(30ms)` 阻塞住 async 采集循环**（阻塞 std mpsc 在 tokio
+   worker 上可能即 78% CPU 来源）——把它改成非阻塞 poll 或挪到独立 blocking 线程，可能比改节流更直接。
+2. **手机帧投递改二进制 Channel（**非帧率修**）**：移动端 `feedVideo` 走 base64+JSON 事件
+   （`mobile_jni.rs` → Rust 事件 `receive-frame` → 前端 atob → Kotlin），与桌面 `Channel<Vec<u8>>` 不对称。
+   实测确认**它不是 7fps 根因**（消费 `try_send`/不背压、`dropped=0`），只是**降低 IPC/前端开销的
+   基建优化**；对齐桌面可减每帧 base64/JSON/JNI 开销（对动态屏高帧率更稳），但**不会提升静止屏帧率**。
+3. **动态画面复测帧率（验证传输/内核上限）**：静止屏 ~7fps 是源产帧率，非传输瓶颈。需用
+   **持续变化的动态画面**（如播放视频/高频刷新终端）复测「手机端 received/显示」能否到 ~30fps，
+   才能定论内核传输/编码是否也有上限。此为「帧率瓶颈」是否真成立的判定前置。
+4. **排查 `SPA_CHUNK_FLAG_CORRUPTED`**：pipewire 采集判损坏帧是否拖慢首帧/关键帧与稳定性。
+   桌面能用，仅影响质量时先记录，不作为本轮交付。
+
+### 顺带发现的其它隐患（待后续处理）
+
+- **Android 音频**：订阅「系统声音」后手机 `feedAudio` 大量上报，但 UI 统计 `audioBlocks/audioBlocksIn`
+  恒 0（Rust 接收链未计数 mobile 路径）；logcat 反复 `AudioTrackShared: Track invalidated` +
+  `writeFramesHelper getNextBuffer failed error -11`，且（08-30）在 `PlaybackPlugin.startAudioTrack`
+  的 `AudioTrack.write` 有一处 native crash 栈。疑似 WIP 新增低延迟 AudioTrack
+  （`FLAG_LOW_LATENCY` + `PERFORMANCE_MODE_LOW_LATENCY` + `minBuf*2`）在这台设备上有兼容问题，
+  需要一台能出稳定音频的源 + 真机复测确认是否为新回归（本轮 PC 系统声音源静默，未定论）。
+- **发现去重**：同一 IP 复活后手机卡片短暂出现**两张同名「pico」**（mDNS 缓存 + 名字不同，
+  `pico`(hostname) vs `Stross 设备`(identity.device_name)，见 dev-playbook §173）。非阻塞。
+- **目录「加载中」**：新发现节点的远程目录拉取在卡片未展开时停在占位「加载中…」，直到强制
+  `loadRemoteDir(dev, true)` 才渲染（正常 UX 应展开卡片触发）。疑为发现刷新未对 collapsed 节点
+  重拉目录，待复现确认。
+
+### 复现路径（adb + CDP）
+
+```bash
+# PC：起 serve + 控制面公开两个端点
+./target/debug/stross serve --discoverable
+./target/debug/stross ctrl endpoint publish --device screen:0 --visibility public --delivery pull
+./target/debug/stross ctrl endpoint publish --device sysaudio:builtin --visibility public --delivery pull
+# 手机（app 已装、webview forward 后）：
+node scripts/phone-cdp.mjs eval 'call("endpoint_ls",{host:"192.168.11.61"}).then(x=>x)' # 应返回 2 个端点
+node scripts/phone-cdp.mjs eval '(document.querySelector(`[data-act=subscribe-endpoint][data-endpoint="screen:0"]`).click())'
+node scripts/phone-cdp.mjs eval '(document.querySelector("#sub-confirm-btn").click())'
+node scripts/phone-cdp.mjs eval 'call("receive_links").then(x=>x)'  # received/decodedVideo/dropped
+# PC CPU / 编码器（确认瓶颈）：
+ps -eo pid,pcpu,comm,args | grep -iE 'stross|ffmpeg' | grep -v grep
+```
+
+---
 
 ## 近期关键结论（细节以 AGENTS.md / dev-playbook.md / comm-mode-v2.md 为准）
 

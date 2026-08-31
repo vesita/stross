@@ -109,11 +109,12 @@ let recvVideoH = 0;
 function drawReceiveFrame(w: number, h: number, rgba: Uint8Array): void {
   const ctx = canvasCtx();
   if (!ctx) return;
+  recvVideoW = w;
+  recvVideoH = h;
   const canvas = ctx.canvas;
   if (canvas.width !== w) canvas.width = w;
   if (canvas.height !== h) canvas.height = h;
-  // 尺寸突变帧防御：字节数不符则跳过（否则 ImageData 构造抛 RangeError，
-  // 且发生在事件回调内无捕获，会中断整帧处理）
+  // 尺寸突变帧防御：字节数不符则跳过
   if (rgba.length !== w * h * 4) return;
   if (!recvImg || recvImg.width !== w || recvImg.height !== h) {
     recvImg = new ImageData(
@@ -133,13 +134,27 @@ function drawReceiveFrame(w: number, h: number, rgba: Uint8Array): void {
 
 // ---------------------------------------------------------------- 播放器全屏
 
-/** 把窗口级全屏状态应用到 UI：画布容器悬浮层 + 全屏按钮图标/标题。 */
+/** 把窗口级全屏状态应用到 UI：画布容器悬浮层 + 全屏按钮图标/标题 + 屏幕方向智能自适应。 */
 function setPlayerFullscreen(fs: boolean): void {
   fsActive = fs;
   $('recv-canvas-wrap').classList.toggle('fs', fs);
   const btn = $('recv-fs-btn');
-  btn.title = fs ? '退出全屏' : '全屏';
-  btn.innerHTML = icon(fs ? 'minimize' : 'maximize');
+  if (btn) {
+    btn.title = fs ? '退出全屏' : '全屏';
+    btn.innerHTML = icon(fs ? 'minimize' : 'maximize');
+  }
+
+  // 移动端/Android 智能方向自适应：根据当前视频流宽高比自动旋转
+  if (IS_ANDROID) {
+    try {
+      if (fs) {
+        const isLandscape = recvVideoW > 0 && recvVideoH > 0 ? recvVideoW >= recvVideoH : true;
+        void call('set_screen_orientation', { orientation: isLandscape ? 'landscape' : 'portrait' });
+      } else {
+        void call('set_screen_orientation', { orientation: 'unspecified' });
+      }
+    } catch {}
+  }
 }
 
 /** 切换播放器全屏：先查询窗口实际全屏态再取反（状态校准，防失配），
@@ -177,23 +192,67 @@ async function exitPlayerFullscreen(): Promise<void> {
 
 // ---------------------------------------------------------------- 移动端 Tab 切换
 
-/** 切换全局主视图模式（设备与共享管理 vs 消费播放台）。 */
+/** 切换全局主视图模式（设备与共享管理 vs 消费播放台）——经过状态机派发。 */
 function switchView(mode: 'manage' | 'consume'): void {
-  activeViewMode = mode;
-  const viewManage = $('view-manage');
-  const viewConsume = $('view-consume');
-  if (viewManage) viewManage.classList.toggle('active', mode === 'manage');
-  if (viewConsume) viewConsume.classList.toggle('active', mode === 'consume');
-
-  const btnManage = $('nav-btn-manage');
-  const btnConsume = $('nav-btn-consume');
-  if (btnManage) btnManage.classList.toggle('active', mode === 'manage');
-  if (btnConsume) btnConsume.classList.toggle('active', mode === 'consume');
+  dispatchUIAction({ type: 'SWITCH_VIEW', mode });
 }
 
 /** 兼容旧移动端分段 Tab。 */
 function switchMobileTab(tab: string): void {
   switchView(tab === 'recv' ? 'consume' : 'manage');
+}
+
+/** 状态机驱动的全局 DOM 响应式同步器。 */
+function initFSMUI(): void {
+  subscribeUIFSM((state) => {
+    const viewManage = $('view-manage');
+    const viewConsume = $('view-consume');
+    if (viewManage) viewManage.classList.toggle('active', state.viewMode === 'manage');
+    if (viewConsume) viewConsume.classList.toggle('active', state.viewMode === 'consume');
+
+    const btnManage = $('nav-btn-manage');
+    const btnConsume = $('nav-btn-consume');
+    if (btnManage) btnManage.classList.toggle('active', state.viewMode === 'manage');
+    if (btnConsume) btnConsume.classList.toggle('active', state.viewMode === 'consume');
+
+    const empty = $('recv-empty');
+    const canvasWrap = $('recv-canvas-wrap');
+    const overlay = $('recv-overlay');
+    const audioViz = $('recv-audio-viz');
+    const aiBar = $('player-ai-bar');
+
+    switch (state.playerMode) {
+      case 'empty':
+        if (empty) empty.classList.remove('hidden');
+        if (canvasWrap) canvasWrap.classList.add('hidden');
+        if (overlay) overlay.classList.add('hidden');
+        if (audioViz) audioViz.classList.add('hidden');
+        if (aiBar) aiBar.classList.add('hidden');
+        break;
+      case 'buffering':
+        if (empty) empty.classList.add('hidden');
+        if (canvasWrap) canvasWrap.classList.remove('hidden');
+        if (overlay) overlay.classList.remove('hidden');
+        if (audioViz) audioViz.classList.add('hidden');
+        if (aiBar) aiBar.classList.remove('hidden');
+        break;
+      case 'videoOnly':
+      case 'audioVisualMix':
+        if (empty) empty.classList.add('hidden');
+        if (canvasWrap) canvasWrap.classList.remove('hidden');
+        if (overlay) overlay.classList.add('hidden');
+        if (audioViz) audioViz.classList.add('hidden');
+        if (aiBar) aiBar.classList.remove('hidden');
+        break;
+      case 'audioOnly':
+        if (empty) empty.classList.add('hidden');
+        if (canvasWrap) canvasWrap.classList.add('hidden');
+        if (overlay) overlay.classList.add('hidden');
+        if (audioViz) audioViz.classList.remove('hidden');
+        if (aiBar) aiBar.classList.remove('hidden');
+        break;
+    }
+  });
 }
 // ---------------------------------------------------------------- 提示
 
@@ -275,9 +334,171 @@ function showAudioVisualizer(active: boolean, title?: string, sub?: string): voi
   }
 }
 
+/* ---------------- 画面比例与手势控制器 ---------------- */
+
+type AspectRatioMode = 'fit' | 'cover' | 'fill' | 'original';
+let currentAspectRatio: AspectRatioMode = 'fit';
+const ASPECT_LABELS: Record<AspectRatioMode, string> = {
+  fit: '等比适应',
+  cover: '居中铺满',
+  fill: '拉伸铺满',
+  original: '1:1 原生',
+};
+
+function cycleAspectRatio(): void {
+  const modes: AspectRatioMode[] = ['fit', 'cover', 'fill', 'original'];
+  const nextIdx = (modes.indexOf(currentAspectRatio) + 1) % modes.length;
+  setAspectRatio(modes[nextIdx]);
+}
+
+function setAspectRatio(mode: AspectRatioMode): void {
+  currentAspectRatio = mode;
+  const wrap = $('recv-canvas-wrap');
+  if (wrap) {
+    wrap.classList.remove('aspect-fit', 'aspect-cover', 'aspect-fill', 'aspect-original');
+    wrap.classList.add(`aspect-${mode}`);
+  }
+  const label = $('player-aspect-label');
+  if (label) label.textContent = ASPECT_LABELS[mode];
+  const modes: AspectRatioMode[] = ['fit', 'cover', 'fill', 'original'];
+  showGestureHud(
+    'ratio',
+    `画面比例: ${ASPECT_LABELS[mode]}`,
+    modes.indexOf(mode) * 33.3,
+  );
+}
+
+let gestureHudTimer: number | undefined = undefined;
+function showGestureHud(iconName: string, text: string, percent?: number): void {
+  const hud = $('player-gesture-hud');
+  if (!hud) return;
+  const icEl = $('gesture-hud-icon');
+  if (icEl) icEl.innerHTML = icon(iconName);
+  const txtEl = $('gesture-hud-text');
+  if (txtEl) txtEl.textContent = text;
+  const barWrap = $('gesture-bar-wrap');
+  const barFill = $('gesture-bar-fill');
+  if (barWrap && barFill) {
+    if (percent !== undefined) {
+      barWrap.style.display = 'block';
+      barFill.style.width = Math.min(100, Math.max(0, percent)) + '%';
+    } else {
+      barWrap.style.display = 'none';
+    }
+  }
+  hud.classList.remove('hidden');
+  clearTimeout(gestureHudTimer);
+  gestureHudTimer = window.setTimeout(() => {
+    hud.classList.add('hidden');
+  }, 1200);
+}
+
+let playerBrightness = 1.0;
+let playerVolume = 1.0;
+let playerZoom = 1.0;
+let panX = 0;
+let panY = 0;
+
+function updateCanvasTransform(): void {
+  const canvas = $('recv-canvas');
+  if (canvas) {
+    if (playerZoom === 1.0 && panX === 0 && panY === 0) {
+      canvas.style.transform = '';
+    } else {
+      canvas.style.transform = `scale(${playerZoom}) translate(${panX}px, ${panY}px)`;
+    }
+  }
+}
+function initPlayerGestures(): void {
+  const wrap = $('recv-canvas-wrap');
+  if (!wrap) return;
+  let startX = 0;
+  let startY = 0;
+  let isLeft = false;
+  let isDragging = false;
+  let startDistance = 0;
+  let initialZoom = 1.0;
+  let lastTapTime = 0;
+
+  wrap.addEventListener('touchstart', (e: TouchEvent) => {
+    if (e.touches.length === 1) {
+      const now = Date.now();
+      if (now - lastTapTime < 300) {
+        if (playerZoom !== 1.0) {
+          playerZoom = 1.0;
+          panX = 0;
+          panY = 0;
+          updateCanvasTransform();
+          showGestureHud('maximize', '缩放已重置 (1.0x)', 0);
+        } else {
+          cycleAspectRatio();
+        }
+        lastTapTime = 0;
+        return;
+      }
+      lastTapTime = now;
+      const t = e.touches[0];
+      const rect = wrap.getBoundingClientRect();
+      startX = t.clientX;
+      startY = t.clientY;
+      isLeft = t.clientX - rect.left < rect.width / 2;
+      isDragging = true;
+    } else if (e.touches.length === 2) {
+      isDragging = false;
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      startDistance = Math.hypot(dx, dy);
+      initialZoom = playerZoom;
+    }
+  }, { passive: true });
+
+  wrap.addEventListener('touchmove', (e: TouchEvent) => {
+    if (e.touches.length === 1 && isDragging) {
+      const t = e.touches[0];
+      const dy = startY - t.clientY;
+      if (Math.abs(dy) > 8) {
+        if (isLeft) {
+          playerBrightness = Math.min(1.5, Math.max(0.3, playerBrightness + (dy > 0 ? 0.03 : -0.03)));
+          const canvas = $('recv-canvas');
+          if (canvas) canvas.style.filter = `brightness(${playerBrightness})`;
+          const pct = Math.round(((playerBrightness - 0.3) / 1.2) * 100);
+          showGestureHud('sun', `亮度 ${pct}%`, pct);
+        } else {
+          playerVolume = Math.min(1.0, Math.max(0.0, playerVolume + (dy > 0 ? 0.03 : -0.03)));
+          const pct = Math.round(playerVolume * 100);
+          showGestureHud(playerVolume > 0 ? 'volume-2' : 'volume-x', `音量 ${pct}%`, pct);
+        }
+        startY = t.clientY;
+      }
+    } else if (e.touches.length === 2 && startDistance > 0) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      const factor = dist / startDistance;
+      playerZoom = Math.min(3.0, Math.max(1.0, initialZoom * factor));
+      updateCanvasTransform();
+      showGestureHud('maximize', `缩放 ${playerZoom.toFixed(1)}x`, (playerZoom - 1) * 50);
+    }
+  }, { passive: true });
+
+  wrap.addEventListener('touchend', () => {
+    isDragging = false;
+    startDistance = 0;
+  });
+}
+
+function toggleDiagnosticsDrawer(): void {
+  const drawer = $('player-diag-drawer');
+  if (drawer) drawer.classList.toggle('hidden');
+}
+
 const winObj = window as unknown as WindowWithTauri;
 winObj.showToast = showToast;
 winObj.copyText = copyText;
 winObj.showAudioVisualizer = showAudioVisualizer;
 winObj.switchView = switchView;
 winObj.switchMobileTab = switchMobileTab;
+winObj.cycleAspectRatio = cycleAspectRatio;
+winObj.setAspectRatio = setAspectRatio;
+winObj.initPlayerGestures = initPlayerGestures;
+winObj.toggleDiagnosticsDrawer = toggleDiagnosticsDrawer;

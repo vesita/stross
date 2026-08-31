@@ -256,18 +256,12 @@ pub fn spawn_android_playback(
     let handle = app.state::<PlaybackPluginHandle>().0.clone();
     ACTIVE_PLAYBACK_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // 启动 Kotlin 播放器（同步等待 resolve；放 blocking 线程避免冻结 runtime）
-    {
-        let handle = handle.clone();
-        tokio::task::spawn_blocking(move || {
-            let _ = handle.run_mobile_plugin::<serde_json::Value>(
-                "startPlayback",
-                serde_json::json!({ "audio": audio == AudioOut::Device }),
-            );
-        });
-    }
-    // 编码帧 → Kotlin（放 blocking 线程：run_mobile_plugin 同步阻塞）
+    // 编码帧 → Kotlin（在同一 blocking 任务中先调 startPlayback 确保解码器就绪，再消费 rx）
     tokio::task::spawn_blocking(move || {
+        let _ = handle.run_mobile_plugin::<serde_json::Value>(
+            "startPlayback",
+            serde_json::json!({ "audio": audio == AudioOut::Device }),
+        );
         let mut rx = rx;
         let mut skipping = false; // 积压跳帧状态：跳非关键帧直到关键帧
         while let Some(f) = rx.blocking_recv() {

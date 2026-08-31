@@ -106,4 +106,96 @@ const remoteStreams = new Map<string, RemoteStream>();
 /** 设备搜索过滤关键词（为空时显示全部）。 */
 let deviceFilterQuery = '';
 /** 全局主视图模式（管理界面 Manage vs 消费播放台 Consume）。 */
+
+// ===========================================================================
+// UI 状态机（Finite State Machine for Predictable UI Lifecycle）
+// ===========================================================================
+
+type AppStage = 'idle' | 'managing' | 'streaming' | 'error';
+type PlayerDisplayMode = 'empty' | 'buffering' | 'videoOnly' | 'audioOnly' | 'audioVisualMix';
+
+interface UIStateMachineState {
+  appStage: AppStage;
+  playerMode: PlayerDisplayMode;
+  viewMode: 'manage' | 'consume';
+  aspectRatio: 'fit' | 'cover' | 'fill' | 'original';
+  isFullscreen: boolean;
+  activeModal: 'none' | 'publish' | 'subscribe' | 'diagnostics' | 'approve';
+}
+
+const uiFSM: UIStateMachineState = {
+  appStage: 'idle',
+  playerMode: 'empty',
+  viewMode: 'manage',
+  aspectRatio: 'fit',
+  isFullscreen: false,
+  activeModal: 'none',
+};
+
+type UIAction =
+  | { type: 'SWITCH_VIEW'; mode: 'manage' | 'consume' }
+  | { type: 'SET_ASPECT_RATIO'; mode: 'fit' | 'cover' | 'fill' | 'original' }
+  | { type: 'SET_FULLSCREEN'; active: boolean }
+  | { type: 'OPEN_MODAL'; modal: 'publish' | 'subscribe' | 'diagnostics' | 'approve' }
+  | { type: 'CLOSE_MODAL' }
+  | { type: 'SYNC_LINKS' };
+
+type UIStateListener = (state: Readonly<UIStateMachineState>) => void;
+const fsmListeners = new Set<UIStateListener>();
+
+function subscribeUIFSM(listener: UIStateListener): () => void {
+  fsmListeners.add(listener);
+  listener(uiFSM);
+  return () => fsmListeners.delete(listener);
+}
+
+function dispatchUIAction(action: UIAction): void {
+  switch (action.type) {
+    case 'SWITCH_VIEW':
+      uiFSM.viewMode = action.mode;
+      activeViewMode = action.mode;
+      break;
+    case 'SET_ASPECT_RATIO':
+      uiFSM.aspectRatio = action.mode;
+      break;
+    case 'SET_FULLSCREEN':
+      uiFSM.isFullscreen = action.active;
+      fsActive = action.active;
+      break;
+    case 'OPEN_MODAL':
+      uiFSM.activeModal = action.modal;
+      break;
+    case 'CLOSE_MODAL':
+      uiFSM.activeModal = 'none';
+      break;
+    case 'SYNC_LINKS':
+      break;
+  }
+
+  const total = recvLinks.size;
+  receiving = total > 0;
+  if (total === 0) {
+    uiFSM.appStage = uiFSM.viewMode === 'consume' ? 'idle' : 'managing';
+    uiFSM.playerMode = 'empty';
+  } else {
+    uiFSM.appStage = 'streaming';
+    const activeVideo = activeVideoLink ? recvLinks.get(activeVideoLink) : null;
+    const hasVideo = !!activeVideo && activeVideo.frames > 0;
+    const hasAudio = Array.from(recvLinks.values()).some((l) => l.audioBlocks > 0);
+
+    if (!hasVideo && !hasAudio) {
+      uiFSM.playerMode = 'buffering';
+    } else if (hasVideo && hasAudio) {
+      uiFSM.playerMode = 'audioVisualMix';
+    } else if (hasVideo) {
+      uiFSM.playerMode = 'videoOnly';
+    } else {
+      uiFSM.playerMode = 'audioOnly';
+    }
+  }
+
+  for (const fn of fsmListeners) {
+    fn(uiFSM);
+  }
+}
 let activeViewMode: 'manage' | 'consume' = 'manage';

@@ -51,10 +51,10 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
     @InvokeArg
     class CaptureArgs {
         var streamId: String = ""
-        var width: Int = 1280
-        var height: Int = 720
+        var width: Int = 1920
+        var height: Int = 1080
         var fps: Int = 30
-        var bitrateKbps: Int = 2500
+        var bitrateKbps: Int = 6000
         var withAudio: Boolean = true
         var channel: Channel? = null
         /** 纯麦克风采集（B2 手机反向推流）：跳过屏幕录制授权/前台服务。 */
@@ -68,10 +68,10 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
     private val running = AtomicBoolean(false)
 
     // 编码参数
-    private var width = 1280
-    private var height = 720
+    private var width = 1920
+    private var height = 1080
     private var fps = 30
-    private var bitrateKbps = 2500
+    private var bitrateKbps = 6000
     private var withAudio = true
     /** 当前是否为纯麦克风采集（B2：无屏幕授权/前台服务/虚拟显示）。 */
     private var micOnly = false

@@ -19,6 +19,18 @@ use tokio::sync::mpsc;
 
 use crate::pipeline::Quality;
 
+/// 轻量内容指纹（FNV-1a）：判定帧内容是否真的变化。DRIVER 模式下静止桌面也
+/// 持续出帧，但 `damage_regions` 不可靠（实测恒空导致画面冻结）——改用对像素
+/// 字节的哈希做**内容变更检测**：变则缩放、不变则复用上次结果（省转换 CPU）。
+fn pixel_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// Wayland 采集控制器（持有以保活采集任务）。
 pub struct WaylandCapture {
     /// 采集任务句柄（终止方式：kill ffmpeg 子进程 → stdin 关闭 → 任务自清理）。
@@ -109,7 +121,12 @@ async fn capture_loop(quality: Quality, stdin: &mut ChildStdin) -> Result<(), St
     let lcfg = LamcoStreamConfig::new("stross-screen".to_string())
         .with_resolution(info.size.0, info.size.1)
         .with_dmabuf(false)
-        .with_buffer_count(4);
+        .with_buffer_count(4)
+        // 把采集流帧率压到目标编码帧率：DRIVER 模式会按协商帧率持续出帧，
+        // 若用默认（显示器刷新率，常 60fps）会产生 60 > 30 的产>消费 差，
+        // 填满 256 深帧通道 → 「channel full, backpressure」丢帧（画面滞后/
+        // 不更新）+ 多余 CPU。设为目标 fps 后产=消费，通道不再积压。
+        .with_framerate(quality.fps);
     let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
     mgr.send_command(PipeWireThreadCommand::CreateStream {
         stream_id: 0,
@@ -126,14 +143,18 @@ async fn capture_loop(quality: Quality, stdin: &mut ChildStdin) -> Result<(), St
     tracing::info!("[wayland] 建流成功，进入帧循环");
 
     // ---- 3. 帧循环：缩放 → yuv420p → 节流 → ffmpeg stdin ----
-    // Wayland portal 是**伤害驱动**（桌面静止即停发帧），而中继数据面有
-    // `PUSH_SILENCE_TIMEOUT`（10s 无消息判失联拆流）。因此静止时按目标
-    // 帧率**持续重发上一帧**：流保持活跃、GOP 正常推进（关键帧每 2s 一次，
-    // 新观看端随时可接入；重发帧解码为相同画面，带宽 ~6KB/s 可忽略）。
+    // lamco_pipewire 用 DRIVER 标志驱动时钟：静止桌面也按协商帧率持续出帧
+    // （会话实测：非伤害驱动）。因此这里以 interval(30fps) 稳定喂帧，PTS 与
+    // GOP（`-g=fps*2`=2s 关键帧）保持正确，新观看端随时可接入。
+    // **功耗优化**：对每帧像素做轻量内容指纹（`pixel_hash`），**内容真的变了**才
+    // 做 1080p→720p 缩放；静止帧内容不变则复用上次缩放结果，但**仍以 30fps 喂帧**
+    // 保持 PTS。不依赖 `damage_regions`（DRIVER 路径下实测恒空、曾致画面冻结）。
+    // 实测 serve 一根 tokio worker ~78% CPU，大头即逐帧缩放（~2M 像素/帧）。
     let (dst_w, dst_h) = (quality.width as usize, quality.height as usize);
     let yuv_len = dst_w * dst_h + dst_w * dst_h / 2;
     let mut yuv = vec![0u8; yuv_len];
     let mut last_frame: Option<Vec<u8>> = None;
+    let mut last_hash: Option<u64> = None;
     let interval = Duration::from_secs_f64(1.0 / f64::from(quality.fps.max(1)));
     let mut next_write = Instant::now();
     let mut sent = 0u32;
@@ -158,21 +179,29 @@ async fn capture_loop(quality: Quality, stdin: &mut ChildStdin) -> Result<(), St
             let FrameBuffer::Memory(data) = &frame.buffer else {
                 continue; // 不应出现 DMA-BUF 帧（已强制 SHM）；跳过
             };
+            // 内容变了（指纹不同）且到达发送节流点时缩放；静止帧跳过转换，复用缓存。
+            // 只在节流点做指纹/缩放：DRIVER 模式可能仍以高于目标帧率出帧，逐帧计算
+            // 8MB 指纹会拖慢消费、反过来造成「channel full, backpressure」——节流点
+            // 之间只快速拿帧/丢弃，不处理。
             if !data.is_empty() && Instant::now() >= next_write {
-                crate::convert::yuv::bgra_to_yuv420p_scaled(
-                    data,
-                    frame.stride as usize,
-                    frame.width as usize,
-                    frame.height as usize,
-                    dst_w,
-                    dst_h,
-                    &mut yuv,
-                )
-                .map_err(|e| format!("帧转换失败: {e}"))?;
-                last_frame = Some(yuv.clone());
+                let h = pixel_hash(data);
+                if last_hash != Some(h) {
+                    crate::convert::yuv::bgra_to_yuv420p_scaled(
+                        data,
+                        frame.stride as usize,
+                        frame.width as usize,
+                        frame.height as usize,
+                        dst_w,
+                        dst_h,
+                        &mut yuv,
+                    )
+                    .map_err(|e| format!("帧转换失败: {e}"))?;
+                    last_frame = Some(yuv.clone());
+                    last_hash = Some(h);
+                }
             }
         }
-        // 到达节流点：写新帧（或静止时重发上一帧）
+        // 到达节流点：写新帧（静止时复用缓存帧，仍按 interval 喂帧保持 PTS）
         let now = Instant::now();
         if now < next_write {
             tokio::task::yield_now().await;

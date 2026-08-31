@@ -184,6 +184,64 @@
       <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
       <polyline points="22 4 12 14.01 9 11.01" />
     </symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="5" />
+      <line x1="12" y1="1" x2="12" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="23" />
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+      <line x1="1" y1="12" x2="3" y2="12" />
+      <line x1="21" y1="12" x2="23" y2="12" />
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+    </symbol>
+    <symbol id="i-volume-2" viewBox="0 0 24 24">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07" />
+    </symbol>
+    <symbol id="i-volume-x" viewBox="0 0 24 24">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      <line x1="23" y1="9" x2="17" y2="15" />
+      <line x1="17" y1="9" x2="23" y2="15" />
+    </symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24">
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <rect x="9" y="9" width="6" height="6" />
+      <line x1="9" y1="1" x2="9" y2="4" />
+      <line x1="15" y1="1" x2="15" y2="4" />
+      <line x1="9" y1="20" x2="9" y2="23" />
+      <line x1="15" y1="20" x2="15" y2="23" />
+      <line x1="20" y1="9" x2="23" y2="9" />
+      <line x1="20" y1="14" x2="23" y2="14" />
+      <line x1="1" y1="9" x2="4" y2="9" />
+      <line x1="1" y1="14" x2="4" y2="14" />
+    </symbol>
+    <symbol id="i-layout" viewBox="0 0 24 24">
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <line x1="3" y1="9" x2="21" y2="9" />
+      <line x1="9" y1="21" x2="9" y2="9" />
+    </symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24">
+      <rect x="3" y="3" width="7" height="7" />
+      <rect x="14" y="3" width="7" height="7" />
+      <rect x="14" y="14" width="7" height="7" />
+      <rect x="3" y="14" width="7" height="7" />
+    </symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24">
+      <line x1="4" y1="21" x2="4" y2="14" />
+      <line x1="4" y1="10" x2="4" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12" y2="3" />
+      <line x1="20" y1="21" x2="20" y2="16" />
+      <line x1="20" y1="12" x2="20" y2="3" />
+      <line x1="1" y1="14" x2="7" y2="14" />
+      <line x1="9" y1="8" x2="15" y2="8" />
+      <line x1="17" y1="16" x2="23" y2="16" />
+    </symbol>
+    <symbol id="i-ratio" viewBox="0 0 24 24">
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+      <path d="M7 15h10M7 9h10" />
+    </symbol>
     <symbol id="i-layers" viewBox="0 0 24 24">
       <polygon points="12 2 2 7 12 12 22 7 12 2" />
       <polyline points="2 17 12 22 22 17" />
@@ -317,9 +375,75 @@
         <div id="recv-error" class="error hidden"></div>
         <!-- 多端点链接：接收链路列表（一次可同时接收多条流；每条链独立状态/停止） -->
         <div id="recv-links" class="recv-links"></div>
+        <!-- AI 智能布局与流健康遥测工具条（接收中动态展开） -->
+        <div class="player-ai-bar hidden" id="player-ai-bar">
+          <div class="ai-pill-group">
+            <div class="ai-badge" id="ai-smart-layout-badge">
+              <svg class="ic"><use href="#i-sparkles" /></svg>
+              <span id="ai-layout-label">AI 智能自适应</span>
+            </div>
+            <button id="player-aspect-btn" class="aspect-toggle-btn" type="button" title="点击切换画面比例 (适应/铺满/拉伸/1:1)">
+              <svg class="ic"><use href="#i-ratio" /></svg>
+              <span id="player-aspect-label">等比适应</span>
+            </button>
+          </div>
+          <div class="ai-telemetry-pill" id="player-telemetry-pill" title="点击查看 AI 链路健康与网络遥测分析">
+            <span class="telemetry-dot live"></span>
+            <span id="telemetry-fps-text">~60fps</span>
+            <span class="telemetry-divider">·</span>
+            <span id="telemetry-health-badge" class="health-ok">极佳 (0丢包)</span>
+            <svg class="ic chevron"><use href="#i-chevron-right" /></svg>
+          </div>
+        </div>
+
+        <!-- AI 智能诊断浮层（点击遥测胶囊展开） -->
+        <div class="player-diag-drawer hidden" id="player-diag-drawer">
+          <div class="diag-header">
+            <div class="diag-title">
+              <svg class="ic"><use href="#i-cpu" /></svg>
+              <span>AI 实时流媒体诊断分析</span>
+            </div>
+            <button id="diag-close-btn" class="icon-btn-sm" type="button" title="关闭诊断">
+              <svg class="ic"><use href="#i-x" /></svg>
+            </button>
+          </div>
+          <div class="diag-grid">
+            <div class="diag-item">
+              <span class="diag-lbl">解码管线</span>
+              <span class="diag-val" id="diag-val-pipeline">Android MediaCodec (硬解直通)</span>
+            </div>
+            <div class="diag-item">
+              <span class="diag-lbl">渲染帧率</span>
+              <span class="diag-val ok" id="diag-val-fps">~60 fps (稳定)</span>
+            </div>
+            <div class="diag-item">
+              <span class="diag-lbl">抖动抗性</span>
+              <span class="diag-val" id="diag-val-jitter">&lt; 15 ms (低抖动)</span>
+            </div>
+            <div class="diag-item">
+              <span class="diag-lbl">音频输出</span>
+              <span class="diag-val" id="diag-val-audio">48kHz 立体声 (低延迟)</span>
+            </div>
+          </div>
+          <div class="diag-tip" id="diag-ai-tip">
+            <svg class="ic"><use href="#i-sparkles" /></svg>
+            <span>AI 优化建议：当前局域网质量优异，已自动开启低延迟极速渲染与音频防抖。</span>
+          </div>
+        </div>
+
         <!-- 接收画面：有视频帧时显示，纯音频隐藏 -->
-        <div class="canvas-wrap hidden" id="recv-canvas-wrap">
+        <div class="canvas-wrap hidden aspect-fit" id="recv-canvas-wrap">
           <canvas id="recv-canvas" width="640" height="360"></canvas>
+          <!-- 手势操作反馈浮层（亮度/音量/缩放/双击铺满） -->
+          <div class="player-gesture-hud hidden" id="player-gesture-hud">
+            <div class="gesture-icon" id="gesture-hud-icon">
+              <svg class="ic"><use href="#i-sun" /></svg>
+            </div>
+            <div class="gesture-bar-wrap" id="gesture-bar-wrap">
+              <div class="gesture-bar-fill" id="gesture-bar-fill" style="width: 75%;"></div>
+            </div>
+            <span class="gesture-text" id="gesture-hud-text">亮度 75%</span>
+          </div>
           <div class="canvas-overlay hidden" id="recv-overlay">
             <span class="spinner"></span>
             <span>等待流数据…</span>
@@ -328,6 +452,9 @@
           <div class="recv-controls" id="recv-controls">
             <span class="recv-controls-info" id="recv-controls-info"></span>
             <span class="spacer"></span>
+            <button id="recv-aspect-quick-btn" class="ctrl-btn" type="button" title="画面比例">
+              <svg class="ic"><use href="#i-ratio" /></svg>
+            </button>
             <button id="recv-fs-btn" class="ctrl-btn" type="button" title="全屏">
               <svg class="ic"><use href="#i-maximize" /></svg>
             </button>

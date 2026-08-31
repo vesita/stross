@@ -450,7 +450,7 @@ impl Quality {
 
 impl Default for Quality {
     fn default() -> Self {
-        Self::MEDIUM
+        Self::HIGH
     }
 }
 

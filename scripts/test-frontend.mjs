@@ -46,6 +46,7 @@ Object.defineProperty(window.navigator, 'clipboard', {
 const calls = [];
 let streamRunning = false; // 与 start_stream/stop_stream 联动（真实行为）
 let mockRecvEnded = false; // B6 测试：流结束 → receive_links 返回 running=false 且已收帧
+let mockDecoded = 0; // 解码累计（模拟 Rust decodedVideo；[3e] 推帧时同步递增）
 // 多端点链接：接收链路注册表（linkId → 存活）；receive_links 回放
 const recvLinksMock = new Map();
 let fwMissing = ['18779/tcp', '33464/udp']; // 防火墙自检回放（缺 SRT? 实际缺两个）
@@ -140,8 +141,8 @@ const invoke = async (cmd, args) => {
       return [...recvLinksMock.keys()].map((linkId) => ({
         linkId,
         stats: mockRecvEnded
-          ? { running: false, received: 30, decodedVideo: 30, audioBlocks: 0, dropped: 0, pacedDropped: 0, pacedReanchors: 0, pacedHeld: 0, error: null }
-          : { running: true, received: 0, decodedVideo: 0, audioBlocks: 0, dropped: 0, pacedDropped: 0, pacedReanchors: 0, pacedHeld: 0, error: null },
+          ? { running: false, received: 30, decodedVideo: mockDecoded, audioBlocks: 0, dropped: 0, pacedDropped: 0, pacedReanchors: 0, pacedHeld: 0, error: null }
+          : { running: true, received: 0, decodedVideo: mockDecoded, audioBlocks: 0, dropped: 0, pacedDropped: 0, pacedReanchors: 0, pacedHeld: 0, error: null },
       }));
     // —— 端点框架（节点 → 设备 → 端点） ——
     case 'local_catalog': {
@@ -460,17 +461,26 @@ console.log('\n[3e] 显示管线改造：二进制 Channel 帧 → 计数正确�
     return p;
   };
   lastFrameChannel.onmessage(frame(100));
+  mockDecoded += 1;
   await sleep(1300); // RAF 绘制 + 1s 统计轮询渲染链路行
   const rowAfter1 = document.querySelector('#recv-links .recv-link-row');
   check('推 1 帧后链路行显示「收到 1 帧」', !!rowAfter1 && rowAfter1.textContent.includes('收到 1 帧'), rowAfter1?.textContent || '行丢失');
   check('行数仍为 1（帧处理不破坏 DOM）', document.querySelectorAll('#recv-links .recv-link-row').length === 1);
-  // 连续推送 3 帧（模拟 30fps 突发，RAF 只画最新）→ 计数累积不崩
-  lastFrameChannel.onmessage(frame(133));
-  lastFrameChannel.onmessage(frame(166));
-  lastFrameChannel.onmessage(frame(200));
+  // 持续流模拟（10fps × 1.5s）：帧率统计（第三十一轮）解码/显示 fps 同屏。
+  // poll 差分按实际间隔归一化；持续流下差分稳定非 0（脉冲式推帧会被瞬时
+  // 差分 0 覆盖，故此处模拟真实节奏而非一次性突发）。
+  for (let i = 0; i < 15; i++) {
+    lastFrameChannel.onmessage(frame(100 + (i + 1) * 100));
+    mockDecoded += 1;
+    await sleep(100);
+  }
   await sleep(1300);
-  const rowAfter4 = document.querySelector('#recv-links .recv-link-row');
-  check('累计 4 帧后显示「收到 4 帧」', !!rowAfter4 && rowAfter4.textContent.includes('收到 4 帧'), rowAfter4?.textContent || '行丢失');
+  const rowAfterStream = document.querySelector('#recv-links .recv-link-row');
+  check('持续流后计数累积（收到 ≥16 帧）', !!rowAfterStream && /收到 \d+ 帧/.test(rowAfterStream.textContent) && parseInt(rowAfterStream.textContent.match(/收到 (\d+) 帧/)[1], 10) >= 16, rowAfterStream?.textContent || '行丢失');
+  const showFps = rowAfterStream?.textContent.match(/显示 ~(\d+)fps/);
+  const decodeFps = rowAfterStream?.textContent.match(/解码 ~(\d+)fps/);
+  check('行内显示「显示 ~Nfps」（N>0，持续流）', !!showFps && parseInt(showFps[1], 10) > 0, rowAfterStream?.textContent || '行丢失');
+  check('行内显示「解码 ~Nfps」（N>0）', !!decodeFps && parseInt(decodeFps[1], 10) > 0, rowAfterStream?.textContent || '行丢失');
   // 清理：停止全部
   $('recv-stop-btn').click();
   await sleep(300);

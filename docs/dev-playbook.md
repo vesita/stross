@@ -169,6 +169,7 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
   - **前端 RAF 节流**：帧回调（Channel/事件）只存 `pendingFrame` 最新帧，`requestAnimationFrame` 里画（丢中间帧、不积压）；**禁止在帧回调里调 `renderRecvLinks()`**（每帧 DOM 重建是主线程大开销，第三十轮移除）；
   - **Android 显示仍走 `receive-frame` base64 事件**（`mobile_jni.rs` Kotlin 解码 → JNI → Rust 事件），前端双路径（`ensureRecvFrameListener` + `newFrameChannel`）——改一边别忘了另一边；
   - `rgba_scaled`（stross-endpoint convert/rgba.rs）是 **12 位定点双线性**（热路径 720p→720×405 ≈ 1ms/帧，改回浮点慢 ~6×）；
+  - **接收面板帧率统计**（第三十一轮）：链路行「解码 ~Nfps · 显示 ~Nfps」= poll 差分按实际间隔归一化 + **最近 4 次滑动平均**——瞬时差分 0（流暂停的 poll 间隙）会抹掉历史，别改回瞬时差分；「解码高、显示低」即显示管线瓶颈的直观信号。
 - 名称不一致：mDNS `pico`(hostname) vs `/api/discovery` `Stross 设备`(identity.device_name)。
 - Android 屏幕端点（MediaProjection FGS）、摄像头（CameraX）、剪贴板（E 阶段）待扩充。
 - 协议优化排队：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕。

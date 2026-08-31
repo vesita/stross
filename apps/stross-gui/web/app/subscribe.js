@@ -262,9 +262,11 @@ function renderRecvLinks() {
         name.textContent = link.name;
         const meta = document.createElement('span');
         meta.className = 'meta';
+        const fpsText = (link.displayFps ? ` · 显示 ~${link.displayFps}fps` : '') +
+            (link.decodeFps ? ` · 解码 ~${link.decodeFps}fps` : '');
         meta.textContent = link.error
             ? '错误：' + link.error
-            : `${statusText(link)} · 收到 ${link.frames} 帧 · 音频 ${link.audioBlocks} 块`;
+            : `${statusText(link)} · 收到 ${link.frames} 帧${fpsText} · 音频 ${link.audioBlocks} 块`;
         body.appendChild(name);
         body.appendChild(meta);
         const stop = document.createElement('button');
@@ -324,6 +326,28 @@ async function pollReceiveLinks() {
             if (!s)
                 continue; // 内核侧已无该链（防御；正常路径 stop 才删）
             link.audioBlocks = s.audioBlocks;
+            // 帧率估算（poll 间隔差分 / 实际秒数归一化）：解码 fps（Rust
+            // decodedVideo 累计）与显示 fps（前端实际接收/绘制）同屏对比——
+            // 修复显示管线后两者趋近；差分可能为负（流切换重计数），钳制为 0。
+            const now = Date.now();
+            const dtSec = (now - (link.lastPollAt || now)) / 1000;
+            link.lastPollAt = now;
+            const dfps = dtSec > 0 ? Math.round((s.decodedVideo - (link.lastDecoded || 0)) / dtSec) : 0;
+            const fps = dtSec > 0 ? Math.round((link.frames - (link.lastFrames || 0)) / dtSec) : 0;
+            link.lastDecoded = s.decodedVideo;
+            link.lastFrames = link.frames;
+            // 滑动平均（最近 4 次）：瞬时差分 0（流暂停/脉冲到达的 poll 间隙）不
+            // 抹掉历史帧率；持续播放时平均值 ≈ 真实帧率。
+            const win = (samples, v) => (samples || []).concat(v).slice(-4);
+            const avg = (samples) => samples.reduce((a, b) => a + b, 0) / samples.length;
+            const fpsWin = win(link.fpsSamples, fps);
+            const decodeWin = win(link.decodeSamples, dfps);
+            link.fpsSamples = fpsWin;
+            link.decodeSamples = decodeWin;
+            if (dfps >= 0)
+                link.decodeFps = Math.round(avg(decodeWin));
+            if (fps >= 0)
+                link.displayFps = Math.round(avg(fpsWin));
             // 曾收到数据后停（帧/解码/音频块）→ 真结束，立即收尾；
             // 从未收到数据（新流连接窗口）→ 给宽限期，仍未运行再判定结束——
             // 否则过早收尾把 UI 拉回空闲，对端端点也回落「订阅」。

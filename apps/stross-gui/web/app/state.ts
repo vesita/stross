@@ -32,6 +32,19 @@ interface RecvLinkState {
   frames: number;
   /** 音频块数（receive_links 轮询回写）。 */
   audioBlocks: number;
+  /** 显示帧率（前端绘制速率，poll 差分估算；0/未定 = 不显示）。 */
+  displayFps?: number;
+  /** 解码帧率（Rust `decodedVideo` 差分；与 displayFps 同屏对比——「解码高、
+   *  显示低」即显示管线瓶颈的直观信号，第三十轮修复后两者应趋近）。 */
+  decodeFps?: number;
+  /** poll 差分游标（frames / decodedVideo 上次采样值）。 */
+  lastFrames?: number;
+  lastDecoded?: number;
+  /** 上次 poll 时刻（fps 差分按实际间隔归一化）。 */
+  lastPollAt?: number;
+  /** 帧率滑动窗口（最近 4 次 poll 差分；平均后显示，差分 0 不覆盖历史）。 */
+  fpsSamples?: number[];
+  decodeSamples?: number[];
   status: 'starting' | 'live' | 'error' | 'ended';
   error: string | null;
 }

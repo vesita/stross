@@ -22,10 +22,13 @@ pub mod auth;
 pub mod data_plane;
 pub mod endpoint;
 pub mod graph;
+pub mod id;
 pub mod session;
 
 pub use auth::{AuthError, AuthPolicy, PinAuthPolicy};
 pub use data_plane::{DataPlaneBackend, RelayDataPlane};
+// 内核 id 新类型（内部业务 id 用；壳层仍传 &str，见 id.rs 边界约定）。
+pub use id::Id;
 // 端点契约与端点实现（插件区 stross-endpoint）：本模块只保留注册表
 // （EndpointRegistry / EndpointEntry / FileSource），路径经 stross_kernel 根部重导出。
 pub use endpoint::{
@@ -44,7 +47,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::Serialize;
 use stross_endpoint::capture::CaptureBackend;
@@ -118,16 +121,16 @@ pub struct Kernel {
     data_plane: Mutex<Option<Arc<dyn DataPlaneBackend>>>,
     /// 数据面事件转发任务（[`RelayEvent`] → [`KernelEvent`]）。
     data_plane_task: Mutex<Option<JoinHandle<()>>>,
-    /// 接入凭证签发表（stream_id → 签发时的完整凭证；`Arc` 供数据面校验器共享，
+    /// 接入凭证签发表（`Id` → 签发时的完整凭证；`Arc` 供数据面校验器共享，
     /// 校验器只持本表引用，不形成循环引用）。
-    share_tokens: Arc<Mutex<HashMap<String, ShareToken>>>,
+    share_tokens: Arc<Mutex<HashMap<Id, ShareToken>>>,
     // -- 运行态：平台标签 / 推流 / 接收 / 端点 / 身份 --
     /// 平台标签（纯值；设备能力枚举等平台知识在 stross-bridge）。
     platform: Platform,
     /// 运行中推流（`Arc` 供数据面事件转发任务共享：流结束时清理引擎状态）。
     /// **并发流**：端点模型的「任意端点可推送/订阅」目标要求一个节点能同时推多路
     /// 流（如屏幕 + 系统声音），故按 `stream_id` 管理多台推流引擎（原来是单引擎）。
-    engines: Arc<Mutex<HashMap<String, RunningStream>>>,
+    engines: Arc<Mutex<HashMap<Id, RunningStream>>>,
     /// 本机锚点：常驻受控中继 + mDNS 广播（免先连：一起启动、生命周期一致）。
     anchor: Mutex<Option<LocalAnchor>>,
     /// 「可被发现」（mDNS 广播本机）：显式用户开关，默认**关**。
@@ -141,7 +144,7 @@ pub struct Kernel {
     registry: Mutex<UnifiedRegistry>,
     /// 端点共享登记（stream_id → 端点）：实时目标生命周期治理——
     /// watchers=0 自动收尾 / 取消通告联动停止 / 同端点订阅收敛（iteration-plan.md 第十二轮）。
-    active_shares: Mutex<HashMap<String, ActiveShare>>,
+    active_shares: Mutex<HashMap<Id, ActiveShare>>,
     /// watchers 归零后停止端点共享的延迟（给订阅者重连 / 新订阅者接入窗口；测试注入）。
     share_stop_delay: Duration,
     /// 端点共享启动后无任何观看者的接入窗口（订阅者从未接入时兜底停止）。
@@ -151,7 +154,7 @@ pub struct Kernel {
     /// Phase C「接收端多流化」）：一次可同时接收多条流（如屏幕 + 系统声音
     /// 同播），每条链独立启停 / 统计，停一条不级联其它链。旧单流 API
     /// （`start_receive` 等）与 Android 播放路径统一落到预留槽 `main`。
-    receivers: Mutex<HashMap<String, Arc<Receiver>>>,
+    receivers: Mutex<HashMap<Id, Arc<Receiver>>>,
     /// 本机持久化身份（`load_or_create_identity` 注入；用于 mDNS 实例名
     /// 唯一化——多设备同端口广播不再同名串扰）。
     identity: Mutex<Option<DeviceIdentity>>,
@@ -557,7 +560,7 @@ impl Kernel {
         {
             let mut shares = self.active_shares.lock_poisoned();
             shares.insert(
-                stream_id.to_string(),
+                Id::from(stream_id),
                 ActiveShare {
                     endpoint_id: endpoint_id.to_string(),
                     delivery,
@@ -571,7 +574,7 @@ impl Kernel {
         tracing::info!("端点共享已登记: {endpoint_id} → {stream_id} ({delivery:?})");
         // 接入窗口兜底：与事件顺序无关（StreamStarted 可能先于登记到达转发任务），
         // 因此在登记处统一启动检查（经弱引用回调，不拖住内核）。
-        let stream_id = stream_id.to_string();
+        let stream_id = Id::from(stream_id);
         let idle = self.share_idle_delay;
         tokio::spawn(async move {
             tokio::time::sleep(idle).await;
@@ -597,36 +600,50 @@ impl Kernel {
 
     /// 按流停止端点共享：清登记 + 复位状态 + 优雅停流 + 拆除本机会话。
     /// （同步：停流仅取出引擎并 spawn 收尾，不在本路径 await。）
-    fn stop_share_by_stream(&self, stream_id: &str) {
-        // 先取走登记（并发到达的停止请求只执行一次）
-        let Some(share) = self.clear_active_share(stream_id) else {
-            return;
-        };
-        tracing::info!("端点共享停止: {} (stream={stream_id})", share.endpoint_id);
-        let _ = self
-            .registry
-            .lock_poisoned()
-            .set_state(&share.endpoint_id, EndpointState::Idle, 0);
-        // 优雅停流：按 stream_id 从并发流表取出对应引擎，仅在存在时动作
+    fn stop_share_by_stream(&self, stream_id: &Id) {
+        if let Some(endpoint_id) = self.reap_stream(stream_id) {
+            tracing::info!("端点共享停止: {endpoint_id} (stream={stream_id})");
+        }
+    }
+
+    /// 流结束公共清理（`stop_share_by_stream` 与数据面 `StreamEnded` 事件共用）：
+    /// ①清端点共享登记并复位状态；②按 stream_id 移除并发推流引擎并**优雅停流**
+    /// （防采集进程中断后该流残留、卡住同 id 重推）；③拆除本机会话
+    /// （会话生命周期 = 流生命周期；远程 push 会话不在本机 → SessionNotFound 忽略）。
+    ///
+    /// 返回是否清除了**端点共享登记**（调用方据此判断来源是否端点共享流）。
+    /// ②③ 对非端点共享流（如远程 push、QUIC 推流）同样执行——它们的
+    /// 引擎/会话清理不依赖端点登记。同步非阻塞：停流仅取出引擎并 spawn 收尾。
+    fn reap_stream(&self, stream_id: &Id) -> Option<String> {
+        // ① 先取走登记（并发到达的停止请求只执行一次），并复位端点状态；
+        //    非端点共享流无登记 → endpoint_id 为 None，其余清理仍继续。
+        let endpoint_id = self.clear_active_share(stream_id).map(|share| {
+            let _ =
+                self.registry
+                    .lock_poisoned()
+                    .set_state(&share.endpoint_id, EndpointState::Idle, 0);
+            share.endpoint_id
+        });
+        // ② 优雅停流：按 stream_id 从并发流表取出对应引擎，仅在存在时动作
         if let Some(stream) = self.engines.lock_poisoned().remove(stream_id) {
             tokio::spawn(async move {
                 stream.engine.stop().await;
             });
         }
-        // 拆除本机会话（会话生命周期 = 流生命周期；远程 push 会话不在本机，
-        // SessionNotFound 忽略）
-        if self.has_session(stream_id) {
-            let _ = self.force_teardown(stream_id);
+        // ③ 拆除本机会话
+        if self.has_session(stream_id.as_str()) {
+            let _ = self.force_teardown(stream_id.as_str());
         }
+        endpoint_id
     }
 
     /// watchers 归零复查：仍无人观看才停（期间有新观众接入则放弃）。
-    fn stop_share_if_unwatched(&self, stream_id: &str) {
+    fn stop_share_if_unwatched(&self, stream_id: &Id) {
         let Some(dp) = self.data_plane.lock_poisoned().clone() else {
             return;
         };
         // 流已消失（StreamEnded 路径清理）或有观众接入时不动
-        if let Some(0) = dp.stream_watchers(stream_id) {
+        if let Some(0) = dp.stream_watchers(stream_id.as_str()) {
             self.stop_share_by_stream(stream_id);
         }
     }
@@ -642,16 +659,18 @@ impl Kernel {
         self.active_shares
             .lock_poisoned()
             .iter()
-            .find_map(|(sid, s)| (s.endpoint_id == endpoint_id).then(|| (sid.clone(), s.delivery)))
+            .find_map(|(sid, s)| {
+                (s.endpoint_id == endpoint_id).then(|| (sid.to_string(), s.delivery))
+            })
     }
 
     /// 查询流的活动共享登记（watchers 事件反查端点用）。
-    fn active_share_by_stream(&self, stream_id: &str) -> Option<ActiveShare> {
+    fn active_share_by_stream(&self, stream_id: &Id) -> Option<ActiveShare> {
         self.active_shares.lock_poisoned().get(stream_id).cloned()
     }
 
     /// 取走流的活动共享登记（停止 / 流结束时调用）。
-    fn clear_active_share(&self, stream_id: &str) -> Option<ActiveShare> {
+    fn clear_active_share(&self, stream_id: &Id) -> Option<ActiveShare> {
         self.active_shares.lock_poisoned().remove(stream_id)
     }
 
@@ -672,7 +691,6 @@ impl Kernel {
         backend.set_share_token_validator(self.token_validator());
         let mut rx = backend.events();
         let events = self.events.clone();
-        let engines = Arc::clone(&self.engines);
         let me = self.clone();
         let stop_delay = self.share_stop_delay;
         let task = tokio::spawn(async move {
@@ -683,27 +701,10 @@ impl Kernel {
                         info,
                     },
                     RelayEvent::StreamEnded { stream_id } => {
-                        // 1) 端点共享登记清理 + 状态复位（推流端断开 / 静默超时 /
-                        //    显式停止 / revoke 都可能触发）
-                        if let Some(share) = me.clear_active_share(&stream_id) {
-                            me.registry.lock_poisoned().set_state(
-                                &share.endpoint_id,
-                                EndpointState::Idle,
-                                0,
-                            );
-                        }
-                        // 2) 并发推流引擎状态清理：按 stream_id 移除对应引擎
-                        //    （防采集进程中途退出后该流残留、卡住同 id 重推）
-                        if let Some(dead) = engines.lock_poisoned().remove(&stream_id) {
-                            tokio::spawn(async move {
-                                dead.engine.stop().await;
-                            });
-                        }
-                        // 3) 本机会话随流结束拆除（无 PIN 会话直接放行；
-                        //    远程 push 会话不在本机 → SessionNotFound 忽略）
-                        if me.has_session(&stream_id) {
-                            let _ = me.force_teardown(&stream_id);
-                        }
+                        // 数据面流结束 → 统一收尾（清登记 + 复位状态 + 停引擎 +
+                        // 拆会话；推流端断开 / 静默超时 / 显式停止 / revoke 均触发）。
+                        // 与 [`Kernel::stop_share_by_stream`] 共用同一清理逻辑（单一真源）。
+                        me.reap_stream(&Id::from(stream_id.as_str()));
                         KernelEvent::StreamEnded {
                             session_id: stream_id,
                         }
@@ -714,9 +715,13 @@ impl Kernel {
                     } => {
                         // 端点共享自动收尾：watchers 归零 → 延迟复查仍无人观看才停
                         // （给订阅者重连 / 新订阅者接入窗口）
-                        if watchers == 0 && me.active_share_by_stream(&stream_id).is_some() {
+                        if watchers == 0
+                            && me
+                                .active_share_by_stream(&Id::from(stream_id.as_str()))
+                                .is_some()
+                        {
                             let me2 = me.clone();
-                            let sid = stream_id.clone();
+                            let sid = Id::from(stream_id.as_str());
                             let delay = stop_delay;
                             tokio::spawn(async move {
                                 tokio::time::sleep(delay).await;
@@ -724,7 +729,9 @@ impl Kernel {
                             });
                         }
                         // 订阅数同步：端点共享的流 subscribers = watchers
-                        if let Some(share) = me.active_share_by_stream(&stream_id) {
+                        if let Some(share) =
+                            me.active_share_by_stream(&Id::from(stream_id.as_str()))
+                        {
                             me.registry.lock_poisoned().set_state(
                                 &share.endpoint_id,
                                 EndpointState::Active,
@@ -740,6 +747,12 @@ impl Kernel {
                 let _ = events.send(kernel_ev);
             }
         });
+        // 替换旧的数据面转发任务（若存在）：防重复 attach 时旧任务滞留
+        // （旧后端事件流关闭即退出，但显式 abort 更即时）；abort 的 JoinHandle
+        // 不再更新，避免进程生命周期内残留孤儿协程。
+        if let Some(old) = self.data_plane_task.lock_poisoned().take() {
+            old.abort();
+        }
         *self.data_plane_task.lock_poisoned() = Some(task);
     }
 
@@ -776,16 +789,18 @@ impl Kernel {
             expires_at: now.saturating_add(ttl.as_secs()),
             media,
         };
-        tokens.insert(session_id.to_string(), token.clone());
+        tokens.insert(Id::from(session_id), token.clone());
         Ok(token)
     }
 
     /// 校验凭证：已签发 + 未过期 + 与签发时逐字一致（防篡改 / 重放）。
     pub fn verify_share_token(&self, token: &ShareToken) -> Result<()> {
         let tokens = self.share_tokens.lock_poisoned();
-        let stored = tokens.get(&token.stream_id).ok_or_else(|| {
-            Error::Token(format!("凭证无效：会话 {} 未签发凭证", token.stream_id))
-        })?;
+        let stored = tokens
+            .get(&Id::from(token.stream_id.as_str()))
+            .ok_or_else(|| {
+                Error::Token(format!("凭证无效：会话 {} 未签发凭证", token.stream_id))
+            })?;
         if stored != token {
             return Err(Error::Token(
                 "凭证无效：与签发时不符（可能被篡改或重放）".into(),
@@ -869,10 +884,12 @@ impl Kernel {
         sinks: &[String],
         prefs: &SessionPrefs,
     ) -> Result<Session> {
-        if let Some(s) = self.sessions.get(id) {
+        // 边界 `&str` → 内部 `Id`（壳层仍传字符串）
+        let id = Id::from(id);
+        if let Some(s) = self.sessions.get(&id) {
             return Ok(s);
         }
-        self.build_session(id.to_string(), src, sinks, prefs)
+        self.build_session(id.into_string(), src, sinks, prefs)
     }
 
     /// 会话构建公共核心（`create_session` 生成随机 id、`ensure_session_with_id`
@@ -919,9 +936,10 @@ impl Kernel {
     ///
     /// 会话启用访问码（PIN）且未通过 [`Kernel::authorize`] 时拒绝（设计文档 §7）。
     pub fn route(&self, id: &str, path: RoutePath) -> Result<()> {
-        self.sessions.route(id, path.clone())?;
+        let id = Id::from(id);
+        self.sessions.route(&id, path.clone())?;
         let _ = self.events.send(KernelEvent::SessionRouted {
-            session_id: id.to_string(),
+            session_id: id.into_string(),
             path,
         });
         Ok(())
@@ -932,12 +950,12 @@ impl Kernel {
     /// 未设置访问码的会话直接成功（无操作）。
     pub fn authorize(&self, id: &str, access_code: Option<&str>) -> Result<()> {
         self.auth.authorize(id, access_code)?;
-        self.sessions.mark_authorized(id)
+        self.sessions.mark_authorized(&Id::from(id))
     }
 
     /// 查询单个会话。
     pub fn session(&self, id: &str) -> Option<Session> {
-        self.sessions.get(id)
+        self.sessions.get(&Id::from(id))
     }
 
     /// 会话列表快照（按 id 排序）。
@@ -947,7 +965,7 @@ impl Kernel {
 
     /// 会话是否存在（id 已由内核签发且未拆除）。
     pub fn has_session(&self, id: &str) -> bool {
-        self.sessions.contains(id)
+        self.sessions.contains(&Id::from(id))
     }
 
     /// 最简能力协商：
@@ -992,19 +1010,20 @@ impl Kernel {
 
     /// 内部拆除会话：可选择是否强制校验访问码鉴权（数据面流结束自愈清理 vs 用户指令）。
     fn teardown_internal(&self, id: &str, check_auth: bool) -> Result<()> {
+        let id = Id::from(id);
         if check_auth {
-            self.sessions.require_authorized(id)?;
+            self.sessions.require_authorized(&id)?;
         }
-        self.sessions.remove(id);
-        self.auth.set_code(id, None); // 清理访问码
-        self.share_tokens.lock_poisoned().remove(id); // 凭证随会话失效（防重放）
+        self.sessions.remove(&id);
+        self.auth.set_code(id.as_str(), None); // 清理访问码
+        self.share_tokens.lock_poisoned().remove(&id); // 凭证随会话失效（防重放）
         let dp = self.data_plane.lock_poisoned().clone();
         if let Some(dp) = dp {
-            dp.revoke_stream(id)
+            dp.revoke_stream(id.as_str())
                 .map_err(|e| Error::DataPlane(format!("撤销失败: {e}")))?;
         }
         let _ = self.events.send(KernelEvent::SessionEnded {
-            session_id: id.to_string(),
+            session_id: id.into_string(),
         });
         Ok(())
     }
@@ -1162,12 +1181,13 @@ impl Kernel {
             .unwrap_or(DEFAULT_PORT);
         let started_at = stross_proto::time::unix_secs();
         {
+            let sid = Id::from(cfg.stream_id.as_str());
             let mut g = self.engines.lock_poisoned();
-            if g.contains_key(&cfg.stream_id) {
+            if g.contains_key(&sid) {
                 return Err(Error::Message("该流已在推流中".into()));
             }
             g.insert(
-                cfg.stream_id.clone(),
+                sid,
                 RunningStream {
                     engine,
                     relay_port,
@@ -1393,7 +1413,7 @@ impl Kernel {
     pub fn take_receive_frames_for(&self, link_id: &str) -> Option<mpsc::Receiver<RenderedFrame>> {
         self.receivers
             .lock_poisoned()
-            .get(link_id)
+            .get(&Id::from(link_id))
             .and_then(|r| r.take_frames())
     }
 
@@ -1401,7 +1421,7 @@ impl Kernel {
     pub fn take_receive_raw_frames_for(&self, link_id: &str) -> Option<mpsc::Receiver<Frame>> {
         self.receivers
             .lock_poisoned()
-            .get(link_id)
+            .get(&Id::from(link_id))
             .and_then(|r| r.take_raw_frames())
     }
 
@@ -1409,14 +1429,18 @@ impl Kernel {
     pub fn receive_status(&self) -> crate::receiver::ReceiveStats {
         self.receivers
             .lock_poisoned()
-            .get(MAIN_RECEIVE_LINK)
+            .get(&Id::from(MAIN_RECEIVE_LINK))
             .map(|r| r.stats())
             .unwrap_or_default()
     }
 
     /// Android 播放路径回写：Kotlin `PlaybackPlugin` 每解码一帧回调一次（`main` 槽）。
     pub fn note_android_decoded_frame(&self) {
-        if let Some(r) = self.receivers.lock_poisoned().get(MAIN_RECEIVE_LINK) {
+        if let Some(r) = self
+            .receivers
+            .lock_poisoned()
+            .get(&Id::from(MAIN_RECEIVE_LINK))
+        {
             r.note_decoded_video();
         }
     }
@@ -1429,7 +1453,7 @@ impl Kernel {
         } else {
             link_id
         };
-        if let Some(r) = self.receivers.lock_poisoned().get(id) {
+        if let Some(r) = self.receivers.lock_poisoned().get(&Id::from(id)) {
             r.note_decoded_video();
         }
     }
@@ -1457,9 +1481,11 @@ impl Kernel {
         stream_id: String,
         audio_out: AudioOut,
     ) -> Result<Arc<Receiver>> {
-        self.stop_receive_link(&link_id);
+        self.stop_receive_link(&Id::from(link_id.as_str()));
         let r = Receiver::start(relay_url, stream_id, audio_out, self.local_proxy()).await?;
-        self.receivers.lock_poisoned().insert(link_id, r.clone());
+        self.receivers
+            .lock_poisoned()
+            .insert(Id::from(link_id), r.clone());
         Ok(r)
     }
 
@@ -1471,15 +1497,17 @@ impl Kernel {
         relay_url: String,
         stream_id: String,
     ) -> Result<Arc<Receiver>> {
-        self.stop_receive_link(&link_id);
+        self.stop_receive_link(&Id::from(link_id.as_str()));
         let r = Receiver::start_raw(relay_url, stream_id, self.local_proxy()).await?;
-        self.receivers.lock_poisoned().insert(link_id, r.clone());
+        self.receivers
+            .lock_poisoned()
+            .insert(Id::from(link_id), r.clone());
         Ok(r)
     }
 
     /// 停止指定链路的接收（其它链路不受影响；不存在时静默成功）。
     pub fn stop_receive_link(&self, link_id: &str) {
-        if let Some(r) = self.receivers.lock_poisoned().remove(link_id) {
+        if let Some(r) = self.receivers.lock_poisoned().remove(&Id::from(link_id)) {
             r.stop();
         }
     }
@@ -1490,7 +1518,7 @@ impl Kernel {
         let mut v: Vec<_> = guard
             .iter()
             .map(|(link_id, r)| crate::receiver::ReceiveLinkView {
-                link_id: link_id.clone(),
+                link_id: link_id.to_string(),
                 stats: r.stats(),
             })
             .collect();
@@ -1648,19 +1676,19 @@ impl EndpointApp for Kernel {
     }
 
     fn stop_share_if_unwatched(&self, stream_id: &str) {
-        Self::stop_share_if_unwatched(self, stream_id);
+        Self::stop_share_if_unwatched(self, &Id::from(stream_id));
     }
 }
 
 /// 数据面接入凭证校验器：读内核签发表，校验"存在 + 未过期 + 逐字一致"。
 struct KernelTokenValidator {
-    tokens: Arc<Mutex<HashMap<String, ShareToken>>>,
+    tokens: Arc<Mutex<HashMap<Id, ShareToken>>>,
 }
 
 impl crate::relay::ShareTokenValidator for KernelTokenValidator {
     fn validate(&self, token: &ShareToken) -> bool {
         let tokens = self.tokens.lock_poisoned();
-        let Some(stored) = tokens.get(&token.stream_id) else {
+        let Some(stored) = tokens.get(&Id::from(token.stream_id.as_str())) else {
             return false;
         };
         stored == token && !stored.is_expired(now_secs())
@@ -1689,20 +1717,11 @@ fn now_secs() -> u64 {
 
 /// 一次性凭证 PIN（6 位数字）。
 ///
-/// 非密码学随机（一次性凭证防误连/旁观冒用即可）：`DefaultHasher` 每次运行
-/// 带进程随机种子，混合会话 id 与纳秒时间，碰撞概率可忽略；不引入 rand 依赖。
-fn random_pin(seed: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    seed.hash(&mut h);
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .hash(&mut h);
-    let v = h.finish();
-    format!("{:06}", v % 1_000_000)
+/// 非密码学随机（一次性凭证防误连/旁观冒用即可）：`fastrand` 全局 PRNG 由
+/// OS 熵种子初始化，无需自建 Hasher 混种，比手写 `DefaultHasher` 更不可预测
+/// 且更简洁。
+fn random_pin(_seed: &str) -> String {
+    format!("{:06}", fastrand::u32(0..1_000_000))
 }
 
 #[cfg(test)]

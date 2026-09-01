@@ -9,6 +9,7 @@ use stross_proto::message::{CodecId, ReliabilityProfile, RoutePath, TransportId}
 
 use super::super::lock::MutexExt;
 use crate::error::{Error, Result};
+use crate::kernel::id::Id;
 
 /// 会话协商结果（阶段 1 起由 Offer/Answer 填充）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -67,29 +68,30 @@ impl Session {
 /// 会话管理：会话拓扑与协商结果。
 #[derive(Default)]
 pub(super) struct SessionManager {
-    sessions: Mutex<HashMap<String, Session>>,
+    sessions: Mutex<HashMap<Id, Session>>,
 }
 
 impl SessionManager {
     /// 会话是否存在。
-    pub(super) fn contains(&self, id: &str) -> bool {
+    pub(super) fn contains(&self, id: &Id) -> bool {
         self.sessions.lock_poisoned().contains_key(id)
     }
 
     /// 会话快照（不存在 → `None`）。
-    pub(super) fn get(&self, id: &str) -> Option<Session> {
+    pub(super) fn get(&self, id: &Id) -> Option<Session> {
         self.sessions.lock_poisoned().get(id).cloned()
     }
 
     /// 登记会话。
     pub(super) fn insert(&self, session: Session) {
+        // `Session.id` 是线序/壳层可见的 String；登记时经 Id 定为内部 key。
         self.sessions
             .lock_poisoned()
-            .insert(session.id.clone(), session);
+            .insert(Id::from(session.id.as_str()), session);
     }
 
     /// 移除会话（返回被移除项；不存在 → `None`）。
-    pub(super) fn remove(&self, id: &str) -> Option<Session> {
+    pub(super) fn remove(&self, id: &Id) -> Option<Session> {
         self.sessions.lock_poisoned().remove(id)
     }
 
@@ -102,7 +104,7 @@ impl SessionManager {
     }
 
     /// 控制操作前的鉴权门禁：会话必须存在且已授权（F2.5 / 设计文档 §7）。
-    pub(super) fn require_authorized(&self, id: &str) -> Result<()> {
+    pub(super) fn require_authorized(&self, id: &Id) -> Result<()> {
         let guard = self.sessions.lock_poisoned();
         let s = guard
             .get(id)
@@ -111,7 +113,7 @@ impl SessionManager {
     }
 
     /// 改道：校验鉴权后更新传输路径（F2.3 会话内动态改道）。
-    pub(super) fn route(&self, id: &str, path: RoutePath) -> Result<()> {
+    pub(super) fn route(&self, id: &Id, path: RoutePath) -> Result<()> {
         let mut guard = self.sessions.lock_poisoned();
         let s = guard
             .get_mut(id)
@@ -122,7 +124,7 @@ impl SessionManager {
     }
 
     /// 标记已鉴权（访问码校验成功后调用）。
-    pub(super) fn mark_authorized(&self, id: &str) -> Result<()> {
+    pub(super) fn mark_authorized(&self, id: &Id) -> Result<()> {
         let mut guard = self.sessions.lock_poisoned();
         let s = guard
             .get_mut(id)

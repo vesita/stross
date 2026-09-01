@@ -50,6 +50,8 @@ base64 = "0.23.1"
 clap = { version = "4", features = ["derive"] }
 # mDNS（crates/mdns）依赖：版本统一在此管理，mdns 内 xxx.workspace = true
 fastrand = "2.5.0"
+# 内核 id 新类型底层小字符串（SBO，clone 零分配用于 ≤23 字节的短 id）。
+smol_str = "0.3"
 flume = { version = "0.12", default-features = false }
 if-addrs = { version = "0.15", features = ["link-local"] }
 mio = { version = "1.2.2", features = ["os-poll", "net"] }

@@ -21,6 +21,7 @@ use stross_proto::message::PickRule;
 
 use super::buffer::{JitterBuffer, JitterConfig};
 use super::interpret::{Interpreter, RealtimePacing, StrictOrdered};
+use crate::kernel::id::Id;
 
 /// 流式通道的数据路径（由会话协商出的传输可靠性决定）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +142,7 @@ impl StreamChannel {
 /// 解读模块注册表：按会话装载 pick 规则解读模块。
 #[derive(Default)]
 pub struct InterpretRegistry {
-    interpreters: HashMap<String, Box<dyn Interpreter>>,
+    interpreters: HashMap<Id, Box<dyn Interpreter>>,
 }
 
 impl InterpretRegistry {
@@ -157,18 +158,19 @@ impl InterpretRegistry {
         rule: PickRule,
         kind: ChannelKind,
     ) -> &mut dyn Interpreter {
-        // 热路径快速查找：避免每包为 session_id.to_string() 分配堆内存
-        if self.interpreters.contains_key(session_id) {
+        let session_id = Id::from(session_id);
+        // 热路径快速查找：Id 底层 SmolStr 哈希廉价，避免每包构造 String
+        if self.interpreters.contains_key(&session_id) {
             return self
                 .interpreters
-                .get_mut(session_id)
+                .get_mut(&session_id)
                 .expect("已确认存在")
                 .as_mut();
         }
         let key = (rule, kind);
         let slot = self
             .interpreters
-            .entry(session_id.to_string())
+            .entry(session_id)
             .or_insert_with(|| match key {
                 (PickRule::StrictOrdered, _) => {
                     Box::new(StrictOrdered::new()) as Box<dyn Interpreter>
@@ -180,7 +182,7 @@ impl InterpretRegistry {
 
     /// 会话拆除时移除（释放缓冲）。
     pub fn remove(&mut self, session_id: &str) {
-        self.interpreters.remove(session_id);
+        self.interpreters.remove(&Id::from(session_id));
     }
 
     /// 当前活跃会话数。

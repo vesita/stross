@@ -19,6 +19,10 @@ async-trait.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
+# 一次性凭证 PIN 随机数（非密码学；fastrand 已在工作区，避免引入 rand 家族新依赖）。
+fastrand.workspace = true
+# 内核 id 新类型底层小字符串（见 kernel/id.rs）。
+smol_str.workspace = true
 axum.workspace = true
 reqwest.workspace = true
 # QUIC 链路 peer 循环（通信模式 v2 Phase C 连接复用：中继侧按 quinn 流类型

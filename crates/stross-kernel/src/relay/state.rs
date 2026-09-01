@@ -10,6 +10,7 @@ use stross_proto::frame::{Frame, TRACK_VIDEO};
 use stross_proto::message::{ShareToken, StreamInfo};
 
 use super::peers::PeerInfo;
+use crate::kernel::id::Id;
 use crate::lock::MutexExt;
 
 /// 中继数据面事件（内核订阅，用于控制面追踪流生命周期）。
@@ -59,7 +60,7 @@ struct ProxyEntry {
 }
 
 /// 流表分片（`Arc` 便于 `RelayState` 克隆共享；每片一把 `Mutex`）。
-type StreamShards = Arc<Vec<Arc<Mutex<HashMap<String, StreamEntry>>>>>;
+type StreamShards = Arc<Vec<Arc<Mutex<HashMap<Id, StreamEntry>>>>>;
 
 /// 流表分片数（幂为 2，取模快；16 片对家庭/小团队并发足够）。
 const STREAM_SHARDS: usize = 16;
@@ -78,7 +79,7 @@ pub struct RelayState {
     /// 代理流同时注册在 [`Self::streams`]，本地观看端走普通转发路径。
     proxies: Arc<Mutex<HashMap<String, ProxyEntry>>>,
     /// 受控模式允许接入的 stream id（内核预注册；非受控模式忽略）。
-    allowed: Arc<Mutex<HashSet<String>>>,
+    allowed: Arc<Mutex<HashSet<Id>>>,
     /// 接入凭证校验器（跨设备推流；`None` = 不接受凭证接入）。
     token_validator: Arc<Mutex<Option<Arc<dyn ShareTokenValidator>>>>,
     /// 是否受控：仅允许 [`Self::allowed`] 中的 stream id 推流。
@@ -158,18 +159,20 @@ impl RelayState {
     }
 
     pub(crate) fn get(&self, id: &str) -> Option<StreamEntry> {
-        self.streams[Self::shard_for(id)]
+        let id = Id::from(id);
+        self.streams[Self::shard_for(id.as_str())]
             .lock()
             .unwrap()
-            .get(id)
+            .get(&id)
             .cloned()
     }
 
     pub(crate) fn insert(&self, entry: StreamEntry) {
-        self.streams[Self::shard_for(&entry.info.stream_id)]
+        let key = Id::from(entry.info.stream_id.as_str());
+        self.streams[Self::shard_for(key.as_str())]
             .lock()
             .unwrap()
-            .insert(entry.info.stream_id.clone(), entry);
+            .insert(key, entry);
     }
 
     /// 转发一帧：关键帧时更新缓存，然后广播。
@@ -178,8 +181,9 @@ impl RelayState {
     /// 避免逐帧整体 clone `StreamEntry`；不同流走不同分片锁，互不阻塞。
     /// `Frame.payload` 为 `Bytes`（原子引用计数），关键帧缓存与广播均为 O(1) 零内存拷贝。
     pub(crate) fn forward(&self, id: &str, frame: Frame) {
-        let mut guard = self.streams[Self::shard_for(id)].lock_poisoned();
-        if let Some(entry) = guard.get_mut(id) {
+        let id = Id::from(id);
+        let mut guard = self.streams[Self::shard_for(id.as_str())].lock_poisoned();
+        if let Some(entry) = guard.get_mut(&id) {
             if frame.header.track == TRACK_VIDEO && frame.header.is_keyframe() {
                 entry.last_keyframe = Some(frame.clone());
             }
@@ -188,10 +192,11 @@ impl RelayState {
     }
 
     pub(crate) fn remove(&self, id: &str) -> bool {
-        self.streams[Self::shard_for(id)]
+        let id = Id::from(id);
+        self.streams[Self::shard_for(id.as_str())]
             .lock()
             .unwrap()
-            .remove(id)
+            .remove(&id)
             .is_some()
     }
 
@@ -214,7 +219,7 @@ impl RelayState {
 
     /// 预授权一个 stream id 接入（受控模式下 Hello 校验；非受控模式无效果）。
     pub fn authorize_stream(&self, id: &str) {
-        self.allowed.lock_poisoned().insert(id.to_string());
+        self.allowed.lock_poisoned().insert(Id::from(id));
     }
 
     /// 撤销预授权（会话拆除时调用）。
@@ -222,7 +227,7 @@ impl RelayState {
     /// 除移除授权外，**同步拆除仍在推送的流**（推流端下次 send 失败即断开）：
     /// 会话拆除 = 数据面流停止，避免"会话已删、媒体仍流转"的泄漏。
     pub fn revoke_stream(&self, id: &str) {
-        self.allowed.lock_poisoned().remove(id);
+        self.allowed.lock_poisoned().remove(&Id::from(id));
         if self.remove(id) {
             self.emit(RelayEvent::StreamEnded {
                 stream_id: id.to_string(),
@@ -241,7 +246,7 @@ impl RelayState {
     }
 
     fn is_authorized(&self, id: &str) -> bool {
-        self.allowed.lock_poisoned().contains(id)
+        self.allowed.lock_poisoned().contains(&Id::from(id))
     }
 
     /// 凭证接入判定（跨设备推流）：只做凭证校验，**不含预授权**——

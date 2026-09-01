@@ -134,7 +134,8 @@ impl JitterBuffer {
         self.stats.received += 1;
         // 自适应：更新到达间隔与抖动估计（EWMA）
         if let Some(last) = self.last_arrival {
-            let interval = now.duration_since(last);
+            // 用 saturating 防 `now` 非单调（多轨对齐时调用方注入的时间源不同）panic
+            let interval = now.saturating_duration_since(last);
             self.avg_interval = Some(match self.avg_interval {
                 Some(avg) => ewma(avg, interval),
                 None => interval,
@@ -223,7 +224,7 @@ impl JitterBuffer {
         if !ready {
             let overdue = self
                 .last_progress
-                .is_some_and(|t| now.duration_since(t) > self.effective_wait());
+                .is_some_and(|t| now.saturating_duration_since(t) > self.effective_wait());
             if !overdue {
                 return Vec::new();
             }
@@ -255,7 +256,7 @@ impl JitterBuffer {
             // 空洞：等待窗口内不跳，超时才跳（自适应窗口见 [`Self::effective_wait`]）
             let overdue = self
                 .last_progress
-                .is_some_and(|t| now.duration_since(t) > self.effective_wait());
+                .is_some_and(|t| now.saturating_duration_since(t) > self.effective_wait());
             if !overdue {
                 break;
             }

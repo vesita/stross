@@ -16,7 +16,7 @@ use stross_kernel::transport::srt::SrtTransport;
 use stross_kernel::transport::{PeerAddr, SessionPacket, SessionParams, Transport};
 use stross_kernel::{Kernel, Platform, Receiver};
 use stross_proto::frame::Frame;
-use stross_proto::message::{ControlMessage, ReliabilityProfile};
+use stross_proto::message::{ControlMessage, MediaKind, ReliabilityProfile};
 use tokio::sync::mpsc;
 
 fn cfg(stream_id: &str, secs: u32) -> StreamConfig {
@@ -236,7 +236,8 @@ async fn receive_media_decodes_subscribe_spec_stream() {
         .expect("推流启动");
     let spec = SubscribeSpec {
         node_id: "local".into(),
-        endpoint_id: "screen:0".into(),
+        kind: MediaKind::Screen,
+        endpoint_id: 0,
         strategy_id: None,
         strategy: EndpointStrategy {
             strategy_id: EndpointStrategy::DEFAULT_ID.into(),

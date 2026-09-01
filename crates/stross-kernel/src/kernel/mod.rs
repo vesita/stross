@@ -58,9 +58,9 @@ use stross_endpoint::playback::RenderedFrame;
 use stross_endpoint::share::file::FilePushOptions;
 use stross_proto::frame::Frame;
 use stross_proto::message::{
-    CapabilityDescriptor, CodecId, Delivery, DiscoveryInfo, EndpointManifest, EndpointState,
-    EndpointStrategy, MediaKind, RoutePath, ShareToken, StreamInfo, SubscribeSpec, TransportId,
-    TransportPreference, Visibility,
+    CapabilityDescriptor, CodecId, Delivery, DiscoveryInfo, EndpointId, EndpointManifest,
+    EndpointState, EndpointStrategy, MediaKind, RoutePath, ShareToken, StreamInfo, SubscribeSpec,
+    TransportId, TransportPreference, Visibility,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -187,7 +187,7 @@ struct RunningStream {
 /// 端点共享登记条目（实时目标；文件端点不登记——有完成态，StreamEnded 统一清理）。
 #[derive(Debug, Clone)]
 struct ActiveShare {
-    endpoint_id: String,
+    endpoint_id: EndpointId,
     delivery: Delivery,
 }
 
@@ -398,7 +398,7 @@ impl Kernel {
     /// 确定目标 Lossless → QUIC>WS）。
     pub fn publish_endpoint(
         &self,
-        endpoint_id: &str,
+        endpoint_id: EndpointId,
         visibility: Visibility,
         delivery: Delivery,
         transports: Option<Vec<TransportPreference>>,
@@ -421,7 +421,7 @@ impl Kernel {
     ///
     /// **活动共享联动**：该端点若正在被订阅观看，先停止共享并拆除会话
     /// （取消通告 = 不再共享，踢出当前订阅者）。
-    pub async fn unpublish_endpoint(&self, endpoint_id: &str) -> Result<()> {
+    pub async fn unpublish_endpoint(&self, endpoint_id: EndpointId) -> Result<()> {
         self.stop_endpoint_share(endpoint_id)?;
         self.registry.lock_poisoned().unpublish(endpoint_id)?;
         // 取消通告 → 立即刷新 mDNS 端点摘要（锁外）
@@ -447,7 +447,7 @@ impl Kernel {
     }
 
     /// 文件端点的本地文件源（control.rs 状态展示）。
-    pub fn file_source(&self, endpoint_id: &str) -> Option<FileSource> {
+    pub fn file_source(&self, endpoint_id: EndpointId) -> Option<FileSource> {
         self.registry
             .lock_poisoned()
             .file_source(endpoint_id)
@@ -458,7 +458,12 @@ impl Kernel {
     /// 内核不做类型分派）。
     ///
     /// share 在注册表锁**外**调用（端点实现会再次访问内核），持锁回调会死锁。
-    pub fn on_endpoint_subscribed(&self, app: Arc<Self>, endpoint_id: &str, ctx: &SubscribeCtx) {
+    pub fn on_endpoint_subscribed(
+        &self,
+        app: Arc<Self>,
+        endpoint_id: EndpointId,
+        ctx: &SubscribeCtx,
+    ) {
         // 严格出锁调用：提取端点 Arc 后立即释放注册表锁，防止端点实现重入内核引发死锁
         let ep = self.registry.lock_poisoned().endpoint_arc(endpoint_id);
         if let Some(ep) = ep {
@@ -467,7 +472,7 @@ impl Kernel {
     }
 
     /// 端点清单查询（订阅握手 / 目录 API 用）。
-    pub fn endpoint_manifest(&self, endpoint_id: &str) -> Option<EndpointManifest> {
+    pub fn endpoint_manifest(&self, endpoint_id: EndpointId) -> Option<EndpointManifest> {
         self.registry.lock_poisoned().manifest(endpoint_id)
     }
 
@@ -506,7 +511,7 @@ impl Kernel {
     pub fn resolve_strategy(
         &self,
         node_id: &str,
-        endpoint_id: &str,
+        endpoint_id: EndpointId,
         strategy_id: Option<&str>,
     ) -> Option<EndpointStrategy> {
         self.registry
@@ -536,7 +541,7 @@ impl Kernel {
             .ok_or_else(|| {
                 Error::Message(format!(
                     "端点「{}」的订阅目标类型暂无订阅端点宿主（生成订阅端点失败）",
-                    spec.endpoint_id
+                    EndpointId::new(spec.kind, spec.endpoint_id)
                 ))
             })?;
         ep.subscribe(app, spec.clone());
@@ -553,7 +558,7 @@ impl Kernel {
     pub fn note_share_active(
         &self,
         self_weak: std::sync::Weak<dyn EndpointApp>,
-        endpoint_id: &str,
+        endpoint_id: EndpointId,
         stream_id: &str,
         delivery: Delivery,
     ) {
@@ -562,7 +567,7 @@ impl Kernel {
             shares.insert(
                 Id::from(stream_id),
                 ActiveShare {
-                    endpoint_id: endpoint_id.to_string(),
+                    endpoint_id,
                     delivery,
                 },
             );
@@ -585,7 +590,7 @@ impl Kernel {
     }
 
     /// 停止指定端点的活动共享（幂等：无活动共享时直接成功）。
-    pub fn stop_endpoint_share(&self, endpoint_id: &str) -> Result<()> {
+    pub fn stop_endpoint_share(&self, endpoint_id: EndpointId) -> Result<()> {
         let sid = self
             .active_shares
             .lock_poisoned()
@@ -614,14 +619,14 @@ impl Kernel {
     /// 返回是否清除了**端点共享登记**（调用方据此判断来源是否端点共享流）。
     /// ②③ 对非端点共享流（如远程 push、QUIC 推流）同样执行——它们的
     /// 引擎/会话清理不依赖端点登记。同步非阻塞：停流仅取出引擎并 spawn 收尾。
-    fn reap_stream(&self, stream_id: &Id) -> Option<String> {
+    fn reap_stream(&self, stream_id: &Id) -> Option<EndpointId> {
         // ① 先取走登记（并发到达的停止请求只执行一次），并复位端点状态；
         //    非端点共享流无登记 → endpoint_id 为 None，其余清理仍继续。
         let endpoint_id = self.clear_active_share(stream_id).map(|share| {
             let _ =
                 self.registry
                     .lock_poisoned()
-                    .set_state(&share.endpoint_id, EndpointState::Idle, 0);
+                    .set_state(share.endpoint_id, EndpointState::Idle, 0);
             share.endpoint_id
         });
         // ② 优雅停流：按 stream_id 从并发流表取出对应引擎，仅在存在时动作
@@ -655,7 +660,7 @@ impl Kernel {
     }
 
     /// 查询端点当前活动共享（`(stream_id, delivery)`；订阅收敛用）。
-    pub fn active_share_by_endpoint(&self, endpoint_id: &str) -> Option<(String, Delivery)> {
+    pub fn active_share_by_endpoint(&self, endpoint_id: EndpointId) -> Option<(String, Delivery)> {
         self.active_shares
             .lock_poisoned()
             .iter()
@@ -733,7 +738,7 @@ impl Kernel {
                             me.active_share_by_stream(&Id::from(stream_id.as_str()))
                         {
                             me.registry.lock_poisoned().set_state(
-                                &share.endpoint_id,
+                                share.endpoint_id,
                                 EndpointState::Active,
                                 watchers,
                             );
@@ -1668,7 +1673,7 @@ impl EndpointApp for Kernel {
     fn note_share_active(
         &self,
         self_weak: std::sync::Weak<dyn EndpointApp>,
-        endpoint_id: &str,
+        endpoint_id: EndpointId,
         stream_id: &str,
         delivery: Delivery,
     ) {
@@ -2089,21 +2094,34 @@ mod tests {
         let k = Arc::new(Kernel::new(Platform::Desktop));
         let weak: std::sync::Weak<dyn EndpointApp> =
             Arc::downgrade(&(k.clone() as Arc<dyn EndpointApp>));
-        k.note_share_active(weak, "mic:builtin", "sess-1", Delivery::Pull);
+        k.note_share_active(
+            weak,
+            EndpointId::new(MediaKind::Mic, 0),
+            "sess-1",
+            Delivery::Pull,
+        );
         let got = k
-            .active_share_by_endpoint("mic:builtin")
+            .active_share_by_endpoint(EndpointId::new(MediaKind::Mic, 0))
             .expect("登记后可查询");
         assert_eq!(got.0, "sess-1");
         assert_eq!(got.1, Delivery::Pull);
 
-        k.stop_endpoint_share("mic:builtin").unwrap();
+        k.stop_endpoint_share(EndpointId::new(MediaKind::Mic, 0))
+            .unwrap();
         assert!(
-            k.active_share_by_endpoint("mic:builtin").is_none(),
+            k.active_share_by_endpoint(EndpointId::new(MediaKind::Mic, 0))
+                .is_none(),
             "停止后登记应清除"
         );
         // 幂等：无活动共享时停止直接成功
-        assert!(k.stop_endpoint_share("mic:builtin").is_ok());
-        assert!(k.stop_endpoint_share("screen:0").is_ok());
+        assert!(
+            k.stop_endpoint_share(EndpointId::new(MediaKind::Mic, 0))
+                .is_ok()
+        );
+        assert!(
+            k.stop_endpoint_share(EndpointId::new(MediaKind::Screen, 0))
+                .is_ok()
+        );
     }
 
     /// 会话拆除联动清除接入凭证（凭证随会话失效，防重放）。

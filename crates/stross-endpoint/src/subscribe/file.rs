@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use stross_proto::message::{
-    EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SerializeRule, SubscribeSpec,
+    EndpointId, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SerializeRule,
+    SubscribeSpec,
 };
 
 use crate::contract::{Endpoint, EndpointApp, EndpointBase, TargetKind};
@@ -21,7 +22,7 @@ pub struct FileReceiveEndpoint {
 
 impl FileReceiveEndpoint {
     /// `out_dir`：接收落盘目录（订阅方用户意图；订阅端点生成时注入）。
-    pub const fn new(endpoint_id: String, name: String, out_dir: PathBuf) -> Self {
+    pub const fn new(endpoint_id: EndpointId, name: String, out_dir: PathBuf) -> Self {
         Self {
             base: EndpointBase {
                 id: endpoint_id,
@@ -36,8 +37,8 @@ impl FileReceiveEndpoint {
 }
 
 impl Endpoint for FileReceiveEndpoint {
-    fn id(&self) -> &str {
-        &self.base.id
+    fn id(&self) -> EndpointId {
+        self.base.id
     }
     fn kind(&self) -> MediaKind {
         self.base.kind

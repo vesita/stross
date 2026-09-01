@@ -17,7 +17,7 @@
 //! stross ctrl endpoint publish-file --path ./notes.txt --visibility public --delivery pull
 //! stross endpoint ls --host 127.0.0.1 --port 18779
 //! stross endpoint subscribe --host 127.0.0.1 --port 18779 \
-//!     --endpoint file:notes.txt --out /tmp/stross-files --data-dir /tmp/stross-b
+//!     --endpoint file:0 --out /tmp/stross-files --data-dir /tmp/stross-b
 //! ```
 
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Args, Subcommand};
 use stross_kernel::{Kernel, Platform, fetch_directory, subscribe_file, subscribe_media_and_watch};
-use stross_proto::message::{Delivery, MediaKind};
+use stross_proto::message::{Delivery, EndpointId, MediaKind};
 
 #[derive(Args, Debug)]
 pub struct EndpointArgs {
@@ -90,7 +90,11 @@ pub async fn run(args: EndpointArgs) -> anyhow::Result<()> {
             out,
         } => {
             let delivery = delivery.map(DeliveryArg::to_delivery);
-            run_subscribe(&args.host, args.port, &endpoint, delivery, &out, &base).await
+            // 用户输入为可读 "kind:id"，在壳层边界解析为强类型 EndpointId
+            let endpoint_id = EndpointId::parse(&endpoint).ok_or_else(|| {
+                anyhow::anyhow!("非法端点标识: {endpoint}（期望形如 screen:0 / file:0）")
+            })?;
+            run_subscribe(&args.host, args.port, endpoint_id, delivery, &out, &base).await
         }
     }
 }
@@ -115,7 +119,7 @@ async fn run_ls(host: &str, port: u16, json: bool) -> anyhow::Result<()> {
         };
         println!(
             "  {}「{}」{} vis={} delivery={} state={}",
-            e.endpoint_id,
+            EndpointId::new(e.kind, e.endpoint_id),
             e.name,
             avail,
             serde_json::to_string(&e.visibility).unwrap_or_default(),
@@ -131,7 +135,7 @@ async fn run_ls(host: &str, port: u16, json: bool) -> anyhow::Result<()> {
 async fn run_subscribe(
     host: &str,
     port: u16,
-    endpoint_id: &str,
+    endpoint_id: EndpointId,
     delivery_wish: Option<Delivery>,
     out: &std::path::Path,
     base: &std::path::Path,
@@ -147,7 +151,7 @@ async fn run_subscribe(
     let kind = dir
         .endpoints
         .iter()
-        .find(|e| e.endpoint_id == endpoint_id)
+        .find(|e| e.kind == endpoint_id.kind && e.endpoint_id == endpoint_id.id)
         .map(|e| e.kind)
         .ok_or_else(|| anyhow::anyhow!("目录中未找到端点 {endpoint_id}（是否已通告？）"))?;
     if kind == MediaKind::File {

@@ -12,7 +12,7 @@ use std::result::Result as StdResult;
 use std::sync::Arc;
 
 use stross_proto::message::{
-    Delivery, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SerializeRule,
+    Delivery, EndpointId, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SerializeRule,
 };
 
 use crate::contract::{
@@ -30,7 +30,7 @@ pub struct FileEndpoint {
 }
 
 impl FileEndpoint {
-    pub const fn new(endpoint_id: String, name: String, path: PathBuf) -> Self {
+    pub const fn new(endpoint_id: EndpointId, name: String, path: PathBuf) -> Self {
         Self {
             base: EndpointBase {
                 id: endpoint_id,
@@ -45,8 +45,8 @@ impl FileEndpoint {
 }
 
 impl Endpoint for FileEndpoint {
-    fn id(&self) -> &str {
-        &self.base.id
+    fn id(&self) -> EndpointId {
+        self.base.id
     }
     fn kind(&self) -> MediaKind {
         self.base.kind

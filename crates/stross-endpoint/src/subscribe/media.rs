@@ -13,7 +13,8 @@
 use std::sync::Arc;
 
 use stross_proto::message::{
-    EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SerializeRule, SubscribeSpec,
+    EndpointId, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SerializeRule,
+    SubscribeSpec,
 };
 
 use crate::contract::{Endpoint, EndpointApp, EndpointBase, TargetKind};
@@ -26,7 +27,7 @@ pub struct MediaReceiveEndpoint {
 impl MediaReceiveEndpoint {
     /// `kind`：订阅目标的内容类型（屏幕/麦克风/…；能力族由 kind 推导——
     /// 同一族共享本实现）。
-    pub const fn new(endpoint_id: String, name: String, kind: MediaKind) -> Self {
+    pub const fn new(endpoint_id: EndpointId, name: String, kind: MediaKind) -> Self {
         Self {
             base: EndpointBase {
                 id: endpoint_id,
@@ -40,8 +41,8 @@ impl MediaReceiveEndpoint {
 }
 
 impl Endpoint for MediaReceiveEndpoint {
-    fn id(&self) -> &str {
-        &self.base.id
+    fn id(&self) -> EndpointId {
+        self.base.id
     }
     fn kind(&self) -> MediaKind {
         self.base.kind
@@ -74,12 +75,12 @@ impl crate::contract::SubscribeEndpoint for MediaReceiveEndpoint {
                 Ok(frames) => tracing::info!(
                     "媒体订阅端点 {endpoint_id} 接收完成（节点 {}，端点 {}，策略 {}，解码 {frames} 帧）",
                     spec.node_id,
-                    spec.endpoint_id,
+                    EndpointId::new(spec.kind, spec.endpoint_id),
                     spec.strategy.strategy_id,
                 ),
                 Err(e) => tracing::warn!(
                     "媒体订阅端点 {endpoint_id} 接收失败（端点 {}）: {e:#}",
-                    spec.endpoint_id
+                    EndpointId::new(spec.kind, spec.endpoint_id),
                 ),
             }
         });

@@ -131,7 +131,7 @@ mod tests {
 
     fn sample_summary() -> EndpointSummary {
         EndpointSummary {
-            endpoint_id: "mic:builtin".into(),
+            endpoint_id: 0,
             kind: MediaKind::Mic,
             name: "麦克风".into(),
             available: true,
@@ -165,7 +165,7 @@ mod tests {
         assert!(!txt[0].1.contains("\"endpoints\""), "端点摘要移出 base key");
         assert_eq!(txt[1].0, "ep.0");
         assert!(txt[1].1.len() <= 255, "端点 TXT 应在 255B 内");
-        assert!(txt[1].1.contains("\"endpointId\":\"mic:builtin\""));
+        assert!(txt[1].1.contains("\"endpointId\":0"));
         let back = DiscoveryInfo::from_txt(&txt).expect("roundtrip 解码");
         assert_eq!(info, back);
     }
@@ -176,21 +176,21 @@ mod tests {
         // ≤255B。用桌面三个端点的真实摘要验证（含不可用屏幕端点）。
         let endpoints = vec![
             EndpointSummary {
-                endpoint_id: "screen:0".into(),
+                endpoint_id: 0,
                 kind: MediaKind::Screen,
                 name: "屏幕".into(),
                 available: false,
                 published: true,
             },
             EndpointSummary {
-                endpoint_id: "mic:builtin".into(),
+                endpoint_id: 0,
                 kind: MediaKind::Mic,
                 name: "麦克风".into(),
                 available: true,
                 published: false,
             },
             EndpointSummary {
-                endpoint_id: "sysaudio:builtin".into(),
+                endpoint_id: 0,
                 kind: MediaKind::SystemAudio,
                 name: "系统声音".into(),
                 available: true,
@@ -213,7 +213,7 @@ mod tests {
         }
         let back = DiscoveryInfo::from_txt(&txt).expect("多 key roundtrip");
         assert_eq!(back.endpoints.len(), 3, "端点按序合并回");
-        assert_eq!(back.endpoints[0].endpoint_id, "screen:0");
+        assert_eq!(back.endpoints[0].endpoint_id, 0);
         assert_eq!(back.endpoints[1].kind, MediaKind::Mic);
         assert!(!back.endpoints[0].available);
         assert!(back.endpoints[0].published);

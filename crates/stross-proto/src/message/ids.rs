@@ -77,7 +77,9 @@ pub enum CapabilityKind {
 }
 
 /// 媒体能力类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, ToSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum MediaKind {
     Screen,
@@ -108,6 +110,93 @@ impl MediaKind {
             Self::Service => "service",
         }
     }
+
+    /// 从 wire 字符串反向解析（与 [`Self::as_str`] 互逆；未知值返回 `None`）。
+    /// 端点 id 强类型化后，`kind` 与子 id 分开承载，本函数供从
+    /// `"<kind>:<id>"` 这类可读串解析 `EndpointId` 用（见 [`super::mod`]）。
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "screen" => Some(Self::Screen),
+            "window" => Some(Self::Window),
+            "camera" => Some(Self::Camera),
+            "mic" => Some(Self::Mic),
+            "systemAudio" => Some(Self::SystemAudio),
+            "input" => Some(Self::Input),
+            "clipboard" => Some(Self::Clipboard),
+            "file" => Some(Self::File),
+            "service" => Some(Self::Service),
+            _ => None,
+        }
+    }
+}
+
+/// 端点 id（端点身份强类型：**kind 枚举 + 数值子 id**，替代裸字符串）。
+///
+/// 设计（user story：id 管理靠「约定 + 强类型 + 注册表」，人类可读内容
+/// ——文件名/设备名——**不进 id**，走注册表 `name`/`FileSource` 查询）：
+///
+/// * `kind`：枚举（[`MediaKind`]，单一真源 `as_str`），**根治前缀字符串漂移**
+///   （旧字符串 `"sysaudio:builtin"` vs `MediaKind::SystemAudio.as_str() ==
+///   "systemAudio"` 不一致）；
+/// * `id`：**数值子 id**，仅保证**本机族内唯一**（`screen` 的第 N 块屏）。
+///   跨设备唯一性由命名空间 `(device_id, endpoint_id)` 组合保证——网格无
+///   全局分配器，端点 id 是**局部句柄**；
+/// * 线上序列化见各 wire 结构体：`endpoint_id` 独立数值字段 + `kind` 独立
+///   枚举字段（方案 A，wire 无前缀冗余）。
+///
+/// 本类型是内核注册表键位 / [`super::endpoint::SubscribeSpec`] /
+/// [`crate::contract::Endpoint::id`] 的**内部承载**（Copy + Hash + Eq），
+/// 不强加 `String`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EndpointId {
+    pub kind: MediaKind,
+    /// 族内数值子 id（`kind` 内唯一；由注册表分配/约定）。
+    pub id: u32,
+}
+
+impl EndpointId {
+    /// 构造族内子 id（如 `EndpointId::of(MediaKind::Screen, 0)`）。
+    pub const fn new(kind: MediaKind, id: u32) -> Self {
+        Self { kind, id }
+    }
+
+    /// 从可读串 `"<kind>:<id>"` 解析（如 `"systemAudio:0"` / `"screen:2"`；
+    /// kind 用 [`MediaKind::as_str`] 单一真源，丢弃旧 `"mic:builtin"` 魔法串）。
+    /// 仅用于命令参数 / 日志 / 展示的**可读形态**；wire 不依赖本函数。
+    pub fn parse(s: &str) -> Option<Self> {
+        let (kind, id) = s.split_once(':')?;
+        Some(Self {
+            kind: MediaKind::from_wire(kind)?,
+            id: id.parse().ok()?,
+        })
+    }
+
+    /// 可读串形态（与 [`Self::parse`] 互逆）：`"{kind}:{id}"`。
+    pub fn to_wire_str(&self) -> String {
+        format!("{}:{}", self.kind.as_str(), self.id)
+    }
+}
+
+impl std::fmt::Display for EndpointId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_wire_str())
+    }
+}
+
+impl serde::Serialize for EndpointId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // 控制面 / 日志 JSON 用可读串 `"kind:id"`（MediaKind::as_str 单一真源）；
+        // 跨设备 wire（EndpointSummary/Manifest/SubscribeSpec）用独立
+        // `endpoint_id: u32` + `kind` 字段，不经本实现。
+        s.serialize_str(&self.to_wire_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EndpointId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Self::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("非法端点 id: {s}")))
+    }
 }
 
 /// 语义流 id 派生（docs/comm-mode-v2.md §6「语义 id / 身份层」）：
@@ -121,9 +210,15 @@ impl MediaKind {
 /// * codec 为可扩展维度：同端点同刻只产一种编码，暂不进 id 三要素；未来
 ///   若同端点多 codec 多路，扩为 `[端点 协议 解析 codec]` 即可。
 ///
-/// 编码：可读前缀（URL 安全的清洗端点 id + 档案短名）+ FNV-1a 哈希尾
-/// （确定性、长度受控、无随机 seed 依赖）。
-pub fn derive_stream_id(endpoint_id: &str, profile: ReliabilityProfile, pick: PickRule) -> String {
+/// 编码：可读前缀（URL 安全的端点 id 字符串 + 档案短名）+ FNV-1a 哈希尾
+/// （确定性、长度受控、无随机 seed 依赖）。端点 id 以 [`EndpointId::to_wire_str`]
+/// 形态（`"kind:id"`，kind 用 [`MediaKind::as_str`] 单一真源）进入——不再有
+/// 手工拼接的魔法前缀，也根治 `sysaudio`/`systemAudio` 之类的漂移。
+pub fn derive_stream_id(
+    endpoint_id: &EndpointId,
+    profile: ReliabilityProfile,
+    pick: PickRule,
+) -> String {
     let profile_short = match profile {
         ReliabilityProfile::Lossless => "ll",
         ReliabilityProfile::Lossy => "ly",
@@ -134,10 +229,11 @@ pub fn derive_stream_id(endpoint_id: &str, profile: ReliabilityProfile, pick: Pi
         PickRule::StrictOrdered => "so",
         PickRule::None => "n",
     };
-    // 前缀 = 清洗端点 id（保留 [A-Za-z0-9._-]，其余压成 `-`，长度封顶）+
-    // 档案短名——日志/UI 可读，且三要素已全部进入前缀（哈希只控长）。
-    let mut cleaned: Vec<u8> = Vec::with_capacity(endpoint_id.len());
-    for b in endpoint_id.bytes() {
+    // 端点 id 字符串（`kind:id`，全为 URL 安全字符：kind 小写 + 数字冒号）→
+    // 清洗（防极端 kind 演进引入非安全字符）+ 档案短名前缀。
+    let raw = endpoint_id.to_wire_str();
+    let mut cleaned: Vec<u8> = Vec::with_capacity(raw.len());
+    for b in raw.bytes() {
         let c = match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' => b,
             _ => b'-',
@@ -198,50 +294,72 @@ mod tests {
     #[test]
     fn derive_stream_id_is_deterministic_and_distinct() {
         // 同三要素 → 同 id（结构性订阅收敛的核心保证）
-        let a = derive_stream_id("screen:0", ReliabilityProfile::Lossy, PickRule::Realtime);
-        let b = derive_stream_id("screen:0", ReliabilityProfile::Lossy, PickRule::Realtime);
+        let screen0 = EndpointId::new(MediaKind::Screen, 0);
+        let a = derive_stream_id(&screen0, ReliabilityProfile::Lossy, PickRule::Realtime);
+        let b = derive_stream_id(&screen0, ReliabilityProfile::Lossy, PickRule::Realtime);
         assert_eq!(a, b, "同端点同档案必须派生同 id");
         // 档案任一项不同 → 不同 id（协议 / 解析是 id 三要素）
         assert_ne!(
             a,
-            derive_stream_id("screen:0", ReliabilityProfile::Lossless, PickRule::Realtime),
+            derive_stream_id(&screen0, ReliabilityProfile::Lossless, PickRule::Realtime),
             "协议不同必须派生不同 id"
         );
         assert_ne!(
             a,
-            derive_stream_id(
-                "screen:0",
-                ReliabilityProfile::Lossy,
-                PickRule::StrictOrdered
-            ),
+            derive_stream_id(&screen0, ReliabilityProfile::Lossy, PickRule::StrictOrdered),
             "解析规则不同必须派生不同 id"
         );
-        // 端点不同 → 不同 id
+        // 端点不同（kind 或 子 id 不同）→ 不同 id
         assert_ne!(
             a,
-            derive_stream_id("mic:builtin", ReliabilityProfile::Lossy, PickRule::Realtime),
-            "端点不同必须派生不同 id"
+            derive_stream_id(
+                &EndpointId::new(MediaKind::Mic, 0),
+                ReliabilityProfile::Lossy,
+                PickRule::Realtime
+            ),
+            "端点 kind 不同必须派生不同 id"
+        );
+        assert_ne!(
+            a,
+            derive_stream_id(
+                &EndpointId::new(MediaKind::Screen, 1),
+                ReliabilityProfile::Lossy,
+                PickRule::Realtime
+            ),
+            "端点子 id 不同必须派生不同 id"
         );
     }
 
     #[test]
     fn derive_stream_id_is_url_safe_and_bounded() {
         for (ep, profile, pick) in [
-            ("screen:0", ReliabilityProfile::Lossy, PickRule::Realtime),
             (
-                "file:备注.txt",
+                EndpointId::new(MediaKind::Screen, 0),
+                ReliabilityProfile::Lossy,
+                PickRule::Realtime,
+            ),
+            (
+                EndpointId::new(MediaKind::File, 12),
                 ReliabilityProfile::Lossless,
                 PickRule::StrictOrdered,
             ),
-            ("mic:builtin", ReliabilityProfile::Lossy, PickRule::Realtime),
             (
-                "a/b\\c d e::f",
+                EndpointId::new(MediaKind::Mic, 0),
+                ReliabilityProfile::Lossy,
+                PickRule::Realtime,
+            ),
+            (
+                EndpointId::new(MediaKind::SystemAudio, 0),
                 ReliabilityProfile::Adaptive,
                 PickRule::None,
             ),
-            ("系统声音", ReliabilityProfile::Lossy, PickRule::Realtime),
+            (
+                EndpointId::new(MediaKind::Screen, 1),
+                ReliabilityProfile::Lossy,
+                PickRule::Realtime,
+            ),
         ] {
-            let id = derive_stream_id(ep, profile, pick);
+            let id = derive_stream_id(&ep, profile, pick);
             assert!(
                 id.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_'),
@@ -251,9 +369,54 @@ mod tests {
             assert!(id.contains(profile_short(profile)), "前缀含协议短名: {id}");
             assert!(id.contains(pick_short(pick)), "前缀含解析短名: {id}");
         }
-        // 前缀可读：端点 id 清洗后出现在派生 id 里
-        let id = derive_stream_id("screen:0", ReliabilityProfile::Lossy, PickRule::Realtime);
+        // 前缀可读：端点 id（`kind:id`）清洗后出现在派生 id 里，用 MediaKind 单一真源
+        let id = derive_stream_id(
+            &EndpointId::new(MediaKind::Screen, 0),
+            ReliabilityProfile::Lossy,
+            PickRule::Realtime,
+        );
         assert!(id.starts_with("screen-0-ly-rt-"), "可读前缀: {id}");
+        // 系统性根治旧魔法串：SystemAudio kind 用 `systemAudio`（不再是错的 sysaudio）
+        let id = derive_stream_id(
+            &EndpointId::new(MediaKind::SystemAudio, 0),
+            ReliabilityProfile::Lossy,
+            PickRule::Realtime,
+        );
+        assert!(
+            id.starts_with("systemAudio-0-ly-rt-"),
+            "SystemAudio kind 前缀漂移已根治: {id}"
+        );
+    }
+
+    #[test]
+    fn endpoint_id_parse_roundtrip_and_kind_source_of_truth() {
+        // 可读串 ↔ 强类型（命令参数/日志用）
+        for (ep, s) in [
+            (EndpointId::new(MediaKind::Screen, 0), "screen:0"),
+            (EndpointId::new(MediaKind::SystemAudio, 2), "systemAudio:2"),
+            (EndpointId::new(MediaKind::File, 77), "file:77"),
+        ] {
+            assert_eq!(ep.to_wire_str(), s);
+            assert_eq!(EndpointId::parse(s), Some(ep));
+        }
+        assert_eq!(EndpointId::parse("nope:1"), None);
+        assert_eq!(EndpointId::parse("screen:abc"), None); // 子 id 非数值
+        assert_eq!(EndpointId::parse("screen:1:2"), None); // 多余冒号
+        assert_eq!(EndpointId::parse("mic:builtin"), None); // 旧魔法串不再可解析
+
+        // kind/id 强类型承载：比较与哈希按 (kind,id) 数值进行
+        assert_eq!(
+            EndpointId::new(MediaKind::Screen, 0),
+            EndpointId::new(MediaKind::Screen, 0)
+        );
+        assert_ne!(
+            EndpointId::new(MediaKind::Screen, 0),
+            EndpointId::new(MediaKind::Mic, 0)
+        );
+        assert_ne!(
+            EndpointId::new(MediaKind::Screen, 0),
+            EndpointId::new(MediaKind::Screen, 1)
+        );
     }
 
     fn profile_short(p: ReliabilityProfile) -> &'static str {

@@ -147,12 +147,14 @@ const invoke = async (cmd, args) => {
     // —— 端点框架（节点 → 设备 → 端点） ——
     case 'local_catalog': {
       // 单层端点模型：平铺清单（available/lastError/published 自标注）
+      // 方案 A：endpointId 数值子 id + kind 独立字段
       const base = [
-        { endpointId: 'screen:0', kind: 'screen', name: '屏幕', available: true, lastError: null },
-        { endpointId: 'mic:builtin', kind: 'mic', name: '麦克风', available: true, lastError: null },
+        { endpointId: 0, kind: 'screen', name: '屏幕', available: true, lastError: null },
+        { endpointId: 0, kind: 'mic', name: '麦克风', available: true, lastError: null },
       ];
       const endpoints = base.map((d) => {
-        const p = localEpState.get(d.endpointId);
+        // 方案 A：kind + 数值子 id 组合成可读键（与前端 endpointIdStr 一致）
+        const p = localEpState.get(d.kind + ':' + d.endpointId);
         return {
           ...d,
           published: !!p,
@@ -171,7 +173,7 @@ const invoke = async (cmd, args) => {
         node: { deviceId: 'dev-b', deviceName: '电脑B' },
         endpoints: [
           {
-            endpointId: 'screen:0',
+            endpointId: 0,
             kind: 'screen',
             name: '屏幕',
             available: true,
@@ -186,7 +188,7 @@ const invoke = async (cmd, args) => {
             updatedAt: 0,
           },
           {
-            endpointId: 'sysaudio:0',
+            endpointId: 0,
             kind: 'systemAudio',
             name: '系统声',
             available: true,
@@ -204,9 +206,12 @@ const invoke = async (cmd, args) => {
       };
     case 'endpoint_publish': {
       localEpState.set(args.deviceId, { visibility: args.visibility, delivery: args.delivery });
+      // 方案 A：endpointId 数值子 id + kind；deviceId 参数为可读 "kind:id"
+      const sep = args.deviceId.indexOf(':');
+      const kind = sep >= 0 ? args.deviceId.slice(0, sep) : 'mic';
       return {
-        endpointId: args.deviceId,
-        kind: 'mic',
+        endpointId: sep >= 0 ? Number(args.deviceId.slice(sep + 1)) : 0,
+        kind,
         name: '麦克风',
         available: true,
         lastError: null,
@@ -224,7 +229,7 @@ const invoke = async (cmd, args) => {
       return {
         delivery: 'pull',
         relayUrl: 'ws://192.168.1.52:9002',
-        streamId: args.endpointId === 'sysaudio:0' ? 'sess-sub-audio' : 'sess-sub',
+        streamId: args.endpointId === 'systemAudio:0' ? 'sess-sub-audio' : 'sess-sub',
       };
     case 'discoverable_status':
       // 「可被发现」开关：refreshDiscoverable 依赖返回 Settings 对象
@@ -412,7 +417,7 @@ console.log('\n[3d] 多端点链接：第二条链路并存，逐条停止互不
   // 再订阅「系统声」→ 链路 2（多端点链接：并存，不停止链路 1）
   card = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
   dir = card?.querySelector('[data-role="remote-dir"]');
-  const sysBtn = Array.from(dir?.querySelectorAll('[data-act="subscribe-endpoint"]') || []).find((b) => b.dataset.endpoint === 'sysaudio:0');
+  const sysBtn = Array.from(dir?.querySelectorAll('[data-act="subscribe-endpoint"]') || []).find((b) => b.dataset.endpoint === 'systemAudio:0');
   sysBtn?.click();
   await sleep(100);
   $('sub-confirm-btn').click();
@@ -525,7 +530,7 @@ if (pubRadio) pubRadio.checked = true;
 $('pub-confirm-btn').click();
 await sleep(400);
 const pubCallsMic = calls.filter((c) => c.cmd === 'endpoint_publish');
-check('endpoint_publish 被调用（deviceId=mic:builtin, public）', pubCallsMic.some((c) => c.args.deviceId === 'mic:builtin' && c.args.visibility === 'public'), JSON.stringify(pubCallsMic[pubCallsMic.length - 1]?.args));
+check('endpoint_publish 被调用（deviceId=mic:0, public）', pubCallsMic.some((c) => c.args.deviceId === 'mic:0' && c.args.visibility === 'public'), JSON.stringify(pubCallsMic[pubCallsMic.length - 1]?.args));
 const micRow2 = Array.from(document.querySelectorAll('[data-role="local-devices"] .ep-row')).find((r) => r.textContent.includes('麦克风'));
 check('共享后行显示「已共享」徽标', !!micRow2?.querySelector('.ep-badge'), micRow2?.textContent || '行丢失');
 micRow2?.querySelector('[data-act="unpublish-endpoint"]')?.click();

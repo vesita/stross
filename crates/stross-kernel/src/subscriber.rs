@@ -23,7 +23,9 @@ use crate::relay::client as relay_http;
 use anyhow::Context;
 use serde::Serialize;
 use stross_proto::message::derive_stream_id;
-use stross_proto::message::{Delivery, EndpointDir, ShareGrant, ShareRequest, SubscribeSpec};
+use stross_proto::message::{
+    Delivery, EndpointDir, EndpointId, ShareGrant, ShareRequest, SubscribeSpec,
+};
 
 use crate::Kernel;
 use crate::bootstrap;
@@ -74,7 +76,7 @@ pub async fn subscribe_media(
     base: &Path,
     host: &str,
     port: u16,
-    endpoint_id: &str,
+    endpoint_id: EndpointId,
     _delivery_wish: Option<Delivery>,
 ) -> anyhow::Result<MediaSubscribeOutcome> {
     let EndpointGrant { grant, node_id } =
@@ -121,7 +123,7 @@ pub async fn subscribe_media_and_watch(
     base: &Path,
     host: &str,
     port: u16,
-    endpoint_id: &str,
+    endpoint_id: EndpointId,
     delivery_wish: Option<Delivery>,
 ) -> anyhow::Result<()> {
     let outcome = subscribe_media(app, base, host, port, endpoint_id, delivery_wish).await?;
@@ -175,7 +177,7 @@ async fn request_endpoint_grant(
     base: &Path,
     host: &str,
     port: u16,
-    endpoint_id: &str,
+    endpoint_id: EndpointId,
     strategy_id: Option<String>,
 ) -> anyhow::Result<EndpointGrant> {
     // 1) 目录拉取 → 映射进统一注册表（节点 → 端点 → 策略 三层；
@@ -195,7 +197,8 @@ async fn request_endpoint_grant(
     let req = ShareRequest {
         device_id: identity.device_id.clone(),
         device_name: identity.device_name.clone(),
-        endpoint_id: Some(endpoint_id.to_string()),
+        endpoint_id: Some(endpoint_id.id),
+        endpoint_kind: Some(endpoint_id.kind),
         strategy_id,
         delivery_mode: Some(Delivery::Pull),
         relay_addr: None,
@@ -220,7 +223,7 @@ fn build_subscribe_spec(
     app: &Arc<Kernel>,
     host: &str,
     _port: u16,
-    endpoint_id: &str,
+    endpoint_id: EndpointId,
     strategy_id: Option<String>,
     grant: &ShareGrant,
     node_id: &str,
@@ -238,7 +241,7 @@ fn build_subscribe_spec(
     // 同源同版本必然一致（watch 用自己能算出的 id）；旧对端不派生时仅告警，
     // 仍按授予继续（不阻断订阅）。
     if let (Some(profile), Some(pick)) = (grant.transport_profile, grant.pick_rule) {
-        let expected = derive_stream_id(endpoint_id, profile, pick);
+        let expected = derive_stream_id(&endpoint_id, profile, pick);
         if expected != grant.view.stream_id {
             tracing::warn!(
                 "订阅 id 一致性校验失败：本地推导 {expected} ≠ 授予 {}（对端版本偏差？仍按授予继续）",
@@ -254,7 +257,8 @@ fn build_subscribe_spec(
         .map(|r| format!("ws://{host}:{}", r.ws_port));
     Ok(SubscribeSpec {
         node_id: node_id.to_string(),
-        endpoint_id: endpoint_id.to_string(),
+        kind: endpoint_id.kind,
+        endpoint_id: endpoint_id.id,
         strategy_id,
         strategy,
         delivery: grant.delivery.unwrap_or(Delivery::Pull),
@@ -271,7 +275,7 @@ pub async fn subscribe_file(
     base: &Path,
     host: &str,
     port: u16,
-    endpoint_id: &str,
+    endpoint_id: EndpointId,
     _delivery_wish: Option<Delivery>,
     out: &Path,
 ) -> anyhow::Result<SubscribeOutcome> {
@@ -319,7 +323,7 @@ pub async fn subscribe_file_via_endpoint(
     base: &Path,
     host: &str,
     port: u16,
-    endpoint_id: &str,
+    endpoint_id: EndpointId,
     out: &Path,
 ) -> anyhow::Result<()> {
     let EndpointGrant { grant, node_id } =
@@ -404,7 +408,7 @@ mod tests {
             &dir_b,
             "127.0.0.1",
             neg.port,
-            &m.endpoint_id,
+            EndpointId::new(m.kind, m.endpoint_id),
             None, // 按端点声明（Pull）
             &out,
         )
@@ -449,9 +453,16 @@ mod tests {
 
         // —— 订阅方节点 B：订阅端点生成路径（fire-and-forget，轮询落盘）——
         let app_b = Arc::new(Kernel::new(Platform::Desktop));
-        subscribe_file_via_endpoint(&app_b, &dir_b, "127.0.0.1", neg.port, &m.endpoint_id, &out)
-            .await
-            .expect("订阅端点生成应成功");
+        subscribe_file_via_endpoint(
+            &app_b,
+            &dir_b,
+            "127.0.0.1",
+            neg.port,
+            EndpointId::new(m.kind, m.endpoint_id),
+            &out,
+        )
+        .await
+        .expect("订阅端点生成应成功");
         // 生成端点自驱动接收：等待落盘（公开方等观看者接入 + 推送，秒级）
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let received = loop {
@@ -491,7 +502,7 @@ mod tests {
             .unwrap();
         let m = app_a
             .publish_endpoint(
-                "mic:builtin",
+                EndpointId::new(stross_proto::message::MediaKind::Mic, 0),
                 stross_proto::message::Visibility::Public,
                 Delivery::Pull,
                 None,
@@ -505,7 +516,7 @@ mod tests {
             &dir_b,
             "127.0.0.1",
             neg.port,
-            &m.endpoint_id,
+            EndpointId::new(m.kind, m.endpoint_id),
             None, // 按端点声明（Pull）
         )
         .await

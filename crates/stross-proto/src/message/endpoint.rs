@@ -25,10 +25,15 @@ use super::ids::{CodecId, MediaKind, PickRule, ReliabilityProfile, TransportId};
 
 /// mDNS 摘要层（L1）：只带 id/kind/name/是否可挂载/是否已通告，绝无协议、
 /// 可见性等详情（详情走 L2 `GET /api/endpoints` 拉取）。
+///
+/// **方案 A（端点 id 强类型化）**：`endpoint_id` 是**纯数值子 id**（本机族内
+/// 唯一），`kind` 独立枚举字段承载能力族——wire 无前缀冗余，根治
+/// `sysaudio`/`systemAudio` 漂移。消费方重建内部 [`super::ids::EndpointId`]：
+/// `EndpointId::new(s.kind, s.endpoint_id)`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointSummary {
-    pub endpoint_id: String,
+    pub endpoint_id: u32,
     pub kind: MediaKind,
     pub name: String,
     /// load 探测结果：能否被挂载成节点（共享源可用）。
@@ -157,13 +162,19 @@ impl EndpointStrategy {
 ///
 /// 方向挂载在端点层（节点只是「拥有多个端点」的容器，不承载方向）；
 /// 订阅端（[`Endpoint::subscribe`]）据此装载对应管线并处理订阅流/数据。
+///
+/// **方案 A（端点 id 强类型化）**：`endpoint_id` 是**数值子 id**，`kind` 独立
+/// 枚举字段——订阅方收到目录后无需反解前缀即可重建
+/// [`super::ids::EndpointId`]（`EndpointId::new(s.kind, s.endpoint_id)`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeSpec {
     /// 互联节点 id（对端 device_id；本机订阅本机时为本地节点 id）。
     pub node_id: String,
-    /// 对端端点 id（"screen:0" / "mic:builtin" / "file:notes.txt"）。
-    pub endpoint_id: String,
+    /// 订阅目标端点能力族（与 `endpoint_id` 组合成内部 `EndpointId`）。
+    pub kind: MediaKind,
+    /// 对端端点数值子 id（"0" / "5"；与 `kind` 组合）。
+    pub endpoint_id: u32,
     /// 选定的策略 id（注册表第三层；`None` = 取端点默认策略）。
     pub strategy_id: Option<StrategyId>,
     /// 策略组合（序列化规则 + pick 规则；注册表查得，订阅端点据此装载管线）。
@@ -204,11 +215,15 @@ impl EndpointState {
 /// 单层端点模型：端点 = 节点上可共享的能力实体（原「设备」与「端点」合并），
 /// `published` 表示是否已通告；未通告端点只在本机目录可见，不进对端目录/
 /// mDNS 摘要的可订阅集。
+///
+/// **方案 A（端点 id 强类型化）**：`endpoint_id` 是**纯数值子 id**（本机族内
+/// 唯一），`kind` 独立枚举字段承载能力族。重建内部 [`super::ids::EndpointId`]：
+/// `EndpointId::new(m.kind, m.endpoint_id)`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointManifest {
-    /// 节点内稳定 id（"screen:0" / "mic:builtin" / "file:notes.txt"）。
-    pub endpoint_id: String,
+    /// 端点数值子 id（本机族内唯一；与 `kind` 组合成 [`super::ids::EndpointId`]）。
+    pub endpoint_id: u32,
     pub kind: MediaKind,
     /// 用户可见名（"内置麦克风"）。
     pub name: String,
@@ -283,7 +298,7 @@ mod tests {
 
     fn sample_manifest() -> EndpointManifest {
         EndpointManifest {
-            endpoint_id: "mic:builtin".into(),
+            endpoint_id: 0,
             kind: MediaKind::Mic,
             name: "麦克风".into(),
             available: true,
@@ -318,14 +333,14 @@ mod tests {
     #[test]
     fn endpoint_summary_wire() {
         let s = EndpointSummary {
-            endpoint_id: "screen:0".into(),
+            endpoint_id: 0,
             kind: MediaKind::Screen,
             name: "屏幕".into(),
             available: false,
             published: true,
         };
         let text = serde_json::to_string(&s).unwrap();
-        assert!(text.contains("\"endpointId\":\"screen:0\""), "wire: {text}");
+        assert!(text.contains("\"endpointId\":0"), "wire: {text}");
         assert!(text.contains("\"available\":false"), "wire: {text}");
         let back: EndpointSummary = serde_json::from_str(&text).unwrap();
         assert_eq!(s, back);
@@ -438,11 +453,8 @@ mod tests {
     fn manifest_roundtrip_flat_single_layer() {
         let m = sample_manifest();
         let text = serde_json::to_string(&m).unwrap();
-        // 单层端点模型：平铺 kind/name（无 device 嵌套）
-        assert!(
-            text.contains("\"endpointId\":\"mic:builtin\""),
-            "wire: {text}"
-        );
+        // 单层端点模型：平铺 kind/name（无 device 嵌套）；endpointId 数值化
+        assert!(text.contains("\"endpointId\":0"), "wire: {text}");
         assert!(text.contains("\"kind\":\"mic\""), "wire: {text}");
         assert!(
             !text.contains("\"device\""),
@@ -484,8 +496,13 @@ mod tests {
     /// 的兼容性。
     #[test]
     fn manifest_parses_without_profile_fields() {
-        let old = r#"{"endpointId":"mic:builtin","kind":"mic","name":"麦克风","available":true,"published":true,"visibility":"public","delivery":"pull","transports":[],"codecs":[],"state":"idle","subscribers":0,"updatedAt":1800000000}"#;
+        // 旧 wire（无档案字段）反序列化：`#[serde(default)]` 回退到 Lossy/Realtime，
+        // 策略列表为空（消费方按平铺字段推导默认策略），不破坏旧对端 / 旧目录缓存
+        // 的兼容性。注：endpointId 已按方案 A 数值化（旧字符串端点 id 不再可解析）。
+        let old = r#"{"endpointId":0,"kind":"mic","name":"麦克风","available":true,"published":true,"visibility":"public","delivery":"pull","transports":[],"codecs":[],"state":"idle","subscribers":0,"updatedAt":1800000000}"#;
         let m: EndpointManifest = serde_json::from_str(old).unwrap();
+        assert_eq!(m.endpoint_id, 0);
+        assert_eq!(m.kind, MediaKind::Mic);
         assert_eq!(m.transport_profile, ReliabilityProfile::Lossy);
         assert_eq!(m.pick_rule, PickRule::Realtime);
         assert!(m.strategies.is_empty(), "旧 wire 无策略列表");
@@ -515,7 +532,8 @@ mod tests {
     fn subscribe_spec_wire_roundtrip() {
         let spec = SubscribeSpec {
             node_id: "node-phone".into(),
-            endpoint_id: "screen:0".into(),
+            kind: MediaKind::Screen,
+            endpoint_id: 0,
             strategy_id: None,
             strategy: EndpointStrategy {
                 strategy_id: EndpointStrategy::DEFAULT_ID.into(),
@@ -528,6 +546,8 @@ mod tests {
         };
         let text = serde_json::to_string(&spec).unwrap();
         assert!(text.contains("\"nodeId\":\"node-phone\""), "wire: {text}");
+        assert!(text.contains("\"kind\":\"screen\""), "wire: {text}");
+        assert!(text.contains("\"endpointId\":0"), "wire: {text}");
         assert!(text.contains("\"strategyId\":null"), "wire: {text}");
         assert!(
             text.contains("\"relayUrl\":\"ws://192.168.1.5:18777\""),
@@ -535,6 +555,8 @@ mod tests {
         );
         let back: SubscribeSpec = serde_json::from_str(&text).unwrap();
         assert_eq!(spec, back);
+        assert_eq!(back.kind, MediaKind::Screen);
+        assert_eq!(back.endpoint_id, 0);
         let _ = SerializeRule::default();
     }
 }

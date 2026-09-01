@@ -29,7 +29,7 @@ use stross_endpoint::share::file::FileEndpoint;
 use stross_endpoint::subscribe::file::FileReceiveEndpoint;
 use stross_endpoint::subscribe::media::MediaReceiveEndpoint;
 use stross_proto::message::{
-    CodecId, Delivery, EndpointDir, EndpointManifest, EndpointState, EndpointStrategy,
+    CodecId, Delivery, EndpointDir, EndpointId, EndpointManifest, EndpointState, EndpointStrategy,
     EndpointSummary, MediaKind, PickRule, ReliabilityProfile, SerializeRule, StrategyId,
     SubscribeSpec, TransportId, TransportPreference, Visibility,
 };
@@ -80,9 +80,11 @@ pub struct EndpointEntry {
 /// 端点自维护可挂载性（`load` 探测）；注册表只做身份登记与通告参数管理。
 #[derive(Default)]
 pub struct EndpointRegistry {
-    endpoints: HashMap<String, EndpointEntry>,
+    endpoints: HashMap<EndpointId, EndpointEntry>,
     /// 文件端点：endpoint_id → 本地文件源（control.rs 状态展示）。
-    file_sources: HashMap<String, FileSource>,
+    file_sources: HashMap<EndpointId, FileSource>,
+    /// 文件端点数值子 id 分配器（`file:<n>`；重名不再进 id，只影响展示名）。
+    next_file_id: u32,
 }
 
 impl EndpointRegistry {
@@ -95,7 +97,7 @@ impl EndpointRegistry {
     /// load 失败不阻止登记：端点保留在表里但标记不可挂载（`available=false`
     /// + `last_error`）——UI 可见原因，不可通告/订阅。
     pub fn seed(&mut self, mut ep: Box<dyn ShareEndpoint>) -> bool {
-        let id = ep.id().to_string();
+        let id = ep.id();
         if self.endpoints.contains_key(&id) {
             return false;
         }
@@ -120,13 +122,13 @@ impl EndpointRegistry {
     }
 
     /// 端点行为对象（`on_subscribed` 出锁调用用；持锁调用会死锁）。
-    pub fn endpoint_arc(&self, endpoint_id: &str) -> Option<Arc<dyn ShareEndpoint>> {
-        self.endpoints.get(endpoint_id).map(|e| e.ep.clone())
+    pub fn endpoint_arc(&self, endpoint_id: EndpointId) -> Option<Arc<dyn ShareEndpoint>> {
+        self.endpoints.get(&endpoint_id).map(|e| e.ep.clone())
     }
 
     /// 端点目标类型（缺省传输选择用）。
-    pub fn target(&self, endpoint_id: &str) -> Option<TargetKind> {
-        self.endpoints.get(endpoint_id).map(|e| e.ep.target())
+    pub fn target(&self, endpoint_id: EndpointId) -> Option<TargetKind> {
+        self.endpoints.get(&endpoint_id).map(|e| e.ep.target())
     }
 
     /// 全部端点清单（本机目录用；含未通告）。
@@ -156,12 +158,15 @@ impl EndpointRegistry {
         let mut v: Vec<EndpointSummary> = self
             .endpoints
             .values()
-            .map(|e| EndpointSummary {
-                endpoint_id: e.ep.id().to_string(),
-                kind: e.ep.kind(),
-                name: e.ep.name().to_string(),
-                available: e.ep.available(),
-                published: e.published,
+            .map(|e| {
+                let id = e.ep.id();
+                EndpointSummary {
+                    endpoint_id: id.id,
+                    kind: id.kind,
+                    name: e.ep.name().to_string(),
+                    available: e.ep.available(),
+                    published: e.published,
+                }
             })
             .collect();
         v.sort_by(|a, b| {
@@ -174,9 +179,10 @@ impl EndpointRegistry {
 
     fn manifest_of(entry: &EndpointEntry) -> EndpointManifest {
         let strategy = entry.ep.strategy();
+        let id = entry.ep.id();
         EndpointManifest {
-            endpoint_id: entry.ep.id().to_string(),
-            kind: entry.ep.kind(),
+            endpoint_id: id.id,
+            kind: id.kind,
             name: entry.ep.name().to_string(),
             available: entry.ep.available(),
             last_error: entry.ep.last_error().map(str::to_string),
@@ -199,14 +205,14 @@ impl EndpointRegistry {
     }
 
     /// 端点清单（订阅握手 / 目录 API 用）。
-    pub fn manifest(&self, endpoint_id: &str) -> Option<EndpointManifest> {
-        self.endpoints.get(endpoint_id).map(Self::manifest_of)
+    pub fn manifest(&self, endpoint_id: EndpointId) -> Option<EndpointManifest> {
+        self.endpoints.get(&endpoint_id).map(Self::manifest_of)
     }
 
     /// 通告端点（设置可见性 / delivery / 传输；不可挂载端点拒绝）。
     pub fn publish(
         &mut self,
-        endpoint_id: &str,
+        endpoint_id: EndpointId,
         visibility: Visibility,
         delivery: Delivery,
         transports: Vec<TransportPreference>,
@@ -214,7 +220,7 @@ impl EndpointRegistry {
     ) -> Result<EndpointManifest> {
         let entry = self
             .endpoints
-            .get_mut(endpoint_id)
+            .get_mut(&endpoint_id)
             .ok_or_else(|| Error::Message(format!("端点不存在: {endpoint_id}")))?;
         if !entry.ep.available() {
             let reason = entry.ep.last_error().unwrap_or("未知原因").to_string();
@@ -235,10 +241,10 @@ impl EndpointRegistry {
     }
 
     /// 取消通告（端点保留在表里：可再次通告；文件端点顺带移除文件源登记）。
-    pub fn unpublish(&mut self, endpoint_id: &str) -> Result<()> {
+    pub fn unpublish(&mut self, endpoint_id: EndpointId) -> Result<()> {
         let entry = self
             .endpoints
-            .get_mut(endpoint_id)
+            .get_mut(&endpoint_id)
             .ok_or_else(|| Error::Message(format!("端点不存在: {endpoint_id}")))?;
         if !entry.published {
             return Err(Error::Message(format!("端点未通告: {endpoint_id}")));
@@ -251,7 +257,7 @@ impl EndpointRegistry {
         entry.state = EndpointState::Idle;
         entry.subscribers = 0;
         entry.updated_at = unix_secs();
-        self.file_sources.remove(endpoint_id);
+        self.file_sources.remove(&endpoint_id);
         Ok(())
     }
 
@@ -273,19 +279,21 @@ impl EndpointRegistry {
         let name = path
             .file_name()
             .map_or_else(|| "未命名".into(), |s| s.to_string_lossy().to_string());
-        let mut endpoint_id = format!("file:{name}");
-        let mut n = 2;
+        // 数值子 id：重名文件不再进 id（`file:<n>`），只影响展示名——
+        // 文件名是内容（注册表 name / FileSource 登记），不进端点身份。
+        let mut endpoint_id = EndpointId::new(MediaKind::File, self.next_file_id);
         while self.endpoints.contains_key(&endpoint_id) {
-            endpoint_id = format!("file:{name}-{n}");
-            n += 1;
+            self.next_file_id += 1;
+            endpoint_id = EndpointId::new(MediaKind::File, self.next_file_id);
         }
+        self.next_file_id += 1;
         let size = meta.len();
-        let ep = FileEndpoint::new(endpoint_id.clone(), name.clone(), path.to_path_buf());
+        let ep = FileEndpoint::new(endpoint_id, name.clone(), path.to_path_buf());
         if !self.seed(Box::new(ep)) {
             return Err(Error::Message(format!("端点已存在: {endpoint_id}")));
         }
         self.file_sources.insert(
-            endpoint_id.clone(),
+            endpoint_id,
             FileSource {
                 path: path.to_path_buf(),
                 name: name.clone(),
@@ -293,7 +301,7 @@ impl EndpointRegistry {
             },
         );
         self.publish(
-            &endpoint_id,
+            endpoint_id,
             visibility,
             delivery,
             Self::default_transports(TargetKind::Determined),
@@ -302,13 +310,18 @@ impl EndpointRegistry {
     }
 
     /// 文件端点的本地文件源（control.rs 状态展示；非文件端点返回 `None`）。
-    pub fn file_source(&self, endpoint_id: &str) -> Option<&FileSource> {
-        self.file_sources.get(endpoint_id)
+    pub fn file_source(&self, endpoint_id: EndpointId) -> Option<&FileSource> {
+        self.file_sources.get(&endpoint_id)
     }
 
     /// 更新端点运行状态（Idle/Active/Suspended + 订阅数）。
-    pub fn set_state(&mut self, endpoint_id: &str, state: EndpointState, subscribers: u32) -> bool {
-        let Some(entry) = self.endpoints.get_mut(endpoint_id) else {
+    pub fn set_state(
+        &mut self,
+        endpoint_id: EndpointId,
+        state: EndpointState,
+        subscribers: u32,
+    ) -> bool {
+        let Some(entry) = self.endpoints.get_mut(&endpoint_id) else {
             return false;
         };
         entry.state = state;
@@ -319,7 +332,7 @@ impl EndpointRegistry {
 
     /// 订阅达成事件：出锁克隆端点对象后调用其 `share`（端点自驱动，
     /// 内核不做类型分派）。注意：调用方切勿持有本注册表锁。
-    pub fn on_subscribed(&self, app: &Arc<Kernel>, endpoint_id: &str, ctx: &SubscribeCtx) {
+    pub fn on_subscribed(&self, app: &Arc<Kernel>, endpoint_id: EndpointId, ctx: &SubscribeCtx) {
         let Some(ep) = self.endpoint_arc(endpoint_id) else {
             return;
         };
@@ -375,13 +388,13 @@ pub struct NodeRegistration {
     /// 是否本机（本机 = `local` 表 + 本注册镜像，便于 UI 高亮；非特殊身份）。
     pub is_self: bool,
     /// 该互联节点的下属端点。
-    pub endpoints: HashMap<String, EndpointRegistration>,
+    pub endpoints: HashMap<EndpointId, EndpointRegistration>,
 }
 
 /// 一个端点（节点上可分享的具体内容，如"屏幕"/"麦克风"）的注册。
 #[derive(Debug, Clone)]
 pub struct EndpointRegistration {
-    pub endpoint_id: String,
+    pub endpoint_id: EndpointId,
     pub kind: stross_proto::message::MediaKind,
     pub name: String,
     /// 目标类型（由协商档案推断；远端不落 wire）。
@@ -424,11 +437,11 @@ impl UnifiedRegistry {
         self.local.seed(ep)
     }
 
-    pub fn endpoint_arc(&self, endpoint_id: &str) -> Option<Arc<dyn ShareEndpoint>> {
+    pub fn endpoint_arc(&self, endpoint_id: EndpointId) -> Option<Arc<dyn ShareEndpoint>> {
         self.local.endpoint_arc(endpoint_id)
     }
 
-    pub fn target(&self, endpoint_id: &str) -> Option<TargetKind> {
+    pub fn target(&self, endpoint_id: EndpointId) -> Option<TargetKind> {
         self.local.target(endpoint_id)
     }
 
@@ -444,13 +457,13 @@ impl UnifiedRegistry {
         self.local.summaries()
     }
 
-    pub fn manifest(&self, endpoint_id: &str) -> Option<EndpointManifest> {
+    pub fn manifest(&self, endpoint_id: EndpointId) -> Option<EndpointManifest> {
         self.local.manifest(endpoint_id)
     }
 
     pub fn publish(
         &mut self,
-        endpoint_id: &str,
+        endpoint_id: EndpointId,
         visibility: Visibility,
         delivery: Delivery,
         transports: Vec<TransportPreference>,
@@ -460,7 +473,7 @@ impl UnifiedRegistry {
             .publish(endpoint_id, visibility, delivery, transports, codecs)
     }
 
-    pub fn unpublish(&mut self, endpoint_id: &str) -> Result<()> {
+    pub fn unpublish(&mut self, endpoint_id: EndpointId) -> Result<()> {
         self.local.unpublish(endpoint_id)
     }
 
@@ -473,15 +486,20 @@ impl UnifiedRegistry {
         self.local.publish_file(path, visibility, delivery)
     }
 
-    pub fn file_source(&self, endpoint_id: &str) -> Option<&FileSource> {
+    pub fn file_source(&self, endpoint_id: EndpointId) -> Option<&FileSource> {
         self.local.file_source(endpoint_id)
     }
 
-    pub fn set_state(&mut self, endpoint_id: &str, state: EndpointState, subscribers: u32) -> bool {
+    pub fn set_state(
+        &mut self,
+        endpoint_id: EndpointId,
+        state: EndpointState,
+        subscribers: u32,
+    ) -> bool {
         self.local.set_state(endpoint_id, state, subscribers)
     }
 
-    pub fn on_subscribed(&self, app: &Arc<Kernel>, endpoint_id: &str, ctx: &SubscribeCtx) {
+    pub fn on_subscribed(&self, app: &Arc<Kernel>, endpoint_id: EndpointId, ctx: &SubscribeCtx) {
         self.local.on_subscribed(app, endpoint_id, ctx);
     }
 
@@ -507,10 +525,11 @@ impl UnifiedRegistry {
             endpoints: HashMap::new(),
         };
         for m in &dir.endpoints {
+            let id = EndpointId::new(m.kind, m.endpoint_id);
             reg.endpoints.insert(
-                m.endpoint_id.clone(),
+                id,
                 EndpointRegistration {
-                    endpoint_id: m.endpoint_id.clone(),
+                    endpoint_id: id,
                     kind: m.kind,
                     name: m.name.clone(),
                     target: target_from_manifest(m),
@@ -528,7 +547,7 @@ impl UnifiedRegistry {
     pub fn resolve_strategy(
         &self,
         node_id: &str,
-        endpoint_id: &str,
+        endpoint_id: EndpointId,
         strategy_id: Option<&str>,
     ) -> Option<EndpointStrategy> {
         if node_id == self.self_node || node_id == "local" {
@@ -541,7 +560,7 @@ impl UnifiedRegistry {
             });
         }
         let node = self.nodes.get(node_id)?;
-        let ep = node.endpoints.get(endpoint_id)?;
+        let ep = node.endpoints.get(&endpoint_id)?;
         match strategy_id {
             Some(id) => ep.strategies.get(id).cloned(),
             None => ep.strategies.values().next().cloned(),
@@ -560,10 +579,11 @@ impl UnifiedRegistry {
             endpoints: HashMap::new(),
         };
         for m in self.local.manifests() {
+            let id = EndpointId::new(m.kind, m.endpoint_id);
             self_reg.endpoints.insert(
-                m.endpoint_id.clone(),
+                id,
                 EndpointRegistration {
-                    endpoint_id: m.endpoint_id.clone(),
+                    endpoint_id: id,
                     kind: m.kind,
                     name: m.name.clone(),
                     target: target_from_manifest(&m),
@@ -590,30 +610,27 @@ impl UnifiedRegistry {
         spec: &SubscribeSpec,
         out_dir: Option<&Path>,
     ) -> Option<Box<dyn SubscribeEndpoint>> {
-        let (kind, class) = self
+        let target_id = EndpointId::new(spec.kind, spec.endpoint_id);
+        let (kind, name, class) = self
             .nodes
             .get(&spec.node_id)
-            .and_then(|n| n.endpoints.get(&spec.endpoint_id))
-            .map(|e| (e.kind, EndpointClass::from_kind(e.kind)))
+            .and_then(|n| n.endpoints.get(&target_id))
+            .map(|e| (e.kind, e.name.clone(), EndpointClass::from_kind(e.kind)))
             .or_else(|| {
                 self.local
-                    .manifest(&spec.endpoint_id)
-                    .map(|m| (m.kind, EndpointClass::from_kind(m.kind)))
+                    .manifest(target_id)
+                    .map(|m| (m.kind, m.name.clone(), EndpointClass::from_kind(m.kind)))
             })?;
         match class {
             EndpointClass::File => Some(Box::new(FileReceiveEndpoint::new(
-                format!("recv:{}", spec.endpoint_id),
-                spec.endpoint_id.clone(),
+                target_id,
+                name,
                 out_dir
                     .map(Path::to_path_buf)
                     .unwrap_or_else(std::env::temp_dir),
             ))),
             EndpointClass::Graph | EndpointClass::Audio => {
-                Some(Box::new(MediaReceiveEndpoint::new(
-                    format!("recv:{}", spec.endpoint_id),
-                    spec.endpoint_id.clone(),
-                    kind,
-                )))
+                Some(Box::new(MediaReceiveEndpoint::new(target_id, name, kind)))
             }
             // 剪贴板 / 输入 / 服务：暂无订阅端点宿主（后续按族补实现）
             EndpointClass::Clipboard | EndpointClass::Input | EndpointClass::Service => None,
@@ -693,12 +710,16 @@ mod tests {
         ))
     }
 
+    const fn sid(kind: MediaKind, id: u32) -> EndpointId {
+        EndpointId::new(kind, id)
+    }
+
     #[test]
     fn seed_loads_and_marks_availability() {
         let mut r = EndpointRegistry::new();
         // 可用端点：load 成功 → available
         assert!(r.seed(screen()));
-        let m = r.manifest("screen:0").unwrap();
+        let m = r.manifest(sid(MediaKind::Screen, 0)).unwrap();
         assert!(m.available);
         assert!(m.last_error.is_none());
         assert!(!m.published, "登记后未通告");
@@ -710,7 +731,7 @@ mod tests {
                 fail_probe("无图形会话（DISPLAY / WAYLAND_DISPLAY 均未设置）")
             )
         )));
-        let m2 = r2.manifest("screen:0").unwrap();
+        let m2 = r2.manifest(sid(MediaKind::Screen, 0)).unwrap();
         assert!(!m2.available);
         assert_eq!(
             m2.last_error.as_deref(),
@@ -719,7 +740,7 @@ mod tests {
         // 不可挂载端点拒绝通告（错误携带原因）
         assert!(
             r2.publish(
-                "screen:0",
+                sid(MediaKind::Screen, 0),
                 Visibility::Public,
                 Delivery::Pull,
                 vec![],
@@ -737,14 +758,15 @@ mod tests {
 
         let m = r
             .publish(
-                "screen:0",
+                sid(MediaKind::Screen, 0),
                 Visibility::Public,
                 Delivery::Pull,
                 EndpointRegistry::default_transports(TargetKind::Live),
                 vec![CodecId::H264],
             )
             .unwrap();
-        assert_eq!(m.endpoint_id, "screen:0");
+        assert_eq!(m.endpoint_id, 0);
+        assert_eq!(m.kind, MediaKind::Screen);
         assert!(m.published);
         assert_eq!(m.state, EndpointState::Idle);
         assert_eq!(m.subscribers, 0);
@@ -768,7 +790,7 @@ mod tests {
         // 重复通告报错
         assert!(
             r.publish(
-                "screen:0",
+                sid(MediaKind::Screen, 0),
                 Visibility::Public,
                 Delivery::Pull,
                 vec![],
@@ -778,28 +800,34 @@ mod tests {
         );
         // 未知端点报错
         assert!(
-            r.publish("nope", Visibility::Public, Delivery::Pull, vec![], vec![])
-                .is_err()
+            r.publish(
+                sid(MediaKind::Service, 99),
+                Visibility::Public,
+                Delivery::Pull,
+                vec![],
+                vec![]
+            )
+            .is_err()
         );
 
         // 状态与订阅数
-        assert!(r.set_state("screen:0", EndpointState::Active, 2));
-        let m = r.manifest("screen:0").unwrap();
+        assert!(r.set_state(sid(MediaKind::Screen, 0), EndpointState::Active, 2));
+        let m = r.manifest(sid(MediaKind::Screen, 0)).unwrap();
         assert_eq!(m.state, EndpointState::Active);
         assert_eq!(m.subscribers, 2);
-        assert!(!r.set_state("nope", EndpointState::Active, 0));
+        assert!(!r.set_state(sid(MediaKind::Service, 99), EndpointState::Active, 0));
 
         // 摘要携带 available + published
         let s = r.summaries();
         assert!(s.iter().any(|e| e.published && e.available));
 
         // 取消通告（端点保留，可再次通告）
-        assert!(r.unpublish("screen:0").is_ok());
-        assert!(r.unpublish("screen:0").is_err());
-        assert!(!r.manifest("screen:0").unwrap().published);
+        assert!(r.unpublish(sid(MediaKind::Screen, 0)).is_ok());
+        assert!(r.unpublish(sid(MediaKind::Screen, 0)).is_err());
+        assert!(!r.manifest(sid(MediaKind::Screen, 0)).unwrap().published);
         assert!(
             r.publish(
-                "screen:0",
+                sid(MediaKind::Screen, 0),
                 Visibility::Public,
                 Delivery::Pull,
                 vec![],
@@ -834,11 +862,8 @@ mod tests {
             .publish_file(&path, Visibility::Public, Delivery::Pull)
             .expect("公开文件端点");
         assert_eq!(m.kind, MediaKind::File);
-        assert!(
-            m.endpoint_id.starts_with("file:备注.txt"),
-            "{}",
-            m.endpoint_id
-        );
+        assert_eq!(m.name, "备注.txt", "文件名进注册表 name，不进端点身份");
+        assert_eq!(m.endpoint_id, 0, "文件数值子 id 从 0 起");
         assert!(m.available, "文件端点 load 应探测可读");
         assert_eq!(m.transports.len(), 2, "确定目标默认 QUIC>WS");
         assert_eq!(m.transports[0].transport, TransportId::Quic);
@@ -853,22 +878,25 @@ mod tests {
             stross_proto::message::PickRule::StrictOrdered,
             "确定目标默认严格顺序规则"
         );
+        let m_id = EndpointId::new(m.kind, m.endpoint_id);
         // 文件源可查（本地路径不落 wire：清单里没有 path 字段）
-        let src = r.file_source(&m.endpoint_id).expect("文件源已登记");
+        let src = r.file_source(m_id).expect("文件源已登记");
         assert_eq!(src.name, "备注.txt");
         assert_eq!(src.size, b"hello stross".len() as u64);
-        // 重名自动加序号
+        // 重名文件数值子 id 递增（`file:0` / `file:1`）
         let m2 = r
             .publish_file(&path, Visibility::Public, Delivery::Pull)
             .unwrap();
         assert_ne!(m.endpoint_id, m2.endpoint_id);
+        assert_eq!(m2.endpoint_id, 1);
         // 摘要含动态端点
         assert!(r.summaries().iter().any(|e| e.kind == MediaKind::File));
         // 取消通告 → 文件源移除、published 归 false（端点保留）
-        r.unpublish(&m.endpoint_id).unwrap();
-        assert!(r.file_source(&m.endpoint_id).is_none());
-        assert!(!r.manifest(&m.endpoint_id).unwrap().published);
-        assert!(r.unpublish(&m2.endpoint_id).is_ok());
+        r.unpublish(m_id).unwrap();
+        assert!(r.file_source(m_id).is_none());
+        assert!(!r.manifest(m_id).unwrap().published);
+        r.unpublish(EndpointId::new(m2.kind, m2.endpoint_id))
+            .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -882,8 +910,8 @@ mod tests {
             fired: Arc<AtomicUsize>,
         }
         impl Endpoint for CountingEndpoint {
-            fn id(&self) -> &str {
-                &self.base.id
+            fn id(&self) -> EndpointId {
+                self.base.id
             }
             fn kind(&self) -> MediaKind {
                 self.base.kind
@@ -928,7 +956,7 @@ mod tests {
         let mut r = EndpointRegistry::new();
         r.seed(Box::new(CountingEndpoint {
             base: stross_endpoint::contract::EndpointBase {
-                id: "rec:0".into(),
+                id: EndpointId::new(MediaKind::Mic, 0),
                 kind: MediaKind::Mic,
                 name: "录音".into(),
                 available: false,
@@ -936,8 +964,14 @@ mod tests {
             },
             fired: f.clone(),
         }));
-        r.publish("rec:0", Visibility::Confirm, Delivery::Push, vec![], vec![])
-            .unwrap();
+        r.publish(
+            EndpointId::new(MediaKind::Mic, 0),
+            Visibility::Confirm,
+            Delivery::Push,
+            vec![],
+            vec![],
+        )
+        .unwrap();
         let ctx = SubscribeCtx {
             subscriber: "dev-phone".into(),
             delivery: Delivery::Push,
@@ -952,10 +986,10 @@ mod tests {
             share_token: Some("tok".into()),
         };
         let app = Arc::new(Kernel::new(crate::Platform::Desktop));
-        r.on_subscribed(&app, "rec:0", &ctx);
+        r.on_subscribed(&app, EndpointId::new(MediaKind::Mic, 0), &ctx);
         assert_eq!(fired.load(Ordering::SeqCst), 1);
         // 未知端点不触发
-        r.on_subscribed(&app, "nope", &ctx);
+        r.on_subscribed(&app, EndpointId::new(MediaKind::Service, 99), &ctx);
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
@@ -971,7 +1005,7 @@ mod tests {
             },
             endpoints: vec![
                 EndpointManifest {
-                    endpoint_id: "screen:0".into(),
+                    endpoint_id: 0,
                     kind: MediaKind::Screen,
                     name: "屏幕".into(),
                     available: true,
@@ -993,7 +1027,7 @@ mod tests {
                     updated_at: unix_secs(),
                 },
                 EndpointManifest {
-                    endpoint_id: "file:notes.txt".into(),
+                    endpoint_id: 0,
                     kind: MediaKind::File,
                     name: "notes.txt".into(),
                     available: true,
@@ -1025,14 +1059,14 @@ mod tests {
         reg.set_self_node("node-pc", "电脑");
         assert!(reg.seed(screen()), "本机端点登记（自节点注册）");
         assert!(reg.seed(Box::new(FileEndpoint::new(
-            "file:本地.txt".into(),
+            EndpointId::new(MediaKind::File, 0),
             "本地.txt".into(),
             std::env::temp_dir().join("stross-unified.txt"),
         ))));
 
         // 本机查表：registry[本机][端点][策略] → 策略组合（strategy() 单一真源）
         let s = reg
-            .resolve_strategy("node-pc", "screen:0", None)
+            .resolve_strategy("node-pc", EndpointId::new(MediaKind::Screen, 0), None)
             .expect("本机屏幕端点应可解析");
         assert_eq!(s.strategy_id, "default");
         assert_eq!(s.pick, stross_proto::message::PickRule::Realtime);
@@ -1042,26 +1076,41 @@ mod tests {
         );
         // 本机文件端点：严格顺序 + Lossless 推断为确定目标
         let fs = reg
-            .resolve_strategy("node-pc", "file:本地.txt", Some("default"))
+            .resolve_strategy(
+                "node-pc",
+                EndpointId::new(MediaKind::File, 0),
+                Some("default"),
+            )
             .expect("本机文件端点应可解析");
         assert_eq!(fs.pick, stross_proto::message::PickRule::StrictOrdered);
         // 未知端点 → None
-        assert!(reg.resolve_strategy("node-pc", "nope", None).is_none());
+        assert!(
+            reg.resolve_strategy("node-pc", EndpointId::new(MediaKind::Service, 99), None)
+                .is_none()
+        );
 
         // 互联节点映射（目录拉取 → 节点 → 端点 → 策略）
         reg.register_remote_directory(&remote_dir("node-phone", "手机A"), "192.168.1.5:18779");
         let s = reg
-            .resolve_strategy("node-phone", "screen:0", None)
+            .resolve_strategy("node-phone", EndpointId::new(MediaKind::Screen, 0), None)
             .expect("远端屏幕端点应可解析");
         assert_eq!(s.pick, stross_proto::message::PickRule::Realtime);
         let f = reg
-            .resolve_strategy("node-phone", "file:notes.txt", Some("default"))
+            .resolve_strategy(
+                "node-phone",
+                EndpointId::new(MediaKind::File, 0),
+                Some("default"),
+            )
             .expect("远端文件端点应可解析");
         assert_eq!(f.pick, stross_proto::message::PickRule::StrictOrdered);
         // 未知策略 id → None（策略独立可寻址）
         assert!(
-            reg.resolve_strategy("node-phone", "screen:0", Some("nope"))
-                .is_none()
+            reg.resolve_strategy(
+                "node-phone",
+                EndpointId::new(MediaKind::Screen, 0),
+                Some("nope")
+            )
+            .is_none()
         );
 
         // 快照：本机 + 互联节点都在同一张表（含 is_self 标记）
@@ -1069,7 +1118,11 @@ mod tests {
         assert_eq!(nodes.len(), 2, "本机 + 手机两台节点");
         let self_node = nodes.iter().find(|n| n.is_self).expect("本机镜像在表内");
         assert_eq!(self_node.node_id, "node-pc");
-        assert!(self_node.endpoints.contains_key("screen:0"));
+        assert!(
+            self_node
+                .endpoints
+                .contains_key(&EndpointId::new(MediaKind::Screen, 0))
+        );
         let phone = nodes
             .iter()
             .find(|n| n.node_id == "node-phone")
@@ -1081,7 +1134,8 @@ mod tests {
         // Graph/Audio → 媒体订阅端（播放器入端点）
         let spec = SubscribeSpec {
             node_id: "node-phone".into(),
-            endpoint_id: "file:notes.txt".into(),
+            kind: MediaKind::File,
+            endpoint_id: 0,
             strategy_id: Some("default".into()),
             strategy: f,
             delivery: Delivery::Pull,
@@ -1098,7 +1152,8 @@ mod tests {
         );
         let spec_media = SubscribeSpec {
             node_id: "node-phone".into(),
-            endpoint_id: "screen:0".into(),
+            kind: MediaKind::Screen,
+            endpoint_id: 0,
             strategy_id: None,
             strategy: s,
             delivery: Delivery::Pull,
@@ -1127,7 +1182,7 @@ mod tests {
         dir.endpoints[0].pick_rule = stross_proto::message::PickRule::Realtime;
         reg.register_remote_directory(&dir, "192.168.1.9:18779");
         let s = reg
-            .resolve_strategy("node-old", "screen:0", None)
+            .resolve_strategy("node-old", EndpointId::new(MediaKind::Screen, 0), None)
             .expect("旧对端策略应推导成功");
         assert_eq!(s.strategy_id, "default");
         assert_eq!(s.pick, stross_proto::message::PickRule::Realtime);

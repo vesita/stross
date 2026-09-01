@@ -14,7 +14,7 @@ use anyhow::bail;
 use clap::{Args, Subcommand};
 use stross_endpoint::pipeline::StreamConfig;
 use stross_kernel::CtrlRequest;
-use stross_proto::message::{Delivery, Visibility};
+use stross_proto::message::{Delivery, EndpointId, Visibility};
 
 use crate::push::QualityArg;
 
@@ -308,7 +308,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 let m: stross_types::EndpointPublishedView = request_as(&args.connect, req).await?;
                 println!(
                     "已公开端点 {}（{}）delivery={}",
-                    m.endpoint_id,
+                    EndpointId::new(m.kind, m.endpoint_id),
                     m.name,
                     m.delivery.as_str(),
                 );
@@ -359,7 +359,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                     };
                     println!(
                         "  {}「{}」{} {}{} vis={} delivery={} state={} subscribers={}",
-                        e.endpoint_id,
+                        EndpointId::new(e.kind, e.endpoint_id),
                         e.name,
                         avail,
                         if e.published {

@@ -40,14 +40,20 @@ pub struct RelayAddr {
 ///
 /// 端点语义（`endpoint_id` 非空 = 订阅某端点）：`media` 可为空，由端点推断；
 /// 旧语义（`endpoint_id` 为空 = 接收方签发）与现状逐字节兼容。
+///
+/// **方案 A（端点 id 强类型化）**：`endpoint_id` 为**数值子 id**，`endpoint_kind`
+/// 独立枚举字段——二者组合成内部 [`super::ids::EndpointId`]。
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareRequest {
     pub device_id: String,
     pub device_name: String,
-    /// 订阅目标端点（端点框架，docs/endpoint-model-v2.md §4）。
+    /// 订阅目标端点数值子 id（端点框架，docs/endpoint-model-v2.md §4）。
     #[serde(default)]
-    pub endpoint_id: Option<String>,
+    pub endpoint_id: Option<u32>,
+    /// 订阅目标端点能力族（与 `endpoint_id` 组合成内部 `EndpointId`）。
+    #[serde(default)]
+    pub endpoint_kind: Option<MediaKind>,
     /// 订阅方选定的策略 id（注册表第三层；`None` = 取端点默认策略，
     /// docs/endpoint-model-v2.md §2）。仅端点语义生效。
     #[serde(default)]
@@ -125,7 +131,8 @@ mod tests {
         let req = ShareRequest {
             device_id: "dev-a".into(),
             device_name: "电脑".into(),
-            endpoint_id: Some("mic:builtin".into()),
+            endpoint_id: Some(0),
+            endpoint_kind: Some(MediaKind::Mic),
             strategy_id: Some("default".into()),
             delivery_mode: Some(Delivery::Push),
             relay_addr: Some("ws://192.168.1.5:41355".into()),
@@ -133,9 +140,10 @@ mod tests {
             media: vec![MediaKind::File],
         };
         let json = serde_json::to_value(&req).unwrap();
-        // 端点语义字段：camelCase，与旧实现逐字一致
+        // 端点语义字段：camelCase，与旧实现逐字一致；endpointId 数值化 + kind 独立
         assert_eq!(json["deviceId"], "dev-a");
-        assert_eq!(json["endpointId"], "mic:builtin");
+        assert_eq!(json["endpointId"], 0);
+        assert_eq!(json["endpointKind"], "mic");
         assert_eq!(json["strategyId"], "default");
         assert_eq!(json["deliveryMode"], "push");
         assert_eq!(json["relayAddr"], "ws://192.168.1.5:41355");
@@ -143,6 +151,8 @@ mod tests {
         assert_eq!(json["media"][0], "file");
         let back: ShareRequest = serde_json::from_value(json).unwrap();
         assert_eq!(back.device_id, "dev-a");
+        assert_eq!(back.endpoint_id, Some(0));
+        assert_eq!(back.endpoint_kind, Some(MediaKind::Mic));
         assert_eq!(back.delivery_mode, Some(Delivery::Push));
     }
 

@@ -222,12 +222,16 @@ pub fn endpoint_publish(
     visibility: String,
     delivery: String,
 ) -> Result<stross_proto::message::EndpointManifest, String> {
-    use stross_proto::message::{Delivery, Visibility};
+    use stross_proto::message::{Delivery, EndpointId, Visibility};
     // wire 字符串 → 枚举的解析单一真源在 proto（from_wire），前端不重复定义
     let visibility = Visibility::from_wire(&visibility).unwrap_or(Visibility::Public);
     let delivery = Delivery::from_wire(&delivery).unwrap_or(Delivery::Pull);
+    // 前端传入可读 "kind:id"（端点 id 强类型化后数值子 id + kind 独立字段），
+    // 在边界解析为强类型 EndpointId（与 CLI `--endpoint` 同语义）
+    let endpoint_id = EndpointId::parse(&device_id)
+        .ok_or_else(|| format!("非法端点标识: {device_id}（期望形如 screen:0）"))?;
     state
-        .publish_endpoint(&device_id, visibility, delivery, None, None)
+        .publish_endpoint(endpoint_id, visibility, delivery, None, None)
         .map_err(|e| e.to_user_string())
 }
 
@@ -237,8 +241,10 @@ pub async fn endpoint_unpublish(
     state: State<'_, Arc<Kernel>>,
     endpoint_id: String,
 ) -> Result<(), String> {
+    let endpoint_id = stross_proto::message::EndpointId::parse(&endpoint_id)
+        .ok_or_else(|| format!("非法端点标识: {endpoint_id}（期望形如 screen:0）"))?;
     state
-        .unpublish_endpoint(&endpoint_id)
+        .unpublish_endpoint(endpoint_id)
         .await
         .map_err(|e| e.to_user_string())
 }
@@ -252,8 +258,10 @@ pub async fn endpoint_stop_share(
     state: State<'_, Arc<Kernel>>,
     endpoint_id: String,
 ) -> Result<(), String> {
+    let endpoint_id = stross_proto::message::EndpointId::parse(&endpoint_id)
+        .ok_or_else(|| format!("非法端点标识: {endpoint_id}（期望形如 screen:0）"))?;
     state
-        .stop_endpoint_share(&endpoint_id)
+        .stop_endpoint_share(endpoint_id)
         .map_err(|e| e.to_user_string())
 }
 
@@ -281,12 +289,14 @@ pub async fn endpoint_subscribe_media(
     let delivery = delivery
         .as_deref()
         .and_then(stross_proto::message::Delivery::from_wire);
+    let endpoint_id = stross_proto::message::EndpointId::parse(&endpoint_id)
+        .ok_or_else(|| format!("非法端点标识: {endpoint_id}（期望形如 screen:0）"))?;
     stross_kernel::subscribe_media(
         &state.inner().clone(),
         &base,
         &host,
         port.unwrap_or(stross_kernel::DEFAULT_NEGOTIATOR_PORT),
-        &endpoint_id,
+        endpoint_id,
         delivery,
     )
     .await

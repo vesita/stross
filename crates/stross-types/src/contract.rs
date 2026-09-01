@@ -28,8 +28,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use stross_proto::message::{
-    CodecId, ControlMessage, Delivery, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile,
-    SerializeRule, SubscribeSpec, TrackInfo,
+    CodecId, ControlMessage, Delivery, EndpointId, EndpointStrategy, MediaKind, PickRule,
+    ReliabilityProfile, SerializeRule, SubscribeSpec, TrackInfo,
 };
 
 /// 目标类型：端点分两类的维度（决定默认传输 Lossless/Lossy 与共享生命周期）。
@@ -84,7 +84,7 @@ pub type Probe = Arc<dyn Fn() -> StdResult<(), String> + Send + Sync>;
 /// 端点公共身份 + 挂载状态（各具体端点的共有字段）。
 #[derive(Debug)]
 pub struct EndpointBase {
-    pub id: String,
+    pub id: EndpointId,
     pub kind: MediaKind,
     pub name: String,
     /// 能否被挂载成节点（load 探测结果；false = 不可通告、不可订阅）。
@@ -113,9 +113,10 @@ impl EndpointBase {
 /// 本 trait 只承载两端的共同视图（身份 / 内容类型 / 能力族 / 策略档案），
 /// 注册表与 UI 按它展示，不再有「双向能力体」的无意义占位方法。
 pub trait Endpoint: Send + Sync {
-    /// 节点内稳定 id（"screen:0" / "mic:builtin" / "file:notes.txt"；
-    /// 订阅端为生成时的 `recv:<目标端点>`）。
-    fn id(&self) -> &str;
+    /// 节点内稳定身份（`EndpointId`：`kind` + 数值子 id；跨设备唯一性由
+    /// `(device_id, endpoint_id)` 命名空间保证）。订阅端复用目标端点的
+    /// `EndpointId`（仅日志用途，不进注册表）。
+    fn id(&self) -> EndpointId;
     fn kind(&self) -> MediaKind;
     /// 用户可见名。
     fn name(&self) -> &str;
@@ -224,7 +225,7 @@ pub trait MediaSourceEndpoint: ShareEndpoint {
 ///
 /// ```ignore
 /// impl_media_source_endpoint!(ScreenEndpoint {
-///     fn id(&self) -> &str { &self.base.id }
+///     fn id(&self) -> EndpointId { self.base.id }
 ///     fn kind(&self) -> MediaKind { self.base.kind }
 ///     fn name(&self) -> &str { &self.base.name }
 /// }, {
@@ -328,7 +329,7 @@ pub trait EndpointApp: Send + Sync {
     fn note_share_active(
         &self,
         _self_weak: std::sync::Weak<dyn EndpointApp>,
-        _endpoint_id: &str,
+        _endpoint_id: EndpointId,
         _stream_id: &str,
         _delivery: Delivery,
     ) {
@@ -346,12 +347,11 @@ pub trait EndpointApp: Send + Sync {
 pub fn spawn_media_share(
     app: Arc<dyn EndpointApp>,
     ctx: SubscribeCtx,
-    endpoint_id: &str,
+    endpoint_id: EndpointId,
     title: String,
     video: Option<VideoSource>,
     audio: Option<AudioSourceConfig>,
 ) {
-    let endpoint_id = endpoint_id.to_string();
     let self_weak = std::sync::Arc::downgrade(&app);
     let app2 = app.clone();
     app.spawn_task(Box::pin(async move {
@@ -375,7 +375,7 @@ pub fn spawn_media_share(
                     ctx.subscriber
                 );
                 // 生命周期治理登记（watchers=0 自动收尾 / 取消通告联动停止 / 订阅收敛）
-                app2.note_share_active(self_weak, &endpoint_id, &r.stream_id, ctx.delivery);
+                app2.note_share_active(self_weak, endpoint_id, &r.stream_id, ctx.delivery);
             }
             Err(e) => tracing::warn!("端点自动推流失败（订阅方 {}）: {e:#}", ctx.subscriber),
         }

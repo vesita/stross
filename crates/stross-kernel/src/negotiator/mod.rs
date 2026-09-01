@@ -34,7 +34,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use stross_proto::message::{
-    Delivery, EndpointDir, EndpointManifest, EndpointNode, EndpointStrategy, MediaKind,
+    Delivery, EndpointDir, EndpointId, EndpointManifest, EndpointNode, EndpointStrategy, MediaKind,
     TransportId, Visibility, derive_stream_id,
 };
 use stross_proto::time::unix_secs;
@@ -257,7 +257,7 @@ struct PendingEntry {
     device_id: String,
     device_name: String,
     /// 订阅目标端点（端点语义；旧语义为 `None`）。
-    endpoint_id: Option<String>,
+    endpoint_id: Option<EndpointId>,
     /// 订阅方选定的策略 id（注册表第三层；`None` = 端点默认策略）。
     strategy_id: Option<String>,
     /// 订阅方期望的 delivery。
@@ -345,13 +345,13 @@ impl ShareNegotiator {
             let grant = self.grant(
                 entry.device_id.clone(),
                 entry.device_name.clone(),
-                entry.endpoint_id.clone(),
+                entry.endpoint_id,
                 entry.strategy_id.clone(),
                 entry.delivery_mode,
             )?;
             // 订阅达成：触发上层驱动（文件泵 / 媒体自动推流），docs §5 联动
             self.notify_subscribed(
-                entry.endpoint_id.as_deref(),
+                entry.endpoint_id,
                 &grant,
                 &entry.device_id,
                 entry.relay_addr.as_deref(),
@@ -383,7 +383,7 @@ impl ShareNegotiator {
                 endpoint_name: e
                     .endpoint_id
                     .as_ref()
-                    .and_then(|eid| self.app.endpoint_manifest(eid))
+                    .and_then(|eid| self.app.endpoint_manifest(*eid))
                     .map(|m| m.name.clone()),
                 created_at: 0, // 挂起表未记录创建时刻，置 0 表示未知
             })
@@ -394,13 +394,11 @@ impl ShareNegotiator {
         &self,
         device_id: String,
         device_name: String,
-        endpoint_id: Option<String>,
+        endpoint_id: Option<EndpointId>,
         strategy_id: Option<String>,
         delivery_mode: Option<Delivery>,
     ) -> Result<ShareGrant, String> {
-        let endpoint = endpoint_id
-            .as_ref()
-            .and_then(|eid| self.app.endpoint_manifest(eid));
+        let endpoint = endpoint_id.and_then(|eid| self.app.endpoint_manifest(eid));
         let (title, media) = match &endpoint {
             Some(m) => (format!("接收 {} 共享", m.name), vec![m.kind]),
             None => (format!("接收 {device_name} 共享"), vec![MediaKind::Mic]),
@@ -425,7 +423,7 @@ impl ShareNegotiator {
     /// * push：流 id / 凭证取自**订阅方**自签 token（订阅方中继校验用）。
     fn notify_subscribed(
         &self,
-        endpoint_id: Option<&str>,
+        endpoint_id: Option<EndpointId>,
         grant: &ShareGrant,
         subscriber: &str,
         relay_addr: Option<&str>,
@@ -474,7 +472,12 @@ pub(crate) async fn handle_request(
     Json(req): Json<ShareRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // 端点语义：先校验端点存在与可挂载（404）；旧语义校验 media 非空（400）
-    let endpoint = match &req.endpoint_id {
+    // （方案 A：数值子 id + kind 独立字段组合成内部 EndpointId）
+    let endpoint_id = match (req.endpoint_kind, req.endpoint_id) {
+        (Some(kind), Some(id)) => Some(EndpointId::new(kind, id)),
+        _ => None,
+    };
+    let endpoint = match endpoint_id {
         Some(eid) => match state.app.endpoint_manifest(eid) {
             Some(m) if !m.available => {
                 let reason = m.last_error.as_deref().unwrap_or("未知原因");
@@ -540,7 +543,7 @@ pub(crate) async fn handle_request(
                     // 订阅达成：触发上层驱动（docs §5 联动）
                     notify_subscribed(
                         &state.app,
-                        endpoint.as_ref().map(|m| m.endpoint_id.as_str()),
+                        endpoint_id,
                         &grant,
                         &req.device_id,
                         req.relay_addr.as_deref(),
@@ -572,7 +575,7 @@ pub(crate) async fn handle_request(
                     PendingEntry {
                         device_id: req.device_id.clone(),
                         device_name: req.device_name.clone(),
-                        endpoint_id: req.endpoint_id.clone(),
+                        endpoint_id,
                         strategy_id: req.strategy_id.clone(),
                         delivery_mode: req.delivery_mode,
                         relay_addr: req.relay_addr.clone(),
@@ -681,7 +684,7 @@ fn compose_grant(
 ) -> Result<ShareGrant, String> {
     // 订阅收敛检查（先于建会话：复用不产生新会话）
     if let Some(m) = endpoint
-        && let Some((sid, _)) = app.active_share_by_endpoint(&m.endpoint_id)
+        && let Some((sid, _)) = app.active_share_by_endpoint(EndpointId::new(m.kind, m.endpoint_id))
     {
         // 订阅驱动（docs/endpoint-model-v2.md §4 定稿）：只在 pull 复用——
         // 同端点已有活动共享（只走 pull），订阅方只用 stream_id（watch 路径）
@@ -721,7 +724,11 @@ fn compose_grant(
             .issue_share_token_for(title, media, Some(DEFAULT_GRANT_TTL_SECS))
             .map_err(|e| e.to_user_string())?,
         Some(m) => {
-            let sid = derive_stream_id(&m.endpoint_id, m.transport_profile, m.pick_rule);
+            let sid = derive_stream_id(
+                &EndpointId::new(m.kind, m.endpoint_id),
+                m.transport_profile,
+                m.pick_rule,
+            );
             app.ensure_session_with_id(
                 &sid,
                 "local",
@@ -783,7 +790,9 @@ fn checked_strategy(
     if crate::pick::loader_for(&strategy).is_none() {
         return Err(format!(
             "内核不支持序列化规则 {:?}（端点 {} 策略 {}）——协商拒绝，不静默降级",
-            strategy.serialize, m.endpoint_id, strategy.strategy_id
+            strategy.serialize,
+            EndpointId::new(m.kind, m.endpoint_id),
+            strategy.strategy_id
         ));
     }
     Ok(strategy)
@@ -814,7 +823,7 @@ fn strategy_of(m: &EndpointManifest, strategy_id: Option<&str>) -> EndpointStrat
 /// 订阅方连公开方中继 watch 取流（无 push 出站路径）。
 fn notify_subscribed(
     app: &Arc<Kernel>,
-    endpoint_id: Option<&str>,
+    endpoint_id: Option<EndpointId>,
     grant: &ShareGrant,
     subscriber: &str,
     _relay_addr: Option<&str>,
@@ -944,6 +953,15 @@ mod tests {
         k.seed_endpoint(Box::new(SystemAudioEndpoint::new("系统声音", ok_probe())));
         k
     }
+
+    // 桌面 fixture 的种子端点 id（数值子 id 恒 0，见 share/audio|screen 基座）。
+    const MIC: EndpointId = EndpointId::new(MediaKind::Mic, 0);
+    const SCREEN: EndpointId = EndpointId::new(MediaKind::Screen, 0);
+    const SYSTEM_AUDIO: EndpointId = EndpointId::new(MediaKind::SystemAudio, 0);
+    /// 记录端点（share 触发测试；kind=File 数值子 id 0）。
+    const REC: EndpointId = EndpointId::new(MediaKind::File, 0);
+    /// 不存在的端点 id（查表为 None）。
+    const NOPE: EndpointId = EndpointId::new(MediaKind::Mic, 42);
 
     #[test]
     fn identity_persists_and_stable() {
@@ -1076,14 +1094,8 @@ mod tests {
     async fn endpoint_public_grant_carries_delivery_and_transports() {
         let dir = tmp_dir("epub");
         let app = Arc::new(desktop_kernel());
-        app.publish_endpoint(
-            "mic:builtin",
-            Visibility::Public,
-            Delivery::Pull,
-            None,
-            None,
-        )
-        .expect("公开麦克风端点");
+        app.publish_endpoint(MIC, Visibility::Public, Delivery::Pull, None, None)
+            .expect("公开麦克风端点");
         let neg = ShareNegotiator {
             app: app.clone(),
             store: Arc::new(TrustStore::load(&dir)),
@@ -1092,13 +1104,7 @@ mod tests {
             port: 0,
         };
         let grant = neg
-            .grant(
-                "dev-phone".into(),
-                "手机A".into(),
-                Some("mic:builtin".into()),
-                None,
-                None,
-            )
+            .grant("dev-phone".into(), "手机A".into(), Some(MIC), None, None)
             .expect("Public 端点应自动签发");
         assert_eq!(grant.delivery, Some(Delivery::Pull));
         let transports = grant.transports.expect("应携带传输列表");
@@ -1112,14 +1118,8 @@ mod tests {
     async fn endpoint_delivery_both_granted_as_pull_subscription_driven() {
         let dir = tmp_dir("both");
         let app = Arc::new(desktop_kernel());
-        app.publish_endpoint(
-            "sysaudio:builtin",
-            Visibility::Public,
-            Delivery::Both,
-            None,
-            None,
-        )
-        .expect("公开系统声音端点");
+        app.publish_endpoint(SYSTEM_AUDIO, Visibility::Public, Delivery::Both, None, None)
+            .expect("公开系统声音端点");
         let neg = ShareNegotiator {
             app: app.clone(),
             store: Arc::new(TrustStore::load(&dir)),
@@ -1133,7 +1133,7 @@ mod tests {
             .grant(
                 "dev-phone".into(),
                 "手机A".into(),
-                Some("sysaudio:builtin".into()),
+                Some(SYSTEM_AUDIO),
                 None,
                 Some(Delivery::Push),
             )
@@ -1144,7 +1144,7 @@ mod tests {
             .grant(
                 "dev-phone".into(),
                 "手机A".into(),
-                Some("sysaudio:builtin".into()),
+                Some(SYSTEM_AUDIO),
                 None,
                 None,
             )
@@ -1159,14 +1159,8 @@ mod tests {
     async fn pull_reuse_same_stream_for_second_subscriber() {
         let dir = tmp_dir("reuse");
         let app = Arc::new(desktop_kernel());
-        app.publish_endpoint(
-            "mic:builtin",
-            Visibility::Public,
-            Delivery::Pull,
-            None,
-            None,
-        )
-        .expect("公开麦克风端点");
+        app.publish_endpoint(MIC, Visibility::Public, Delivery::Pull, None, None)
+            .expect("公开麦克风端点");
         let neg = ShareNegotiator {
             app: app.clone(),
             store: Arc::new(TrustStore::load(&dir)),
@@ -1176,29 +1170,17 @@ mod tests {
         };
         // 第一个订阅者：无活动共享 → 新建会话
         let g1 = neg
-            .grant(
-                "dev-a".into(),
-                "设备A".into(),
-                Some("mic:builtin".into()),
-                None,
-                None,
-            )
+            .grant("dev-a".into(), "设备A".into(), Some(MIC), None, None)
             .unwrap();
         let sid1 = g1.view.stream_id.clone();
         assert!(!sid1.is_empty());
         // 模拟端点共享已登记（真实路径：share → start_stream 成功 → note_share_active）
         let weak: std::sync::Weak<dyn crate::EndpointApp> =
             std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
-        app.note_share_active(weak, "mic:builtin", &sid1, Delivery::Pull);
+        app.note_share_active(weak, MIC, &sid1, Delivery::Pull);
         // 第二个订阅者：复用同一流
         let g2 = neg
-            .grant(
-                "dev-b".into(),
-                "设备B".into(),
-                Some("mic:builtin".into()),
-                None,
-                None,
-            )
+            .grant("dev-b".into(), "设备B".into(), Some(MIC), None, None)
             .unwrap();
         assert_eq!(
             g2.view.stream_id, sid1,
@@ -1216,14 +1198,8 @@ mod tests {
     async fn endpoint_grant_stream_id_is_derived_and_session_exists() {
         let dir = tmp_dir("derived");
         let app = Arc::new(desktop_kernel());
-        app.publish_endpoint(
-            "mic:builtin",
-            Visibility::Public,
-            Delivery::Pull,
-            None,
-            None,
-        )
-        .expect("公开麦克风端点");
+        app.publish_endpoint(MIC, Visibility::Public, Delivery::Pull, None, None)
+            .expect("公开麦克风端点");
         let neg = ShareNegotiator {
             app: app.clone(),
             store: Arc::new(TrustStore::load(&dir)),
@@ -1232,16 +1208,14 @@ mod tests {
             port: 0,
         };
         let g1 = neg
-            .grant(
-                "dev-a".into(),
-                "设备A".into(),
-                Some("mic:builtin".into()),
-                None,
-                None,
-            )
+            .grant("dev-a".into(), "设备A".into(), Some(MIC), None, None)
             .unwrap();
-        let m = app.endpoint_manifest("mic:builtin").unwrap();
-        let expected = derive_stream_id(&m.endpoint_id, m.transport_profile, m.pick_rule);
+        let m = app.endpoint_manifest(MIC).unwrap();
+        let expected = derive_stream_id(
+            &EndpointId::new(m.kind, m.endpoint_id),
+            m.transport_profile,
+            m.pick_rule,
+        );
         assert_eq!(
             g1.view.stream_id, expected,
             "端点订阅流 id = 语义派生 id（{}）",
@@ -1254,13 +1228,7 @@ mod tests {
         );
         // 无活动共享时再次 grant → 同 id（确定性派生 + 会话幂等，不产生新会话）
         let g2 = neg
-            .grant(
-                "dev-b".into(),
-                "设备B".into(),
-                Some("mic:builtin".into()),
-                None,
-                None,
-            )
+            .grant("dev-b".into(), "设备B".into(), Some(MIC), None, None)
             .unwrap();
         assert_eq!(g2.view.stream_id, expected, "确定性派生：同端点同 id");
         assert_eq!(app.sessions().len(), 1, "会话幂等：派生 id 不重复建会话");
@@ -1273,14 +1241,8 @@ mod tests {
     async fn push_declared_endpoint_still_reuses_as_pull() {
         let dir = tmp_dir("pushrej");
         let app = Arc::new(desktop_kernel());
-        app.publish_endpoint(
-            "mic:builtin",
-            Visibility::Public,
-            Delivery::Push,
-            None,
-            None,
-        )
-        .expect("公开麦克风端点");
+        app.publish_endpoint(MIC, Visibility::Public, Delivery::Push, None, None)
+            .expect("公开麦克风端点");
         let neg = ShareNegotiator {
             app: app.clone(),
             store: Arc::new(TrustStore::load(&dir)),
@@ -1292,7 +1254,7 @@ mod tests {
             .grant(
                 "dev-a".into(),
                 "设备A".into(),
-                Some("mic:builtin".into()),
+                Some(MIC),
                 None,
                 Some(Delivery::Push),
             )
@@ -1301,16 +1263,10 @@ mod tests {
         let sid1 = g1.view.stream_id.clone();
         let weak: std::sync::Weak<dyn crate::EndpointApp> =
             std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
-        app.note_share_active(weak, "mic:builtin", &sid1, Delivery::Pull);
+        app.note_share_active(weak, MIC, &sid1, Delivery::Pull);
         // 第二个订阅者：复用同一流（不再报「正被使用」）
         let g2 = neg
-            .grant(
-                "dev-b".into(),
-                "设备B".into(),
-                Some("mic:builtin".into()),
-                None,
-                None,
-            )
+            .grant("dev-b".into(), "设备B".into(), Some(MIC), None, None)
             .unwrap();
         assert_eq!(g2.view.stream_id, sid1, "Push 声明端点仍复用同一流");
         assert_eq!(g2.delivery, Some(Delivery::Pull));
@@ -1330,8 +1286,8 @@ mod tests {
             fired: Arc<StdMutex<Vec<crate::kernel::SubscribeCtx>>>,
         }
         impl Endpoint for RecordingEndpoint {
-            fn id(&self) -> &str {
-                &self.base.id
+            fn id(&self) -> EndpointId {
+                self.base.id
             }
             fn kind(&self) -> MediaKind {
                 self.base.kind
@@ -1374,7 +1330,7 @@ mod tests {
         }
         app.seed_endpoint(Box::new(RecordingEndpoint {
             base: EndpointBase {
-                id: "rec:0".into(),
+                id: REC,
                 kind: MediaKind::File,
                 name: "记录".into(),
                 available: false,
@@ -1383,7 +1339,7 @@ mod tests {
             fired: fired.clone(),
         }));
         let m = app
-            .publish_endpoint("rec:0", Visibility::Public, Delivery::Pull, None, None)
+            .publish_endpoint(REC, Visibility::Public, Delivery::Pull, None, None)
             .unwrap();
 
         let neg = ShareNegotiator {
@@ -1401,7 +1357,7 @@ mod tests {
             PendingEntry {
                 device_id: "dev-sub".into(),
                 device_name: "订阅方".into(),
-                endpoint_id: Some(m.endpoint_id.clone()),
+                endpoint_id: Some(EndpointId::new(m.kind, m.endpoint_id)),
                 strategy_id: None,
                 delivery_mode: Some(Delivery::Pull),
                 relay_addr: None,
@@ -1433,24 +1389,18 @@ mod tests {
         let app = desktop_kernel();
 
         // Public：任何人免确认
-        app.publish_endpoint(
-            "mic:builtin",
-            Visibility::Public,
-            Delivery::Pull,
-            None,
-            None,
-        )
-        .unwrap();
-        let m = app.endpoint_manifest("mic:builtin").unwrap();
+        app.publish_endpoint(MIC, Visibility::Public, Delivery::Pull, None, None)
+            .unwrap();
+        let m = app.endpoint_manifest(MIC).unwrap();
         assert_eq!(
             policy_decision(&store, Some(&m), "stranger"),
             Decision::Grant
         );
 
         // Confirm：未信任挂起，信任后自动
-        app.publish_endpoint("screen:0", Visibility::Confirm, Delivery::Pull, None, None)
+        app.publish_endpoint(SCREEN, Visibility::Confirm, Delivery::Pull, None, None)
             .unwrap();
-        let m = app.endpoint_manifest("screen:0").unwrap();
+        let m = app.endpoint_manifest(SCREEN).unwrap();
         assert_eq!(
             policy_decision(&store, Some(&m), "dev-trusted"),
             Decision::Pending
@@ -1463,7 +1413,7 @@ mod tests {
 
         // Private：白名单自动、非白名单拒绝
         app.publish_endpoint(
-            "sysaudio:builtin",
+            SYSTEM_AUDIO,
             Visibility::Private {
                 nodes: vec!["dev-ok".into()],
             },
@@ -1472,7 +1422,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let m = app.endpoint_manifest("sysaudio:builtin").unwrap();
+        let m = app.endpoint_manifest(SYSTEM_AUDIO).unwrap();
         assert_eq!(policy_decision(&store, Some(&m), "dev-ok"), Decision::Grant);
         assert_eq!(
             policy_decision(&store, Some(&m), "dev-no"),
@@ -1492,7 +1442,7 @@ mod tests {
     fn endpoint_unknown_and_private_directory_rules() {
         let app = desktop_kernel();
         // 未知端点查不到
-        assert!(app.endpoint_manifest("nope").is_none());
+        assert!(app.endpoint_manifest(NOPE).is_none());
         // 目录快照含全部端点（单层模型）；未通告时 published 全 false
         let endpoints = app.endpoint_catalog();
         assert_eq!(endpoints.len(), 3, "桌面平台默认 3 个端点");
@@ -1509,7 +1459,7 @@ mod tests {
             std::sync::Arc::new(|| Err("无图形会话".into())),
         )));
         let err = app
-            .publish_endpoint("screen:0", Visibility::Public, Delivery::Pull, None, None)
+            .publish_endpoint(SCREEN, Visibility::Public, Delivery::Pull, None, None)
             .unwrap_err();
         assert!(
             err.to_string().contains("无图形会话"),
@@ -1526,7 +1476,8 @@ mod tests {
         let req = ShareRequest {
             device_id: "dev-x".into(),
             device_name: "申请方".into(),
-            endpoint_id: Some("screen:0".into()),
+            endpoint_id: Some(SCREEN.id),
+            endpoint_kind: Some(SCREEN.kind),
             strategy_id: None,
             delivery_mode: None,
             relay_addr: None,

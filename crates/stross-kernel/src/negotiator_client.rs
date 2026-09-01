@@ -40,7 +40,8 @@ mod tests {
         let req = ShareRequest {
             device_id: "dev-b".into(),
             device_name: "手机".into(),
-            endpoint_id: Some("file:notes.txt".into()),
+            endpoint_id: Some(0),
+            endpoint_kind: Some(MediaKind::File),
             strategy_id: None,
             delivery_mode: Some(stross_proto::message::Delivery::Push),
             relay_addr: Some("ws://192.168.1.5:41355".into()),
@@ -49,7 +50,9 @@ mod tests {
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["deviceId"], "dev-b");
-        assert_eq!(json["endpointId"], "file:notes.txt");
+        // 方案 A：endpointId 数值化 + kind 独立字段
+        assert_eq!(json["endpointId"], 0);
+        assert_eq!(json["endpointKind"], "file");
         assert_eq!(json["deliveryMode"], "push");
         assert_eq!(json["relayAddr"], "ws://192.168.1.5:41355");
         assert_eq!(json["shareToken"], "sess-9:abc:123");
@@ -59,6 +62,7 @@ mod tests {
             device_id: "dev-b".into(),
             device_name: "手机".into(),
             endpoint_id: None,
+            endpoint_kind: None,
             strategy_id: None,
             delivery_mode: None,
             relay_addr: None,

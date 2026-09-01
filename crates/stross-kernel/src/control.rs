@@ -19,7 +19,7 @@ use axum::response::Response;
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
 use stross_endpoint::pipeline::StreamConfig;
-use stross_proto::message::{Delivery, TransportPreference, Visibility};
+use stross_proto::message::{Delivery, EndpointId, TransportPreference, Visibility};
 
 use crate::Kernel;
 use crate::SessionPrefs;
@@ -259,25 +259,38 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             delivery,
             transports,
             codecs,
-        } => match app.publish_endpoint(&device_id, visibility, delivery, transports, codecs) {
-            Ok(m) => CtrlResponse::ok_json(m),
-            Err(e) => CtrlResponse::err(e.to_user_string()),
-        },
+        } => {
+            // 旧字段名 device_id 实际承载端点标识（可读 "kind:id"），强类型化后
+            // 在边界解析为 EndpointId
+            let Some(endpoint_id) = EndpointId::parse(&device_id) else {
+                return CtrlResponse::err(format!("非法端点标识: {device_id}"));
+            };
+            match app.publish_endpoint(endpoint_id, visibility, delivery, transports, codecs) {
+                Ok(m) => CtrlResponse::ok_json(m),
+                Err(e) => CtrlResponse::err(e.to_user_string()),
+            }
+        }
         CtrlRequest::EndpointPublishFile {
             path,
             visibility,
             delivery,
         } => match app.publish_file_endpoint(std::path::Path::new(&path), visibility, delivery) {
-            Ok(m) => CtrlResponse::ok_json(stross_types::FilePublishedView {
-                size: app.file_source(&m.endpoint_id).map_or(0, |s| s.size),
-                endpoint_id: m.endpoint_id,
-                name: m.name,
-                delivery: m.delivery,
-            }),
+            Ok(m) => {
+                let endpoint_id = EndpointId::new(m.kind, m.endpoint_id);
+                CtrlResponse::ok_json(stross_types::FilePublishedView {
+                    size: app.file_source(endpoint_id).map_or(0, |s| s.size),
+                    endpoint_id,
+                    name: m.name,
+                    delivery: m.delivery,
+                })
+            }
             Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::EndpointUnpublish { endpoint_id } => {
-            match app.unpublish_endpoint(&endpoint_id).await {
+            let Some(endpoint_id) = EndpointId::parse(&endpoint_id) else {
+                return CtrlResponse::err(format!("非法端点标识: {endpoint_id}"));
+            };
+            match app.unpublish_endpoint(endpoint_id).await {
                 Ok(()) => CtrlResponse::ok_json(stross_types::UnpublishedView {
                     endpoint_id,
                     unpublished: true,

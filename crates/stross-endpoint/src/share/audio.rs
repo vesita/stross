@@ -8,7 +8,7 @@
 
 use std::result::Result as StdResult;
 
-use stross_proto::message::MediaKind;
+use stross_proto::message::{EndpointId, MediaKind};
 
 use crate::contract::{EndpointBase, MediaSourceEndpoint, Probe};
 use crate::impl_media_source_endpoint;
@@ -24,7 +24,7 @@ impl MicEndpoint {
     pub fn new(name: impl Into<String>, probe: Probe) -> Self {
         Self {
             base: EndpointBase {
-                id: "mic:builtin".into(),
+                id: EndpointId::new(MediaKind::Mic, 0),
                 kind: MediaKind::Mic,
                 name: name.into(),
                 available: false,
@@ -46,8 +46,8 @@ impl MediaSourceEndpoint for MicEndpoint {
 
 impl_media_source_endpoint!(MicEndpoint {
 
-        fn id(&self) -> &str {
-            &self.base.id
+        fn id(&self) -> EndpointId {
+            self.base.id
         }
         fn kind(&self) -> MediaKind {
             self.base.kind
@@ -88,7 +88,7 @@ impl SystemAudioEndpoint {
     pub fn new(name: impl Into<String>, probe: Probe) -> Self {
         Self {
             base: EndpointBase {
-                id: "sysaudio:builtin".into(),
+                id: EndpointId::new(MediaKind::SystemAudio, 0),
                 kind: MediaKind::SystemAudio,
                 name: name.into(),
                 available: false,
@@ -114,8 +114,8 @@ impl MediaSourceEndpoint for SystemAudioEndpoint {
 
 impl_media_source_endpoint!(SystemAudioEndpoint {
 
-        fn id(&self) -> &str {
-            &self.base.id
+        fn id(&self) -> EndpointId {
+            self.base.id
         }
         fn kind(&self) -> MediaKind {
             self.base.kind

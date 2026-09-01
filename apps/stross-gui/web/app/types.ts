@@ -146,6 +146,12 @@ function deviceKindIcon(kind: string): string {
   return KIND_ICONS[kind as EndpointKind] || 'server';
 }
 
+/** 端点可读 id（`kind:id`；方案 A：wire 拆成数值子 id + kind 独立字段，
+ *  前端组合成稳定键 / 命令参数，与 Rust `EndpointId::parse` 互逆）。 */
+function endpointIdStr(ep: { kind: string; endpointId: number }): string {
+  return ep.kind + ':' + ep.endpointId;
+}
+
 // ---------------------------------------------------------------------------
 // 线协议 / 命令面类型镜像（Rust serde camelCase；字段名 = wire 键）
 // ---------------------------------------------------------------------------
@@ -284,9 +290,12 @@ interface PendingRequest {
 
 // —— 端点框架（节点 → 端点；docs/endpoint-model-v2.md） ——
 
-/** 端点清单（单层端点模型，Rust `EndpointManifest` 平铺：可挂载性 + 共享状态）。 */
+/** 端点清单（单层端点模型，Rust `EndpointManifest` 平铺：可挂载性 + 共享状态）。
+ *  方案 A（端点 id 强类型化）：`endpointId` 为**数值子 id**，`kind` 独立字段——
+ *  前端展示/链路键/命令参数统一用 `endpointIdStr(ep)`（`"kind:id"` 可读串）。 */
 interface EndpointManifest {
-  endpointId: string;
+  /** 数值子 id（与 `kind` 组合成内部 EndpointId；本机 kind 内唯一）。 */
+  endpointId: number;
   kind: string;
   name: string;
   /** load 探测结果：能否被挂载成节点（false = 不可共享、不可订阅）。 */

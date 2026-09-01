@@ -68,3 +68,8 @@ const KIND_ICONS = {
 function deviceKindIcon(kind) {
     return KIND_ICONS[kind] || 'server';
 }
+/** 端点可读 id（`kind:id`；方案 A：wire 拆成数值子 id + kind 独立字段，
+ *  前端组合成稳定键 / 命令参数，与 Rust `EndpointId::parse` 互逆）。 */
+function endpointIdStr(ep) {
+    return ep.kind + ':' + ep.endpointId;
+}

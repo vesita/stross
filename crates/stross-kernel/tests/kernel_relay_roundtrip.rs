@@ -15,7 +15,7 @@ use stross_kernel::relay::RelayServer;
 use stross_kernel::{Kernel, Platform, RelayDataPlane};
 use stross_kernel::{KernelEvent, SessionPrefs};
 use stross_proto::frame::{Frame, TRACK_VIDEO};
-use stross_proto::message::{CodecId, ControlMessage, TrackInfo};
+use stross_proto::message::{CodecId, ControlMessage, EndpointId, MediaKind, TrackInfo};
 use tokio_tungstenite::tungstenite::Message;
 
 fn hello(stream_id: &str) -> ControlMessage {
@@ -417,13 +417,14 @@ async fn endpoint_share_stops_after_last_watcher_leaves() {
     kernel.attach_data_plane(Arc::new(RelayDataPlane::new(&relay)));
 
     // 端点共享登记（真实路径：订阅达成 → share → start_stream 成功 → note_share_active）
+    let screen_id = EndpointId::new(MediaKind::Screen, 0);
     let session = kernel
         .create_session("local", &["local".into()], &SessionPrefs::default())
         .unwrap();
     let weak: std::sync::Weak<dyn EndpointApp> =
         Arc::downgrade(&(kernel.clone() as Arc<dyn EndpointApp>));
-    kernel.note_share_active(weak, "screen:0", &session.id, Delivery::Pull);
-    assert!(kernel.active_share_by_endpoint("screen:0").is_some());
+    kernel.note_share_active(weak, screen_id, &session.id, Delivery::Pull);
+    assert!(kernel.active_share_by_endpoint(screen_id).is_some());
 
     // 推流端（模拟端点自动推流进受控中继）
     let (mut push, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/push"))
@@ -462,13 +463,13 @@ async fn endpoint_share_stops_after_last_watcher_leaves() {
     // 轮询等待自动收尾（watchers→0 检测 + 150ms 复查延迟）
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline
-        && kernel.active_share_by_endpoint("screen:0").is_some()
+        && kernel.active_share_by_endpoint(screen_id).is_some()
     {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     assert!(
-        kernel.active_share_by_endpoint("screen:0").is_none(),
+        kernel.active_share_by_endpoint(screen_id).is_none(),
         "watchers=0 后端点共享登记应清除"
     );
     assert!(

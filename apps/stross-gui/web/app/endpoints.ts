@@ -78,7 +78,7 @@ function renderLocalDevices(): void {
         stop.className = 'sm danger ep-act';
         stop.innerHTML = icon('stop') + '<span>停止共享</span>';
         stop.dataset.act = 'stop-share';
-        stop.dataset.endpoint = ep.endpointId;
+        stop.dataset.endpoint = endpointIdStr(ep);
         ops.appendChild(stop);
       }
       const unpub = document.createElement('button');
@@ -86,7 +86,7 @@ function renderLocalDevices(): void {
       unpub.className = 'sm ep-act';
       unpub.innerHTML = icon('x') + '<span>取消共享</span>';
       unpub.dataset.act = 'unpublish-endpoint';
-      unpub.dataset.endpoint = ep.endpointId;
+      unpub.dataset.endpoint = endpointIdStr(ep);
       ops.appendChild(unpub);
       row.appendChild(ops);
     } else {
@@ -95,7 +95,7 @@ function renderLocalDevices(): void {
       pub.className = 'sm primary ep-act';
       pub.innerHTML = icon('radio') + '<span>共享</span>';
       pub.dataset.act = 'publish-device';
-      pub.dataset.device = ep.endpointId;
+      pub.dataset.device = endpointIdStr(ep);
       row.appendChild(pub);
     }
     box.appendChild(row);
@@ -108,7 +108,7 @@ function renderLocalDevices(): void {
 
 /** 打开共享弹窗（可见性由公开者声明；数据面方向由端点/系统自动决定）。 */
 function openPublishModal(endpointId: string): void {
-  const ep = localCatalog.endpoints.find((x) => x.endpointId === endpointId);
+  const ep = localCatalog.endpoints.find((x) => endpointIdStr(x) === endpointId);
   if (!ep) return;
   publishTarget = { ep };
   $('pub-modal-title').textContent = `共享「${ep.name}」`;
@@ -130,7 +130,7 @@ async function confirmPublish(): Promise<void> {
   try {
     const name = publishTarget.ep.name;
     await call('endpoint_publish', {
-      deviceId: publishTarget.ep.endpointId,
+      deviceId: endpointIdStr(publishTarget.ep),
       visibility: vis,
       delivery,
     });
@@ -251,9 +251,9 @@ function renderRemoteDir(dev: DeviceView, dir: RemoteDir): void {
       hint.textContent = '文件（命令行订阅）';
       row.appendChild(hint);
     } else if (
-      subscribedEndpoints.has(deviceHostOf(dev) + '/' + ep.endpointId) ||
-      subscribedEndpoints.has(ep.endpointId) ||
-      recvLinks.has(deviceHostOf(dev) + '/' + ep.endpointId)
+      subscribedEndpoints.has(deviceHostOf(dev) + '/' + endpointIdStr(ep)) ||
+      subscribedEndpoints.has(endpointIdStr(ep)) ||
+      recvLinks.has(deviceHostOf(dev) + '/' + endpointIdStr(ep))
     ) {
       const badge = document.createElement('span');
       badge.className = 'badge ep-badge live';
@@ -262,7 +262,7 @@ function renderRemoteDir(dev: DeviceView, dir: RemoteDir): void {
     } else if (
       subscribingEndpoint &&
       subscribingEndpoint.host === deviceHostOf(dev) &&
-      subscribingEndpoint.endpointId === ep.endpointId
+      subscribingEndpoint.endpointId === endpointIdStr(ep)
     ) {
       const sub = document.createElement('button');
       sub.type = 'button';
@@ -277,7 +277,7 @@ function renderRemoteDir(dev: DeviceView, dir: RemoteDir): void {
       sub.innerHTML = icon('download') + '<span>订阅</span>';
       sub.dataset.act = 'subscribe-endpoint';
       sub.dataset.host = deviceHostOf(dev) || '';
-      sub.dataset.endpoint = ep.endpointId;
+      sub.dataset.endpoint = endpointIdStr(ep);
       row.appendChild(sub);
     }
     container.appendChild(row);
@@ -298,7 +298,7 @@ function deviceHostOf(dev: DeviceView): string {
 function openSubscribeModal(host: string, endpointId: string): void {
   const dev = deviceViews.find((d) => d.key && deviceHostOf(d) === host);
   const dir = dev ? remoteDirs.get(dev.key) : null;
-  const ep = dir?.endpoints.find((e) => e.endpointId === endpointId);
+  const ep = dir?.endpoints.find((e) => endpointIdStr(e) === endpointId);
   if (!ep) return;
   subscribeTarget = { host, ep };
   $('sub-modal-title').textContent = `订阅「${ep.name}」`;
@@ -318,12 +318,12 @@ async function confirmSubscribe(): Promise<void> {
   try {
     subscribingEndpoint = {
       host: subscribeTarget.host,
-      endpointId: subscribeTarget.ep.endpointId,
+      endpointId: endpointIdStr(subscribeTarget.ep),
     };
     renderDeviceList();
     const r = await call<MediaSubscribeOutcome>('endpoint_subscribe_media', {
       host: subscribeTarget.host,
-      endpointId: subscribeTarget.ep.endpointId,
+      endpointId: endpointIdStr(subscribeTarget.ep),
       delivery: subscribeTarget.ep.delivery === 'push' ? 'push' : undefined,
     });
     subscribingEndpoint = null;
@@ -331,13 +331,13 @@ async function confirmSubscribe(): Promise<void> {
     targetRelay = { wsBase: r.relayUrl, srtUrl: null, quicUrl: null };
     const ok = await startReceiveLink({
       host: subscribeTarget.host,
-      endpointId: subscribeTarget.ep.endpointId,
+      endpointId: endpointIdStr(subscribeTarget.ep),
       endpointName: subscribeTarget.ep.name,
       streamId: r.streamId,
       kind: subscribeTarget.ep.kind,
     });
     if (ok) {
-      subscribedEndpoints.add(subscribeTarget.host + '/' + subscribeTarget.ep.endpointId);
+      subscribedEndpoints.add(subscribeTarget.host + '/' + endpointIdStr(subscribeTarget.ep));
       showToast(`已订阅「${subscribeTarget.ep.name}」`, 'ok');
       switchMobileTab('recv');
     }

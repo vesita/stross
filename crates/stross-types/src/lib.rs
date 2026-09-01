@@ -27,7 +27,7 @@
 use serde::{Deserialize, Serialize};
 
 use stross_proto::message::{
-    Delivery, EndpointManifest, EndpointSummary, MediaKind, RoleId, TransportId,
+    Delivery, EndpointId, EndpointManifest, EndpointSummary, MediaKind, RoleId, TransportId,
 };
 
 /// 端点 SPI（分享端 / 订阅端契约）——**内核约定特性、端点实现**。
@@ -337,7 +337,7 @@ pub type EndpointPublishedView = EndpointManifest;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilePublishedView {
-    pub endpoint_id: String,
+    pub endpoint_id: EndpointId,
     pub name: String,
     pub size: u64,
     pub delivery: Delivery,
@@ -347,7 +347,7 @@ pub struct FilePublishedView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnpublishedView {
-    pub endpoint_id: String,
+    pub endpoint_id: EndpointId,
     pub unpublished: bool,
 }
 

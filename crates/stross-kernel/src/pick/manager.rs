@@ -110,11 +110,24 @@ impl StreamChannel {
     /// 产出当前可播放的帧（视频 + 音频合并；接收端按 `track` 分流消费）。
     pub fn poll(&mut self, now: Instant) -> Vec<Frame> {
         match self.kind {
-            ChannelKind::Lossless => self.lossless_queue.drain(..).collect(),
+            ChannelKind::Lossless => {
+                if self.lossless_queue.is_empty() {
+                    Vec::new()
+                } else {
+                    self.lossless_queue.drain(..).collect()
+                }
+            }
             ChannelKind::Lossy => {
-                let mut out = self.video.poll(now);
-                out.extend(self.audio.poll(now));
-                out
+                let mut video_out = self.video.poll(now);
+                let audio_out = self.audio.poll(now);
+                if video_out.is_empty() {
+                    audio_out
+                } else if audio_out.is_empty() {
+                    video_out
+                } else {
+                    video_out.extend(audio_out);
+                    video_out
+                }
             }
         }
     }
@@ -144,6 +157,14 @@ impl InterpretRegistry {
         rule: PickRule,
         kind: ChannelKind,
     ) -> &mut dyn Interpreter {
+        // 热路径快速查找：避免每包为 session_id.to_string() 分配堆内存
+        if self.interpreters.contains_key(session_id) {
+            return self
+                .interpreters
+                .get_mut(session_id)
+                .expect("已确认存在")
+                .as_mut();
+        }
         let key = (rule, kind);
         let slot = self
             .interpreters
@@ -260,5 +281,20 @@ mod tests {
                 .rule()
                 == PickRule::Realtime
         );
+    }
+
+    #[test]
+    fn empty_poll_returns_empty_vec() {
+        let mut lossless = StreamChannel::new(ChannelKind::Lossless);
+        let mut lossy = StreamChannel::new(ChannelKind::Lossy);
+        let now = Instant::now();
+        assert!(lossless.poll(now).is_empty());
+        assert!(lossy.poll(now).is_empty());
+
+        // 只推音频帧时，无视频帧仍正确独立产出
+        lossy.push(frame(TRACK_AUDIO, 0, false), now);
+        let out = lossy.poll(now);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].header.track, TRACK_AUDIO);
     }
 }

@@ -60,49 +60,55 @@ pub fn yuv420_to_rgba_scaled(
         return None;
     }
     let (y_base, uv_base) = (0usize, y_plane);
-    let uv_row_gap = if matches!(layout, Yuv420Layout::SemiPlanar) {
-        // NV12：UV 交错单平面，行跨度即 uv_stride（= stride_y）
-        0
-    } else {
-        uv_size
-    };
 
-    let scale_x = f64::from(w) / f64::from(tw);
-    let scale_y = f64::from(h) / f64::from(th);
+    const FP: u64 = 12;
+    let scale_x = ((w as u64) << FP) / tw as u64;
+    let scale_y = ((h as u64) << FP) / th as u64;
     let mut out = Vec::with_capacity(tw as usize * th as usize * 4);
     for oy in 0..th {
-        // 中心对齐采样（与 rgba::rgba_scaled 同约定）；越界 clamp 防负权重外插
-        let sy = (f64::from(oy) + 0.5)
-            .mul_add(scale_y, -0.5)
-            .clamp(0.0, f64::from(h - 1));
-        let y0 = sy.floor() as usize;
+        // 中心对齐采样（与 rgba::rgba_scaled 同约定，12 位定点）；越界 clamp 防负权重外插
+        let sy = ((oy as u64) * scale_y)
+            .saturating_add(scale_y / 2)
+            .saturating_sub(1 << (FP - 1));
+        let y0 = ((sy >> FP) as usize).min(h as usize - 1);
         let y1 = (y0 + 1).min(h as usize - 1);
-        let ty = (sy - y0 as f64) as f32;
+        let fy = (sy & ((1 << FP) - 1)) as u32;
+        let w_fy = (1 << FP) - fy;
         let row0 = y_base + y0 * stride_y;
         let row1 = y_base + y1 * stride_y;
+        let uy = y0 / 2;
+        let uv_row_off = uv_base + uy * uv_stride;
         for ox in 0..tw {
-            let sx = (f64::from(ox) + 0.5)
-                .mul_add(scale_x, -0.5)
-                .clamp(0.0, f64::from(w - 1));
-            let x0 = sx.floor() as usize;
+            let sx = ((ox as u64) * scale_x)
+                .saturating_add(scale_x / 2)
+                .saturating_sub(1 << (FP - 1));
+            let x0 = ((sx >> FP) as usize).min(w as usize - 1);
             let x1 = (x0 + 1).min(w as usize - 1);
-            let tx = (sx - x0 as f64) as f32;
-            // 亮度对细节敏感：Y 双线性插值
-            let y00 = f32::from(buf[row0 + x0]);
-            let y01 = f32::from(buf[row0 + x1]);
-            let y10 = f32::from(buf[row1 + x0]);
-            let y11 = f32::from(buf[row1 + x1]);
-            let yf = y11
-                .mul_add(tx, y10 * (1.0 - tx))
-                .mul_add(ty, y01.mul_add(tx, y00 * (1.0 - tx)) * (1.0 - ty));
+            let fx = (sx & ((1 << FP) - 1)) as u32;
+            let w_fx = (1 << FP) - fx;
+
+            // 亮度对细节敏感：Y 12 位定点双线性插值
+            let y00 = u32::from(buf[row0 + x0]);
+            let y01 = u32::from(buf[row0 + x1]);
+            let y10 = u32::from(buf[row1 + x0]);
+            let y11 = u32::from(buf[row1 + x1]);
+            let top = (y00 * w_fx + y01 * fx + 2048) >> FP;
+            let bot = (y10 * w_fx + y11 * fx + 2048) >> FP;
+            let y_val = ((top * w_fy + bot * fy + 2048) >> FP) as i32;
+
             // 色度按 2x2 块采样（YUV420 语义；块坐标取插值格点左下）
-            let (uy, ux) = (y0 / 2, x0 / 2);
-            let u_off = uv_base + uy * uv_stride + ux;
+            let ux = x0 / 2;
             let (u, v) = match layout {
-                Yuv420Layout::SemiPlanar => (i32::from(buf[u_off]), i32::from(buf[u_off + 1])),
-                Yuv420Layout::Planar => (i32::from(buf[u_off]), i32::from(buf[u_off + uv_row_gap])),
+                Yuv420Layout::SemiPlanar => (
+                    i32::from(buf[uv_row_off + ux * 2]),
+                    i32::from(buf[uv_row_off + ux * 2 + 1]),
+                ),
+                Yuv420Layout::Planar => (
+                    i32::from(buf[uv_row_off + ux]),
+                    i32::from(buf[uv_row_off + ux + uv_size]),
+                ),
             };
-            let c = yf.round() as i32 - 16;
+            let c = y_val - 16;
             let d = u - 128;
             let e = v - 128;
             let r = clamp_u8((298 * c + 409 * e + 128) >> 8);
@@ -358,27 +364,35 @@ pub fn bgra_to_yuv420p_scaled(
     // 屏幕文本/UI 是屏幕共享的常态内容，最近邻缩放锯齿明显。
     let mut scaled = vec![0u8; dst_w * dst_h * 4];
     let dst_stride = dst_w * 4;
-    let scale_x = src_w as f64 / dst_w as f64;
-    let scale_y = src_h as f64 / dst_h as f64;
+    const FP: u64 = 12;
+    let scale_x = ((src_w as u64) << FP) / dst_w as u64;
+    let scale_y = ((src_h as u64) << FP) / dst_h as u64;
     for j in 0..dst_h {
-        let sy = ((j as f64 + 0.5) * scale_y - 0.5).clamp(0.0, (src_h - 1) as f64);
-        let y0 = sy.floor() as usize;
+        let sy = ((j as u64 * scale_y).saturating_add(scale_y / 2)).saturating_sub(1 << (FP - 1));
+        let y0 = ((sy >> FP) as usize).min(src_h - 1);
         let y1 = (y0 + 1).min(src_h - 1);
-        let ty = (sy - y0 as f64) as f32;
+        let fy = (sy & ((1 << FP) - 1)) as u32;
+        let w_fy = (1 << FP) - fy;
         let r0 = y0 * src_stride;
         let r1 = y1 * src_stride;
         for i in 0..dst_w {
-            let sx = ((i as f64 + 0.5) * scale_x - 0.5).clamp(0.0, (src_w - 1) as f64);
-            let x0 = sx.floor() as usize;
+            let sx =
+                ((i as u64 * scale_x).saturating_add(scale_x / 2)).saturating_sub(1 << (FP - 1));
+            let x0 = ((sx >> FP) as usize).min(src_w - 1);
             let x1 = (x0 + 1).min(src_w - 1);
-            let tx = (sx - x0 as f64) as f32;
+            let fx = (sx & ((1 << FP) - 1)) as u32;
+            let w_fx = (1 << FP) - fx;
             let d = j * dst_stride + i * 4;
+            let i00 = r0 + x0 * 4;
+            let i01 = r0 + x1 * 4;
+            let i10 = r1 + x0 * 4;
+            let i11 = r1 + x1 * 4;
             for c in 0..4 {
                 let top =
-                    bgra[r0 + x0 * 4 + c] as f32 * (1.0 - tx) + bgra[r0 + x1 * 4 + c] as f32 * tx;
+                    (u32::from(bgra[i00 + c]) * w_fx + u32::from(bgra[i01 + c]) * fx + 2048) >> FP;
                 let bot =
-                    bgra[r1 + x0 * 4 + c] as f32 * (1.0 - tx) + bgra[r1 + x1 * 4 + c] as f32 * tx;
-                scaled[d + c] = (top * (1.0 - ty) + bot * ty + 0.5) as u8;
+                    (u32::from(bgra[i10 + c]) * w_fx + u32::from(bgra[i11 + c]) * fx + 2048) >> FP;
+                scaled[d + c] = ((top * w_fy + bot * fy + 2048) >> FP) as u8;
             }
         }
     }

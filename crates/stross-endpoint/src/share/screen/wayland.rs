@@ -236,7 +236,7 @@ async fn feed_loop(
         // 到达节流点：写最新帧（尚未收到首帧时跳过）
         let now = Instant::now();
         if now < next_write {
-            tokio::task::yield_now().await;
+            tokio::time::sleep_until(next_write.into()).await;
             continue;
         }
         next_write = now + interval;

@@ -176,6 +176,7 @@ impl RelayState {
     ///
     /// 热路径：单次加锁（本流分片）完成「缓存更新 + 广播」，
     /// 避免逐帧整体 clone `StreamEntry`；不同流走不同分片锁，互不阻塞。
+    /// `Frame.payload` 为 `Bytes`（原子引用计数），关键帧缓存与广播均为 O(1) 零内存拷贝。
     pub(crate) fn forward(&self, id: &str, frame: Frame) {
         let mut guard = self.streams[Self::shard_for(id)].lock_poisoned();
         if let Some(entry) = guard.get_mut(id) {

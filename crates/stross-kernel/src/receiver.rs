@@ -8,7 +8,7 @@
 //! 音频轨解码后输出到设备（`AudioOut::Device`，D3 反向音频路径：电脑扬声器播手机
 //! 麦克风）或丢弃（`AudioOut::Discard`，无声卡环境可跑），统计块数。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -146,7 +146,7 @@ async fn watch_consume_loop_connected<C, S>(
         }
         match data.recv().await {
             Ok(Some(SessionPacket::Media(frame))) => {
-                inner.stats.lock_poisoned().received += 1;
+                inner.received.fetch_add(1, Ordering::Relaxed);
                 // 单次借用通道：push + poll 共用一个 &mut（热路径）
                 let adapter = mgr.adapter(stream_id, pick_rule, channel_kind);
                 adapter.push(frame, Instant::now());
@@ -207,6 +207,7 @@ pub struct Receiver {
 
 struct ReceiverInner {
     stopped: AtomicBool,
+    received: AtomicU64,
     stats: Mutex<ReceiveStats>,
     /// 协商定稿的解读档案（通信模式 v2）：装载对应解读模块
     /// （RealtimePacing / StrictOrdered）。
@@ -288,6 +289,7 @@ impl Receiver {
         let (frame_tx, frame_rx) = mpsc::channel::<RenderedFrame>(128);
         let inner = Arc::new(ReceiverInner {
             stopped: AtomicBool::new(false),
+            received: AtomicU64::new(0),
             stats: Mutex::new(ReceiveStats::default()),
             pick_rule: PickRule::Realtime,
             frames: Mutex::new(Some(frame_rx)),
@@ -317,6 +319,7 @@ impl Receiver {
         let (frame_tx, frame_rx) = mpsc::channel::<RenderedFrame>(128);
         let inner = Arc::new(ReceiverInner {
             stopped: AtomicBool::new(false),
+            received: AtomicU64::new(0),
             stats: Mutex::new(ReceiveStats::default()),
             pick_rule,
             frames: Mutex::new(Some(frame_rx)),
@@ -360,6 +363,7 @@ impl Receiver {
         let (frame_tx, frame_rx) = mpsc::channel::<Frame>(32);
         let inner = Arc::new(ReceiverInner {
             stopped: AtomicBool::new(false),
+            received: AtomicU64::new(0),
             stats: Mutex::new(ReceiveStats::default()),
             pick_rule: PickRule::Realtime,
             frames: Mutex::new(None),
@@ -387,7 +391,9 @@ impl Receiver {
 
     /// 当前统计。
     pub fn stats(&self) -> ReceiveStats {
-        self.inner.stats.lock_poisoned().clone()
+        let mut st = self.inner.stats.lock_poisoned().clone();
+        st.received = self.inner.received.load(Ordering::Relaxed);
+        st
     }
 
     /// Android 播放路径回写：Kotlin `PlaybackPlugin`（MediaCodec）每解码一帧

@@ -213,6 +213,26 @@ impl JitterBuffer {
         if self.awaiting_keyframe {
             return Vec::new();
         }
+        let Some(next) = self.next_seq else {
+            return Vec::new();
+        };
+        let idx = next as usize % self.cfg.capacity;
+        let ready = self.slots[idx]
+            .as_ref()
+            .is_some_and(|s| s.frame.header.seq == next);
+        if !ready {
+            let overdue = self
+                .last_progress
+                .is_some_and(|t| now.duration_since(t) > self.effective_wait());
+            if !overdue {
+                return Vec::new();
+            }
+            if let Some(h) = self.highest_seq
+                && seq_lt(h, next)
+            {
+                return Vec::new();
+            }
+        }
         let mut out = Vec::new();
         // 跳洞上限（= 槽位数）：一次 poll 内最多推进这么多空洞就退出本轮，
         // 防止「空洞持续 + overdue 恒真」时 `next_seq` 无限递增（u32 环绕）

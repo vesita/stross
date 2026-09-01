@@ -139,7 +139,11 @@ impl Interpreter for StrictOrdered {
     }
 
     fn poll(&mut self, _now: Instant) -> Vec<Frame> {
-        self.queue.drain(..).collect()
+        if self.queue.is_empty() {
+            Vec::new()
+        } else {
+            self.queue.drain(..).collect()
+        }
     }
 }
 
@@ -212,5 +216,15 @@ mod tests {
         assert_eq!(rt.poll(t).len(), 2, "实时模块独立产出");
         assert_eq!(so.poll(t).len(), 2, "严格顺序模块独立产出（seq=0 直通）");
         let _ = Duration::ZERO;
+    }
+
+    #[test]
+    fn empty_poll_returns_empty() {
+        let mut so = StrictOrdered::new();
+        let t = now();
+        assert!(so.poll(t).is_empty());
+        so.push(frame(0), t);
+        assert_eq!(so.poll(t).len(), 1);
+        assert!(so.poll(t).is_empty());
     }
 }

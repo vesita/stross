@@ -24,6 +24,7 @@ bytes.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
+memchr.workspace = true
 
 # cpal 仅在非 Android 目标启用：Android 播放走 Kotlin MediaCodec（1f-3），
 # cpal-android 会链接 -laaudio（NDK 27 无独立 aaudio 库导致交叉编译失败）。

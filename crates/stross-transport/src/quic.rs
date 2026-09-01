@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::sync::{Mutex, mpsc};
 
@@ -688,11 +688,14 @@ async fn read_msg(rx: &mut quinn::RecvStream) -> Result<Option<Bytes>, Transport
             "QUIC 消息长度超限（{len} > {MAX_MSG_LEN} 字节）"
         )));
     }
-    let mut buf = vec![0u8; len];
+    let mut buf = BytesMut::with_capacity(len);
+    // 安全保证：紧随其后的 read_exact 会立即完全覆写所有 len 字节；
+    // 若读取失败，buf 会被立即 drop，不会向外暴露任何未初始化内存。
+    unsafe { buf.set_len(len) };
     if let Err(e) = rx.read_exact(&mut buf).await {
         return map_read_err(e).map(|_| None);
     }
-    Ok(Some(buf.into()))
+    Ok(Some(buf.freeze()))
 }
 
 /// 把读错误映射为「干净结束」（对端 finish/reset/关闭连接）或真实错误。

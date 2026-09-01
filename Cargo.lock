@@ -5442,6 +5442,7 @@ dependencies = [
  "futures-util",
  "lamco-pipewire",
  "lamco-portal",
+ "memchr",
  "serde",
  "serde_json",
  "stross-proto",

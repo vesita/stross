@@ -41,32 +41,39 @@ impl AdtsSplitter {
     pub fn feed(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
         self.buf.extend_from_slice(data);
         let mut out = Vec::new();
-        loop {
-            // 同步：找下一个 0xFFF
-            if !is_adts_frame(&self.buf) {
-                if let Some(pos) = self.find_sync() {
-                    self.buf.drain(..pos);
+        let mut cursor = 0usize;
+        while cursor < self.buf.len() {
+            let slice = &self.buf[cursor..];
+            if !is_adts_frame(slice) {
+                if let Some(rel_pos) = find_sync(slice) {
+                    cursor += rel_pos;
                 } else {
-                    // 剩余不足 2 字节，等待更多数据
-                    self.buf.clear();
+                    // 没有找到同步字，若末尾字节为 0xFF 则保留最后 1 字节等待后续字节，否则丢弃全部
+                    if self.buf.last() == Some(&0xFF) {
+                        cursor = self.buf.len() - 1;
+                    } else {
+                        cursor = self.buf.len();
+                    }
                     break;
                 }
                 continue;
             }
-            match adts_frame_len(&self.buf) {
-                Some(len) if self.buf.len() >= len => {
-                    let frame = self.buf[..len].to_vec();
-                    self.buf.drain(..len);
+            match adts_frame_len(&self.buf[cursor..]) {
+                Some(len) if self.buf.len() - cursor >= len => {
+                    let frame = self.buf[cursor..cursor + len].to_vec();
+                    cursor += len;
                     out.push(frame);
                 }
-                Some(_) => break, // 帧不完整，等待更多数据
+                Some(_) => break, // 帧不完整，保留从 cursor 开始的数据等待更多输入
                 None => {
-                    // 伪同步头（长度字段非法 < 7）：跳过 1 字节继续找同步字，
-                    // 防止垃圾流让缓冲无限累积（正常流不会触发）
-                    self.buf.drain(..1);
+                    // 伪同步头（长度字段非法 < 7）：跳过 1 字节继续找同步字
+                    cursor += 1;
                     continue;
                 }
             }
+        }
+        if cursor > 0 {
+            self.buf.drain(..cursor);
         }
         out
     }
@@ -74,29 +81,37 @@ impl AdtsSplitter {
     /// 冲刷剩余的完整帧。
     pub fn finish(&mut self) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        while is_adts_frame(&self.buf) {
-            match adts_frame_len(&self.buf) {
-                Some(len) if self.buf.len() >= len => {
-                    let frame = self.buf[..len].to_vec();
-                    self.buf.drain(..len);
+        let mut cursor = 0usize;
+        while cursor < self.buf.len() && is_adts_frame(&self.buf[cursor..]) {
+            match adts_frame_len(&self.buf[cursor..]) {
+                Some(len) if self.buf.len() - cursor >= len => {
+                    let frame = self.buf[cursor..cursor + len].to_vec();
+                    cursor += len;
                     out.push(frame);
                 }
                 _ => break,
             }
         }
+        self.buf.clear();
         out
     }
+}
 
-    fn find_sync(&self) -> Option<usize> {
-        let mut i = 0;
-        while i + 1 < self.buf.len() {
-            if self.buf[i] == 0xFF && (self.buf[i + 1] & 0xF0) == 0xF0 {
-                return Some(i);
+fn find_sync(buf: &[u8]) -> Option<usize> {
+    let mut offset = 0usize;
+    while offset + 1 < buf.len() {
+        let rel = memchr::memchr(0xFF, &buf[offset..])?;
+        let pos = offset + rel;
+        if pos + 1 < buf.len() {
+            if (buf[pos + 1] & 0xF0) == 0xF0 {
+                return Some(pos);
             }
-            i += 1;
+            offset = pos + 1;
+        } else {
+            break;
         }
-        None
     }
+    None
 }
 
 #[cfg(test)]

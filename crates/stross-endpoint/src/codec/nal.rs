@@ -21,6 +21,9 @@ pub fn nal_type(nal: &[u8]) -> Option<u8> {
     nal.first().map(|b| b & 0x1f)
 }
 
+static NAL_START_CODE: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(&[0, 0, 1]));
+
 /// 有状态 Annex-B 切分器：喂入任意长度的字节块，产出完整的 NAL 单元（不含起始码）。
 ///
 /// 输入的字节可以按任意边界到达（管道读取天然如此）。
@@ -38,38 +41,28 @@ impl AnnexBSplitter {
     pub fn feed(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
         self.buf.extend_from_slice(data);
         let mut out = Vec::new();
-        // 流开头就是 3 字节起始码（00 00 01）：主循环从 i=3 起扫，
-        // 只能命中"结束于 ≥3 位置"的码；开头的码需在此先行识别。
-        // （4 字节码 00 00 00 01 的"1"在 buf[3]，由主循环在 i=3 命中。）
-        let mut prev =
-            if self.buf.len() >= 3 && self.buf[0] == 0 && self.buf[1] == 0 && self.buf[2] == 1 {
-                3
+        let mut prev = 0usize;
+        let mut search_pos = 0usize;
+        while let Some(rel) = NAL_START_CODE.find(&self.buf[search_pos..]) {
+            let match_idx = search_pos + rel;
+            let i = match_idx + 2;
+            // 起始码可能为 3 字节 (00 00 01) 或 4 字节 (00 00 00 01)
+            let code_start = if i >= 3 && self.buf[i - 3] == 0 {
+                i - 3
             } else {
-                0
+                i - 2
             };
-        let mut i = 3usize;
-        while i + 2 < self.buf.len() {
-            if self.buf[i - 2] == 0 && self.buf[i - 1] == 0 && self.buf[i] == 1 {
-                // 起始码可能为 3 字节 (00 00 01) 或 4 字节 (00 00 00 01)
-                let code_start = if i >= 3 && self.buf[i - 3] == 0 {
-                    i - 3
+            if code_start > prev {
+                let seg = code_start - prev;
+                if seg <= MAX_PENDING_NAL {
+                    out.push(self.buf[prev..code_start].to_vec());
                 } else {
-                    i - 2
-                };
-                if code_start > prev {
-                    let seg = code_start - prev;
-                    if seg <= MAX_PENDING_NAL {
-                        out.push(self.buf[prev..code_start].to_vec());
-                    } else {
-                        // 单段超大（伪起始码 / 垃圾流）：丢弃该段，不产出
-                        tracing::warn!("Annex-B 单段过大（{seg} 字节），已丢弃");
-                    }
+                    // 单段超大（伪起始码 / 垃圾流）：丢弃该段，不产出
+                    tracing::warn!("Annex-B 单段过大（{seg} 字节），已丢弃");
                 }
-                prev = i + 1;
-                i += 3;
-            } else {
-                i += 1;
             }
+            prev = i + 1;
+            search_pos = prev;
         }
         // 防呆：长时间无起始码的可疑数据累积超过上限时整体丢弃重新同步
         if prev == 0 && self.buf.len() > MAX_PENDING_NAL {
@@ -212,47 +205,29 @@ pub struct AvcConfig {
 /// 扫描起始码（00 00 01 / 00 00 00 01），收集 SPS(type 7) 与 PPS(type 8)；
 /// 同时用 [`sps_dimensions`] 解析 SPS 得尺寸。返回 `None` = 无 SPS（非法/截断）。
 pub fn extract_avc_config(au: &[u8]) -> Option<AvcConfig> {
-    // 扫描起始码（00 00 01 / 00 00 00 01），收集 SPS(type 7) 与 PPS(type 8)
     let mut csd = Vec::new();
     let mut saw_sps = false;
     let mut width = 0u32;
     let mut height = 0u32;
-    let mut i = 0usize;
-    while i + 3 <= au.len() {
-        let sc_len = if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
-            3
-        } else if i + 4 <= au.len()
-            && au[i] == 0
-            && au[i + 1] == 0
-            && au[i + 2] == 0
-            && au[i + 3] == 1
-        {
-            4
-        } else {
-            i += 1;
-            continue;
-        };
-        let hdr = i + sc_len;
-        if hdr >= au.len() {
+    let mut search_pos = 0usize;
+    while let Some(rel) = NAL_START_CODE.find(&au[search_pos..]) {
+        let match_idx = search_pos + rel;
+        let hdr = match_idx + 3;
+        if hdr > au.len() {
             break;
         }
         let kind = nal_type(&au[hdr..])?;
         // 找到该 NAL 的结尾（下一个起始码或帧尾）
-        let mut end = au.len();
-        let mut k = hdr + 1;
-        while k + 2 < au.len() {
-            let next = (au[k] == 0 && au[k + 1] == 0 && au[k + 2] == 1)
-                || (k + 3 < au.len()
-                    && au[k] == 0
-                    && au[k + 1] == 0
-                    && au[k + 2] == 0
-                    && au[k + 3] == 1);
-            if next {
-                end = k;
-                break;
+        let end = if let Some(next_rel) = NAL_START_CODE.find(&au[hdr..]) {
+            let next_match = hdr + next_rel;
+            if next_match > 0 && au[next_match - 1] == 0 {
+                next_match - 1
+            } else {
+                next_match
             }
-            k += 1;
-        }
+        } else {
+            au.len()
+        };
         match kind {
             NAL_SPS => {
                 csd.extend_from_slice(&au[hdr..end]);
@@ -268,7 +243,7 @@ pub fn extract_avc_config(au: &[u8]) -> Option<AvcConfig> {
             _ if saw_sps => break, // SPS 之后遇到 slice：SPS/PPS 已收集齐
             _ => {}
         }
-        i = end;
+        search_pos = end;
     }
     if !saw_sps || width == 0 || height == 0 {
         return None;

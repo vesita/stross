@@ -123,16 +123,21 @@ impl Interpreter for StrictOrdered {
         // 首帧 0 建立起点后，后续 0 视为重复丢弃？不：无损路径帧不携带
         // 有效 seq，此处仅对「显式携带 seq（有损语义）」做校验；seq=0
         // 全部直通（无损路径逐帧有序，重复不可能）。
-        if frame.header.seq != 0 {
-            match self.next_seq {
-                None => self.next_seq = Some(frame.header.seq.wrapping_add(1)),
-                Some(next) => {
-                    if frame.header.seq != next {
-                        self.dropped += 1;
-                        return;
-                    }
-                    self.next_seq = Some(next.wrapping_add(1));
+        // seq 单调校验（u32 回绕安全）：非连续 = 乱序/重复 → 防御式丢弃。
+        // 无损传输（QUIC/WS）seq 恒 0（协议帧头注释：无损路径取 0）——
+        // 初始为 None 时保持直通；一旦检测到非 0 seq 或已初始化 next_seq，进入严格单调校验。
+        match self.next_seq {
+            None => {
+                if frame.header.seq != 0 {
+                    self.next_seq = Some(frame.header.seq.wrapping_add(1));
                 }
+            }
+            Some(next) => {
+                if frame.header.seq != next {
+                    self.dropped += 1;
+                    return;
+                }
+                self.next_seq = Some(next.wrapping_add(1));
             }
         }
         self.queue.push_back(frame);
@@ -226,5 +231,17 @@ mod tests {
         so.push(frame(0), t);
         assert_eq!(so.poll(t).len(), 1);
         assert!(so.poll(t).is_empty());
+    }
+
+    #[test]
+    fn strict_ordered_u32_wrapping_safe() {
+        let mut so = StrictOrdered::new();
+        let t = now();
+        so.push(frame(u32::MAX), t);
+        so.push(frame(0), t);
+        so.push(frame(1), t);
+        let out = so.poll(t);
+        assert_eq!(out.len(), 3, "u32 回绕至 0 和 1 应顺利通过");
+        assert_eq!(so.dropped(), 0, "不应丢帧");
     }
 }

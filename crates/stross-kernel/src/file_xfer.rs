@@ -170,54 +170,92 @@ pub async fn receive_file_session(
     session: Box<dyn crate::transport::DataSession>,
     out_dir: &Path,
 ) -> anyhow::Result<ReceivedFile> {
+    use tokio::io::AsyncWriteExt;
     let mut meta: Option<FileMeta> = None;
-    let mut buf: Vec<u8> = Vec::new();
-    loop {
-        match session.recv().await {
-            Ok(Some(SessionPacket::Media(frame))) if frame.header.track == TRACK_FILE => {
-                if meta.is_none() {
-                    if !frame.header.is_config() {
-                        bail!("文件流缺首帧（期望 FileMeta CONFIG 帧）");
+    let mut tmp_file: Option<(std::path::PathBuf, tokio::fs::File)> = None;
+    let mut received_bytes: u64 = 0;
+
+    let res = async {
+        loop {
+            match session.recv().await {
+                Ok(Some(SessionPacket::Media(frame))) if frame.header.track == TRACK_FILE => {
+                    if meta.is_none() {
+                        if !frame.header.is_config() {
+                            bail!("文件流缺首帧（期望 FileMeta CONFIG 帧）");
+                        }
+                        let m = FileMeta::from_bytes(&frame.payload)
+                            .ok_or_else(|| anyhow::anyhow!("文件首帧（FileMeta）解析失败"))?;
+                        tokio::fs::create_dir_all(out_dir)
+                            .await
+                            .with_context(|| format!("创建输出目录失败 {}", out_dir.display()))?;
+                        // 临时文件流式写入，避免超大文件爆内存
+                        let tmp_name = format!(
+                            ".tmp-recv-{}-{}",
+                            std::process::id(),
+                            stross_proto::time::unix_secs()
+                        );
+                        let tmp_path = out_dir.join(tmp_name);
+                        let file = tokio::fs::File::create(&tmp_path)
+                            .await
+                            .with_context(|| format!("创建临时文件失败 {}", tmp_path.display()))?;
+                        meta = Some(m);
+                        tmp_file = Some((tmp_path, file));
+                        continue;
                     }
-                    let m = FileMeta::from_bytes(&frame.payload)
-                        .ok_or_else(|| anyhow::anyhow!("文件首帧（FileMeta）解析失败"))?;
-                    meta = Some(m);
-                    continue;
-                }
-                let m = meta.as_ref().expect("已设置");
-                buf.extend_from_slice(&frame.payload);
-                if buf.len() as u64 > m.size {
-                    bail!("文件超长：期望 {} 字节，实收 {}", m.size, buf.len());
-                }
-                if frame.header.is_end() {
-                    if buf.len() as u64 != m.size {
-                        bail!("文件不完整：期望 {} 字节，实收 {}", m.size, buf.len());
+                    let m = meta.as_ref().expect("已设置");
+                    let Some((ref tmp_path, ref mut file)) = tmp_file else {
+                        bail!("内部错误：临时接收句柄未初始化");
+                    };
+
+                    if !frame.payload.is_empty() {
+                        file.write_all(&frame.payload)
+                            .await
+                            .with_context(|| format!("写入临时文件失败 {}", tmp_path.display()))?;
+                        received_bytes += frame.payload.len() as u64;
                     }
-                    // 净化文件名：拒绝路径穿越（只取 basename）
-                    let name = Path::new(&m.name).file_name().map_or_else(
-                        || "received.bin".into(),
-                        |s| s.to_string_lossy().to_string(),
-                    );
-                    tokio::fs::create_dir_all(out_dir)
-                        .await
-                        .with_context(|| format!("创建输出目录失败 {}", out_dir.display()))?;
-                    let path = out_dir.join(&name);
-                    tokio::fs::write(&path, &buf)
-                        .await
-                        .with_context(|| format!("写文件失败 {}", path.display()))?;
-                    return Ok(ReceivedFile {
-                        name,
-                        size: m.size,
-                        path,
-                    });
+
+                    if received_bytes > m.size {
+                        bail!("文件超长：期望 {} 字节，实收 {}", m.size, received_bytes);
+                    }
+
+                    if frame.header.is_end() {
+                        if received_bytes != m.size {
+                            bail!("文件不完整：期望 {} 字节，实收 {}", m.size, received_bytes);
+                        }
+                        file.flush().await.context("刷盘临时文件失败")?;
+                        // 净化文件名：拒绝路径穿越（只取 basename）
+                        let name = Path::new(&m.name).file_name().map_or_else(
+                            || "received.bin".into(),
+                            |s| s.to_string_lossy().to_string(),
+                        );
+                        let target_path = out_dir.join(&name);
+                        tokio::fs::rename(tmp_path, &target_path)
+                            .await
+                            .with_context(|| {
+                                format!("重命名接收文件失败 {}", target_path.display())
+                            })?;
+                        return Ok(ReceivedFile {
+                            name,
+                            size: m.size,
+                            path: target_path,
+                        });
+                    }
                 }
+                Ok(Some(SessionPacket::Media(_))) => {} // 其它轨（视频/音频）忽略
+                Ok(Some(SessionPacket::Control(_))) => {}
+                Ok(None) => bail!("流提前关闭，文件不完整（实收 {} 字节）", received_bytes),
+                Err(e) => bail!("观看连接异常: {e}"),
             }
-            Ok(Some(SessionPacket::Media(_))) => {} // 其它轨（视频/音频）忽略
-            Ok(Some(SessionPacket::Control(_))) => {}
-            Ok(None) => bail!("流提前关闭，文件不完整（实收 {} 字节）", buf.len()),
-            Err(e) => bail!("观看连接异常: {e}"),
         }
     }
+    .await;
+
+    // 发生错误时清理残留的临时文件
+    if let (Err(_), Some((tmp_path, file))) = (&res, tmp_file) {
+        drop(file);
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+    }
+    res
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 //! 中继 HTTP API 的**官方客户端**（与 server 侧 [`super::api`] 同 crate，
-//! 响应契约单一真源；纯 raw TCP + serde_json，零新增依赖，平台无关）。
+//! 响应契约单一真源；基于 reqwest 标准库封装，支持连接复用与完善的 HTTP 语义）。
 //!
 //! 消费方：CLI `devices` / `adb status` 探测、`endpoint ls` 目录拉取、
 //! 文件泵等观看者轮询（stross-app `file_xfer`）。任何一处解析 `/api/*`
@@ -8,13 +8,12 @@
 //! 兼容性：`/api/streams` 历史上有「裸数组」与「`{streams:[...]}`」两种形态
 //! （前端双形态兼容），此处统一收敛为 [`StreamsResp`] 一次解析。
 
-use std::time::Duration;
-
 use anyhow::{Context, bail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
+use std::time::Duration;
 use stross_proto::message::StreamInfo;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// `/api/info` 中继入口信息（各传输端口）。
 #[derive(Debug, Clone, Deserialize)]
@@ -50,87 +49,107 @@ impl StreamsResp {
     }
 }
 
-/// 极简 HTTP GET（raw TCP 一发一收）：返回响应体原文。
-/// `url` 接受 `ws://host:port/path` 或 `http://host:port/path` 基址+路径。
+/// 进程内全局复用的 HTTP 客户端实例（连接池 + 零多余资源创建）。
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .tcp_nodelay(true)
+        .build()
+        .expect("创建 reqwest 客户端失败")
+});
+
+fn http_client() -> &'static reqwest::Client {
+    &HTTP_CLIENT
+}
+/// 规范化中继 URL：支持 `ws://` / `wss://` / `http://` / `https://` 格式转换为 HTTP URL。
+fn normalize_url(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else if let Some(rest) = url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else {
+        url.to_string()
+    }
+}
+
+/// 发起标准 HTTP GET 请求并返回文本响应体。
 pub async fn http_get(url: &str, timeout: Duration) -> anyhow::Result<String> {
-    let (host, port, path) = parse_url(url)?;
-    let stream = tokio::time::timeout(
-        timeout,
-        tokio::net::TcpStream::connect((host.as_str(), port)),
-    )
-    .await
-    .context(format!("连接失败 {url}"))??;
-    stream.set_nodelay(true).ok();
-    let mut stream = stream;
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: */*\r\n\r\n"
-    );
-    tokio::time::timeout(timeout, stream.write_all(req.as_bytes()))
+    let target = normalize_url(url);
+    let resp = http_client()
+        .get(&target)
+        .timeout(timeout)
+        .send()
         .await
-        .context("发送请求失败")??;
-    let mut buf = Vec::new();
-    tokio::time::timeout(timeout, stream.read_to_end(&mut buf))
+        .with_context(|| format!("请求失败 {url}"))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
         .await
-        .context("读取响应失败")??;
-    let body = String::from_utf8_lossy(&buf);
-    Ok(body.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+        .with_context(|| format!("读取响应体失败 {url}"))?;
+
+    if !status.is_success() {
+        let msg = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string))
+            .unwrap_or_else(|| body.clone());
+        bail!("HTTP {}: {}", status.as_u16(), msg);
+    }
+    Ok(body)
 }
 
-/// GET + JSON 反序列化（`T` 为响应契约类型）。
+/// 发起 GET 请求并自动反序列化 JSON（`T` 为响应契约类型）。
 pub async fn get_json<T: DeserializeOwned>(url: &str, timeout: Duration) -> anyhow::Result<T> {
-    let body = http_get(url, timeout).await?;
-    serde_json::from_str(&body).context(format!("响应解析失败 {url}"))
+    let target = normalize_url(url);
+    let resp = http_client()
+        .get(&target)
+        .timeout(timeout)
+        .send()
+        .await
+        .with_context(|| format!("请求失败 {url}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let msg = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string))
+            .unwrap_or(body);
+        bail!("HTTP {}: {}", status.as_u16(), msg);
+    }
+
+    resp.json::<T>()
+        .await
+        .with_context(|| format!("响应 JSON 解析失败 {url}"))
 }
 
-/// POST JSON 请求体（raw TCP），按 `HTTP 状态 + {error}` 语义返回：
-/// 200 → 反序列化 `T`；其它状态 → bail（优先提取响应体 `error` 字段）。
+/// POST JSON 请求体，并自动处理 HTTP 状态码与响应反序列化。
 pub async fn post_json<T: DeserializeOwned, B: Serialize>(
     url: &str,
     body: &B,
     timeout: Duration,
 ) -> anyhow::Result<T> {
-    let (host, port, path) = parse_url(url)?;
-    let payload = serde_json::to_vec(body)?;
-    let mut stream = tokio::time::timeout(
-        timeout,
-        tokio::net::TcpStream::connect((host.as_str(), port)),
-    )
-    .await
-    .context(format!("连接失败 {url}"))??;
-    stream.set_nodelay(true).ok();
-    let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        payload.len()
-    );
-    tokio::time::timeout(timeout, stream.write_all(head.as_bytes()))
+    let target = normalize_url(url);
+    let resp = http_client()
+        .post(&target)
+        .json(body)
+        .timeout(timeout)
+        .send()
         .await
-        .context("发送请求头失败")??;
-    tokio::time::timeout(timeout, stream.write_all(&payload))
-        .await
-        .context("发送请求体失败")??;
-    let mut buf = Vec::new();
-    tokio::time::timeout(timeout, stream.read_to_end(&mut buf))
-        .await
-        .context("读取响应失败")??;
-    let text = String::from_utf8_lossy(&buf);
-    let (status_line, rest) = text
-        .split_once("\r\n")
-        .ok_or_else(|| anyhow::anyhow!("响应格式非法"))?;
-    let body_json = rest.split("\r\n\r\n").nth(1).unwrap_or("");
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("500")
-        .parse::<u16>()
-        .unwrap_or(500);
-    if status != 200 {
-        let msg = serde_json::from_str::<serde_json::Value>(body_json)
+        .with_context(|| format!("请求失败 {url}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body_str = resp.text().await.unwrap_or_default();
+        let msg = serde_json::from_str::<serde_json::Value>(&body_str)
             .ok()
             .and_then(|v| v["error"].as_str().map(str::to_string))
-            .unwrap_or_else(|| "未知错误".into());
-        bail!("HTTP {status}: {msg}");
+            .unwrap_or(body_str);
+        bail!("HTTP {}: {}", status.as_u16(), msg);
     }
-    serde_json::from_str(body_json).context("响应 JSON 解析失败")
+
+    resp.json::<T>()
+        .await
+        .with_context(|| format!("响应 JSON 解析失败 {url}"))
 }
 
 /// `/api/info` 探测（不可达返回 Err；调用方决定是否忽略）。
@@ -158,45 +177,23 @@ pub async fn stream_watchers(
         .map(|s| s.watchers)
 }
 
-/// URL 拆解：`ws://` / `http://` 前缀（可见 base 兼收），路径缺省 `/`，
-/// 端口缺省 80。
-fn parse_url(url: &str) -> anyhow::Result<(String, u16, String)> {
-    let rest = url
-        .strip_prefix("ws://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| anyhow::anyhow!("非法 HTTP 基址: {url}"))?;
-    let (host_port, path) = match rest.split_once('/') {
-        Some((hp, p)) => (hp, format!("/{p}")),
-        None => (rest, "/".into()),
-    };
-    let (host, port) = match host_port.rsplit_once(':') {
-        Some((h, p)) => (
-            h.to_string(),
-            p.parse::<u16>().map_err(|_| anyhow::anyhow!("端口非法"))?,
-        ),
-        None => (host_port.to_string(), 80),
-    };
-    Ok((host, port, path))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parses_ws_and_http_bases() {
+    fn normalizes_ws_and_http_urls() {
         assert_eq!(
-            parse_url("ws://192.168.1.5:18777/api/streams").unwrap(),
-            ("192.168.1.5".into(), 18777, "/api/streams".into())
+            normalize_url("ws://192.168.1.5:18777/api/streams"),
+            "http://192.168.1.5:18777/api/streams"
         );
         assert_eq!(
-            parse_url("http://127.0.0.1:41355/api/negotiator/request").unwrap(),
-            ("127.0.0.1".into(), 41355, "/api/negotiator/request".into())
+            normalize_url("wss://secure.local/api/info"),
+            "https://secure.local/api/info"
         );
-        // 无路径 → 根；无端口 → 80
         assert_eq!(
-            parse_url("ws://example.local").unwrap(),
-            ("example.local".into(), 80, "/".into())
+            normalize_url("http://127.0.0.1:41355/api/negotiator/request"),
+            "http://127.0.0.1:41355/api/negotiator/request"
         );
     }
 
@@ -217,14 +214,9 @@ mod tests {
 
     #[tokio::test]
     async fn unreachable_host_errors_not_panics() {
-        // 端口 9 不可达：应 Err 而非 panic（raw TCP 路径的健壮性回归）
+        // 端口 9 不可达：应 Err 而非 panic（reqwest 错误传播正常）
         assert!(
             http_get("ws://127.0.0.1:9/api/streams", Duration::from_millis(500))
-                .await
-                .is_err()
-        );
-        assert!(
-            info("127.0.0.1", 9, Duration::from_millis(500))
                 .await
                 .is_err()
         );

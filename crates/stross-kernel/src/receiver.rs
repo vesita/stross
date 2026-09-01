@@ -106,7 +106,9 @@ async fn watch_consume_loop<C, S>(
     let data = match connect_with_proxy(&relay_url, &stream_id, local_proxy.as_ref()).await {
         Ok(d) => d,
         Err(e) => {
-            inner.stats.lock_poisoned().error = Some(e.to_user_string());
+            let mut st = inner.stats.lock_poisoned();
+            st.error = Some(e.to_user_string());
+            st.running = false;
             return;
         }
     };
@@ -168,6 +170,7 @@ async fn watch_consume_loop_connected<C, S>(
         }
     }
     sync(); // 最终同步
+    inner.stats.lock_poisoned().running = false;
 }
 
 /// 观看连接：先直连 `relay_url`；失败且提供 `local_proxy` 时，

@@ -456,9 +456,11 @@ impl Kernel {
     ///
     /// share 在注册表锁**外**调用（端点实现会再次访问内核），持锁回调会死锁。
     pub fn on_endpoint_subscribed(&self, app: Arc<Self>, endpoint_id: &str, ctx: &SubscribeCtx) {
-        self.registry
-            .lock_poisoned()
-            .on_subscribed(&app, endpoint_id, ctx);
+        // 严格出锁调用：提取端点 Arc 后立即释放注册表锁，防止端点实现重入内核引发死锁
+        let ep = self.registry.lock_poisoned().endpoint_arc(endpoint_id);
+        if let Some(ep) = ep {
+            ep.share(app, ctx.clone());
+        }
     }
 
     /// 端点清单查询（订阅握手 / 目录 API 用）。
@@ -614,7 +616,7 @@ impl Kernel {
         // 拆除本机会话（会话生命周期 = 流生命周期；远程 push 会话不在本机，
         // SessionNotFound 忽略）
         if self.has_session(stream_id) {
-            let _ = self.teardown(stream_id);
+            let _ = self.force_teardown(stream_id);
         }
     }
 
@@ -700,7 +702,7 @@ impl Kernel {
                         // 3) 本机会话随流结束拆除（无 PIN 会话直接放行；
                         //    远程 push 会话不在本机 → SessionNotFound 忽略）
                         if me.has_session(&stream_id) {
-                            let _ = me.teardown(&stream_id);
+                            let _ = me.force_teardown(&stream_id);
                         }
                         KernelEvent::StreamEnded {
                             session_id: stream_id,
@@ -988,9 +990,11 @@ impl Kernel {
         }
     }
 
-    /// 拆除会话（同样受访问码鉴权约束）；已接入数据面时撤销流预授权。
-    pub fn teardown(&self, id: &str) -> Result<()> {
-        self.sessions.require_authorized(id)?;
+    /// 内部拆除会话：可选择是否强制校验访问码鉴权（数据面流结束自愈清理 vs 用户指令）。
+    fn teardown_internal(&self, id: &str, check_auth: bool) -> Result<()> {
+        if check_auth {
+            self.sessions.require_authorized(id)?;
+        }
         self.sessions.remove(id);
         self.auth.set_code(id, None); // 清理访问码
         self.share_tokens.lock_poisoned().remove(id); // 凭证随会话失效（防重放）
@@ -1003,6 +1007,16 @@ impl Kernel {
             session_id: id.to_string(),
         });
         Ok(())
+    }
+
+    /// 拆除会话（受访问码鉴权约束）；已接入数据面时撤销流预授权。
+    pub fn teardown(&self, id: &str) -> Result<()> {
+        self.teardown_internal(id, true)
+    }
+
+    /// 强制拆除会话（内部生命周期收尾，不受访问码约束）。
+    pub fn force_teardown(&self, id: &str) -> Result<()> {
+        self.teardown_internal(id, false)
     }
 
     /// 订阅内核事件。
@@ -1931,6 +1945,25 @@ mod tests {
         assert!(k.teardown(&s.id).is_ok());
         // 会话不存在
         assert!(k.authorize("nope", Some("1234")).is_err());
+    }
+
+    #[tokio::test]
+    async fn force_teardown_cleans_pin_session_without_auth() {
+        let k = Kernel::new(Platform::Desktop);
+        let prefs = SessionPrefs {
+            profile: ReliabilityProfile::Lossy,
+            preferred_transport: None,
+            access_code: Some("8888".into()),
+            title: "受保护会话".into(),
+        };
+        let s = k.create_session("a", &["b".into()], &prefs).unwrap();
+        assert!(s.requires_pin);
+        // 普通 teardown 因未授权被拒绝
+        assert!(k.teardown(&s.id).is_err());
+        assert!(k.session(&s.id).is_some());
+        // 内部生命周期 force_teardown 无阻碍彻底清理会话
+        assert!(k.force_teardown(&s.id).is_ok());
+        assert!(k.session(&s.id).is_none());
     }
 
     #[tokio::test]

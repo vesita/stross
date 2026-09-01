@@ -20,6 +20,7 @@ futures-util.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 axum.workspace = true
+reqwest.workspace = true
 # QUIC 链路 peer 循环（通信模式 v2 Phase C 连接复用：中继侧按 quinn 流类型
 # 驱动媒体流收发；传输层 stross-transport 仍是 QUIC 的实现属主）。
 quinn.workspace = true

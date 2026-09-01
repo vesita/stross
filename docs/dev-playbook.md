@@ -204,13 +204,14 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
   - **测试方法坑**：手动 CDP 调 `startReceiveLink()` 只起手机本地接收器，**不触发 PC
     `on_subscribed`→`share`→push**（端点 idle、中继报「流不存在」）。必须走**真实订阅按钮**
     （`subscribe-endpoint` + `#sub-confirm-btn`）。`[data-endpoint="screen:0"]` 的冒号要加引号。
-  - **移动端 `feedVideo` 仍走 base64+JSON 事件**：与桌面 `Channel<Vec<u8>>` 不对称，是降低
-    IPC/前端开销的基建优化（对高帧率更稳），但**不会提升静止屏帧率**。
-  - pipewire 日志偶见 `SPA_CHUNK_FLAG_CORRUPTED`（未定论，待查）。
-  - **Android 音频待复测**：订阅系统声音后手机 `feedAudio` 大量上报但 `audioBlocks/audioBlocksIn` 恒 0；
-    logcat 反复 `AudioTrackShared: Track invalidated` + `writeFramesHelper getNextBuffer failed -11`；
-    且（08-30）`PlaybackPlugin.startAudioTrack` 的 `AudioTrack.write` 有 native crash 栈。疑似 WIP 新增
-    低延迟 AudioTrack（`FLAG_LOW_LATENCY` + `PERFORMANCE_MODE_LOW_LATENCY` + `minBuf*2`）在这台设备
-    兼容问题，需稳定音频源复测确认是否新回归（本轮 PC 系统声音源静默，未定论）。
+- **UI 状态机（FSM）响应式架构**：
+  - `web/app/state.ts` 集中维护 `uiFSM` 状态与 `dispatchUIAction` 派发中心；
+  - 应用阶段 `AppStage`（`idle`/`managing`/`streaming`/`error`）与播放器模式 `PlayerDisplayMode`（`empty`/`buffering`/`videoOnly`/`audioOnly`/`audioVisualMix`）严格由链路活跃度与视图模式转移；
+  - `ui.ts` 经 `subscribeUIFSM` 订阅全量状态转移并响应式同步 DOM（禁止在业务分支散落 ad-hoc 的 DOM 显隐操作）。
+- **Android 原生播放器最佳实践与健壮性**：
+  - **常亮管理**：`PlaybackPlugin.kt` 在 `startPlayback` 时通过 `activity.runOnUiThread` 设置 `FLAG_KEEP_SCREEN_ON`，`stopPlayback` 时重置；
+  - **音频焦点与 Ducking**：`AudioManager` & `AudioFocusRequest`（API 26+）监听焦点变化，电话/通知打断时音量自动 Duck 至 25%，焦点恢复自动拉回 100%；
+  - **解码器安全降级**：`createVideoDecoder` 首选 `low-latency=1` 与 `priority=0` 配置，若设备厂商驱动抛异常，自动回退标准 `MediaFormat` 配置，杜绝启动崩溃；
+  - **全屏智能自适应旋转**：前端在全屏时根据视频真实宽高比调用 `set_screen_orientation`，横屏内容自动旋转 `SENSOR_LANDSCAPE`，竖屏内容保持 `SENSOR_PORTRAIT`，退出全屏恢复 `UNSPECIFIED`。
 - Android 屏幕端点（MediaProjection FGS）、摄像头（CameraX）、剪贴板（E 阶段）待扩充。
 - 协议优化排队：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕。

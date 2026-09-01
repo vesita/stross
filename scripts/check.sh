@@ -10,6 +10,9 @@
 set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
+if [ -d "$HOME/.local/share/fnm/node-versions/v24.19.0/installation/bin" ]; then
+  export PATH="$HOME/.local/share/fnm/node-versions/v24.19.0/installation/bin:$PATH"
+fi
 
 PASS=0
 step() { printf '\n\033[1;34m== %s ==\033[0m\n' "$*"; }

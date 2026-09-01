@@ -21,9 +21,10 @@
 | [protocol.md](protocol.md) | 线上协议：24 字节 v2 帧头 + JSON 控制消息 | 权威 |
 | [android-build.md](android-build.md) | **Android 构建实测固化（JDK/工具链/SDK/网络坑 唯一真源）** | 权威 |
 | [platforms.md](platforms.md) | 平台构建与使用（Linux/Windows/Android 快速路径） | 权威（JDK 详见 android-build） |
-| [roadmap.md](roadmap.md) | 路线图（已完成为主 + 待办） | 权威 |
+| [roadmap.md](roadmap.md) | 路线图（已完成项、架构演进与后续待办） | 权威 |
 | [iteration-plan.md](iteration-plan.md) | 迭代日志（轮次索引 + 待办排期；详细记录见 git 历史） | 记录 |
-| [dev-playbook.md](dev-playbook.md) | AI 速查卡：构建时序坑 / 前端约定 / 真机套路 / 门禁 | 记录（压缩上下文用） |
+| [dev-playbook.md](dev-playbook.md) | AI 速查卡：构建时序坑 / 前端约定 / 真机套路 / 门禁 / FSM 状态机与 Android 播放规范 | 记录（压缩上下文用） |
+| [../dev-notes/README.md](../dev-notes/README.md) | **会话踩坑原料库**：真实排查过程、性能瓶颈定位与根因归档 | 记录 |
 | ~~stress-test-report.md~~ | 压力测试记录（已并入历史，见 git） | 已删除 |
 | ~~mdns-android-finding-debug.md~~ | mDNS 排查记录（结论已并入 AGENTS.md §6 / dev-playbook §5） | 已删除 |
 | ~~closed-loop-plan.md~~ | 运行闭环整改计划（P0-1 已落地；未决项并入 iteration-plan 排期） | 已删除 |
@@ -41,6 +42,7 @@
 - 想改跨壳层类型：`stross-types`
 - 想改 Android 构建：先读 [android-build.md](android-build.md)（唯一真源，AGENTS.md/platforms 只引用）
 - 压缩对话 / 恢复上下文：读 [dev-playbook.md](dev-playbook.md)
+- 查阅历史踩坑与性能调优过程：读 [dev-notes/](../dev-notes/README.md)
 
 ## 文档维护规则（去重与演进）
 

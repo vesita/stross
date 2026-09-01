@@ -169,16 +169,16 @@ crates/stross-endpoint/src/playback/）：
    音频 → ffmpeg 子进程解码（AAC → PCM）+ cpal 输出扬声器（D6：与采集侧同一
    ffmpeg 二进制与子进程编排模式，零新增原生构建依赖）。
 
-Android 接收（B7 Rust 化）：编码帧 → Kotlin `PlaybackPlugin`（**MediaCodec/
-AudioTrack 系统 API 薄壳**，`feedVideo` 入队立即返回 + 独立解码线程 + 短超时）；
-解码输出 YUV 经 **JNI 直传 Rust**（stross-gui `mobile_jni.rs`）——SPS/csd 解析
-（`stross_endpoint::codec::nal`）、YUV→RGBA 缩放（`stross_endpoint::convert::yuv`）、base64 事件
-`receive-frame`、解码统计回写全部在 Rust 完成，Java 不再做位级解析与逐像素
-转换（四重瓶颈根治：同步解码 / 纯 Java 像素循环 / 5s 阻塞 / JSON 数字数组事件）。
+Android 接收（B7 Rust 化 + 原生播放器最佳实践）：
+1. 编码帧 → Kotlin `PlaybackPlugin`（**MediaCodec/AudioTrack 系统 API 薄壳**，`feedVideo`/`feedAudio` 入队立即返回 + 独立解码线程 + 零阻塞通道）；
+2. 播放状态生命周期管理：
+   - `FLAG_KEEP_SCREEN_ON` 播放期间 UI 线程常亮控制，停止接收自动释放；
+   - `AudioFocusRequest`（API 26+）监听音频焦点丢失与 `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK`，收到通知/通话自动降至 25% 音量，恢复焦点平滑归位；
+   - MediaCodec 配置 `low-latency=1` / `priority=0`，AudioTrack 配置 `FLAG_LOW_LATENCY` 最小化系统缓冲区延迟；
+3. 解码输出 YUV 经 **JNI 直传 Rust**（stross-gui `mobile_jni.rs`）——SPS/csd 解析（`stross_endpoint::codec::nal`）、YUV→RGBA 定点双线性缩放（`stross_endpoint::convert::yuv`），16 字节头部 `STRF` 帧打包经 Channel 零拷贝交付前端；
+4. 状态机驱动（FSM）全生命周期驱动：前端根据链路活跃动态转移 `empty` / `buffering` / `videoOnly` / `audioOnly` / `audioVisualMix` 模式。
 
-> 中继侧"新观众先收最近关键帧 + Lagged 重对齐"机制（§4）与接收端抖动缓冲互补，
-> 保证随时接入可解码。
-
+> 中继侧"新观众先收最近关键帧 + Lagged 重对齐"机制（§4）与接收端抖动缓冲互补，保证随时接入可解码。
 ## 6. 内核门面（crates/stross-kernel）
 
 ### 推流引擎（engine.rs）
@@ -243,3 +243,4 @@ UI 层（桌面 / Android）只把 `invoke` 命令转发到这里，因此命令
 | SRT/QUIC 固定端口（33462/33464） | 防火墙只需放行已知端口（精确收窄，不放行整个网段）；被占用时回退随机并按实际端口放行 |
 | ufw 自检 + polkit 一键放行 | `firewall_status` 只读自检（无权限）；`firewall_allow` 经 polkit 弹一次系统授权自动加精确规则，避免手敲 sudo |
 | 性能敏感逻辑一律 Rust | 编解码/缩放/解析/转换/凭证签发校验/防火墙检测全在 Rust；前端 JS 只做 UI 与轻量 IO；Kotlin 只留系统 API 薄壳 |
+| UI 状态机统一收敛 | 弃用松散的 DOM 查询与布尔标志，采用状态机（FSM）派发与响应式监听，确保生命周期确定性 |

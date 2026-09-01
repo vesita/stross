@@ -42,18 +42,22 @@
 > 目前不可行（推流锚定本机即可被对方发现接收）；远程推流需跨机会话协商
 > （见 P2 流解耦 / M3 跨机事件同步协议）。
 
-### P1 手机端原生播放器
+### P1 手机端与桌面原生播放器演进
 
-> D1 已移除浏览器观看页（无 iframe 依赖）；本阶段为手机端**原生接收**播放器
-> （与 iteration-plan 阶段 D1「Android GUI」合并推进）。播放链路 B7 已 Rust 化：
-> Android「点流即看」已通（MediaCodec 解码 + AudioTrack 播放 + Rust 侧
-> YUV→RGBA/事件规整，见 iteration-plan B7）。
+> D1 已移除浏览器观看页（无 iframe 依赖）；本阶段为原生播放体验优化与 Android 标准播放器最佳实践落地。
 
 - [x] Android GUI 原生接收：点流即看（MediaCodec 解码 + AudioTrack 播放），
-      播放链路 Rust 化（B7）：JNI 直传 Rust 完成 YUV→RGBA 缩放与 base64 事件
-- [ ] 播放器可配置：选流、画质、缓冲策略、断线重连
+      播放链路 Rust 化（B7）：JNI 直传 Rust 完成 YUV→RGBA 缩放与 16 字节二进制头 Channel 帧传输
+- [x] Android 播放器标准规范：
+      - `FLAG_KEEP_SCREEN_ON` 播放期间常亮管理，停止接收自动释放；
+      - `AudioManager` & `AudioFocusRequest`（API 26+）智能音频焦点接管与 Ducking 避让（通知/通话自动降音至 25%，结束后平滑恢复）；
+      - `MediaCodec` 配置 `low-latency=1` 与 `priority=0`，AudioTrack 配置 `FLAG_LOW_LATENCY` 极致降低播放延迟
+- [x] 全屏智能自适应旋转：根据解码帧真实宽高比自动切换 `SENSOR_LANDSCAPE` 或 `SENSOR_PORTRAIT`，退出全屏恢复 `UNSPECIFIED`
+- [x] 智能播放器手势与 HUD：左屏滑动手势调节亮度、右屏滑动调节音量、双击画面比例切换、双指缩放平移
+- [x] AI 智能拓扑布局与实时遥测诊断：单流/音画混播/PiP/纯音频工作台拓扑感知，FPS 4 次滑动平均滤波、抖动与丢包评估
+- [x] UI 状态机（FSM）架构：统一驱动 `idle` / `managing` / `streaming` 与 `empty` / `buffering` / `videoOnly` / `audioOnly` / `audioVisualMix` 状态转移
+- [ ] 播放器可配置：画质档位动态切换、缓冲深度调节、自动断线重连重试策略
 - [ ] 为独立接收 App（stross-viewer）打基础
-
 ### P2 流解耦
 
 - [x] 发送/接收角色解耦（随 P0 免先连落地）：推流端与观看端各自独立启动、
@@ -71,17 +75,14 @@
 - [ ] 数据面/控制面通道分离：媒体帧（大流量）与控制元数据
       （流列表/状态/心跳）分通道传输
 
-### 通信模式 v2（数据衔接层 + 流级 ID 复用）——设计提案，见 comm-mode-v2.md
+### 通信模式 v2（数据衔接层 + 流级 ID 复用）——已全量落地，见 comm-mode-v2.md
 
-> 目标：控制面协商协议/处理方法并约定 `stream_id`；数据面每包只带 id 复用
-> 共享连接；kernel 按 id 装载「传输模块（共享）+ 解读模块（per-stream）」。
-> 直接解决：屏幕+系统声音并发同播（接收端多流）、停一条流不级联、分享/订阅模型简化。
-> 允许破坏性更新 → 帧头 v2 可裁字段（codec/track 移到协商结果）。
+> 控制面协商协议/处理方法并约定 `stream_id`；数据面每包只带 id 复用共享连接；kernel 按 id 装载「传输模块（共享）+ 解读模块（per-stream）」。
+> 解决了屏幕+系统声音并发同播（接收端多流）、停一条流不级联、分享/订阅模型简化。
 
 - [x] **Phase A（小）**：端点档案（`transport_profile` / `pick_rule`）+ 协商字段 ✅
 - [x] **Phase B（中）**：pick 规则层 `Interpreter` trait（`RealtimePacing` / `StrictOrdered`）+ 装载 ✅
-- [ ] **Phase C（大）**：QUIC 流级 ID 复用（一条连接 N 媒体流）+ 中继 demux + 接收端多流/混音
-
+- [x] **Phase C（大）**：QUIC 流级 ID 复用（一条连接 N 媒体流）+ 中继 demux + 接收端多流并发同播/独立停流 ✅
 ### P3 音视频同步（AV Sync）
 
 - [ ] 现状分析：桌面端视频/音频是两个独立 ffmpeg 进程，各用

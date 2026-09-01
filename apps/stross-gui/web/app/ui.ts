@@ -428,8 +428,25 @@ function updateCanvasTransform(): void {
     if (playerZoom === 1.0 && panX === 0 && panY === 0) {
       canvas.style.transform = '';
     } else {
-      canvas.style.transform = `scale(${playerZoom}) translate(${panX}px, ${panY}px)`;
+      canvas.style.transform = `scale(${playerZoom}) translate3d(${panX}px, ${panY}px, 0)`;
     }
+  }
+}
+
+let fsInactivityTimer: number | undefined = undefined;
+
+/** 重置全屏控制栏自动隐藏倒计时。 */
+function resetFsInactivityTimer(): void {
+  const wrap = $('recv-canvas-wrap');
+  if (!wrap) return;
+  wrap.classList.remove('controls-hidden');
+  clearTimeout(fsInactivityTimer);
+  if (fsActive) {
+    fsInactivityTimer = window.setTimeout(() => {
+      if (fsActive) {
+        wrap.classList.add('controls-hidden');
+      }
+    }, 3000);
   }
 }
 function initPlayerGestures(): void {
@@ -443,16 +460,17 @@ function initPlayerGestures(): void {
   let initialZoom = 1.0;
   let lastTapTime = 0;
 
+  // 全屏交互时指针移动重置自动隐藏倒计时
+  wrap.addEventListener('mousemove', () => resetFsInactivityTimer());
+  wrap.addEventListener('pointerdown', () => resetFsInactivityTimer());
+
   wrap.addEventListener('touchstart', (e: TouchEvent) => {
+    resetFsInactivityTimer();
     if (e.touches.length === 1) {
       const now = Date.now();
       if (now - lastTapTime < 300) {
-        if (playerZoom !== 1.0) {
-          playerZoom = 1.0;
-          panX = 0;
-          panY = 0;
-          updateCanvasTransform();
-          showGestureHud('maximize', '缩放已重置 (1.0x)', 0);
+        if (playerZoom !== 1.0 || panX !== 0 || panY !== 0) {
+          resetZoomAndPan();
         } else {
           cycleAspectRatio();
         }
@@ -476,20 +494,27 @@ function initPlayerGestures(): void {
   }, { passive: true });
 
   wrap.addEventListener('touchmove', (e: TouchEvent) => {
+    resetFsInactivityTimer();
     if (e.touches.length === 1 && isDragging) {
       const t = e.touches[0];
-      const dy = startY - t.clientY;
-      if (Math.abs(dy) > 8) {
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+
+      if (playerZoom > 1.0) {
+        // 放大状态下：单指拖拽平移视口
+        const maxPanX = (wrap.clientWidth * (playerZoom - 1)) / (2 * playerZoom);
+        const maxPanY = (wrap.clientHeight * (playerZoom - 1)) / (2 * playerZoom);
+        panX = Math.min(maxPanX, Math.max(-maxPanX, panX + dx / playerZoom));
+        panY = Math.min(maxPanY, Math.max(-maxPanY, panY + dy / playerZoom));
+        startX = t.clientX;
+        startY = t.clientY;
+        updateCanvasTransform();
+      } else if (Math.abs(dy) > 8) {
+        // 正常尺寸下：左屏上下滑亮度，右屏上下滑音量
         if (isLeft) {
-          playerBrightness = Math.min(1.5, Math.max(0.3, playerBrightness + (dy > 0 ? 0.03 : -0.03)));
-          const canvas = $('recv-canvas');
-          if (canvas) canvas.style.filter = `brightness(${playerBrightness})`;
-          const pct = Math.round(((playerBrightness - 0.3) / 1.2) * 100);
-          showGestureHud('sun', `亮度 ${pct}%`, pct);
+          adjustBrightness(dy < 0 ? 0.03 : -0.03);
         } else {
-          playerVolume = Math.min(1.0, Math.max(0.0, playerVolume + (dy > 0 ? 0.03 : -0.03)));
-          const pct = Math.round(playerVolume * 100);
-          showGestureHud(playerVolume > 0 ? 'volume-2' : 'volume-x', `音量 ${pct}%`, pct);
+          adjustVolume(dy < 0 ? 0.03 : -0.03);
         }
         startY = t.clientY;
       }
@@ -499,6 +524,10 @@ function initPlayerGestures(): void {
       const dist = Math.hypot(dx, dy);
       const factor = dist / startDistance;
       playerZoom = Math.min(3.0, Math.max(1.0, initialZoom * factor));
+      if (playerZoom === 1.0) {
+        panX = 0;
+        panY = 0;
+      }
       updateCanvasTransform();
       showGestureHud('maximize', `缩放 ${playerZoom.toFixed(1)}x`, (playerZoom - 1) * 50);
     }
@@ -508,6 +537,38 @@ function initPlayerGestures(): void {
     isDragging = false;
     startDistance = 0;
   });
+}
+
+function adjustBrightness(delta: number): void {
+  playerBrightness = Math.min(1.5, Math.max(0.3, playerBrightness + delta));
+  const canvas = $('recv-canvas');
+  if (canvas) canvas.style.filter = `brightness(${playerBrightness})`;
+  const pct = Math.round(((playerBrightness - 0.3) / 1.2) * 100);
+  showGestureHud('sun', `亮度 ${pct}%`, pct);
+}
+
+function adjustVolume(delta: number): void {
+  playerVolume = Math.min(1.0, Math.max(0.0, playerVolume + delta));
+  const pct = Math.round(playerVolume * 100);
+  showGestureHud(playerVolume > 0 ? 'volume-2' : 'volume-x', `音量 ${pct}%`, pct);
+}
+
+function resetZoomAndPan(): void {
+  playerZoom = 1.0;
+  panX = 0;
+  panY = 0;
+  updateCanvasTransform();
+  showGestureHud('maximize', '缩放已重置 (1.0x)', 0);
+}
+
+function toggleMute(): void {
+  if (playerVolume > 0) {
+    playerVolume = 0;
+    showGestureHud('volume-x', '静音', 0);
+  } else {
+    playerVolume = 1.0;
+    showGestureHud('volume-2', '音量 100%', 100);
+  }
 }
 
 function toggleDiagnosticsDrawer(): void {
@@ -525,3 +586,7 @@ winObj.cycleAspectRatio = cycleAspectRatio;
 winObj.setAspectRatio = setAspectRatio;
 winObj.initPlayerGestures = initPlayerGestures;
 winObj.toggleDiagnosticsDrawer = toggleDiagnosticsDrawer;
+winObj.adjustBrightness = adjustBrightness;
+winObj.adjustVolume = adjustVolume;
+winObj.resetZoomAndPan = resetZoomAndPan;
+winObj.toggleMute = toggleMute;

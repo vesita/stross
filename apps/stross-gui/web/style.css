@@ -858,10 +858,18 @@ button.sm .ic { width: 14px; height: 14px; }
   transition: opacity 0.2s ease;
 }
 .canvas-wrap:hover .recv-controls,
-.canvas-wrap.fs .recv-controls,
+.canvas-wrap.fs:not(.controls-hidden) .recv-controls,
 .recv-controls:focus-within {
   opacity: 1;
   pointer-events: auto;
+}
+.canvas-wrap.fs.controls-hidden {
+  cursor: none;
+}
+.canvas-wrap.fs.controls-hidden .recv-controls {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s ease;
 }
 .recv-controls-info {
   color: var(--text-2);

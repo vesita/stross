@@ -280,4 +280,51 @@ void listen<{ active: boolean }>('native-fullscreen-changed', (p) => {
 window.addEventListener('resize', () => { void syncAndroidSurface(); });
 window.addEventListener('orientationchange', () => { void syncAndroidSurface(); });
 
+// 全局播放器快捷键（F 全屏、M/Space 静音、D 诊断、A 比例、0 重置缩放、方向键 亮度/音量）
+window.addEventListener('keydown', (e: KeyboardEvent) => {
+  const target = e.target as HTMLElement | null;
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+    return;
+  }
+  switch (e.key.toLowerCase()) {
+    case 'f':
+      e.preventDefault();
+      void togglePlayerFullscreen();
+      break;
+    case ' ':
+    case 'm':
+      e.preventDefault();
+      toggleMute();
+      break;
+    case 'd':
+      e.preventDefault();
+      toggleDiagnosticsDrawer();
+      break;
+    case 'a':
+      e.preventDefault();
+      cycleAspectRatio();
+      break;
+    case '0':
+      e.preventDefault();
+      resetZoomAndPan();
+      break;
+    case 'arrowup':
+      e.preventDefault();
+      adjustVolume(0.05);
+      break;
+    case 'arrowdown':
+      e.preventDefault();
+      adjustVolume(-0.05);
+      break;
+    case 'arrowright':
+      e.preventDefault();
+      adjustBrightness(0.05);
+      break;
+    case 'arrowleft':
+      e.preventDefault();
+      adjustBrightness(-0.05);
+      break;
+  }
+});
+
 void init();

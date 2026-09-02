@@ -83,7 +83,11 @@ impl StreamSession {
         let mut audio = None;
         #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
         let wayland = None; // 常规路径无 Wayland 采集（wayland 走 spawn_wayland）
-        let (error_tx, error_rx) = mpsc::channel(4);
+        // 本函数是常规采集路径（X11/Windows/lavfi/摄像头），无 Wayland 采集器
+        // 也就没有采集侧错误源 → `error_rx` 恒为 `None`（Wayland 的错误通道
+        // 只在 [`Self::spawn_wayland`] 里建立）。此前这里无条件建通道、置
+        // `Some`，导致 `install_session` 在非 Wayland 路径也白 spawn 一个立即
+        // 因通道关闭而退出的错误转发任务，与文档 `take_error_rx` 不符。
 
         if cfg.video.is_some() {
             // 常规视频路径（X11 / Windows / lavfi / 摄像头）：ffmpeg 采集。
@@ -97,7 +101,6 @@ impl StreamSession {
             let ff = first_frame.clone();
             tokio::spawn(read_video_loop(stdout, tx2, started, ff));
             video = Some(child);
-            drop(error_tx); // 无 Wayland 采集：错误通道关闭
         }
 
         if cfg.audio.is_some() {
@@ -118,7 +121,7 @@ impl StreamSession {
             audio,
             #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
             wayland,
-            error_rx: Some(error_rx),
+            error_rx: None,
             started,
             started_wall,
             first_frame,

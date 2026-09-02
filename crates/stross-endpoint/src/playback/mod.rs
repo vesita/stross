@@ -194,29 +194,36 @@ impl PlaybackSession {
         }
         use stross_proto::frame::{TRACK_AUDIO, TRACK_VIDEO};
         let is_video = frame.header.track == TRACK_VIDEO;
-        // 先绑定锁守卫再取引用，避免临时守卫被提前释放（E0716）
-        let video_tx = self.inner.video_tx.lock().unwrap();
-        let audio_tx = self.inner.audio_tx.lock().unwrap();
+        // 只锁当前帧轨道对应的发送端：此前每帧同时锁 video+audio 两个互斥量，
+        // 是接收侧逐帧 push 热路径上可避免的双锁开销。`guard` 绑定到具名变量
+        // 以延长临时守卫生命周期（否则临时守卫在 let 语句末被释放 → E0716）。
+        let guard;
         let tx = match frame.header.track {
-            TRACK_VIDEO => video_tx.as_ref(),
-            TRACK_AUDIO => audio_tx.as_ref(),
-            _ => None, // 未知轨道：静默忽略
+            TRACK_VIDEO => {
+                guard = self.inner.video_tx.lock().unwrap();
+                guard.as_ref()
+            }
+            TRACK_AUDIO => {
+                guard = self.inner.audio_tx.lock().unwrap();
+                guard.as_ref()
+            }
+            _ => return Ok(()), // 未知轨道：静默忽略，无需上锁
         };
-        match tx {
-            Some(tx) => match tx.try_send(frame) {
-                Ok(()) => Ok(()),
-                Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                    self.inner.stats.lock().unwrap().dropped_push += 1;
-                    // 视频丢帧会撕裂解码链 → 置失步，writer 等关键帧重建
-                    // （H.264 花屏帧不喂解码器，最多一个 GOP 后干净恢复）
-                    if is_video && let Some(r) = self.inner.video_resync.as_ref() {
-                        r.store(true, Ordering::Relaxed);
-                    }
-                    Ok(())
+        // 该轨道未配置发送端（如纯视频会话收到音频帧）：与原来 `None => Ok(())`
+        // 一致，静默忽略
+        let Some(tx) = tx else { return Ok(()) };
+        match tx.try_send(frame) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                self.inner.stats.lock().unwrap().dropped_push += 1;
+                // 视频丢帧会撕裂解码链 → 置失步，writer 等关键帧重建
+                // （H.264 花屏帧不喂解码器，最多一个 GOP 后干净恢复）
+                if is_video && let Some(r) = self.inner.video_resync.as_ref() {
+                    r.store(true, Ordering::Relaxed);
                 }
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err(PlaybackError::Closed),
-            },
-            None => Ok(()),
+                Ok(())
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err(PlaybackError::Closed),
         }
     }
 

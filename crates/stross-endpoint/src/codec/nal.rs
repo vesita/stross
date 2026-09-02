@@ -39,10 +39,16 @@ impl AnnexBSplitter {
 
     /// 喂入数据，返回新切出的完整 NAL 单元（不含起始码）。
     pub fn feed(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+        let old_len = self.buf.len();
         self.buf.extend_from_slice(data);
         let mut out = Vec::new();
         let mut prev = 0usize;
-        let mut search_pos = 0usize;
+        // 起始码不会出现在已确认是 NAL 载荷的前缀里：一个完整 NAL 可能跨多次
+        // read 才被闭合（如 8MiB 关键帧按 128K 块到达），若每次从 0 重新扫描，
+        // 会把已扫过的累积载荷反复 `find` → 超大 NAL 场景退化为 O(n²)。此处只从
+        // 旧缓冲末尾往回让 2 字节开始扫（起始码可能跨新旧边界 `…00 00 | 01…`），
+        // 本次只遍历新增字节 + 边界，总扫描量 = O(总字节)。
+        let mut search_pos = old_len.saturating_sub(2);
         while let Some(rel) = NAL_START_CODE.find(&self.buf[search_pos..]) {
             let match_idx = search_pos + rel;
             let i = match_idx + 2;
@@ -555,6 +561,55 @@ mod tests {
         assert_eq!(nal_type(&out[0]), Some(NAL_SPS));
         assert_eq!(out[0], a);
         assert_eq!(out[1], b);
+    }
+
+    /// 回归：起始码恰跨在两次 feed 的边界上（旧缓冲以 `00 00` 结尾、新块以
+    /// `01` 开头）。feed 的起始码扫描前进量从「全缓冲」优化为「旧缓冲末尾往
+    /// 回 2 字节」后，必须仍能识别这种跨界起始码，否则帧错位/丢帧。
+    #[test]
+    fn start_code_straddling_read_boundary_detected() {
+        let mut s = AnnexBSplitter::new();
+        let a = nal(NAL_SPS, 7);
+        // NAL-A 载荷 + 起始码前两个字节（00 00）落进第一次 feed，
+        // `01` 与 NAL-B 一起在第二次 feed
+        let mut first = Vec::new();
+        first.extend_from_slice(&[0, 0, 0, 1]); // 4 字节起始码
+        first.extend_from_slice(&a);
+        first.extend_from_slice(&[0, 0]); // 下一个起始码的 `00 00`
+        assert!(s.feed(&first).is_empty(), "首块无完整段，不应产出");
+
+        let mut second = Vec::new();
+        second.push(0x01); // 补齐跨界起始码 `00 00 01`
+        let b = nal(NAL_SLICE_NON_IDR, 5);
+        second.extend_from_slice(&b);
+        let out = s.feed(&second);
+        assert_eq!(out.len(), 1, "跨界起始码闭合后应产出 NAL-A");
+        assert_eq!(out[0], a);
+        assert_eq!(s.finish(), vec![b], "残余 NAL-B 由 finish 冲刷");
+    }
+
+    /// 回归：单个超大 NAL（跨很多次 read 才闭合）逐块喂入应只产出一次、
+    /// 内容完整，且不因扫描起点优化而错切/堆积（O(n²)→O(n) 语义不变）。
+    #[test]
+    fn large_nal_split_across_many_reads() {
+        let payload = vec![0xAA; 256 * 1024 + 7]; // 跨 2 个 128K 块
+        let mut stream = Vec::with_capacity(payload.len() + 8);
+        stream.extend_from_slice(&[0, 0, 0, 1]);
+        stream.extend_from_slice(&payload);
+        stream.extend_from_slice(&[0, 0, 1]); // 闭合大 NAL 的起始码
+        stream.push(NAL_SLICE_NON_IDR);
+        stream.extend_from_slice(&[0x88, 0x88]);
+
+        let mut s = AnnexBSplitter::new();
+        let mut out = Vec::new();
+        for chunk in stream.chunks(128 * 1024) {
+            out.extend(s.feed(chunk));
+        }
+        out.extend(s.finish());
+        assert_eq!(out.len(), 2, "应切出大 NAL 与末尾小 NAL");
+        assert_eq!(out[0].len(), payload.len(), "大 NAL 内容完整不截断/不叠加");
+        assert!(out[0].iter().all(|&x| x == 0xAA));
+        assert_eq!(out[1], vec![NAL_SLICE_NON_IDR, 0x88, 0x88]);
     }
 
     /// 流以 3 字节起始码开头（`AccessUnit::to_annex_b` 的产物）时，

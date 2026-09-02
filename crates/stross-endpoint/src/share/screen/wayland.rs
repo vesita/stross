@@ -193,7 +193,33 @@ async fn feed_loop(
     let mut next_write = Instant::now();
     let mut sent = 0u32;
     loop {
-        if let Some(frame) = mgr.recv_frame_timeout(Duration::from_millis(30)) {
+        let now = Instant::now();
+        if now >= next_write {
+            // 到达节流点：写最新一帧。
+            if got {
+                next_write = now + interval;
+                if stdin.write_all(&last).await.is_err() {
+                    // ffmpeg 已退出（会话停止 / 接收端关闭）；结束采集
+                    break;
+                }
+                sent += 1;
+                if sent.is_multiple_of(30) {
+                    tracing::debug!("Wayland 采集已送 {sent} 帧");
+                }
+            } else {
+                // 尚未收到首帧：把节流点短推后（避免停留在过去而永远不进
+                // 等帧分支），下一轮继续等新帧
+                next_write = now + Duration::from_millis(5);
+            }
+            continue;
+        }
+        // 未到节流点：等新帧，但**最长只等到写帧时刻**（`remaining`）。
+        // 关键修复：此前用固定 30ms `recv_frame_timeout`，在节流闸门之后又
+        // 阻塞最多 30ms，写帧周期变成 max(interval, recv 阻塞) → 合成器送帧
+        // 相位与闸门相位独立漂移，实际帧率在 30fps 与 ~16fps 间相噪跳变。
+        // 现在等帧窗口与节流截止重叠：到点必写上一帧，周期严格 = interval。
+        let remaining = next_write.saturating_duration_since(now);
+        if let Some(frame) = mgr.recv_frame_timeout(remaining.min(Duration::from_millis(30))) {
             if sent == 0 && !got {
                 let dlen = match &frame.buffer {
                     FrameBuffer::Memory(d) => d.len(),
@@ -233,25 +259,7 @@ async fn feed_loop(
             }
             got = true;
         }
-        // 到达节流点：写最新帧（尚未收到首帧时跳过）
-        let now = Instant::now();
-        if now < next_write {
-            tokio::time::sleep_until(next_write.into()).await;
-            continue;
-        }
-        next_write = now + interval;
-        if !got {
-            tokio::task::yield_now().await;
-            continue;
-        }
-        if stdin.write_all(&last).await.is_err() {
-            // ffmpeg 已退出（会话停止 / 接收端关闭）；结束采集
-            break;
-        }
-        sent += 1;
-        if sent.is_multiple_of(30) {
-            tracing::debug!("Wayland 采集已送 {sent} 帧");
-        }
+        // 回环顶部：若已到节流点则写帧，否则继续等（每轮最多等 remaining）
     }
     Ok(())
 }

@@ -107,8 +107,33 @@ pub fn list_audio_inputs() -> Vec<String> {
     }
 }
 
+/// 系统声音枚举的缓存有效期。枚举依赖外部子进程（Linux `pactl`、
+/// Windows ffmpeg dshow），`SystemAudioEndpoint::audio()` 每次组流配置都会
+/// 调用；短 TTL 缓存避免高频 shell 出子进程，又能在插入/移除设备后刷新。
+const SYSTEM_AUDIO_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+static SYSTEM_AUDIO_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>> =
+    std::sync::Mutex::new(None);
+
 /// 枚举系统声音（回环采集：PulseAudio monitor / Windows Stereo Mix 等）。
+///
+/// 结果按 [`SYSTEM_AUDIO_CACHE_TTL`] 缓存：热路径（组流配置）不重复 fork
+/// `pactl` / ffmpeg，仅缓存过期后重新枚举。
 pub fn list_system_audio() -> Vec<String> {
+    let now = std::time::Instant::now();
+    let mut cache = SYSTEM_AUDIO_CACHE.lock().unwrap();
+    if let Some((t, devices)) = cache.as_ref()
+        && now.duration_since(*t) < SYSTEM_AUDIO_CACHE_TTL
+    {
+        return devices.clone();
+    }
+    let devices = enumerate_system_audio();
+    *cache = Some((now, devices.clone()));
+    devices
+}
+
+/// 实际枚举系统声音（无缓存）。
+fn enumerate_system_audio() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
         dshow_devices()

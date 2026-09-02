@@ -9,9 +9,12 @@
 #
 # 验证三条订阅链路（订阅方进程使用目标节点身份的数据目录，模拟"该节点订阅"）：
 #   1. A→B pull ：B 订阅 A 的 file-a.txt（pull，连 A 中继 watch）
-#   2. A→B push ：B 订阅 A 的 file-c.bin（push，A 凭 B 自签凭证出站推入 B 中继）
+#   2. A→B both ：B 订阅 A 的 file-c.bin（A 声明 both，订阅按声明走 pull；
+#                小文件覆盖"非整块"末帧路径）
 #   3. B→A pull ：A 订阅 B 的 file-b.txt（pull）
 # 每条链路校验：订阅握手（Public 自动签发）→ 文件落盘 → cmp 逐字节一致。
+# 注：订阅驱动定稿（docs/endpoint-model-v2.md §4）——数据流只走 pull（订阅方连
+#     公开方中继 watch），公开方不再出站 push；本脚本不再覆盖 push 交付。
 #
 # 用法：scripts/dual-node-file-test.sh
 # 退出码：0 = 全部通过。
@@ -43,7 +46,7 @@ mkdir -p "$DIR_A" "$DIR_B" "$RECV"
 # 确定性内容（可复现 + cmp 可比对）
 head -c $((SIZE_A * 1024)) /dev/urandom > "$DIR_A/file-a.txt" 2>/dev/null \
   || { i=0; : > "$DIR_A/file-a.txt"; while [ $i -lt $SIZE_A ]; do printf 'A%064d\n' "$i" >> "$DIR_A/file-a.txt"; i=$((i+1)); done; }
-printf 'hello push, 小文件末帧验证 ✅\n' > "$DIR_A/file-c.bin"
+printf 'hello 双端, 小文件末帧验证 ✅\n' > "$DIR_A/file-c.bin"
 printf 'B 节点的小文件: %s\n' "$(date +%s)" > "$DIR_B/file-b.txt"
 printf '世界，你好。跨节点文件互发。\n' >> "$DIR_B/file-b.txt"
 
@@ -67,10 +70,10 @@ for i in $(seq 1 50); do
   sleep 0.2
 done
 
-log "A 公开文件端点：file-a.txt（pull）与 file-c.bin（push）"
+log "A 公开文件端点：file-a.txt（pull）与 file-c.bin（both）"
 "$CLI" ctrl endpoint publish-file --path "$DIR_A/file-a.txt" --visibility public --delivery pull \
   || fail "A 公开 file-a.txt 失败"
-"$CLI" ctrl endpoint publish-file --path "$DIR_A/file-c.bin" --visibility public --delivery push \
+"$CLI" ctrl endpoint publish-file --path "$DIR_A/file-c.bin" --visibility public --delivery both \
   || fail "A 公开 file-c.bin 失败"
 log "B 公开文件端点：file-b.txt（pull）"
 "$CLI" ctrl --connect "ws://127.0.0.1:$CTRL_B/ws/ctrl" endpoint publish-file \
@@ -78,19 +81,19 @@ log "B 公开文件端点：file-b.txt（pull）"
 
 log "1) A→B pull：B 订阅 file-a.txt"
 "$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" \
-  --endpoint "file:file-a.txt" --out "$RECV/1" --data-dir "$DIR_B" || fail "订阅 pull 失败"
+  --endpoint "file:0" --out "$RECV/1" --data-dir "$DIR_B" || fail "订阅 pull 失败"
 cmp -s "$DIR_A/file-a.txt" "$RECV/1/file-a.txt" || fail "1) pull 文件不一致"
 
-log "2) A→B push：B 订阅 file-c.bin（交付方向 push，A 出站推入 B 中继）"
+log "2) A→B both：B 订阅 file-c.bin（A 声明 both，订阅按声明走 pull）"
 "$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" \
-  --endpoint "file:file-c.bin" --delivery push --out "$RECV/2" --data-dir "$DIR_B" \
-  || fail "订阅 push 失败"
-cmp -s "$DIR_A/file-c.bin" "$RECV/2/file-c.bin" || fail "2) push 文件不一致"
+  --endpoint "file:1" --out "$RECV/2" --data-dir "$DIR_B" \
+  || fail "订阅 both 失败"
+cmp -s "$DIR_A/file-c.bin" "$RECV/2/file-c.bin" || fail "2) both 文件不一致"
 
 log "3) B→A pull：A 订阅 file-b.txt"
 "$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_B" \
-  --endpoint "file:file-b.txt" --out "$RECV/3" --data-dir "$DIR_A" || fail "订阅 B 失败"
+  --endpoint "file:0" --out "$RECV/3" --data-dir "$DIR_A" || fail "订阅 B 失败"
 cmp -s "$DIR_B/file-b.txt" "$RECV/3/file-b.txt" || fail "3) B 文件不一致"
 
-log "全部通过：3 条订阅链路（pull/push/pull）文件逐字节一致"
+log "全部通过：3 条订阅链路（pull/both/pull）文件逐字节一致"
 ls -l "$RECV"/*/* | awk '{print "  " $5 " bytes  " $9}'

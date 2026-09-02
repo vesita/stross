@@ -7,8 +7,8 @@
 //! * `ls`：拉取远端节点的 **L2 目录**（类型化 `EndpointDir`）——节点 + 设备 +
 //!   可订阅端点（含可见性 / delivery / 传输）；
 //! * `subscribe`：订阅远端端点并接收数据。文件端点落盘到 `--out`；
-//!   pull（缺省）连公开方中继 watch；push 自建会话 + 自签凭证，公开方
-//!   凭凭证出站推入本机中继后 watch 本机中继。
+//!   订阅驱动定稿（docs/endpoint-model-v2.md §4）只走 pull——连公开方
+//!   中继 watch（端点声明 both 亦按 pull 交付）。
 //!
 //! 本地双端演示：
 //! ```text

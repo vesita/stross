@@ -59,10 +59,10 @@ echo "  B 端点数=$("$CLI" endpoint ls --host 127.0.0.1 --port "$NEG_B" --data
 
 log "2) 并发相互订阅：A→B(c,d) 与 B→A(a,b) 同时进行（4 路并发）"
 SUBPIDS=()
-"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_B" --endpoint "file:file-c.txt"  --out "$RECV/ac" --data-dir "$DIR_A" >"$D/s_ac.log" 2>&1 & SUBPIDS+=($!)
-"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_B" --endpoint "file:file-d.txt"  --out "$RECV/ad" --data-dir "$DIR_A" >"$D/s_ad.log" 2>&1 & SUBPIDS+=($!)
-"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" --endpoint "file:file-a.txt"  --out "$RECV/ba" --data-dir "$DIR_B" >"$D/s_ba.log" 2>&1 & SUBPIDS+=($!)
-"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" --endpoint "file:file-b.txt"  --out "$RECV/bb" --data-dir "$DIR_B" >"$D/s_bb.log" 2>&1 & SUBPIDS+=($!)
+"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_B" --endpoint "file:0"  --out "$RECV/ac" --data-dir "$DIR_A" >"$D/s_ac.log" 2>&1 & SUBPIDS+=($!)
+"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_B" --endpoint "file:1"  --out "$RECV/ad" --data-dir "$DIR_A" >"$D/s_ad.log" 2>&1 & SUBPIDS+=($!)
+"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" --endpoint "file:0"  --out "$RECV/ba" --data-dir "$DIR_B" >"$D/s_ba.log" 2>&1 & SUBPIDS+=($!)
+"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" --endpoint "file:1"  --out "$RECV/bb" --data-dir "$DIR_B" >"$D/s_bb.log" 2>&1 & SUBPIDS+=($!)
 sleep 6
 cmp -s "$DIR_B/file-c.txt" "$RECV/ac/file-c.txt" || fail "A→B file-c 不一致"
 cmp -s "$DIR_B/file-d.txt" "$RECV/ad/file-d.txt" || fail "A→B file-d 不一致"
@@ -71,11 +71,11 @@ cmp -s "$DIR_A/file-b.txt" "$RECV/bb/file-b.txt" || fail "B→A file-b 不一致
 echo "  ✓ 4 路并发相互订阅全部一致"
 
 log "3) 断连恢复：B→A 传输 file-big-a 中段 kill 掉发布节点 B（断连）→ A 的订阅应优雅出错收尾"
-"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_B" --endpoint "file:file-big-b.txt" --out "$RECV/abig" --data-dir "$DIR_A" >"$D/s_abig.log" 2>&1 &
+"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_B" --endpoint "file:2" --out "$RECV/abig" --data-dir "$DIR_A" >"$D/s_abig.log" 2>&1 &
 SUB_BIG=$!; SUBPIDS+=($SUB_BIG)
 sleep 1.5   # 大文件传输进行中
-for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null || true; done   # 杀掉 B（节点）→ 断连
-wait "$PIDS[1]" 2>/dev/null || true
+kill "${PIDS[1]}" 2>/dev/null || true   # 只杀掉发布节点 B（订阅方所在 serve A 保留）→ 断连
+wait "${PIDS[1]}" 2>/dev/null || true
 sleep 2
 RECV_BIG="$(stat -c%s "$RECV/abig/file-big-b.txt" 2>/dev/null || echo 0)"
 if kill -0 "$SUB_BIG" 2>/dev/null; then

@@ -60,10 +60,10 @@ EP_CNT=$("$CLI" endpoint ls --host 127.0.0.1 --port "$NEG_A" --data-dir "$DIR_B"
 [ "$EP_CNT" = "2" ] || fail "A 目录应有 2 个文件端点，实得 $EP_CNT"
 
 log "1) B 同时订阅两个端点（并发，互不影响）"
-"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" --endpoint "file:file-a.txt" \
+"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" --endpoint "file:0" \
   --out "$RECV/a" --data-dir "$DIR_B" >"$D/suba.log" 2>&1 &
 PA=$!
-"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" --endpoint "file:file-b.txt" \
+"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" --endpoint "file:1" \
   --out "$RECV/b" --data-dir "$DIR_B" >"$D/subb.log" 2>&1 &
 PB=$!
 wait "$PA" || fail "订阅 file-a 失败（看 $D/suba.log）"
@@ -73,7 +73,7 @@ cmp -s "$DIR_A/file-b.txt" "$RECV/b/file-b.txt" || fail "file-b 逐字节不一�
 echo "  ✓ file-a($(stat -c%s "$RECV/a/file-a.txt")B) / file-b($(stat -c%s "$RECV/b/file-b.txt")B) 并发订阅一致"
 
 log "2) 同端点二次并发订阅（订阅收敛：复用同一流，不重复推流）"
-"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" --endpoint "file:file-a.txt" \
+"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_A" --endpoint "file:0" \
   --out "$RECV/a2" --data-dir "$DIR_B" >"$D/suba2.log" 2>&1 &
 PA2=$!
 wait "$PA2" || fail "file-a 二次订阅失败（看 $D/suba2.log）"
@@ -84,7 +84,7 @@ echo "  ✓ 同一 file-a 二次订阅也逐字节一致（复用流，无重复
 log "3) 双向多端点：B 公开 file-c.txt，A 订阅（跨方向并发共存）"
 "$CLI" ctrl --connect "ws://127.0.0.1:$CTRL_B/ws/ctrl" endpoint publish-file \
   --path "$DIR_B/file-c.txt" --visibility public --delivery pull || fail "B 公开 file-c 失败"
-"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_B" --endpoint "file:file-c.txt" \
+"$CLI" endpoint subscribe --host 127.0.0.1 --port "$NEG_B" --endpoint "file:0" \
   --out "$RECV/c" --data-dir "$DIR_A" || fail "A 订阅 file-c 失败"
 cmp -s "$DIR_B/file-c.txt" "$RECV/c/file-c.txt" || fail "file-c 逐字节不一致"
 echo "  ✓ 双向多端点共存（A 同时扮演公开方+订阅方）"

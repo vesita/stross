@@ -88,23 +88,11 @@ pub enum Delivery {
 }
 
 impl Delivery {
-    /// wire 字符串（camelCase；与 serde 序列化一致，单一真源）。
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pull => "pull",
-            Self::Push => "push",
-            Self::Both => "both",
-        }
-    }
-
-    /// 从 wire 字符串解析（与 [`as_str`](Self::as_str) 互逆；未知值返回 `None`）。
-    pub fn from_wire(s: &str) -> Option<Self> {
-        match s {
-            "pull" => Some(Self::Pull),
-            "push" => Some(Self::Push),
-            "both" => Some(Self::Both),
-            _ => None,
-        }
+    crate::message::define_wire_strings! {
+        Delivery:
+            Pull => "pull",
+            Push => "push",
+            Both => "both",
     }
 }
 
@@ -200,13 +188,11 @@ pub enum EndpointState {
 }
 
 impl EndpointState {
-    /// wire 字符串（camelCase；与 serde 序列化一致，单一真源）。
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Active => "active",
-            Self::Suspended => "suspended",
-        }
+    crate::message::define_wire_strings! {
+        EndpointState:
+            Idle => "idle",
+            Active => "active",
+            Suspended => "suspended",
     }
 }
 
@@ -558,5 +544,20 @@ mod tests {
         assert_eq!(back.kind, MediaKind::Screen);
         assert_eq!(back.endpoint_id, 0);
         let _ = SerializeRule::default();
+    }
+
+    // Delivery / EndpointState 已由 define_wire_strings! 生成 as_str/from_wire，
+    // 用一致性宏与 serde「单一真源」核验（新增变体漏改即崩测试）。
+    crate::message::assert_wire_strings_consistent! {
+        delivery_wire_matches_serde: Delivery;
+        Delivery::Pull => "pull",
+        Delivery::Push => "push",
+        Delivery::Both => "both",
+    }
+    crate::message::assert_wire_strings_consistent! {
+        endpoint_state_wire_matches_serde: EndpointState;
+        EndpointState::Idle => "idle",
+        EndpointState::Active => "active",
+        EndpointState::Suspended => "suspended",
     }
 }

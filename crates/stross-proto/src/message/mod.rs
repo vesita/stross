@@ -20,6 +20,10 @@ pub mod control;
 pub mod discovery;
 pub mod endpoint;
 pub mod ids;
+mod macros; // 内部宏（define_wire_strings / assert_wire_strings_consistent）
+#[cfg(test)]
+pub(crate) use macros::assert_wire_strings_consistent;
+pub(crate) use macros::define_wire_strings;
 pub mod negotiator;
 pub mod platform;
 pub mod stream;

@@ -96,37 +96,36 @@ pub enum MediaKind {
 }
 
 impl MediaKind {
-    /// wire 字符串（camelCase；与 serde 序列化一致，单一真源）。
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Screen => "screen",
-            Self::Window => "window",
-            Self::Camera => "camera",
-            Self::Mic => "mic",
-            Self::SystemAudio => "systemAudio",
-            Self::Input => "input",
-            Self::Clipboard => "clipboard",
-            Self::File => "file",
-            Self::Service => "service",
-        }
+    // as_str / from_wire 由 define_wire_strings! 从下方 wire 表生成（单一真源）；
+    // from_wire 供从 `"<kind>:<id>"` 可读串解析 `EndpointId` 用（见 super::mod）。
+    crate::message::define_wire_strings! {
+        MediaKind:
+            Screen => "screen",
+            Window => "window",
+            Camera => "camera",
+            Mic => "mic",
+            SystemAudio => "systemAudio",
+            Input => "input",
+            Clipboard => "clipboard",
+            File => "file",
+            Service => "service",
     }
+}
 
-    /// 从 wire 字符串反向解析（与 [`Self::as_str`] 互逆；未知值返回 `None`）。
-    /// 端点 id 强类型化后，`kind` 与子 id 分开承载，本函数供从
-    /// `"<kind>:<id>"` 这类可读串解析 `EndpointId` 用（见 [`super::mod`]）。
-    pub fn from_wire(s: &str) -> Option<Self> {
-        match s {
-            "screen" => Some(Self::Screen),
-            "window" => Some(Self::Window),
-            "camera" => Some(Self::Camera),
-            "mic" => Some(Self::Mic),
-            "systemAudio" => Some(Self::SystemAudio),
-            "input" => Some(Self::Input),
-            "clipboard" => Some(Self::Clipboard),
-            "file" => Some(Self::File),
-            "service" => Some(Self::Service),
-            _ => None,
-        }
+#[cfg(test)]
+mod wire_consistency {
+    use super::*;
+    crate::message::assert_wire_strings_consistent! {
+        mediatype_wire_matches_serde: MediaKind;
+        MediaKind::Screen => "screen",
+            MediaKind::Window => "window",
+            MediaKind::Camera => "camera",
+            MediaKind::Mic => "mic",
+            MediaKind::SystemAudio => "systemAudio",
+            MediaKind::Input => "input",
+            MediaKind::Clipboard => "clipboard",
+            MediaKind::File => "file",
+            MediaKind::Service => "service",
     }
 }
 

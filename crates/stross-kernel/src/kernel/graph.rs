@@ -41,6 +41,6 @@ pub struct NodeInfo {
 
 /// 设备图：节点注册与能力聚合。
 #[derive(Default)]
-pub(super) struct DeviceGraph {
-    pub(super) nodes: Mutex<HashMap<String, NodeInfo>>,
+pub(crate) struct DeviceGraph {
+    pub(crate) nodes: Mutex<HashMap<String, NodeInfo>>,
 }

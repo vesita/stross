@@ -67,7 +67,7 @@ impl Session {
 
 /// 会话管理：会话拓扑与协商结果。
 #[derive(Default)]
-pub(super) struct SessionManager {
+pub(crate) struct SessionManager {
     sessions: Mutex<HashMap<Id, Session>>,
 }
 

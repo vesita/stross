@@ -29,7 +29,7 @@ use bytes::{Bytes, BytesMut};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::sync::{Mutex, mpsc};
 
-use stross_proto::frame::{Frame, Frame2};
+use stross_proto::frame::{Frame, Frame2, FrameHeader2, HEADER2_LEN};
 use stross_proto::message::{ControlMessage, ReliabilityProfile, StreamRole, TransportId};
 
 use super::{
@@ -446,13 +446,22 @@ impl DataSession for QuicMediaSession {
             SessionPacket::Control(_) => Ok(()),
             SessionPacket::Media(frame) => {
                 self.ensure_registered().await?;
-                let full = Frame2::from_frame(&frame).to_bytes();
                 let mut tx = self.tx.lock().await;
                 let Some(tx) = tx.as_mut() else {
                     return Err(TransportError::Protocol("QUIC 媒体会话未登记".into()));
                 };
-                write_msg(tx, &full).await?;
-                self.link.stats.add_sent(LEN_BYTES + full.len());
+                let h = FrameHeader2 {
+                    track: frame.header.track,
+                    flags: frame.header.flags,
+                    pts_ms: frame.header.pts_ms,
+                    seq: frame.header.seq,
+                    len: frame.payload.len() as u32,
+                };
+                // 零载荷拷贝：长度 + 头 + 载荷分三次直写流，省去拼接缓冲。
+                write_media_msg(tx, &h, &frame.payload).await?;
+                self.link
+                    .stats
+                    .add_sent(LEN_BYTES + HEADER2_LEN + frame.payload.len());
                 Ok(())
             }
         }
@@ -650,12 +659,42 @@ pub async fn read_media_frame(rx: &mut quinn::RecvStream) -> Result<Option<Frame
 }
 
 /// 写一条媒体帧（v2 紧凑帧头）。中继 QUIC 观看任务用。
+///
+/// **零载荷拷贝**：长度前缀 + 14 字节头 + 载荷分三次 `write_all` 直写流（QUIC
+/// 是有序字节流，分帧语义不变），省去「头+载荷拼接缓冲区」对每帧载荷的一次
+/// 整块复制。
 pub async fn write_media_frame(
     tx: &mut quinn::SendStream,
     frame: &Frame,
 ) -> Result<(), TransportError> {
-    let full = Frame2::from_frame(frame).to_bytes();
-    write_msg(tx, &full).await
+    let h = FrameHeader2 {
+        track: frame.header.track,
+        flags: frame.header.flags,
+        pts_ms: frame.header.pts_ms,
+        seq: frame.header.seq,
+        len: frame.payload.len() as u32,
+    };
+    write_media_msg(tx, &h, &frame.payload).await
+}
+
+/// 写一条带 v2 紧凑帧头的媒体消息（零载荷拷贝）。
+async fn write_media_msg(
+    tx: &mut quinn::SendStream,
+    header: &FrameHeader2,
+    payload: &Bytes,
+) -> Result<(), TransportError> {
+    let total = u32::try_from(HEADER2_LEN + payload.len())
+        .map_err(|_| TransportError::Protocol("消息超过 4GiB".into()))?;
+    tx.write_all(&total.to_le_bytes())
+        .await
+        .map_err(|e| TransportError::Io(format!("QUIC 写长度失败: {e}")))?;
+    tx.write_all(&header.encode())
+        .await
+        .map_err(|e| TransportError::Io(format!("QUIC 写帧头失败: {e}")))?;
+    tx.write_all(payload)
+        .await
+        .map_err(|e| TransportError::Io(format!("QUIC 写载荷失败: {e}")))?;
+    Ok(())
 }
 
 /// 写一条长度前缀消息。

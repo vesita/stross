@@ -199,7 +199,11 @@ mod tests {
             codecs: vec![CodecId::H264, CodecId::Aac],
             endpoints: vec![],
         };
-        let p = peer_from_discovered(discovered("192.168.1.9", 8777, info.to_txt()));
+        let p = peer_from_discovered(discovered(
+            "192.168.1.9",
+            8777,
+            info.to_txt().expect("测试摘要应编码成功"),
+        ));
         assert_eq!(p.name, "客厅电脑");
         assert_eq!(p.ip, "192.168.1.9");
         assert_eq!(p.port, 8777);

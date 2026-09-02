@@ -87,10 +87,16 @@ impl Discovery {
     ) -> anyhow::Result<Self> {
         let host = format!("{hostname}.local.");
         let addrs = broadcast_addrs(ips);
-        // 能力描述由 DiscoveryInfo 单 key JSON 编码（新增字段零维护）
-        let props: std::collections::HashMap<String, String> = info.to_txt().into_iter().collect();
+        // 能力描述由 DiscoveryInfo 单 key JSON 编码（新增字段零维护）。
+        // 广播尽力而为：设备名过长则截断、过长端点摘要则丢弃，绝不静默截断成
+        // 半截 JSON（否则对端解析失败 → 设备消失）；degraded 指示日志。
+        let (props, degraded) = info.to_txt_lenient();
+        if degraded {
+            tracing::warn!("mDNS 广播能力描述需降级（name/端点名过长被截断或丢弃）");
+        }
         // 多网卡广播：ServiceInfo::new 支持 AsIpAddrs（&[IpAddr]），
         // 一次注册携带全部地址记录
+        let props: std::collections::HashMap<String, String> = props.into_iter().collect();
         let mut info =
             ServiceInfo::new(SERVICE_TYPE, instance, &host, addrs.as_slice(), port, props)
                 .map_err(|e| anyhow::anyhow!("ServiceInfo: {e}"))?;
@@ -133,7 +139,11 @@ impl Discovery {
         let Some(fullname) = self.fullname.as_ref() else {
             return Ok(());
         };
-        let props: std::collections::HashMap<String, String> = info.to_txt().into_iter().collect();
+        let (props, degraded) = info.to_txt_lenient();
+        if degraded {
+            tracing::warn!("mDNS 重注册能力描述需降级（name/端点名过长被截断或丢弃）");
+        }
+        let props: std::collections::HashMap<String, String> = props.into_iter().collect();
         let mut new_info = ServiceInfo::new(
             SERVICE_TYPE,
             &self.instance,

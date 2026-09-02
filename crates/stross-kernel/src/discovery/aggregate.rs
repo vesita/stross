@@ -410,7 +410,8 @@ mod tests {
             codecs: vec![],
             endpoints: vec![],
         }
-        .to_txt();
+        .to_txt()
+        .expect("测试摘要应编码成功");
         let found = vec![
             entry("pc-1", "192.168.11.61", 18777, &txt),
             entry("pc-1", "fe80::1", 18777, &txt),

@@ -130,12 +130,35 @@ impl Frame2 {
         out.into()
     }
 
+    /// **零额外拷贝**地构造完整线上消息（header 借用 + 载荷所有权移交）。
+    ///
+    /// 相比 `from_frame(&f).to_bytes()`（先 `from_frame` 克隆载荷、再 `to_bytes`
+    /// 二次拷贝），本方法只做一次拷贝：把 [`FrameHeader2::encode`] 的 14 字节
+    /// 头与载荷拼进新缓冲。QUIC 发送热路径（`write_msg` 前）请用它减少每帧
+    /// 载荷的一整轮复制。
+    pub fn to_bytes_owned(header: &FrameHeader2, payload: Bytes) -> Bytes {
+        let mut out = bytes::BytesMut::with_capacity(HEADER2_LEN + payload.len());
+        out.extend_from_slice(&header.encode());
+        out.extend_from_slice(&payload);
+        out.freeze()
+    }
+
     /// 从线上消息解码为 v1 [`Frame`]（codec=0，消费侧不读；track/flags 保留）。
+    ///
+    /// **len 一致性校验**：要求头声明 `len` 与缓冲 实际载荷字节数严格相等
+    /// （`buf.len() - HEADER2_LEN`），拒绝被截断或尾部多余字节的帧——避免
+    /// 半截关键帧 / 配置帧流入解码器。
     pub fn to_frame(buf: &[u8]) -> Result<Frame, FrameError> {
         let header = FrameHeader2::decode(buf)?;
         let total = HEADER2_LEN + header.len as usize;
         if buf.len() < total {
             return Err(FrameError::TooShort(buf.len()));
+        }
+        if buf.len() != total {
+            return Err(FrameError::LenMismatch {
+                declared: header.len as usize,
+                actual: buf.len() - HEADER2_LEN,
+            });
         }
         Ok(Frame {
             header: FrameHeader {
@@ -153,11 +176,20 @@ impl Frame2 {
     }
 
     /// 零拷贝解码（`buf` 已读入的完整消息；载荷共享底层内存）。
+    ///
+    /// **len 一致性校验**：与 [`Frame2::to_frame`] 相同——头声明 `len` 必须等于
+    /// 缓冲实际载荷字节数，拒绝截断或携带尾部的帧。
     pub fn to_frame_owned(buf: Bytes) -> Result<Frame, FrameError> {
         let header = FrameHeader2::decode(&buf)?;
         let total = HEADER2_LEN + header.len as usize;
         if buf.len() < total {
             return Err(FrameError::TooShort(buf.len()));
+        }
+        if buf.len() != total {
+            return Err(FrameError::LenMismatch {
+                declared: header.len as usize,
+                actual: buf.len() - HEADER2_LEN,
+            });
         }
         Ok(Frame {
             header: FrameHeader {
@@ -204,6 +236,11 @@ pub enum FrameError {
     BadMagic([u8; 4]),
     #[error("不支持的协议版本：{0}")]
     BadVersion(u8),
+    #[error(
+        "帧头 len 与载荷不一致：头声明 {declared} 字节，实际载荷 {actual} 字节 \
+         （拒绝被截断 / 携带尾部的帧，避免解码器收到半截关键帧）"
+    )]
+    LenMismatch { declared: usize, actual: usize },
 }
 
 /// 媒体帧头。
@@ -342,7 +379,8 @@ impl Frame {
         out.into()
     }
 
-    /// 从线上消息解码；若头声明的长度超出输入则返回 `None`。
+    /// 从线上消息解码。**len 一致性校验**：头声明 `len` 必须等于输入载荷字节数
+    /// （`buf.len() - HEADER_LEN`），拒绝截断或携带尾部的帧。
     ///
     /// 拷贝语义：输入是借用切片，载荷会 `copy_from_slice` 复制一份。
     /// 热路径（WS/QUIC 接收）请用 [`Frame::from_bytes_owned`] 避免每帧全量拷贝。
@@ -351,6 +389,12 @@ impl Frame {
         let total = HEADER_LEN + header.len as usize;
         if buf.len() < total {
             return Err(FrameError::TooShort(buf.len()));
+        }
+        if buf.len() != total {
+            return Err(FrameError::LenMismatch {
+                declared: header.len as usize,
+                actual: buf.len() - HEADER_LEN,
+            });
         }
         Ok(Self {
             header,
@@ -361,12 +405,19 @@ impl Frame {
     /// 从线上消息解码（**零拷贝**）：`buf` 是传输层已读入的完整消息，
     /// 载荷用 [`Bytes::slice`] 共享底层内存，不复制。
     ///
-    /// 仅校验帧头与长度；`buf` 尾部多余字节被忽略（不进入载荷）。
+    /// **len 一致性校验**：与 [`Frame::from_bytes`] 相同——头声明 `len` 必须等于
+    /// 缓冲实际载荷字节数，拒绝截断或携带尾部的帧。
     pub fn from_bytes_owned(buf: Bytes) -> Result<Self, FrameError> {
         let header = FrameHeader::decode(&buf)?;
         let total = HEADER_LEN + header.len as usize;
         if buf.len() < total {
             return Err(FrameError::TooShort(buf.len()));
+        }
+        if buf.len() != total {
+            return Err(FrameError::LenMismatch {
+                declared: header.len as usize,
+                actual: buf.len() - HEADER_LEN,
+            });
         }
         Ok(Self {
             header,
@@ -489,6 +540,46 @@ mod tests {
     #[test]
     fn rejects_short_buffer() {
         assert!(Frame::from_bytes(&[0u8; 4]).is_err());
+    }
+
+    #[test]
+    fn rejects_len_mismatch_for_both_frame_versions() {
+        // v1：头声明 len 与真实载荷不一致 → 拒绝（而不是静默截断/忽略尾部）。
+        let good = Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![9u8; 8]).to_bytes();
+
+        // ① 尾部多余字节（头声明 len=8，实际缓冲有第 9 个字节）→ LenMismatch
+        let mut trailing = good.clone().to_vec();
+        trailing.push(0xAA);
+        match Frame::from_bytes_owned(trailing.into()) {
+            Err(FrameError::LenMismatch { declared, actual }) => {
+                assert_eq!(declared, 8);
+                assert_eq!(actual, 9);
+            }
+            other => panic!("v1 尾部多余字节应报 LenMismatch，得到 {other:?}"),
+        }
+        assert!(Frame::from_bytes(&Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![9u8; 8]).to_bytes()).is_ok());
+
+        // ② 截断（头声明 len=8，实际缓冲只有 4 字节载荷）→ TooShort（不足则先太短）
+        let mut hurt = Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![9u8; 8]).to_bytes().to_vec();
+        hurt.truncate(HEADER_LEN + 4);
+        assert!(Frame::from_bytes(&hurt).is_err());
+
+        // ③ v2 紧凑帧同样校验
+        let v2_good = Frame2::from_frame(&Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![1u8; 4]))
+            .to_bytes();
+        let mut v2_trailing = v2_good.clone().to_vec();
+        v2_trailing.push(0xBB);
+        match Frame2::to_frame_owned(v2_trailing.into()) {
+            Err(FrameError::LenMismatch { declared, actual }) => {
+                assert_eq!(declared, 4);
+                assert_eq!(actual, 5);
+            }
+            other => panic!("v2 尾部多余字节应报 LenMismatch，得到 {other:?}"),
+        }
+        assert!(
+            Frame2::to_frame_owned(v2_good.clone()).is_ok(),
+            "正常 v2 帧必须通过一致性校验"
+        );
     }
 
     /// 确定性伪随机（xorshift64*）：任意字节不应 panic，只返回 Ok/Err。

@@ -188,14 +188,12 @@ pub async fn scan_devices(
 }
 
 /// 手动地址可达性探测（`/api/streams` 是受控/普通中继都提供的只读端点；
-/// 供「手动添加设备」校验地址用）。
+/// 供「手动添加设备」校验地址用）。探测逻辑收敛在
+/// `stross_kernel::relay::client::probe_base`（壳层不再手写 `/api/*` 客户端，
+/// docs/layering-architecture.md 红线）。
 #[tauri::command]
 pub async fn probe_relay(base: String) -> bool {
-    use stross_kernel::relay::client as relay_http;
-    let url = format!("{}/api/streams", base.trim_end_matches('/'));
-    relay_http::get_json::<serde_json::Value>(&url, std::time::Duration::from_secs(3))
-        .await
-        .is_ok()
+    stross_kernel::relay::client::probe_base(&base, std::time::Duration::from_secs(3)).await
 }
 
 /// L2 目录（远端节点设备 + 可订阅端点；类型化 `EndpointDir`）。

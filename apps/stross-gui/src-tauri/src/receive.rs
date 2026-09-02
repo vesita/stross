@@ -51,6 +51,26 @@ mod tests {
 #[cfg(not(target_os = "android"))]
 const RECV_MAX_W: u32 = 720;
 
+/// 桌面帧转发任务：解码帧通道 → 双线性缩放 → `STRF` 二进制通道推到前端 canvas。
+/// `start_receive`（main 槽）与 `start_receive_link`（多链路）桌面分支共用
+/// 同一显示管线（曾各写一份，docs/endpoint-model-v2.md 接收端多链路）。
+#[cfg(not(target_os = "android"))]
+fn spawn_frame_forwarder(
+    ch: Channel<Vec<u8>>,
+    mut frames: tokio::sync::mpsc::Receiver<stross_endpoint::playback::RenderedFrame>,
+) {
+    tokio::spawn(async move {
+        while let Some(f) = frames.recv().await {
+            let Some((w, h, data)) =
+                stross_endpoint::rgba_scaled(&f.rgba, f.width, f.height, RECV_MAX_W)
+            else {
+                continue;
+            };
+            let _ = ch.send(pack_frame(w, h, f.pts_ms, &data));
+        }
+    });
+}
+
 /// 开始接收 `relay` 上的 `stream`，解码帧缩放后经 `onFrame` 二进制通道推到前端。
 /// `audio` 决定音频去向：`device` 扬声器播放 / `discard` 静音。
 ///
@@ -111,20 +131,11 @@ pub async fn start_receive_link(
             .start_receive_link(link_id.clone(), relay, stream, audio)
             .await
             .map_err(|e| e.to_user_string())?;
-        let mut frames = match state.take_receive_frames_for(&link_id) {
+        let frames = match state.take_receive_frames_for(&link_id) {
             Some(r) => r,
             None => return Err("接收链路已启动但没有帧通道".into()),
         };
-        tokio::spawn(async move {
-            while let Some(f) = frames.recv().await {
-                let Some((w, h, data)) =
-                    stross_endpoint::rgba_scaled(&f.rgba, f.width, f.height, RECV_MAX_W)
-                else {
-                    continue;
-                };
-                let _ = ch.send(pack_frame(w, h, f.pts_ms, &data));
-            }
-        });
+        spawn_frame_forwarder(ch, frames);
         Ok(())
     }
 }
@@ -195,22 +206,13 @@ pub async fn start_receive(
             .start_receive(relay, stream, audio)
             .await
             .map_err(|e| e.to_user_string())?;
-        let mut frames = match state.take_receive_frames() {
+        let frames = match state.take_receive_frames() {
             Some(r) => r,
             None => return Err("接收会话已启动但没有帧通道".into()),
         };
-        // 帧转发：同 `start_receive_link` 的二进制通道路径（旧单流 `main`
-        // 槽位复用同一显示管线；`on_frame` 由前端逐链路创建）。
-        tokio::spawn(async move {
-            while let Some(f) = frames.recv().await {
-                let Some((w, h, data)) =
-                    stross_endpoint::rgba_scaled(&f.rgba, f.width, f.height, RECV_MAX_W)
-                else {
-                    continue;
-                };
-                let _ = ch.send(pack_frame(w, h, f.pts_ms, &data));
-            }
-        });
+        // 帧转发：与 `start_receive_link` 共用同一显示管线（`on_frame` 由前端
+        // 逐链路创建，old 单流 `main` 槽位复用）。
+        spawn_frame_forwarder(ch, frames);
         Ok(())
     }
 }

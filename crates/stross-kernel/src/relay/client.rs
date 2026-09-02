@@ -15,17 +15,10 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use stross_proto::message::StreamInfo;
 
-/// `/api/info` 中继入口信息（各传输端口）。
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InfoResp {
-    /// HTTP/WS 端口。
-    pub port: u16,
-    /// SRT 推流/观看端口（随机分配）。
-    pub srt_port: Option<u16>,
-    /// QUIC 推流/观看端口（随机分配）。
-    pub quic_port: Option<u16>,
-}
+/// `/api/info` 中继入口信息（各传输端口）。**契约单一真源**：与 server 侧
+/// [`super::dto::RelayInfoResp`] 是同一结构（同一 crate），客户端直接复用，
+/// 不再各自定义一份（此前两份字段相同、改动需同步两处）。
+pub use super::dto::RelayInfoResp as InfoResp;
 
 /// `/api/streams` 响应：兼容裸数组（现行服务端形态）与
 /// `{ "streams": [...] }` 包裹形态（历史兼容，前端同样双形态兼容）。
@@ -71,52 +64,52 @@ fn normalize_url(url: &str) -> String {
     }
 }
 
+/// 校验 HTTP 状态码：非 2xx 时统一提取错误体（`{ "error": ... }` 或原文）并 bail。
+///
+/// `http_get` / `get_json` / `post_json` 共用——此前三段几乎相同的
+/// 「非 2xx → 提取 error → bail」逻辑重复，收敛为本私有辅助（单一真源）。
+async fn ensure_success(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let msg = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v["error"].as_str().map(str::to_string))
+        .unwrap_or(body);
+    bail!("HTTP {}: {}", status.as_u16(), msg)
+}
+
 /// 发起标准 HTTP GET 请求并返回文本响应体。
 pub async fn http_get(url: &str, timeout: Duration) -> anyhow::Result<String> {
     let target = normalize_url(url);
-    let resp = http_client()
-        .get(&target)
-        .timeout(timeout)
-        .send()
+    let resp = ensure_success(
+        http_client()
+            .get(&target)
+            .timeout(timeout)
+            .send()
+            .await
+            .with_context(|| format!("请求失败 {url}"))?,
+    )
+    .await?;
+    resp.text()
         .await
-        .with_context(|| format!("请求失败 {url}"))?;
-
-    let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .with_context(|| format!("读取响应体失败 {url}"))?;
-
-    if !status.is_success() {
-        let msg = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v["error"].as_str().map(str::to_string))
-            .unwrap_or_else(|| body.clone());
-        bail!("HTTP {}: {}", status.as_u16(), msg);
-    }
-    Ok(body)
+        .with_context(|| format!("读取响应体失败 {url}"))
 }
 
 /// 发起 GET 请求并自动反序列化 JSON（`T` 为响应契约类型）。
 pub async fn get_json<T: DeserializeOwned>(url: &str, timeout: Duration) -> anyhow::Result<T> {
     let target = normalize_url(url);
-    let resp = http_client()
-        .get(&target)
-        .timeout(timeout)
-        .send()
-        .await
-        .with_context(|| format!("请求失败 {url}"))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        let msg = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v["error"].as_str().map(str::to_string))
-            .unwrap_or(body);
-        bail!("HTTP {}: {}", status.as_u16(), msg);
-    }
-
+    let resp = ensure_success(
+        http_client()
+            .get(&target)
+            .timeout(timeout)
+            .send()
+            .await
+            .with_context(|| format!("请求失败 {url}"))?,
+    )
+    .await?;
     resp.json::<T>()
         .await
         .with_context(|| format!("响应 JSON 解析失败 {url}"))
@@ -129,24 +122,16 @@ pub async fn post_json<T: DeserializeOwned, B: Serialize>(
     timeout: Duration,
 ) -> anyhow::Result<T> {
     let target = normalize_url(url);
-    let resp = http_client()
-        .post(&target)
-        .json(body)
-        .timeout(timeout)
-        .send()
-        .await
-        .with_context(|| format!("请求失败 {url}"))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body_str = resp.text().await.unwrap_or_default();
-        let msg = serde_json::from_str::<serde_json::Value>(&body_str)
-            .ok()
-            .and_then(|v| v["error"].as_str().map(str::to_string))
-            .unwrap_or(body_str);
-        bail!("HTTP {}: {}", status.as_u16(), msg);
-    }
-
+    let resp = ensure_success(
+        http_client()
+            .post(&target)
+            .json(body)
+            .timeout(timeout)
+            .send()
+            .await
+            .with_context(|| format!("请求失败 {url}"))?,
+    )
+    .await?;
     resp.json::<T>()
         .await
         .with_context(|| format!("响应 JSON 解析失败 {url}"))
@@ -175,6 +160,16 @@ pub async fn stream_watchers(
     list.into_iter()
         .find(|s| s.stream_id == stream_id)
         .map(|s| s.watchers)
+}
+
+/// 探测一个中继 HTTP 基址（`http://host:port`）是否可达：仅校验
+/// `/api/streams` 端点（受控 / 普通中继都提供的只读端点）。不可达返回 `false`。
+///
+/// GUI「手动添加设备」校验地址用——壳层不再手写 `/api/*` 探测客户端
+/// （docs/layering-architecture.md：解析 `/api/*` 只允许在 stross-kernel）。
+pub async fn probe_base(base: &str, timeout: Duration) -> bool {
+    let url = format!("{}/api/streams", base.trim_end_matches('/'));
+    get_json::<serde_json::Value>(&url, timeout).await.is_ok()
 }
 
 #[cfg(test)]

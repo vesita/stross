@@ -49,6 +49,8 @@ interface WindowWithTauri extends Window {
   adjustVolume?: (delta: number) => void;
   resetZoomAndPan?: () => void;
   toggleMute?: () => void;
+  updateMuteButtonUI?: () => void;
+  updateZoomChipUI?: () => void;
 }
 /** Tauri invoke 的弱类型契约（与 Rust 命令面逐步收紧）。 */
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;

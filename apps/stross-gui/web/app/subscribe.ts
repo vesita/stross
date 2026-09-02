@@ -357,10 +357,11 @@ function syncRecvUI(): void {
   }
   // 状态机同步
   dispatchUIAction({ type: 'SYNC_LINKS' });
+  updateMuteButtonUI();
+  updateZoomChipUI();
   calcSmartLayout();
   updateRecvOverlay();
 }
-
 /** 接收等待浮层。 */
 function updateRecvOverlay(): void {
   const active = activeVideoLink ? recvLinks.get(activeVideoLink) : null;

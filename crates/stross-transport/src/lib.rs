@@ -21,6 +21,7 @@ pub mod srt;
 pub mod webrtc;
 pub mod ws;
 
+pub use memory::{BufferPool, BytesChunks, chunk_bytes};
 pub use relay_url::RelayUrl;
 
 use std::sync::Arc;

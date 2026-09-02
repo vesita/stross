@@ -34,7 +34,7 @@ function renderLocalDevices() {
         return;
     box.innerHTML = '';
     if (!localCatalog.endpoints.length) {
-        box.appendChild(emptyState('server', '本机暂无可共享的内容'));
+        box.appendChild(emptyState('server', '本机暂无可共享的内容', '未检测到可用的屏幕、摄像头或音频采集设备'));
         return;
     }
     for (const ep of localCatalog.endpoints) {
@@ -113,8 +113,7 @@ function openPublishModal(endpointId) {
         return;
     publishTarget = { ep };
     $('pub-modal-title').textContent = `共享「${ep.name}」`;
-    $('pub-modal-sub').textContent =
-        '开启后，局域网内其它设备可以订阅并接收这个内容（共享 = 由本机推送）。';
+    $('pub-modal-sub').textContent = '开启后局域网其它设备可订阅并接收此内容';
     document.querySelector('input[name="pub-vis"][value="confirm"]').checked = true;
     $('pub-error').classList.add('hidden');
     $('pub-modal').classList.remove('hidden');
@@ -222,7 +221,7 @@ function renderRemoteDir(dev, dir) {
     title.textContent = '可订阅的内容';
     container.appendChild(title);
     if (!dir.endpoints.length) {
-        container.appendChild(emptyState('server', '该设备暂未共享任何内容'));
+        container.appendChild(emptyState('radio', '该设备暂未共享任何内容', '对方可以在其设备列表中点击「共享」开启推流'));
         return;
     }
     for (const ep of dir.endpoints) {
@@ -307,8 +306,8 @@ function openSubscribeModal(host, endpointId) {
     subscribeTarget = { host, ep };
     $('sub-modal-title').textContent = `订阅「${ep.name}」`;
     $('sub-modal-sub').textContent =
-        '订阅后将接收对方共享的这个内容' +
-            (ep.visibility === 'public' ? '（公开，无需确认）' : '');
+        '订阅后将实时接收对方共享的媒体画面' +
+            (ep.visibility === 'public' ? '（免确认）' : '（需对端授权）');
     $('sub-error').classList.add('hidden');
     $('sub-modal').classList.remove('hidden');
 }

@@ -27,20 +27,52 @@ function icon(name: string, cls = ''): string {
   return `<svg class="ic${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
 }
 
-/** 空状态占位（图标 + 文案，可选错误配色）。 */
-function emptyState(iconName: string, text: string, isError = false): HTMLElement {
+/** 空状态占位组件（支持图标、主标题、辅助说明、可选行动按钮与错误样式）。 */
+function emptyState(
+  iconName: string,
+  title: string,
+  subText?: string,
+  action?: { label: string; icon?: string; onClick: () => void },
+  isError = false,
+): HTMLElement {
   const box = document.createElement('div');
-  box.className = 'empty';
-  const ic = document.createElement('span');
+  box.className = 'empty' + (isError ? ' empty-err' : '');
+
+  const ic = document.createElement('div');
+  ic.className = 'empty-ic';
   ic.innerHTML = icon(iconName);
-  const p = document.createElement('p');
-  if (isError) p.className = 'err-text';
-  p.textContent = text;
   box.appendChild(ic);
-  box.appendChild(p);
+
+  const textWrap = document.createElement('div');
+  textWrap.className = 'empty-text-wrap';
+
+  const p = document.createElement('p');
+  p.className = 'empty-title' + (isError ? ' err-text' : '');
+  p.textContent = title;
+  textWrap.appendChild(p);
+
+  if (subText) {
+    const sub = document.createElement('p');
+    sub.className = 'empty-sub';
+    sub.textContent = subText;
+    textWrap.appendChild(sub);
+  }
+  box.appendChild(textWrap);
+
+  if (action) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sm empty-btn' + (isError ? ' danger' : ' primary');
+    btn.innerHTML = (action.icon ? icon(action.icon) : '') + `<span>${action.label}</span>`;
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      action.onClick();
+    };
+    box.appendChild(btn);
+  }
+
   return box;
 }
-
 /** 让列表项可点击且可键盘操作（Enter/Space 触发）。 */
 function makeClickable(el: HTMLElement, fn: () => void): void {
   el.tabIndex = 0;
@@ -281,34 +313,49 @@ function initFSMUI(): void {
 
 function showFatal(msg: string): void {
   const box = $('error-box');
+  if (!box) return;
   box.textContent = msg;
   box.classList.remove('hidden');
   attachErrClose(box);
 }
 function hideError(): void {
-  $('error-box').classList.add('hidden');
+  const box = $('error-box');
+  if (box) box.classList.add('hidden');
 }
 function showGridError(msg: string): void {
   const box = $('grid-error');
+  if (!box) return;
   box.textContent = msg;
   box.classList.remove('hidden');
   attachErrClose(box);
 }
 function hideGridError(): void {
-  $('grid-error').classList.add('hidden');
+  const box = $('grid-error');
+  if (box) box.classList.add('hidden');
 }
 function showRecvError(msg: string): void {
   const box = $('recv-error');
+  if (!box) return;
   box.textContent = msg;
   box.classList.remove('hidden');
   attachErrClose(box);
 }
 function hideRecvError(): void {
-  $('recv-error').classList.add('hidden');
+  const box = $('recv-error');
+  if (box) box.classList.add('hidden');
 }
 
-/** 浮动 Toast 吐司提示。 */
-function showToast(msg: string, kind: 'ok' | 'err' | 'info' = 'info', durationMs = 3000): void {
+let lastToastMsg = '';
+let lastToastTime = 0;
+
+/** 浮动 Toast 吐司提示（自动去重与排队防抖）。 */
+function showToast(msg: string, kind: 'ok' | 'err' | 'info' = 'info', durationMs = 2800): void {
+  const now = Date.now();
+  // 1.5 秒内相同内容去重，避免网络轮询或多流事件并发触发大量重复弹窗
+  if (msg === lastToastMsg && now - lastToastTime < 1500) return;
+  lastToastMsg = msg;
+  lastToastTime = now;
+
   const container = $('toast-container');
   if (!container) return;
   const toast = document.createElement('div');
@@ -317,12 +364,10 @@ function showToast(msg: string, kind: 'ok' | 'err' | 'info' = 'info', durationMs
   toast.innerHTML = `<span class="toast-ic">${icon(iconName)}</span><span class="toast-msg">${msg}</span>`;
   container.appendChild(toast);
   setTimeout(() => {
-    toast.style.opacity = '0';
-    toast.style.transform = 'translateY(10px)';
-    setTimeout(() => toast.remove(), 250);
+    toast.classList.add('toast-leaving');
+    setTimeout(() => toast.remove(), 240);
   }, durationMs);
 }
-
 /** 复制文本到剪贴板并弹出 Toast 提示。 */
 async function copyText(text: string, label = '已复制'): Promise<void> {
   try {
@@ -431,8 +476,30 @@ function updateCanvasTransform(): void {
       canvas.style.transform = `scale(${playerZoom}) translate3d(${panX}px, ${panY}px, 0)`;
     }
   }
+  updateZoomChipUI();
 }
 
+/** 画面缩放浮动芯片状态同步。 */
+function updateZoomChipUI(): void {
+  const chip = $('player-zoom-chip');
+  if (!chip) return;
+  const isZoomed = playerZoom > 1.05 || panX !== 0 || panY !== 0;
+  chip.classList.toggle('hidden', !isZoomed);
+  const textEl = $('player-zoom-chip-text');
+  if (textEl && isZoomed) {
+    textEl.textContent = `${playerZoom.toFixed(1)}x · 重置`;
+  }
+}
+
+/** 静音按钮图标与状态文字同步。 */
+function updateMuteButtonUI(): void {
+  const muteBtn = $('recv-mute-btn');
+  const muteIc = $('recv-mute-ic');
+  if (!muteBtn || !muteIc) return;
+  const isMuted = playerVolume <= 0.001;
+  muteBtn.title = isMuted ? '恢复声音 (快捷键 M / 空格)' : '静音 (快捷键 M / 空格)';
+  muteIc.innerHTML = `<use href="#i-${isMuted ? 'volume-x' : 'volume-2'}"></use>`;
+}
 let fsInactivityTimer: number | undefined = undefined;
 
 /** 重置全屏控制栏自动隐藏倒计时。 */
@@ -551,6 +618,7 @@ function adjustVolume(delta: number): void {
   playerVolume = Math.min(1.0, Math.max(0.0, playerVolume + delta));
   const pct = Math.round(playerVolume * 100);
   showGestureHud(playerVolume > 0 ? 'volume-2' : 'volume-x', `音量 ${pct}%`, pct);
+  updateMuteButtonUI();
 }
 
 function resetZoomAndPan(): void {
@@ -562,15 +630,15 @@ function resetZoomAndPan(): void {
 }
 
 function toggleMute(): void {
-  if (playerVolume > 0) {
+  if (playerVolume > 0.001) {
     playerVolume = 0;
-    showGestureHud('volume-x', '静音', 0);
+    showGestureHud('volume-x', '已静音', 0);
   } else {
     playerVolume = 1.0;
     showGestureHud('volume-2', '音量 100%', 100);
   }
+  updateMuteButtonUI();
 }
-
 function toggleDiagnosticsDrawer(): void {
   const drawer = $('player-diag-drawer');
   if (drawer) drawer.classList.toggle('hidden');
@@ -590,3 +658,5 @@ winObj.adjustBrightness = adjustBrightness;
 winObj.adjustVolume = adjustVolume;
 winObj.resetZoomAndPan = resetZoomAndPan;
 winObj.toggleMute = toggleMute;
+winObj.updateMuteButtonUI = updateMuteButtonUI;
+winObj.updateZoomChipUI = updateZoomChipUI;

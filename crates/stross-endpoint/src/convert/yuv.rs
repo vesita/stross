@@ -64,7 +64,36 @@ pub fn yuv420_to_rgba_scaled(
     const FP: u64 = 12;
     let scale_x = ((w as u64) << FP) / tw as u64;
     let scale_y = ((h as u64) << FP) / th as u64;
-    let mut out = Vec::with_capacity(tw as usize * th as usize * 4);
+
+    // 预计算水平采样参数（消除逐行内循环的重复乘除法）
+    #[derive(Clone, Copy)]
+    struct YuvXSample {
+        x0: usize,
+        x1: usize,
+        fx: u32,
+        w_fx: u32,
+        ux: usize,
+    }
+    let mut x_samples = Vec::with_capacity(tw as usize);
+    for ox in 0..tw {
+        let sx = ((ox as u64) * scale_x)
+            .saturating_add(scale_x / 2)
+            .saturating_sub(1 << (FP - 1));
+        let x0 = ((sx >> FP) as usize).min(w as usize - 1);
+        let x1 = (x0 + 1).min(w as usize - 1);
+        let fx = (sx & ((1 << FP) - 1)) as u32;
+        let w_fx = (1 << FP) - fx;
+        x_samples.push(YuvXSample {
+            x0,
+            x1,
+            fx,
+            w_fx,
+            ux: x0 / 2,
+        });
+    }
+
+    let dst_stride = tw as usize * 4;
+    let mut out = vec![0u8; tw as usize * th as usize * 4];
     for oy in 0..th {
         // 中心对齐采样（与 rgba::rgba_scaled 同约定，12 位定点）；越界 clamp 防负权重外插
         let sy = ((oy as u64) * scale_y)
@@ -78,14 +107,13 @@ pub fn yuv420_to_rgba_scaled(
         let row1 = y_base + y1 * stride_y;
         let uy = y0 / 2;
         let uv_row_off = uv_base + uy * uv_stride;
-        for ox in 0..tw {
-            let sx = ((ox as u64) * scale_x)
-                .saturating_add(scale_x / 2)
-                .saturating_sub(1 << (FP - 1));
-            let x0 = ((sx >> FP) as usize).min(w as usize - 1);
-            let x1 = (x0 + 1).min(w as usize - 1);
-            let fx = (sx & ((1 << FP) - 1)) as u32;
-            let w_fx = (1 << FP) - fx;
+        let out_row = &mut out[oy as usize * dst_stride..oy as usize * dst_stride + dst_stride];
+
+        for (ox, sample) in x_samples.iter().enumerate() {
+            let x0 = sample.x0;
+            let x1 = sample.x1;
+            let fx = sample.fx;
+            let w_fx = sample.w_fx;
 
             // 亮度对细节敏感：Y 12 位定点双线性插值
             let y00 = u32::from(buf[row0 + x0]);
@@ -97,7 +125,7 @@ pub fn yuv420_to_rgba_scaled(
             let y_val = ((top * w_fy + bot * fy + 2048) >> FP) as i32;
 
             // 色度按 2x2 块采样（YUV420 语义；块坐标取插值格点左下）
-            let ux = x0 / 2;
+            let ux = sample.ux;
             let (u, v) = match layout {
                 Yuv420Layout::SemiPlanar => (
                     i32::from(buf[uv_row_off + ux * 2]),
@@ -114,7 +142,11 @@ pub fn yuv420_to_rgba_scaled(
             let r = clamp_u8((298 * c + 409 * e + 128) >> 8);
             let g = clamp_u8((298 * c - 100 * d - 208 * e + 128) >> 8);
             let b = clamp_u8((298 * c + 516 * d + 128) >> 8);
-            out.extend_from_slice(&[r, g, b, 255]);
+            let dst_px = ox * 4;
+            out_row[dst_px] = r;
+            out_row[dst_px + 1] = g;
+            out_row[dst_px + 2] = b;
+            out_row[dst_px + 3] = 255;
         }
     }
     Some((tw, th, out))
@@ -267,19 +299,24 @@ pub fn bgra_to_yuv420p(
         // 偶数行时累计色度（2x2 平均）
         if j % 2 == 0 && j + 1 < h {
             let row2 = &bgra[(j + 1) * stride..(j + 1) * stride + w * 4];
-            let urow = &mut u_plane[(j / 2) * (w / 2)..(j / 2 + 1) * (w / 2)];
-            let vrow = &mut v_plane[(j / 2) * (w / 2)..(j / 2 + 1) * (w / 2)];
+            let uv_offset = (j / 2) * (w / 2);
+            let urow = &mut u_plane[uv_offset..uv_offset + (w / 2)];
+            let vrow = &mut v_plane[uv_offset..uv_offset + (w / 2)];
             for i in (0..w).step_by(2) {
-                let mut b_sum = 0i32;
-                let mut g_sum = 0i32;
-                let mut r_sum = 0i32;
-                for (di, dj) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                    let px = (i + di) * 4;
-                    let row_sel = if dj == 0 { row } else { row2 };
-                    b_sum += i32::from(row_sel[px]);
-                    g_sum += i32::from(row_sel[px + 1]);
-                    r_sum += i32::from(row_sel[px + 2]);
-                }
+                let px0 = i * 4;
+                let px1 = px0 + 4;
+                let b_sum = i32::from(row[px0])
+                    + i32::from(row[px1])
+                    + i32::from(row2[px0])
+                    + i32::from(row2[px1]);
+                let g_sum = i32::from(row[px0 + 1])
+                    + i32::from(row[px1 + 1])
+                    + i32::from(row2[px0 + 1])
+                    + i32::from(row2[px1 + 1]);
+                let r_sum = i32::from(row[px0 + 2])
+                    + i32::from(row[px1 + 2])
+                    + i32::from(row2[px0 + 2])
+                    + i32::from(row2[px1 + 2]);
                 // 平均后换算（/4 得像素均值，再 /256 得系数缩放）
                 let u = ((-43 * r_sum - 85 * g_sum + 128 * b_sum) / (4 * 256) + 128).clamp(0, 255);
                 let v = ((128 * r_sum - 107 * g_sum - 21 * b_sum) / (4 * 256) + 128).clamp(0, 255);
@@ -367,6 +404,30 @@ pub fn bgra_to_yuv420p_scaled(
     const FP: u64 = 12;
     let scale_x = ((src_w as u64) << FP) / dst_w as u64;
     let scale_y = ((src_h as u64) << FP) / dst_h as u64;
+
+    // 预计算水平采样参数（消除逐行内循环的重复乘除法）
+    #[derive(Clone, Copy)]
+    struct ScaledXSample {
+        i00_off: usize,
+        i01_off: usize,
+        fx: u32,
+        w_fx: u32,
+    }
+    let mut x_samples = Vec::with_capacity(dst_w);
+    for i in 0..dst_w {
+        let sx = ((i as u64 * scale_x).saturating_add(scale_x / 2)).saturating_sub(1 << (FP - 1));
+        let x0 = ((sx >> FP) as usize).min(src_w - 1);
+        let x1 = (x0 + 1).min(src_w - 1);
+        let fx = (sx & ((1 << FP) - 1)) as u32;
+        let w_fx = (1 << FP) - fx;
+        x_samples.push(ScaledXSample {
+            i00_off: x0 * 4,
+            i01_off: x1 * 4,
+            fx,
+            w_fx,
+        });
+    }
+
     for j in 0..dst_h {
         let sy = ((j as u64 * scale_y).saturating_add(scale_y / 2)).saturating_sub(1 << (FP - 1));
         let y0 = ((sy >> FP) as usize).min(src_h - 1);
@@ -375,24 +436,23 @@ pub fn bgra_to_yuv420p_scaled(
         let w_fy = (1 << FP) - fy;
         let r0 = y0 * src_stride;
         let r1 = y1 * src_stride;
-        for i in 0..dst_w {
-            let sx =
-                ((i as u64 * scale_x).saturating_add(scale_x / 2)).saturating_sub(1 << (FP - 1));
-            let x0 = ((sx >> FP) as usize).min(src_w - 1);
-            let x1 = (x0 + 1).min(src_w - 1);
-            let fx = (sx & ((1 << FP) - 1)) as u32;
-            let w_fx = (1 << FP) - fx;
-            let d = j * dst_stride + i * 4;
-            let i00 = r0 + x0 * 4;
-            let i01 = r0 + x1 * 4;
-            let i10 = r1 + x0 * 4;
-            let i11 = r1 + x1 * 4;
+        let dst_row = &mut scaled[j * dst_stride..j * dst_stride + dst_stride];
+
+        for (i, sample) in x_samples.iter().enumerate() {
+            let i00 = r0 + sample.i00_off;
+            let i01 = r0 + sample.i01_off;
+            let i10 = r1 + sample.i00_off;
+            let i11 = r1 + sample.i01_off;
+            let fx = sample.fx;
+            let w_fx = sample.w_fx;
+            let d = i * 4;
+
             for c in 0..4 {
                 let top =
                     (u32::from(bgra[i00 + c]) * w_fx + u32::from(bgra[i01 + c]) * fx + 2048) >> FP;
                 let bot =
                     (u32::from(bgra[i10 + c]) * w_fx + u32::from(bgra[i11 + c]) * fx + 2048) >> FP;
-                scaled[d + c] = ((top * w_fy + bot * fy + 2048) >> FP) as u8;
+                dst_row[d + c] = ((top * w_fy + bot * fy + 2048) >> FP) as u8;
             }
         }
     }

@@ -257,7 +257,21 @@ if (filterClear && filterInput) {
   });
 }
 
-// 播放器 AI 工具条与手势初始化
+// 播放器控制栏按钮事件绑定（静音、比例、全屏、缩放重置）
+const muteBtn = $('recv-mute-btn');
+if (muteBtn) muteBtn.onclick = () => toggleMute();
+const zoomChip = $('player-zoom-chip');
+if (zoomChip) zoomChip.onclick = () => resetZoomAndPan();
+const recentClearBtn = $('recent-clear-btn');
+if (recentClearBtn) {
+  recentClearBtn.onclick = () => {
+    localStorage.removeItem(LS_RECENT);
+    manualRelays = [];
+    renderRecent();
+    void refreshDevices(true);
+  };
+}
+
 const aspectBtn = $('player-aspect-btn');
 if (aspectBtn) aspectBtn.onclick = () => cycleAspectRatio();
 const quickAspectBtn = $('recv-aspect-quick-btn');
@@ -270,7 +284,6 @@ if (diagCloseBtn) diagCloseBtn.onclick = () => toggleDiagnosticsDrawer();
 
 initPlayerGestures();
 initFSMUI();
-
 // 原生返回键退出全屏（Android）→ 前端同步恢复全屏态。
 void listen<{ active: boolean }>('native-fullscreen-changed', (p) => {
   void handleNativeFullscreenChanged(p.active);

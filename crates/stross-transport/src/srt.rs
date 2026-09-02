@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use tokio::sync::Mutex;
 
 use stross_proto::frame::{Frame, FrameHeader, HEADER_LEN};
@@ -250,22 +250,20 @@ impl DataSession for SrtDataSession {
                 let n = msg.len();
                 sock.send(&msg)
                     .await
-                    .map_err(|e| TransportError::Io(format!("SRT 发送失败: {e}")))?;
+                    .map_err(|e| TransportError::Io(format!("SRT 控制消息发送失败: {e}")))?;
                 self.stats.add_sent(n);
             }
             SessionPacket::Media(frame) => {
                 let payload = &frame.payload;
-                // rsrt::send 内部会再 to_vec 一次；这里复用一块 buffer
-                // 避免每帧/每片重复分配
-                let mut msg = Vec::with_capacity(1 + HEADER_LEN + FRAGMENT_LEN);
                 if payload.len() <= FRAGMENT_LEN {
+                    let mut msg = Vec::with_capacity(1 + HEADER_LEN + payload.len());
                     msg.push(PktType::Media as u8);
                     msg.extend_from_slice(&frame.header.encode());
                     msg.extend_from_slice(payload);
                     let n = msg.len();
                     sock.send(&msg)
                         .await
-                        .map_err(|e| TransportError::Io(format!("SRT 发送失败: {e}")))?;
+                        .map_err(|e| TransportError::Io(format!("SRT 媒体帧发送失败: {e}")))?;
                     self.stats.add_sent(n);
                 } else {
                     // 分片：每片 = 1B 类型 + 帧头（frag_* 标记）+ 片载荷
@@ -282,6 +280,8 @@ impl DataSession for SrtDataSession {
                         )));
                     }
                     let frag_cnt = (payload.len().div_ceil(FRAGMENT_LEN)) as u8;
+                    // 复用单块预分配 buffer，避免分片发送过程中的重复内存分配
+                    let mut msg = Vec::with_capacity(1 + HEADER_LEN + FRAGMENT_LEN);
                     for (i, chunk) in payload.chunks(FRAGMENT_LEN).enumerate() {
                         let mut header = frame.header;
                         header.frag_idx = i as u8;
@@ -292,9 +292,9 @@ impl DataSession for SrtDataSession {
                         msg.extend_from_slice(&header.encode());
                         msg.extend_from_slice(chunk);
                         let n = msg.len();
-                        sock.send(&msg)
-                            .await
-                            .map_err(|e| TransportError::Io(format!("SRT 发送失败: {e}")))?;
+                        sock.send(&msg).await.map_err(|e| {
+                            TransportError::Io(format!("SRT 媒体分片发送失败: {e}"))
+                        })?;
                         self.stats.add_sent(n);
                     }
                 }
@@ -307,12 +307,21 @@ impl DataSession for SrtDataSession {
         let mut guard = self.sock.lock().await;
         let sock = guard.as_mut().ok_or(TransportError::Closed)?;
         loop {
-            let Some(bytes) = sock
-                .recv()
-                .await
-                .map_err(|e| TransportError::Io(format!("SRT 接收失败: {e}")))?
-            else {
-                return Ok(None); // 对端干净关闭（SRT SHUTDOWN）
+            let res = sock.recv().await;
+            let bytes = match res {
+                Ok(Some(b)) => b,
+                Ok(None) => return Ok(None), // 对端干净关闭（SRT SHUTDOWN）
+                Err(e) => {
+                    let err_str = e.to_string();
+                    // 检查是否为断开连接/关闭相关错误，以便上层按干净断开处理
+                    if err_str.contains("closed")
+                        || err_str.contains("shutdown")
+                        || err_str.contains("reset")
+                    {
+                        return Ok(None);
+                    }
+                    return Err(TransportError::Io(format!("SRT 接收失败: {err_str}")));
+                }
             };
             self.stats.add_recv(bytes.len());
             if let Some(pkt) = decode_message(bytes, &mut *self.rx.lock().await) {
@@ -321,7 +330,6 @@ impl DataSession for SrtDataSession {
             // `None` = 分片累积中（或一条损坏消息）：继续收下一片/下一条
         }
     }
-
     async fn close(&self) -> Result<(), TransportError> {
         let sock = self.sock.lock().await.take();
         if let Some(sock) = sock {
@@ -372,13 +380,13 @@ impl RxState {
                     h.frag_idx = 0;
                     h.frag_cnt = 0;
                     h.len = total as u32;
-                    let mut out = Vec::with_capacity(total);
+                    let mut out = BytesMut::with_capacity(total);
                     for f in p.frags {
                         out.extend_from_slice(&f);
                     }
                     Some(SessionPacket::Media(Frame {
                         header: h,
-                        payload: out.into(),
+                        payload: out.freeze(),
                     }))
                 } else {
                     None

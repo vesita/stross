@@ -14,13 +14,13 @@
 //! 需要在解析 answer 前把候选行里的 `.local` 名解析成真实 IP
 //! （[`resolve_mdns_candidates`]，feature `discovery` 开启时生效）。
 
+use async_trait::async_trait;
+use bytes::Bytes;
 #[cfg(feature = "discovery")]
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use async_trait::async_trait;
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use str0m::net::{Protocol, Receive};
@@ -318,10 +318,12 @@ impl PeerLoop {
                 match self.cmd_rx.try_recv() {
                     Ok(PeerCommand::Send(pkt)) => {
                         let (cid, binary, bytes) = match &pkt {
-                            SessionPacket::Control(c) => {
-                                (self.control_id, false, c.to_text().into_bytes())
-                            }
-                            SessionPacket::Media(f) => (self.media_id, true, f.to_bytes().to_vec()),
+                            SessionPacket::Control(c) => (
+                                self.control_id,
+                                false,
+                                Bytes::from(c.to_text().into_bytes()),
+                            ),
+                            SessionPacket::Media(f) => (self.media_id, true, f.to_bytes()),
                         };
                         // 注意：先写完再更新统计，避免跨 await 持有 Rtc 借用
                         let sent = if let Some(mut ch) = self.rtc.channel(cid) {

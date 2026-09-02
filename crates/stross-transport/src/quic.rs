@@ -678,6 +678,9 @@ pub async fn write_media_frame(
 }
 
 /// 写一条带 v2 紧凑帧头的媒体消息（零载荷拷贝）。
+///
+/// 优化：栈上合并 4 字节长度前缀与 14 字节紧凑帧头（共 18 字节），
+/// 单次直写流头部，随后零拷贝直写载荷，减少一次异步系统调用与流缓冲追加。
 async fn write_media_msg(
     tx: &mut quinn::SendStream,
     header: &FrameHeader2,
@@ -685,10 +688,10 @@ async fn write_media_msg(
 ) -> Result<(), TransportError> {
     let total = u32::try_from(HEADER2_LEN + payload.len())
         .map_err(|_| TransportError::Protocol("消息超过 4GiB".into()))?;
-    tx.write_all(&total.to_le_bytes())
-        .await
-        .map_err(|e| TransportError::Io(format!("QUIC 写长度失败: {e}")))?;
-    tx.write_all(&header.encode())
+    let mut prefix = [0u8; LEN_BYTES + HEADER2_LEN];
+    prefix[..LEN_BYTES].copy_from_slice(&total.to_le_bytes());
+    prefix[LEN_BYTES..].copy_from_slice(&header.encode());
+    tx.write_all(&prefix)
         .await
         .map_err(|e| TransportError::Io(format!("QUIC 写帧头失败: {e}")))?;
     tx.write_all(payload)
@@ -698,15 +701,26 @@ async fn write_media_msg(
 }
 
 /// 写一条长度前缀消息。
+///
+/// 对于小体积控制消息（≤ 512 字节），在栈上单次组合并发送，减少异步调度与 IO 开销。
 async fn write_msg(tx: &mut quinn::SendStream, payload: &[u8]) -> Result<(), TransportError> {
     let len = u32::try_from(payload.len())
         .map_err(|_| TransportError::Protocol("消息超过 4GiB".into()))?;
-    tx.write_all(&len.to_le_bytes())
-        .await
-        .map_err(|e| TransportError::Io(format!("QUIC 写长度失败: {e}")))?;
-    tx.write_all(payload)
-        .await
-        .map_err(|e| TransportError::Io(format!("QUIC 写载荷失败: {e}")))?;
+    if payload.len() <= 512 {
+        let mut buf = [0u8; LEN_BYTES + 512];
+        buf[..LEN_BYTES].copy_from_slice(&len.to_le_bytes());
+        buf[LEN_BYTES..LEN_BYTES + payload.len()].copy_from_slice(payload);
+        tx.write_all(&buf[..LEN_BYTES + payload.len()])
+            .await
+            .map_err(|e| TransportError::Io(format!("QUIC 写控制消息失败: {e}")))?;
+    } else {
+        tx.write_all(&len.to_le_bytes())
+            .await
+            .map_err(|e| TransportError::Io(format!("QUIC 写长度失败: {e}")))?;
+        tx.write_all(payload)
+            .await
+            .map_err(|e| TransportError::Io(format!("QUIC 写载荷失败: {e}")))?;
+    }
     Ok(())
 }
 
@@ -727,10 +741,10 @@ async fn read_msg(rx: &mut quinn::RecvStream) -> Result<Option<Bytes>, Transport
             "QUIC 消息长度超限（{len} > {MAX_MSG_LEN} 字节）"
         )));
     }
-    let mut buf = BytesMut::with_capacity(len);
-    // 安全保证：紧随其后的 read_exact 会立即完全覆写所有 len 字节；
-    // 若读取失败，buf 会被立即 drop，不会向外暴露任何未初始化内存。
-    unsafe { buf.set_len(len) };
+    if len == 0 {
+        return Ok(Some(Bytes::new()));
+    }
+    let mut buf = BytesMut::zeroed(len);
     if let Err(e) = rx.read_exact(&mut buf).await {
         return map_read_err(e).map(|_| None);
     }

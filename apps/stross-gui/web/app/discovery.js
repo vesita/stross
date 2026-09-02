@@ -10,6 +10,13 @@ function normAddr(addr) {
     let a = addr.trim();
     if (!a)
         return null;
+    // 自动规范化全角标点与数字（应对中文输入法误输入：。/：/／/全角数字）
+    a = a
+        .replace(/[。．]/g, '.')
+        .replace(/[：]/g, ':')
+        .replace(/[／]/g, '/')
+        .replace(/[，、]/g, ',')
+        .replace(/[\uff10-\uff19]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
     if (!/^https?:\/\//i.test(a))
         a = 'http://' + a;
     return a.replace(/\/+$/, '');
@@ -84,7 +91,21 @@ function savePrefs() {
 // ---------------- 手动添加历史 ----------------
 function getRecent() {
     try {
-        return JSON.parse(localStorage.getItem(LS_RECENT) || '[]');
+        const raw = JSON.parse(localStorage.getItem(LS_RECENT) || '[]');
+        const valid = [];
+        const seen = new Set();
+        for (const item of raw) {
+            const normalized = normAddr(item);
+            if (normalized && !seen.has(normalized)) {
+                // 过滤掉包含畸形端口或非法字符的测试脏数据
+                const hostPort = normalized.replace(/^https?:\/\//, '');
+                if (/^[a-zA-Z0-9_.-]+(:\d{1,5})?$/.test(hostPort)) {
+                    seen.add(normalized);
+                    valid.push(normalized);
+                }
+            }
+        }
+        return valid.slice(0, 5);
     }
     catch { }
     return [];
@@ -108,31 +129,32 @@ function renderRecent() {
         return;
     }
     block.classList.remove('hidden');
-    const ul = $('recent-list');
-    ul.innerHTML = '';
+    const container = $('recent-list');
+    container.innerHTML = '';
     list.forEach((u) => {
-        const li = document.createElement('li');
+        const chip = document.createElement('div');
+        chip.className = 'recent-chip';
+        chip.title = `点击填入并连接：${u}`;
         const main = document.createElement('span');
-        main.className = 'recent-main';
+        main.className = 'recent-chip-label';
         main.textContent = u;
-        main.title = '点击重新添加';
-        makeClickable(main, () => {
+        main.onclick = () => {
             $input('manual-addr').value = u;
             void addManualRelay();
-        });
+        };
         const del = document.createElement('button');
         del.type = 'button';
-        del.className = 'recent-del';
-        del.title = '删除该记录';
-        del.setAttribute('aria-label', '删除 ' + u);
+        del.className = 'recent-chip-del';
+        del.title = '移除此历史地址';
+        del.setAttribute('aria-label', '移除 ' + u);
         del.innerHTML = icon('x');
         del.onclick = (e) => {
             e.stopPropagation();
             removeRecent(u);
         };
-        li.appendChild(main);
-        li.appendChild(del);
-        ul.appendChild(li);
+        chip.appendChild(main);
+        chip.appendChild(del);
+        container.appendChild(chip);
     });
 }
 // ---------------------------------------------------------------------------
@@ -251,7 +273,11 @@ function renderDeviceList() {
     // 本机卡片已插入 DOM，设备树此刻渲染（构造期容器未入文档，查不到会空渲）
     renderLocalDevices();
     if (!deviceViews.length) {
-        box.appendChild(emptyState('radio', '未发现局域网内其它设备。可手动输入地址添加。'));
+        box.appendChild(emptyState('wifi', '未发现局域网其它设备', '请确保设备连接同一 Wi-Fi 并已开启「可被发现」，或在上方手动输入 IP 添加。', {
+            label: '重新扫描',
+            icon: 'refresh',
+            onClick: () => void scanRelays(),
+        }));
         return;
     }
     const filtered = deviceFilterQuery
@@ -259,7 +285,18 @@ function renderDeviceList() {
             d.meta.toLowerCase().includes(deviceFilterQuery))
         : deviceViews;
     if (deviceFilterQuery && !filtered.length) {
-        box.appendChild(emptyState('filter', `未找到与「${deviceFilterQuery}」匹配的设备`));
+        box.appendChild(emptyState('filter', '未找到匹配的设备', `未找到与「${deviceFilterQuery}」匹配的设备名称或 IP 地址`, {
+            label: '清除搜索',
+            icon: 'x',
+            onClick: () => {
+                const inp = $input('dev-filter-input');
+                if (inp)
+                    inp.value = '';
+                deviceFilterQuery = '';
+                $('dev-filter-clear')?.classList.add('hidden');
+                renderDeviceList();
+            },
+        }));
         return;
     }
     for (const dev of filtered) {

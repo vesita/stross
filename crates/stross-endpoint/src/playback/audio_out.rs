@@ -48,10 +48,23 @@ impl AudioSink {
                 move |data: &mut Data, _info| {
                     if let Some(out) = data.as_slice_mut::<T>() {
                         let mut q = queue.lock().unwrap();
-                        for s in out.iter_mut() {
-                            *s = q
-                                .pop_front()
-                                .map_or_else(|| T::from_sample(0.0f32), T::from_sample);
+                        let available = q.len().min(out.len());
+                        let (s1, s2) = q.as_slices();
+                        let take_s1 = s1.len().min(available);
+                        for (dst, &src) in out[..take_s1].iter_mut().zip(&s1[..take_s1]) {
+                            *dst = T::from_sample(src);
+                        }
+                        let rem = available - take_s1;
+                        if rem > 0 {
+                            for (dst, &src) in out[take_s1..available].iter_mut().zip(&s2[..rem]) {
+                                *dst = T::from_sample(src);
+                            }
+                        }
+                        q.drain(..available);
+                        // 队列不足（欠载）时补静音（0.0）
+                        let zero = T::from_sample(0.0f32);
+                        for dst in &mut out[available..] {
+                            *dst = zero;
                         }
                     }
                 },
@@ -83,12 +96,23 @@ impl AudioSink {
     /// 推入 PCM（f32，交织声道）。队列满则丢弃最旧样本（滑动窗口，
     /// 保持延迟有界；实时流的正确行为）。
     pub fn push(&self, samples: &[f32]) {
-        let mut q = self.queue.lock().unwrap();
-        for &s in samples {
-            if q.len() >= self.queue_limit {
-                q.pop_front();
-            }
-            q.push_back(s);
+        if samples.is_empty() {
+            return;
         }
+        let mut q = self.queue.lock().unwrap();
+        // 超过队列上限时，丢弃最旧样本以控制延迟
+        let total = q.len() + samples.len();
+        if total > self.queue_limit {
+            let overflow = total - self.queue_limit;
+            let drain_len = overflow.min(q.len());
+            q.drain(..drain_len);
+        }
+        // 若单次推入仍超过上限（极长样本），仅保留最新部分
+        let samples_to_push = if samples.len() > self.queue_limit {
+            &samples[samples.len() - self.queue_limit..]
+        } else {
+            samples
+        };
+        q.extend(samples_to_push.iter().copied());
     }
 }

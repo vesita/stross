@@ -51,13 +51,11 @@ impl AnnexBSplitter {
         let mut search_pos = old_len.saturating_sub(2);
         while let Some(rel) = NAL_START_CODE.find(&self.buf[search_pos..]) {
             let match_idx = search_pos + rel;
-            let i = match_idx + 2;
-            // 起始码可能为 3 字节 (00 00 01) 或 4 字节 (00 00 00 01)
-            let code_start = if i >= 3 && self.buf[i - 3] == 0 {
-                i - 3
-            } else {
-                i - 2
-            };
+            // 起始码前可能存在任意数量的前导 0（Annex-B 语法支持 3 字节、4 字节或多个填充 0）
+            let mut code_start = match_idx;
+            while code_start > prev && self.buf[code_start - 1] == 0 {
+                code_start -= 1;
+            }
             if code_start > prev {
                 let seg = code_start - prev;
                 if seg <= MAX_PENDING_NAL {
@@ -67,7 +65,7 @@ impl AnnexBSplitter {
                     tracing::warn!("Annex-B 单段过大（{seg} 字节），已丢弃");
                 }
             }
-            prev = i + 1;
+            prev = match_idx + 3;
             search_pos = prev;
         }
         // 防呆：长时间无起始码的可疑数据累积超过上限时整体丢弃重新同步
@@ -219,20 +217,24 @@ pub fn extract_avc_config(au: &[u8]) -> Option<AvcConfig> {
     while let Some(rel) = NAL_START_CODE.find(&au[search_pos..]) {
         let match_idx = search_pos + rel;
         let hdr = match_idx + 3;
-        if hdr > au.len() {
+        if hdr >= au.len() {
             break;
         }
         let kind = nal_type(&au[hdr..])?;
-        // 找到该 NAL 的结尾（下一个起始码或帧尾）
-        let end = if let Some(next_rel) = NAL_START_CODE.find(&au[hdr..]) {
+        // 找到该 NAL 的结尾（下一个起始码或帧尾），并记录下一个起始码位置以加速搜索
+        let (end, next_search) = if let Some(next_rel) = NAL_START_CODE.find(&au[hdr..]) {
             let next_match = hdr + next_rel;
-            if next_match > 0 && au[next_match - 1] == 0 {
-                next_match - 1
-            } else {
-                next_match
+            let mut code_start = next_match;
+            while code_start > hdr && au[code_start - 1] == 0 {
+                code_start -= 1;
             }
+            (code_start, next_match)
         } else {
-            au.len()
+            let mut end = au.len();
+            while end > hdr && au[end - 1] == 0 {
+                end -= 1;
+            }
+            (end, au.len())
         };
         match kind {
             NAL_SPS => {
@@ -249,7 +251,7 @@ pub fn extract_avc_config(au: &[u8]) -> Option<AvcConfig> {
             _ if saw_sps => break, // SPS 之后遇到 slice：SPS/PPS 已收集齐
             _ => {}
         }
-        search_pos = end;
+        search_pos = next_search;
     }
     if !saw_sps || width == 0 || height == 0 {
         return None;
@@ -362,8 +364,16 @@ pub fn sps_dimensions(nal: &[u8]) -> Option<(u32, u32)> {
     Some((width, height))
 }
 
+static EP_FINDER: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(&[0, 0, 3]));
+
 /// 去掉防竞争字节（`00 00 03` → `00 00`），把 EBSP 转成 RBSP。
-fn de_emulation_prevention(ebsp: &[u8]) -> Vec<u8> {
+///
+/// 若未发现 `00 00 03` 防竞争序列，直接以 `Cow::Borrowed` 零拷贝返回。
+fn de_emulation_prevention(ebsp: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if EP_FINDER.find(ebsp).is_none() {
+        return std::borrow::Cow::Borrowed(ebsp);
+    }
     let mut out = Vec::with_capacity(ebsp.len());
     let mut zeros = 0u8;
     for &b in ebsp {
@@ -378,7 +388,7 @@ fn de_emulation_prevention(ebsp: &[u8]) -> Vec<u8> {
         }
         out.push(b);
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 /// 逐位读取器（MSB 优先），用于解析 H.264 的 Exp-Golomb 码字。
@@ -1005,5 +1015,27 @@ mod tests {
             sps.len() + pps.len(),
             "csd 只含 SPS+PPS，不吞 slice"
         );
+    }
+
+    /// 多 0 前导填充起始码（例如 00 00 00 00 01）切分测试。
+    #[test]
+    fn split_with_multi_zero_padding() {
+        let mut s = AnnexBSplitter::new();
+        let sps = nal(NAL_SPS, 7);
+        let pps = nal(NAL_PPS, 8);
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&[0, 0, 0, 0, 0, 1]); // 5 个 0
+        stream.extend_from_slice(&sps);
+        stream.extend_from_slice(&[0, 0, 0, 0, 1]); // 4 个 0
+        stream.extend_from_slice(&pps);
+        let mut out = s.feed(&stream);
+        out.extend(s.finish());
+        assert_eq!(
+            out.len(),
+            2,
+            "多 0 填充起始码应被正确识别且不产生空 NAL: {out:?}"
+        );
+        assert_eq!(out[0], sps);
+        assert_eq!(out[1], pps);
     }
 }

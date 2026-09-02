@@ -13,17 +13,16 @@
 //! * `stop` 停止采集并释放持有的 `tx`（通道关闭会触发推流端优雅 Bye）。
 //! * `status` 返回采集的真实状态（Android 上由原生控制帧异步回报）。
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use crate::pipeline::{StreamConfig, StreamSession};
 use stross_proto::frame::Frame;
 use stross_proto::message::{
     CapabilityDescriptor, CapabilityKind, CodecId, MediaKind, ReliabilityProfile, TransportId,
 };
-
-use crate::pipeline::{StreamConfig, StreamSession};
 
 /// 采集状态（供 UI 轮询，替代旧的 `mobile_status`）。
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -79,14 +78,14 @@ pub trait CaptureBackend: Send + Sync {
 /// [`CaptureStatus::error`]（桌面侧 `CaptureStatusView` 轮询展示）。
 pub struct FfmpegBackend {
     session: Mutex<Option<StreamSession>>,
-    status: Arc<Mutex<CaptureStatus>>,
+    status: Arc<RwLock<CaptureStatus>>,
 }
 
 impl FfmpegBackend {
     pub fn new() -> Self {
         Self {
             session: Mutex::new(None),
-            status: Arc::new(Mutex::new(CaptureStatus::default())),
+            status: Arc::new(RwLock::new(CaptureStatus::default())),
         }
     }
 
@@ -100,11 +99,11 @@ impl FfmpegBackend {
             tokio::spawn(async move {
                 while let Some(e) = error_rx.recv().await {
                     tracing::warn!("采集错误: {e}");
-                    status.lock().unwrap().error = Some(e);
+                    status.write().unwrap().error = Some(e);
                 }
             });
         }
-        let mut status = self.status.lock().unwrap();
+        let mut status = self.status.write().unwrap();
         status.started = true;
         status.error = None;
         *self.session.lock().unwrap() = Some(session);
@@ -156,11 +155,11 @@ impl CaptureBackend for FfmpegBackend {
                 session.stop().await;
             });
         }
-        *self.status.lock().unwrap() = CaptureStatus::default();
+        *self.status.write().unwrap() = CaptureStatus::default();
     }
 
     fn status(&self) -> CaptureStatus {
-        self.status.lock().unwrap().clone()
+        self.status.read().unwrap().clone()
     }
 
     fn wall_start_unix_ms(&self) -> Option<u64> {

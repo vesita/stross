@@ -354,6 +354,8 @@ function syncRecvUI() {
     }
     // 状态机同步
     dispatchUIAction({ type: 'SYNC_LINKS' });
+    updateMuteButtonUI();
+    updateZoomChipUI();
     calcSmartLayout();
     updateRecvOverlay();
 }

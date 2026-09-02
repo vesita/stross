@@ -36,10 +36,7 @@ pub const fn is_fake_or_link_local(ip: &IpAddr) -> bool {
 /// 与发现层选址同源决策（AGENTS.md §6 已知坑：fake-IP/TUN 必须排除）。
 pub fn advertise_ip() -> String {
     for ip in local_ips() {
-        let IpAddr::V4(v4) = ip else {
-            continue;
-        };
-        if !is_fake_or_link_local(&IpAddr::V4(v4)) {
+        if ip.is_ipv4() && !is_fake_or_link_local(&ip) {
             return ip.to_string();
         }
     }

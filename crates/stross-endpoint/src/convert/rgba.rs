@@ -34,15 +34,62 @@ pub fn rgba_scaled(src: &[u8], w: u32, h: u32, max_w: u32) -> Option<(u32, u32, 
         // 无需缩放：直接拷贝，绕开逐像素插值开销
         return Some((tw, th, src[..needed].to_vec()));
     }
+    let mut out = vec![0u8; needed];
+    rgba_scaled_into(src, w, h, &mut out, tw, th)?;
+    Some((tw, th, out))
+}
+
+/// 预计算的水平采样参数。
+#[derive(Clone, Copy)]
+struct XSample {
+    i00: usize,
+    i01: usize,
+    fx: u32,
+    w_fx: u32,
+}
+
+/// 将缩放后的 RGBA 数据直接写入调用方提供的输出缓冲区（零多余分配）。
+pub fn rgba_scaled_into(
+    src: &[u8],
+    w: u32,
+    h: u32,
+    out: &mut [u8],
+    tw: u32,
+    th: u32,
+) -> Option<()> {
     let (w, h) = (w as usize, h as usize);
     let (tw, th) = (tw as usize, th as usize);
+    let needed = tw * th * 4;
+    if src.len() < w * h * 4 || out.len() < needed {
+        return None;
+    }
+
     // 12 位定点缩放系数：scale = (源 / 目标) << 12（中心对齐映射用）
     const FP: u64 = 12;
     let scale_x = ((w as u64) << FP) / tw as u64;
     let scale_y = ((h as u64) << FP) / th as u64;
-    let mut out = Vec::with_capacity(needed);
-    let mut row = vec![0u8; tw * 4];
-    // 垂直系数按行预计算（水平系数逐像素内联）
+
+    // 预计算水平采样参数（只需计算一次，逐行复用，消除热循环内的重复乘除法）
+    let mut x_samples = Vec::with_capacity(tw);
+    for ox in 0..tw {
+        let sx = ((ox as u64) * scale_x)
+            .saturating_add(scale_x / 2)
+            .saturating_sub(1 << (FP - 1));
+        let x0 = ((sx >> FP) as usize).min(w - 1);
+        let x1 = (x0 + 1).min(w - 1);
+        let fx = (sx & ((1 << FP) - 1)) as u32;
+        let w_fx = (1 << FP) - fx;
+        x_samples.push(XSample {
+            i00: x0 * 4,
+            i01: x1 * 4,
+            fx,
+            w_fx,
+        });
+    }
+
+    let src_stride = w * 4;
+    let dst_stride = tw * 4;
+
     for oy in 0..th {
         // 中心对齐：sy = (oy + 0.5) * scale - 0.5（定点）；越界 clamp 到 [0, h-1]
         let sy = ((oy as u64) * scale_y)
@@ -52,17 +99,17 @@ pub fn rgba_scaled(src: &[u8], w: u32, h: u32, max_w: u32) -> Option<(u32, u32, 
         let y1 = (y0 + 1).min(h - 1);
         let fy = (sy & ((1 << FP) - 1)) as u32;
         let w_fy = (1 << FP) - fy;
-        let (row00, row01) = (&src[y0 * w * 4..], &src[y1 * w * 4..]);
-        for ox in 0..tw {
-            let sx = ((ox as u64) * scale_x)
-                .saturating_add(scale_x / 2)
-                .saturating_sub(1 << (FP - 1));
-            let x0 = ((sx >> FP) as usize).min(w - 1);
-            let x1 = (x0 + 1).min(w - 1);
-            let fx = (sx & ((1 << FP) - 1)) as u32;
-            let w_fx = (1 << FP) - fx;
-            let i00 = x0 * 4;
-            let i01 = x1 * 4;
+        let row00 = &src[y0 * src_stride..y0 * src_stride + src_stride];
+        let row01 = &src[y1 * src_stride..y1 * src_stride + src_stride];
+        let out_row = &mut out[oy * dst_stride..oy * dst_stride + dst_stride];
+
+        for (ox, sample) in x_samples.iter().enumerate() {
+            let i00 = sample.i00;
+            let i01 = sample.i01;
+            let fx = sample.fx;
+            let w_fx = sample.w_fx;
+            let dst_px = ox * 4;
+
             for c in 0..4 {
                 let top =
                     (u32::from(row00[i00 + c]) * w_fx + u32::from(row00[i01 + c]) * fx + 2048)
@@ -70,12 +117,11 @@ pub fn rgba_scaled(src: &[u8], w: u32, h: u32, max_w: u32) -> Option<(u32, u32, 
                 let bot =
                     (u32::from(row01[i00 + c]) * w_fx + u32::from(row01[i01 + c]) * fx + 2048)
                         >> FP;
-                row[ox * 4 + c] = ((top * w_fy + bot * fy + 2048) >> FP) as u8;
+                out_row[dst_px + c] = ((top * w_fy + bot * fy + 2048) >> FP) as u8;
             }
         }
-        out.extend_from_slice(&row);
     }
-    Some((tw as u32, th as u32, out))
+    Some(())
 }
 
 #[cfg(test)]

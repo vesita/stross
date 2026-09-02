@@ -338,6 +338,10 @@ fn pacer_loop(
     stopped: Arc<AtomicBool>,
 ) {
     let mut sched = PlaybackScheduler::new(pacing.target_delay, pacing.jump_reset);
+    let mut last_dropped = 0u64;
+    let mut last_reanchors = 0u64;
+    let mut last_held = 0u64;
+
     loop {
         if stopped.load(Ordering::Relaxed) {
             break;
@@ -347,11 +351,18 @@ fn pacer_loop(
         // 批量倾泻，PTS 调度平滑失效）。
         {
             let now = Instant::now();
-            for f in sched.emit_due(now) {
+            let mut closed = false;
+            let _ = sched.emit_due_with(now, |f| {
                 if out_tx.try_send(f).is_err() {
                     stats.lock().unwrap().dropped_push += 1;
-                    break; // 输出通道关闭：会话结束
+                    closed = true;
+                    Err(())
+                } else {
+                    Ok(())
                 }
+            });
+            if closed {
+                break; // 输出通道关闭：会话结束
             }
         }
         // 等到队首 play 时刻或新帧到来
@@ -372,19 +383,27 @@ fn pacer_loop(
             Ok(f) => {
                 let now = Instant::now();
                 sched.push(f, now);
-                // 过水位丢队尾（延迟控制器，已接线）：队尾 play 时刻晚于
+                // 过水位丢队尾（延迟控制器）：队尾 play 时刻晚于
                 // now + target_delay → 丢最新帧追平实时（发送端过快 / 时钟
-                // 漂移；正常流零丢帧零加时）。此前仅 schedule.rs 单测覆盖、
-                // 从未在本线程调用（死代码），`paced_dropped` 恒 0。
+                // 漂移；正常流零丢帧零加时）。
                 sched.drop_over_watermark(now);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue, // 空转：顶部补发到期帧
             Err(_) => break, // 通道关闭（writer 已退出）
         }
-        let mut st = stats.lock().unwrap();
-        st.paced_dropped = sched.stats.dropped_watermark;
-        st.paced_reanchors = sched.stats.reanchors;
-        st.paced_held = sched.stats.held;
+        // 仅在统计指标发生变化时更新共享状态，减少多线程锁争用
+        if sched.stats.dropped_watermark != last_dropped
+            || sched.stats.reanchors != last_reanchors
+            || sched.stats.held != last_held
+        {
+            last_dropped = sched.stats.dropped_watermark;
+            last_reanchors = sched.stats.reanchors;
+            last_held = sched.stats.held;
+            let mut st = stats.lock().unwrap();
+            st.paced_dropped = last_dropped;
+            st.paced_reanchors = last_reanchors;
+            st.paced_held = last_held;
+        }
     }
 }
 

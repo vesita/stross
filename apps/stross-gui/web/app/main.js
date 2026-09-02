@@ -254,7 +254,22 @@ if (filterClear && filterInput) {
         renderDeviceList();
     });
 }
-// 播放器 AI 工具条与手势初始化
+// 播放器控制栏按钮事件绑定（静音、比例、全屏、缩放重置）
+const muteBtn = $('recv-mute-btn');
+if (muteBtn)
+    muteBtn.onclick = () => toggleMute();
+const zoomChip = $('player-zoom-chip');
+if (zoomChip)
+    zoomChip.onclick = () => resetZoomAndPan();
+const recentClearBtn = $('recent-clear-btn');
+if (recentClearBtn) {
+    recentClearBtn.onclick = () => {
+        localStorage.removeItem(LS_RECENT);
+        manualRelays = [];
+        renderRecent();
+        void refreshDevices(true);
+    };
+}
 const aspectBtn = $('player-aspect-btn');
 if (aspectBtn)
     aspectBtn.onclick = () => cycleAspectRatio();

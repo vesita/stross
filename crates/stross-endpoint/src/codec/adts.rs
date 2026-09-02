@@ -6,6 +6,9 @@
 /// ADTS 固定头最小长度（无 CRC 时 7 字节，有 CRC 时 9 字节）。
 pub const ADTS_MIN_HEADER: usize = 7;
 
+/// ADTS 流中未切出帧的缓冲上限（1 MiB），防止异常流导致内存无限增长。
+const MAX_PENDING_ADTS: usize = 1024 * 1024;
+
 /// 判断缓冲区开头是否像 ADTS 帧（同步字 0xFFF）。
 pub const fn is_adts_frame(buf: &[u8]) -> bool {
     buf.len() >= 2 && buf[0] == 0xFF && (buf[1] & 0xF0) == 0xF0
@@ -40,7 +43,7 @@ impl AdtsSplitter {
     /// 喂入数据，返回切出的完整 ADTS 帧。
     pub fn feed(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
         self.buf.extend_from_slice(data);
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.buf.len() / 512 + 1);
         let mut cursor = 0usize;
         while cursor < self.buf.len() {
             let slice = &self.buf[cursor..];
@@ -71,6 +74,11 @@ impl AdtsSplitter {
                     continue;
                 }
             }
+        }
+        if cursor == 0 && self.buf.len() > MAX_PENDING_ADTS {
+            tracing::warn!("ADTS 流长时间未对齐，丢弃 {} 字节重新同步", self.buf.len());
+            self.buf.clear();
+            return out;
         }
         if cursor > 0 {
             self.buf.drain(..cursor);

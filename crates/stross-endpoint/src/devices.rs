@@ -112,16 +112,24 @@ pub fn list_audio_inputs() -> Vec<String> {
 /// 调用；短 TTL 缓存避免高频 shell 出子进程，又能在插入/移除设备后刷新。
 const SYSTEM_AUDIO_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
-static SYSTEM_AUDIO_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>> =
-    std::sync::Mutex::new(None);
+static SYSTEM_AUDIO_CACHE: std::sync::RwLock<Option<(std::time::Instant, Vec<String>)>> =
+    std::sync::RwLock::new(None);
 
 /// 枚举系统声音（回环采集：PulseAudio monitor / Windows Stereo Mix 等）。
 ///
 /// 结果按 [`SYSTEM_AUDIO_CACHE_TTL`] 缓存：热路径（组流配置）不重复 fork
-/// `pactl` / ffmpeg，仅缓存过期后重新枚举。
+/// `pactl` / ffmpeg，仅缓存过期后重新枚举。采用读写锁避免并发读取锁争用。
 pub fn list_system_audio() -> Vec<String> {
     let now = std::time::Instant::now();
-    let mut cache = SYSTEM_AUDIO_CACHE.lock().unwrap();
+    {
+        let cache = SYSTEM_AUDIO_CACHE.read().unwrap();
+        if let Some((t, devices)) = cache.as_ref()
+            && now.duration_since(*t) < SYSTEM_AUDIO_CACHE_TTL
+        {
+            return devices.clone();
+        }
+    }
+    let mut cache = SYSTEM_AUDIO_CACHE.write().unwrap();
     if let Some((t, devices)) = cache.as_ref()
         && now.duration_since(*t) < SYSTEM_AUDIO_CACHE_TTL
     {

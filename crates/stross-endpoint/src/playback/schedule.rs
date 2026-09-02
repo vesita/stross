@@ -61,6 +61,9 @@ pub struct PlaybackScheduler {
 }
 
 impl PlaybackScheduler {
+    /// 队列最大帧数上限（防呆：防止异常时间戳导致队列无限膨胀）。
+    const MAX_QUEUE_LEN: usize = 120;
+
     pub fn new(target_delay: Duration, jump_reset: Duration) -> Self {
         Self {
             target_delay,
@@ -96,13 +99,27 @@ impl PlaybackScheduler {
             }
             (Some(p0), Some(t0)) => {
                 if pts < p0 {
-                    // pts 回退（锚点前）：过期丢弃
+                    let back_delta = Duration::from_millis(u64::from(p0 - pts));
+                    if back_delta > self.jump_reset {
+                        // 向后大跳变（流重置 / 循环播放 / 推流端重启）：重置缓冲并重新锚定
+                        self.stats.reanchors += 1;
+                        self.stats.dropped_reset += self.queue.len() as u64;
+                        self.queue.clear();
+                        self.anchor_pts = Some(pts);
+                        self.anchor_at = Some(now);
+                        self.queue.push_back(Queued {
+                            frame,
+                            play_at: now,
+                        });
+                        return;
+                    }
+                    // 较小的向后乱序/回退帧：过期丢弃
                     self.stats.dropped_stale += 1;
                     return;
                 }
                 let delta = Duration::from_millis(u64::from(pts - p0));
                 if delta > self.jump_reset {
-                    // 大跳变：重置缓冲重锚定
+                    // 向前大跳变：重置缓冲重锚定
                     self.stats.reanchors += 1;
                     self.stats.dropped_reset += self.queue.len() as u64;
                     self.queue.clear();
@@ -122,11 +139,22 @@ impl PlaybackScheduler {
                 self.queue.push_back(Queued { frame, play_at });
             }
         }
+        // 防呆：防止队列超过上限帧数
+        while self.queue.len() > Self::MAX_QUEUE_LEN {
+            self.queue.pop_front();
+            self.stats.dropped_watermark += 1;
+        }
     }
 
     /// 发出所有已到 play 时刻的帧（按序；调用方负责 `try_send` 与丢弃计数）。
     pub fn emit_due(&mut self, now: Instant) -> Vec<RenderedFrame> {
         let mut out = Vec::new();
+        self.emit_due_into(&mut out, now);
+        out
+    }
+
+    /// 将所有已到期帧移入调用方提供的缓冲区，避免重复分配。
+    pub fn emit_due_into(&mut self, out: &mut Vec<RenderedFrame>, now: Instant) {
         while let Some(head) = self.queue.front() {
             if head.play_at > now {
                 break;
@@ -135,7 +163,22 @@ impl PlaybackScheduler {
             self.stats.emitted += 1;
             out.push(q.frame);
         }
-        out
+    }
+
+    /// 遍历所有已到期帧并传递给闭包处理，零额外集合分配。
+    pub fn emit_due_with<F, E>(&mut self, now: Instant, mut f: F) -> Result<(), E>
+    where
+        F: FnMut(RenderedFrame) -> Result<(), E>,
+    {
+        while let Some(head) = self.queue.front() {
+            if head.play_at > now {
+                break;
+            }
+            let q = self.queue.pop_front().expect("已检查队首");
+            self.stats.emitted += 1;
+            f(q.frame)?;
+        }
+        Ok(())
     }
 
     /// 过水位丢帧（播放延迟控制器）：**队尾**（最新等待帧）的 play 时刻
@@ -362,5 +405,33 @@ mod tests {
                 "缓冲有界"
             );
         }
+    }
+
+    #[test]
+    fn backwards_pts_jump_resets_buffer_and_reanchors() {
+        let mut s = PlaybackScheduler::new(T, JUMP);
+        let now = t0();
+        s.push(frame(10000), now);
+        assert_eq!(s.emit_due(now).len(), 1);
+        // 向后大跳变（从 10000 跳到 0，差距 10000ms > 500ms JUMP）
+        s.push(frame(0), now + Duration::from_millis(10));
+        assert_eq!(s.stats.reanchors, 1, "向后大跳变应触发重新锚定");
+        let out = s.emit_due(now + Duration::from_millis(10));
+        assert_eq!(out.len(), 1, "新流首帧应立即发出");
+        assert_eq!(out[0].pts_ms, 0);
+    }
+
+    #[test]
+    fn emit_due_with_collects_frames() {
+        let mut s = PlaybackScheduler::new(T, JUMP);
+        let now = t0();
+        s.push(frame(0), now);
+        let mut emitted = Vec::new();
+        let res: Result<(), ()> = s.emit_due_with(now, |f| {
+            emitted.push(f.pts_ms);
+            Ok(())
+        });
+        assert!(res.is_ok());
+        assert_eq!(emitted, vec![0]);
     }
 }

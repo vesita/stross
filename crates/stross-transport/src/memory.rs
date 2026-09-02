@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-
+use bytes::{Bytes, BytesMut};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use stross_proto::message::{ReliabilityProfile, TransportId};
@@ -17,6 +17,101 @@ use stross_proto::message::{ReliabilityProfile, TransportId};
 use super::{
     DataSession, PeerAddr, SessionPacket, SessionParams, Transport, TransportError, TransportStats,
 };
+
+/// 将一个 [`Bytes`] 零拷贝切分成固定大小的 [`Bytes`] 片段序列。
+/// 每个片段共享底层内存引用计数，不发生任何堆内存复制。
+#[derive(Debug, Clone)]
+pub struct BytesChunks {
+    data: Bytes,
+    chunk_size: usize,
+    offset: usize,
+}
+
+impl BytesChunks {
+    /// 构造切分迭代器（`chunk_size` 必须大于 0）。
+    pub fn new(data: Bytes, chunk_size: usize) -> Self {
+        assert!(chunk_size > 0, "分片大小必须大于 0");
+        Self {
+            data,
+            chunk_size,
+            offset: 0,
+        }
+    }
+}
+
+impl Iterator for BytesChunks {
+    type Item = Bytes;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset >= self.data.len() {
+            return None;
+        }
+        let end = (self.offset + self.chunk_size).min(self.data.len());
+        let chunk = self.data.slice(self.offset..end);
+        self.offset = end;
+        Some(chunk)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.offset >= self.data.len() {
+            return (0, Some(0));
+        }
+        let remaining = self.data.len() - self.offset;
+        let count = remaining.div_ceil(self.chunk_size);
+        (count, Some(count))
+    }
+}
+
+impl ExactSizeIterator for BytesChunks {}
+
+/// 针对 [`Bytes`] 的零拷贝切分便捷函数。
+pub fn chunk_bytes(data: Bytes, chunk_size: usize) -> BytesChunks {
+    BytesChunks::new(data, chunk_size)
+}
+
+/// 固定容量的缓冲区对象池，减少媒体热路径（每秒 60 帧媒体流）频繁分配与释放内存造成的堆抖动。
+#[derive(Debug)]
+pub struct BufferPool {
+    capacity: usize,
+    pool: Mutex<Vec<BytesMut>>,
+    max_idle: usize,
+}
+
+impl BufferPool {
+    /// 创建指定容量和最大空闲数量的缓冲池。
+    pub fn new(capacity: usize, max_idle: usize) -> Self {
+        Self {
+            capacity,
+            pool: Mutex::new(Vec::with_capacity(max_idle)),
+            max_idle,
+        }
+    }
+
+    /// 从池中取出一个清空后的 [`BytesMut`]；池为空时新分配指定容量。
+    pub fn get(&self) -> BytesMut {
+        if let Ok(mut guard) = self.pool.lock()
+            && let Some(mut buf) = guard.pop()
+        {
+            buf.clear();
+            return buf;
+        }
+        BytesMut::with_capacity(self.capacity)
+    }
+
+    /// 回收缓冲区到池中；若池已满或缓冲区容量被过量扩容则丢弃。
+    pub fn put(&self, mut buf: BytesMut) {
+        // 避免池内积累被异常扩容的过大 buffer
+        if buf.capacity() > self.capacity * 2 {
+            return;
+        }
+        buf.clear();
+        if let Ok(mut guard) = self.pool.lock()
+            && guard.len() < self.max_idle
+        {
+            guard.push(buf);
+        }
+    }
+}
 
 /// 共享配对中心。
 #[derive(Default)]
@@ -194,5 +289,30 @@ mod tests {
         // 关闭后 recv 返回 None
         client_session.close().await.unwrap();
         assert!(server_session.recv().await.unwrap().is_none());
+    }
+
+    #[test]
+    fn bytes_chunks_zero_copy_slicing() {
+        let original = Bytes::from_static(b"0123456789ABCDEF");
+        let chunks: Vec<Bytes> = chunk_bytes(original.clone(), 5).collect();
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(&chunks[0][..], b"01234");
+        assert_eq!(&chunks[1][..], b"56789");
+        assert_eq!(&chunks[2][..], b"ABCDE");
+        assert_eq!(&chunks[3][..], b"F");
+    }
+
+    #[test]
+    fn buffer_pool_get_and_put() {
+        let pool = BufferPool::new(1024, 4);
+        let mut buf = pool.get();
+        assert_eq!(buf.capacity(), 1024);
+        buf.extend_from_slice(b"hello world");
+        assert_eq!(buf.len(), 11);
+        pool.put(buf);
+
+        let recycled = pool.get();
+        assert_eq!(recycled.len(), 0);
+        assert!(recycled.capacity() >= 1024);
     }
 }

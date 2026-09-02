@@ -28,7 +28,10 @@ impl std::fmt::Display for DiscoveryError {
                 "mDNS 基础能力 TXT 超 {TXT_MAX_BYTES}B（实际 {len}B）：设备名/角色/媒体过长"
             ),
             Self::EndpointTooLarge(len) => {
-                write!(f, "mDNS 端点摘要 TXT 超 {TXT_MAX_BYTES}B（实际 {len}B）：端点名过长")
+                write!(
+                    f,
+                    "mDNS 端点摘要 TXT 超 {TXT_MAX_BYTES}B（实际 {len}B）：端点名过长"
+                )
             }
         }
     }
@@ -288,10 +291,7 @@ mod tests {
         //
         // 超长设备名 → BaseTooLarge
         let long_name = "超长设备名".repeat(60); // 60×6+3 = 363+ 字节，远超 255
-        let base = DiscoveryInfo::relay_default(
-            long_name,
-            vec![MediaKind::Screen, MediaKind::Mic],
-        );
+        let base = DiscoveryInfo::relay_default(long_name, vec![MediaKind::Screen, MediaKind::Mic]);
         match base.to_txt() {
             Err(DiscoveryError::BaseTooLarge(len)) => assert!(len > 255, "应报告实际长度 {len}"),
             other => panic!("超长设备名应报 BaseTooLarge，得到 {other:?}"),
@@ -316,26 +316,23 @@ mod tests {
     fn to_txt_lenient_degrades_instead_of_failing() {
         // 广播尽力而为：超长 device 名被截短、超长端点名被丢弃，但 base 仍正常产出。
         let long_name = "超长设备名".repeat(60);
-        let info = DiscoveryInfo::relay_default(
-            long_name,
-            vec![MediaKind::Screen, MediaKind::Mic],
-        )
-        .with_endpoints(vec![
-            EndpointSummary {
-                endpoint_id: 0,
-                kind: MediaKind::Mic,
-                name: "超长端点名".repeat(60), // 超 255B → 应被丢弃
-                available: true,
-                published: true,
-            },
-            EndpointSummary {
-                endpoint_id: 1,
-                kind: MediaKind::Screen,
-                name: "屏幕".into(),
-                available: true,
-                published: true,
-            },
-        ]);
+        let info = DiscoveryInfo::relay_default(long_name, vec![MediaKind::Screen, MediaKind::Mic])
+            .with_endpoints(vec![
+                EndpointSummary {
+                    endpoint_id: 0,
+                    kind: MediaKind::Mic,
+                    name: "超长端点名".repeat(60), // 超 255B → 应被丢弃
+                    available: true,
+                    published: true,
+                },
+                EndpointSummary {
+                    endpoint_id: 1,
+                    kind: MediaKind::Screen,
+                    name: "屏幕".into(),
+                    available: true,
+                    published: true,
+                },
+            ]);
 
         let (props, degraded) = info.to_txt_lenient();
         assert!(degraded, "超长 name/端点应被标记降级");
@@ -346,7 +343,11 @@ mod tests {
             .expect("base key 必须存在")
             .1
             .clone();
-        assert!(base_json.len() <= TXT_MAX_BYTES, "base {len}B", len = base_json.len());
+        assert!(
+            base_json.len() <= TXT_MAX_BYTES,
+            "base {len}B",
+            len = base_json.len()
+        );
         // 超长端点被丢弃，正常端点（ep.1）保留
         assert!(
             !props.iter().any(|(_, v)| v.contains("超长端点名")),
@@ -356,7 +357,11 @@ mod tests {
             .iter()
             .find(|(k, _)| k == "ep.1")
             .expect("正常端点 ep.1 应保留");
-        assert!(screen_ep.1.contains("屏幕"), "正常端点摘要保留: {}", screen_ep.1);
+        assert!(
+            screen_ep.1.contains("屏幕"),
+            "正常端点摘要保留: {}",
+            screen_ep.1
+        );
         // 降级后仍可被浏览侧解析（不产生半截 JSON）
         let back = DiscoveryInfo::from_txt(&props).expect("降级产物应可被浏览侧解码");
         assert_eq!(back.endpoints.len(), 1, "只剩正常端点");

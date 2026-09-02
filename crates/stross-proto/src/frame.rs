@@ -557,16 +557,21 @@ mod tests {
             }
             other => panic!("v1 尾部多余字节应报 LenMismatch，得到 {other:?}"),
         }
-        assert!(Frame::from_bytes(&Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![9u8; 8]).to_bytes()).is_ok());
+        assert!(
+            Frame::from_bytes(&Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![9u8; 8]).to_bytes())
+                .is_ok()
+        );
 
         // ② 截断（头声明 len=8，实际缓冲只有 4 字节载荷）→ TooShort（不足则先太短）
-        let mut hurt = Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![9u8; 8]).to_bytes().to_vec();
+        let mut hurt = Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![9u8; 8])
+            .to_bytes()
+            .to_vec();
         hurt.truncate(HEADER_LEN + 4);
         assert!(Frame::from_bytes(&hurt).is_err());
 
         // ③ v2 紧凑帧同样校验
-        let v2_good = Frame2::from_frame(&Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![1u8; 4]))
-            .to_bytes();
+        let v2_good =
+            Frame2::from_frame(&Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![1u8; 4])).to_bytes();
         let mut v2_trailing = v2_good.clone().to_vec();
         v2_trailing.push(0xBB);
         match Frame2::to_frame_owned(v2_trailing.into()) {

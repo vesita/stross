@@ -222,7 +222,7 @@ async fn receive_media_decodes_subscribe_spec_stream() {
         return;
     }
     use stross_endpoint::contract::EndpointApp;
-    use stross_proto::message::{EndpointStrategy, PickRule, SerializeRule, SubscribeSpec};
+    use stross_proto::message::{EndpointStrategy, PickRule, SubscribeSpec};
 
     let app = Arc::new(Kernel::new(Platform::Desktop));
     app.set_backend(Arc::new(FfmpegBackend::new()));
@@ -239,11 +239,7 @@ async fn receive_media_decodes_subscribe_spec_stream() {
         kind: MediaKind::Screen,
         endpoint_id: 0,
         strategy_id: None,
-        strategy: EndpointStrategy {
-            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-            serialize: SerializeRule::Passthrough,
-            pick: PickRule::Realtime,
-        },
+        strategy: EndpointStrategy::passthrough(PickRule::Realtime),
         delivery: stross_proto::message::Delivery::Pull,
         stream_id: started.stream_id.clone(),
         relay_url: Some(relay_ws),

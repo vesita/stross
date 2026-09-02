@@ -13,8 +13,7 @@
 use std::sync::Arc;
 
 use stross_proto::message::{
-    EndpointId, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SerializeRule,
-    SubscribeSpec,
+    EndpointId, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SubscribeSpec,
 };
 
 use crate::contract::{Endpoint, EndpointApp, EndpointBase, TargetKind};
@@ -59,19 +58,18 @@ impl Endpoint for MediaReceiveEndpoint {
     }
     fn strategy(&self) -> EndpointStrategy {
         // 订阅端自身不分享；策略默认值与媒体源一致（直通 + 严格即时）
-        EndpointStrategy {
-            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-            serialize: SerializeRule::Passthrough,
-            pick: PickRule::Realtime,
-        }
+        EndpointStrategy::passthrough(PickRule::Realtime)
     }
 }
 
 impl crate::contract::SubscribeEndpoint for MediaReceiveEndpoint {
     fn subscribe(&self, app: Arc<dyn EndpointApp>, spec: SubscribeSpec) {
         let endpoint_id = self.id().to_string();
-        tokio::spawn(async move {
-            match app.receive_media(&spec).await {
+        // 端点自驱动统一经 `EndpointApp::spawn_task`（与分享端 `share` 同构，
+        // docs/endpoint-model-v2.md §3：运行时由内核注入）。
+        let app2 = app.clone();
+        app.spawn_task(Box::pin(async move {
+            match app2.receive_media(&spec).await {
                 Ok(frames) => tracing::info!(
                     "媒体订阅端点 {endpoint_id} 接收完成（节点 {}，端点 {}，策略 {}，解码 {frames} 帧）",
                     spec.node_id,
@@ -83,6 +81,6 @@ impl crate::contract::SubscribeEndpoint for MediaReceiveEndpoint {
                     EndpointId::new(spec.kind, spec.endpoint_id),
                 ),
             }
-        });
+        }));
     }
 }

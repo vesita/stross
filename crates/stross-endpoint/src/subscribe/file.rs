@@ -9,8 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use stross_proto::message::{
-    EndpointId, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SerializeRule,
-    SubscribeSpec,
+    EndpointId, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SubscribeSpec,
 };
 
 use crate::contract::{Endpoint, EndpointApp, EndpointBase, TargetKind};
@@ -55,11 +54,7 @@ impl Endpoint for FileReceiveEndpoint {
     }
     fn strategy(&self) -> EndpointStrategy {
         // 确定目标：直通序列化 + 严格顺序（StrictOrdered）
-        EndpointStrategy {
-            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-            serialize: SerializeRule::Passthrough,
-            pick: PickRule::StrictOrdered,
-        }
+        EndpointStrategy::passthrough(PickRule::StrictOrdered)
     }
 }
 
@@ -67,12 +62,15 @@ impl crate::contract::SubscribeEndpoint for FileReceiveEndpoint {
     fn subscribe(&self, app: Arc<dyn EndpointApp>, spec: SubscribeSpec) {
         let out_dir = self.out_dir.clone();
         let endpoint_id = self.id().to_string();
-        tokio::spawn(async move {
+        // 端点自驱动统一经 `EndpointApp::spawn_task`（与分享端 `share` 同构，
+        // docs/endpoint-model-v2.md §3：运行时由内核注入）。
+        let app2 = app.clone();
+        app.spawn_task(Box::pin(async move {
             let Some(watch_url) = spec.relay_url.clone() else {
                 tracing::warn!("文件订阅端 {endpoint_id} 缺公开方中继地址（pull 未锚定）");
                 return;
             };
-            match app
+            match app2
                 .receive_file(watch_url, spec.stream_id.clone(), out_dir)
                 .await
             {
@@ -89,6 +87,6 @@ impl crate::contract::SubscribeEndpoint for FileReceiveEndpoint {
                     spec.stream_id
                 ),
             }
-        });
+        }));
     }
 }

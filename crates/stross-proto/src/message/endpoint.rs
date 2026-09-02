@@ -143,6 +143,18 @@ pub struct EndpointStrategy {
 impl EndpointStrategy {
     /// 默认策略 id（端点未声明多策略时的唯一策略；订阅方缺省按它取）。
     pub const DEFAULT_ID: &'static str = "default";
+
+    /// 直通序列化 + 指定 pick 规则的默认策略（当前唯一实现组合）。
+    ///
+    /// 全仓构造默认策略的**单一真源**（此前各处手写字面量重复，见
+    /// docs/endpoint-model-v2.md §3）；新增序列化规则时在此扩展构造函数。
+    pub fn passthrough(pick: PickRule) -> Self {
+        Self {
+            strategy_id: Self::DEFAULT_ID.into(),
+            serialize: SerializeRule::Passthrough,
+            pick,
+        }
+    }
 }
 
 /// 订阅规格（订阅端点生成依据，docs/endpoint-model-v2.md §3）：
@@ -251,6 +263,25 @@ pub struct EndpointManifest {
     pub updated_at: u64,
 }
 
+impl EndpointManifest {
+    /// 解析端点策略（**确定性单一真源**，docs/endpoint-model-v2.md §2）：
+    /// 按订阅方选定的策略 id 精确取；`None` = 端点默认策略（首个）；清单无
+    /// 策略列表时由平铺 `pick_rule` 推导直通 + pick 的默认策略（旧对端兼容）。
+    ///
+    /// 注册表（`kernel::endpoint`）、协商层（`negotiator`）与订阅编排共用本
+    /// 方法——此前各层各自实现"按 id → 默认 → 推导"回退链，且注册表默认
+    /// 用 HashMap `values().next()` 非确定性选取，本方法统一为「Vec 首个」
+    /// 的确定性语义。
+    pub fn strategy(&self, strategy_id: Option<&str>) -> EndpointStrategy {
+        self.strategies
+            .iter()
+            .find(|s| Some(s.strategy_id.as_str()) == strategy_id)
+            .cloned()
+            .or_else(|| self.strategies.first().cloned())
+            .unwrap_or_else(|| EndpointStrategy::passthrough(self.pick_rule))
+    }
+}
+
 /// 文件端点元数据（docs/endpoint-model-v2.md §3）：作为文件流**首帧**（FLAG_CONFIG）
 /// 的 JSON 载荷下发给接收方。路径只存在于公开方本地（`EndpointRegistry.file_sources`），
 /// **绝不进入本结构 / 目录 / mDNS 摘要**。
@@ -304,11 +335,7 @@ mod tests {
             ],
             transport_profile: ReliabilityProfile::Lossy,
             pick_rule: PickRule::Realtime,
-            strategies: vec![EndpointStrategy {
-                strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-                serialize: SerializeRule::Passthrough,
-                pick: PickRule::Realtime,
-            }],
+            strategies: vec![EndpointStrategy::passthrough(PickRule::Realtime)],
             codecs: vec![CodecId::Aac],
             state: EndpointState::Idle,
             subscribers: 0,
@@ -498,11 +525,7 @@ mod tests {
     /// 缺省策略 id 为 "default"。
     #[test]
     fn strategy_wire_roundtrip() {
-        let s = EndpointStrategy {
-            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-            serialize: SerializeRule::Passthrough,
-            pick: PickRule::StrictOrdered,
-        };
+        let s = EndpointStrategy::passthrough(PickRule::StrictOrdered);
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(
             text,
@@ -521,11 +544,7 @@ mod tests {
             kind: MediaKind::Screen,
             endpoint_id: 0,
             strategy_id: None,
-            strategy: EndpointStrategy {
-                strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-                serialize: SerializeRule::Passthrough,
-                pick: PickRule::Realtime,
-            },
+            strategy: EndpointStrategy::passthrough(PickRule::Realtime),
             delivery: Delivery::Pull,
             stream_id: "sess-1".into(),
             relay_url: Some("ws://192.168.1.5:18777".into()),

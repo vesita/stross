@@ -5437,6 +5437,7 @@ dependencies = [
  "stross-endpoint",
  "stross-kernel",
  "stross-proto",
+ "stross-types",
 ]
 
 [[package]]

@@ -185,11 +185,11 @@ pub fn load_or_create_identity(base_dir: &std::path::Path, name: &str) -> Device
 }
 
 /// 设备名是否无标识意义（空 / `localhost` / `android`——Android 主机名恒为
-/// localhost，直接广播会得到无意义名字）。与 `stross_bridge::hostname` 的
-/// placeholder 判定同语义；内联于 kernel（分层铁律：内核不依赖 stross-bridge）。
+/// localhost，直接广播会得到无意义名字）。判定**单一真源在 stross-types**
+/// （`stross_types::hostname::is_placeholder`，桥接层与内核共用；分层铁律：
+/// 内核不依赖 stross-bridge，故上移到双方依赖的契约层）。
 fn is_placeholder_name(name: &str) -> bool {
-    let n = name.trim();
-    n.is_empty() || n == "localhost" || n == "android"
+    stross_types::hostname::is_placeholder(name)
 }
 
 /// 生成随机设备标识（16 字节 /dev/urandom → hex；失败时回退时间戳）。
@@ -786,7 +786,9 @@ fn checked_strategy(
     m: &EndpointManifest,
     strategy_id: Option<&str>,
 ) -> Result<EndpointStrategy, String> {
-    let strategy = strategy_of(m, strategy_id);
+    // 策略解析单一真源：`EndpointManifest::strategy`（按 id → 首个 → 推导默认，
+    // 确定性；见 proto 定义）。
+    let strategy = m.strategy(strategy_id);
     if crate::pick::loader_for(&strategy).is_none() {
         return Err(format!(
             "内核不支持序列化规则 {:?}（端点 {} 策略 {}）——协商拒绝，不静默降级",
@@ -796,22 +798,6 @@ fn checked_strategy(
         ));
     }
     Ok(strategy)
-}
-
-/// 清单 → 定稿策略组合（注册表第三层；按订阅方选定的策略 id 精确取，
-/// 缺省 = 默认策略（首个），再由平铺 `pick_rule` 推导直通 + pick 兜底——
-/// 与 [`crate::kernel::endpoint`] 的策略推导同语义）。
-fn strategy_of(m: &EndpointManifest, strategy_id: Option<&str>) -> EndpointStrategy {
-    m.strategies
-        .iter()
-        .find(|s| Some(s.strategy_id.as_str()) == strategy_id)
-        .cloned()
-        .or_else(|| m.strategies.first().cloned())
-        .unwrap_or_else(|| EndpointStrategy {
-            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-            serialize: stross_proto::message::SerializeRule::Passthrough,
-            pick: m.pick_rule,
-        })
 }
 
 /// 订阅达成事件（自由函数版，`handle_request` / `respond` 共用）：构造
@@ -846,11 +832,10 @@ fn notify_subscribed(
         delivery,
         stream_id: grant.view.stream_id.clone(),
         transport_profile: grant.transport_profile.unwrap_or_default(),
-        strategy: grant.strategy.clone().unwrap_or_else(|| EndpointStrategy {
-            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-            serialize: stross_proto::message::SerializeRule::Passthrough,
-            pick: grant.pick_rule.unwrap_or_default(),
-        }),
+        strategy: grant
+            .strategy
+            .clone()
+            .unwrap_or_else(|| EndpointStrategy::passthrough(grant.pick_rule.unwrap_or_default())),
         relay_addr: None,
         share_token: None,
     };
@@ -1302,11 +1287,9 @@ mod tests {
                 stross_proto::message::ReliabilityProfile::Lossless
             }
             fn strategy(&self) -> stross_proto::message::EndpointStrategy {
-                stross_proto::message::EndpointStrategy {
-                    strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
-                    serialize: stross_proto::message::SerializeRule::Passthrough,
-                    pick: stross_proto::message::PickRule::StrictOrdered,
-                }
+                stross_proto::message::EndpointStrategy::passthrough(
+                    stross_proto::message::PickRule::StrictOrdered,
+                )
             }
         }
         impl ShareEndpoint for RecordingEndpoint {

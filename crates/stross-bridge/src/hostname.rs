@@ -9,10 +9,9 @@ pub fn hostname_or(fallback: &str) -> String {
     hostname::get().map_or_else(|_| fallback.into(), |h| h.to_string_lossy().to_string())
 }
 
-/// 占位主机名（无标识意义）：空 / `localhost` / `android`。
-fn is_placeholder_hostname(h: &str) -> bool {
-    h.is_empty() || h == "localhost" || h == "android"
-}
+/// 占位主机名判定（空 / `localhost` / `android`）：**单一真源在 stross-types**
+/// （桥接层与内核共用——内核不依赖本层，故上移到双方依赖的契约层）。
+pub use stross_types::hostname::is_placeholder as is_placeholder_hostname;
 
 /// 本机**设备名**（mDNS 广播名 / 默认设备标识用）。
 ///

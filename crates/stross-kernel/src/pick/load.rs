@@ -91,11 +91,7 @@ mod tests {
     /// （不静默降级——协商/订阅边界据此拒绝 grant）。
     #[test]
     fn loader_for_strategy_dispatch() {
-        let passthrough = EndpointStrategy {
-            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-            serialize: SerializeRule::Passthrough,
-            pick: PickRule::Realtime,
-        };
+        let passthrough = EndpointStrategy::passthrough(PickRule::Realtime);
         let loader = loader_for(&passthrough).expect("Passthrough 应可装载");
         assert_eq!(loader.serialize_rule(), SerializeRule::Passthrough);
 

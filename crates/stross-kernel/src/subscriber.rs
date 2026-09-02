@@ -231,10 +231,10 @@ fn build_subscribe_spec(
     let strategy = app
         .resolve_strategy(node_id, endpoint_id, strategy_id.as_deref())
         .or_else(|| grant.strategy.clone())
-        .unwrap_or_else(|| stross_proto::message::EndpointStrategy {
-            strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
-            serialize: stross_proto::message::SerializeRule::Passthrough,
-            pick: grant.pick_rule.unwrap_or_default(),
+        .unwrap_or_else(|| {
+            stross_proto::message::EndpointStrategy::passthrough(
+                grant.pick_rule.unwrap_or_default(),
+            )
         });
     // 语义 id 一致性校验（docs/comm-mode-v2.md §6「配套改动」）：订阅方用
     // (端点, 传输档案, pick 规则) 本地推导，与授予的 stream_id 比对——

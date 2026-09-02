@@ -30,8 +30,8 @@ use stross_endpoint::subscribe::file::FileReceiveEndpoint;
 use stross_endpoint::subscribe::media::MediaReceiveEndpoint;
 use stross_proto::message::{
     CodecId, Delivery, EndpointDir, EndpointId, EndpointManifest, EndpointState, EndpointStrategy,
-    EndpointSummary, MediaKind, PickRule, ReliabilityProfile, SerializeRule, StrategyId,
-    SubscribeSpec, TransportId, TransportPreference, Visibility,
+    EndpointSummary, MediaKind, PickRule, ReliabilityProfile, SubscribeSpec, TransportId,
+    TransportPreference, Visibility,
 };
 use stross_proto::time::unix_secs;
 
@@ -400,7 +400,9 @@ pub struct EndpointRegistration {
     /// 目标类型（由协商档案推断；远端不落 wire）。
     pub target: TargetKind,
     /// 端点自主声明的策略组合（策略独立可寻址，同一内容可有多种处理组合）。
-    pub strategies: HashMap<StrategyId, EndpointStrategy>,
+    /// **保持清单声明顺序**：默认策略 = 首个（与 [`EndpointManifest::strategy`]
+    /// 的确定性语义一致——曾用 HashMap 迭代序非确定性选取默认策略）。
+    pub strategies: Vec<EndpointStrategy>,
 }
 
 impl Default for UnifiedRegistry {
@@ -562,8 +564,8 @@ impl UnifiedRegistry {
         let node = self.nodes.get(node_id)?;
         let ep = node.endpoints.get(&endpoint_id)?;
         match strategy_id {
-            Some(id) => ep.strategies.get(id).cloned(),
-            None => ep.strategies.values().next().cloned(),
+            Some(id) => ep.strategies.iter().find(|s| s.strategy_id == id).cloned(),
+            None => ep.strategies.first().cloned(),
         }
     }
 
@@ -657,25 +659,14 @@ fn target_from_manifest(m: &EndpointManifest) -> TargetKind {
     }
 }
 
-/// 清单 → 策略组合表（缺省由平铺 `pick_rule` 推导直通 + pick 的默认策略）。
-fn strategies_of(m: &EndpointManifest) -> HashMap<StrategyId, EndpointStrategy> {
+/// 清单 → 策略组合表（缺省由平铺 `pick_rule` 推导直通 + pick 的默认策略；
+/// **保持清单声明顺序**——确定性默认 = 首个，与 [`EndpointManifest::strategy`]
+/// 单一真源一致）。
+fn strategies_of(m: &EndpointManifest) -> Vec<EndpointStrategy> {
     if !m.strategies.is_empty() {
-        return m
-            .strategies
-            .iter()
-            .map(|s| (s.strategy_id.clone(), s.clone()))
-            .collect();
+        return m.strategies.clone();
     }
-    let mut h = HashMap::new();
-    h.insert(
-        EndpointStrategy::DEFAULT_ID.into(),
-        EndpointStrategy {
-            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-            serialize: SerializeRule::Passthrough,
-            pick: m.pick_rule,
-        },
-    );
-    h
+    vec![m.strategy(None)]
 }
 
 /// 文件端点本地文件源（`control.rs` 状态展示用；路径不落 wire）。

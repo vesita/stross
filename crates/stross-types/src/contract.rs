@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use stross_proto::message::{
     CodecId, ControlMessage, Delivery, EndpointId, EndpointStrategy, MediaKind, PickRule,
-    ReliabilityProfile, SerializeRule, SubscribeSpec, TrackInfo,
+    ReliabilityProfile, SubscribeSpec, TrackInfo,
 };
 
 /// 目标类型：端点分两类的维度（决定默认传输 Lossless/Lossy 与共享生命周期）。
@@ -199,11 +199,7 @@ pub trait MediaSourceEndpoint: ShareEndpoint {
     }
     /// 媒体源默认策略：直通序列化 + 严格即时（Realtime）。
     fn strategy(&self) -> EndpointStrategy {
-        EndpointStrategy {
-            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-            serialize: SerializeRule::Passthrough,
-            pick: PickRule::Realtime,
-        }
+        EndpointStrategy::passthrough(PickRule::Realtime)
     }
     /// 分享端统一实现：组流推本机中继（订阅驱动只走 pull）。
     fn share(&self, app: Arc<dyn EndpointApp>, ctx: SubscribeCtx) {

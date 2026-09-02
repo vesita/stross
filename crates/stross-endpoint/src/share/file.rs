@@ -12,7 +12,7 @@ use std::result::Result as StdResult;
 use std::sync::Arc;
 
 use stross_proto::message::{
-    Delivery, EndpointId, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SerializeRule,
+    Delivery, EndpointId, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile,
 };
 
 use crate::contract::{
@@ -63,11 +63,7 @@ impl Endpoint for FileEndpoint {
     }
     fn strategy(&self) -> EndpointStrategy {
         // 确定目标：直通序列化 + 严格顺序（StrictOrdered）
-        EndpointStrategy {
-            strategy_id: EndpointStrategy::DEFAULT_ID.into(),
-            serialize: SerializeRule::Passthrough,
-            pick: PickRule::StrictOrdered,
-        }
+        EndpointStrategy::passthrough(PickRule::StrictOrdered)
     }
 }
 
@@ -93,14 +89,18 @@ impl ShareEndpoint for FileEndpoint {
         let path = self.path.clone();
         let name = self.name().to_string();
         let endpoint_id = self.id().to_string();
-        tokio::spawn(async move {
-            let Some(url) = crate::contract::resolve_file_url(app.as_ref(), &ctx) else {
+        // 端点自驱动统一经 `EndpointApp::spawn_task`（契约单一真源，docs/
+        // endpoint-model-v2.md §3：运行时由内核注入——与 `MediaSourceEndpoint::share`
+        // 一致，不再直接 `tokio::spawn`）。
+        let app2 = app.clone();
+        app.spawn_task(Box::pin(async move {
+            let Some(url) = crate::contract::resolve_file_url(app2.as_ref(), &ctx) else {
                 tracing::warn!(
                     "文件端点 {endpoint_id} 无可用推送地址（pull 未锚定中继 / push 缺订阅方地址）"
                 );
                 return;
             };
-            let watcher_base = crate::contract::resolve_watcher_base(app.as_ref(), &ctx);
+            let watcher_base = crate::contract::resolve_watcher_base(app2.as_ref(), &ctx);
             let opts = FilePushOptions {
                 push_url: url,
                 stream_id: ctx.stream_id.clone(),
@@ -112,7 +112,7 @@ impl ShareEndpoint for FileEndpoint {
                 },
                 watcher_base,
             };
-            match app.push_file(path, opts).await {
+            match app2.push_file(path, opts).await {
                 Ok(sent) => tracing::info!(
                     "文件端点 {endpoint_id} 已推送「{name}」({sent} 字节, stream={}) 给订阅方 {}",
                     ctx.stream_id,
@@ -123,6 +123,6 @@ impl ShareEndpoint for FileEndpoint {
                     ctx.subscriber
                 ),
             }
-        });
+        }));
     }
 }

@@ -55,7 +55,7 @@ async function addManualRelay(): Promise<void> {
   hideGridError();
   const addr = normAddr($input('manual-addr').value);
   if (!addr) {
-    showGridError('请输入设备 IP 或 IP:端口（无需 http://），例如 192.168.1.100 或 192.168.1.100:8777');
+    showGridError('请输入节点 IP 或 IP:端口（无需 http://），例如 192.168.1.100 或 192.168.1.100:8777');
     return;
   }
   savePrefs();
@@ -201,7 +201,7 @@ async function refreshDevices(force = false): Promise<void> {
       .filter((d) => d.online)
       .map((d) => ({
         key: baseOf(d),
-        name: d.name || 'Stross 设备',
+        name: d.name || 'Stross 节点',
         meta: d.ip + ':' + d.port,
         isLocal: false,
         roles: d.roles || [],
@@ -283,8 +283,8 @@ function renderDeviceList(): void {
     box.appendChild(
       emptyState(
         'wifi',
-        '未发现局域网其它设备',
-        '请确保设备连接同一 Wi-Fi 并已开启「可被发现」，或在上方手动输入 IP 添加。',
+        '未发现局域网其它节点',
+        '请确保节点连接同一 Wi-Fi 并已开启「可被发现」，或在上方手动输入 IP 添加。',
         {
           label: '重新扫描',
           icon: 'refresh',
@@ -305,8 +305,8 @@ function renderDeviceList(): void {
     box.appendChild(
       emptyState(
         'filter',
-        '未找到匹配的设备',
-        `未找到与「${deviceFilterQuery}」匹配的设备名称或 IP 地址`,
+        '未找到匹配的节点',
+        `未找到与「${deviceFilterQuery}」匹配的节点名称或 IP 地址`,
         {
           label: '清除搜索',
           icon: 'x',
@@ -348,21 +348,31 @@ function localDeviceCard(): HTMLElement {
   metaLine.id = 'anchor-box';
   metaLine.textContent = anchor ? '已就绪' : '启动中…';
   body.appendChild(nameLine);
-  body.appendChild(metaLine);
+  // meta 行：锚点状态 + 可被发现开关（公开/隐藏）。放在 meta 行内避免被 flex:1 顶到最右。
+  const metaRow = document.createElement('span');
+  metaRow.className = 'scan-meta-row';
+  metaRow.appendChild(metaLine);
+  const disco = document.createElement('button');
+  disco.type = 'button';
+  disco.id = 'disco-toggle';
+  disco.className = 'disco-btn';
+  disco.dataset.act = 'toggle-disco';
+  disco.setAttribute('aria-pressed', 'false');
+  metaRow.appendChild(disco);
+  body.appendChild(metaRow);
   head.appendChild(ic);
   head.appendChild(body);
+  updateDiscoUI(discoverableOn, disco);
   card.appendChild(head);
 
   const detail = document.createElement('div');
   detail.className = 'dev-detail';
 
-  // 本机设备树（节点 → 设备 → 端点）：共享状态 + 共享/取消共享
+  // 本机设备树（节点 → 端点）：共享状态 + 共享/取消共享。
+  // 卡片头已标注「本机」，此处不再重复「本机设备」标题。
   const devBox = document.createElement('div');
   devBox.className = 'dev-dir';
   devBox.dataset.role = 'local-devices';
-  const devTitle = document.createElement('h3');
-  devTitle.textContent = '本机设备';
-  devBox.appendChild(devTitle);
   const devList = document.createElement('div');
   devList.className = 'dev-list';
   devBox.appendChild(devList);

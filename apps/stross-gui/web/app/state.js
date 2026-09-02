@@ -52,6 +52,8 @@ const remoteDirLoading = new Set();
 // —— 设备 / 锚点 / 采集 ——
 /** 运行平台 / 环境。 */
 let IS_ANDROID = false;
+/** 本机「可被发现」开关状态（布尔；localDeviceCard 渲染时用于初始化按钮态）。 */
+let discoverableOn = false;
 /** 本机采集设备（相机/音频输入/系统声；由 list_devices 填充）。 */
 let devices = { cameras: [], audioInputs: [], systemAudio: [] };
 /** 本机锚点（免先连：init 自动 `start_relay`；推流/级联兜底的数据面入口）。 */

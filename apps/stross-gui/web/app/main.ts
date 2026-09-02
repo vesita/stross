@@ -21,8 +21,9 @@ async function init(): Promise<void> {
     $('ver-badge').textContent = 'v' + info.version;
     const fb = $('ffmpeg-badge');
     if (IS_ANDROID) {
-      fb.textContent = '原生采集';
-      fb.classList.add('ok');
+      // Android 走原生 MediaCodec/AAudio，无 ffmpeg 引擎——隐藏「原生采集」字样（无信息量）。
+      fb.classList.add('hidden');
+      fb.textContent = '';
     } else if (info.ffmpeg) {
       fb.textContent = '推流就绪';
       fb.classList.add('ok');
@@ -62,16 +63,32 @@ async function loadDevices(): Promise<void> {
 
 // ---------------------------------------------------------------- 可被发现
 
+/** 更新本机卡片「可被发现」开关按钮态（on=公开，off=隐藏）。
+ *  el 可选：构造期本机卡片尚未入 DOM 时直接传入按钮元素，避免按 id 查不到。 */
+function updateDiscoUI(on: boolean, el?: HTMLElement): void {
+  discoverableOn = on;
+  const btn = el || $btn('disco-toggle');
+  if (!btn) return;
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on
+    ? '已公开：局域网内其它节点可以发现并连接本机（点击隐藏）'
+    : '已隐藏：局域网内其它节点无法发现本机（点击公开）';
+  btn.innerHTML = icon(on ? 'radio' : 'eye') +
+    (on ? '<span>公开</span>' : '<span>隐藏</span>');
+}
+
 /** 读取运行时「可被发现」状态并同步开关 UI。 */
 async function refreshDiscoverable(): Promise<void> {
   const s = await call<Settings>('discoverable_status');
-  $input('disco-toggle').checked = s.discoverable;
+  updateDiscoUI(s.discoverable);
 }
 
 /** 设置「可被发现」（提交内核 + 持久化）。 */
 async function setDiscoverable(on: boolean): Promise<void> {
   try {
     await call('set_discoverable', { on });
+    updateDiscoUI(on);
   } catch (e) {
     showGridError('设置可被发现失败：' + errMsg(e));
     void refreshDiscoverable();
@@ -84,7 +101,7 @@ async function setDiscoverable(on: boolean): Promise<void> {
 function onApproveRequest(req: PendingRequest): void {
   pendingApprove = req;
   $('approve-device').textContent =
-    `设备「${req.deviceName}」（${req.deviceId.slice(0, 12)}…）`;
+    `节点「${req.deviceName}」（${req.deviceId.slice(0, 12)}…）`;
   const mediaLabel =
     req.endpointName ||
     (req.media.length
@@ -109,7 +126,7 @@ async function respondApprove(allow: boolean): Promise<void> {
     return;
   }
   pendingApprove = null;
-  $('approve-status').textContent = allow ? '已允许并通知设备' : '已拒绝';
+  $('approve-status').textContent = allow ? '已允许并通知节点' : '已拒绝';
   $('approve-modal').classList.add('hidden');
 }
 
@@ -122,6 +139,10 @@ $('device-list').addEventListener('click', (e) => {
   if (!btn) return;
   e.stopPropagation();
   switch (btn.dataset.act) {
+    case 'toggle-disco': {
+      void setDiscoverable(!discoverableOn);
+      break;
+    }
     case 'publish-device': {
       const deviceId = btn.dataset.device;
       if (deviceId) openPublishModal(deviceId);
@@ -188,10 +209,7 @@ $btn('fw-close-btn').onclick = () => $('fw-banner').classList.add('hidden');
 
 $btn('scan-btn').onclick = () => void scanRelays();
 $btn('manual-add-btn').onclick = () => void addManualRelay();
-// 「可被发现」开关
-$input('disco-toggle').addEventListener('change', (e) => {
-  void setDiscoverable((e.target as HTMLInputElement).checked);
-});
+// 「可被发现」开关按钮（本机卡片头）：经 #device-list 事件委托处理（见下方 delegation）
 // 手动地址输入框回车 = 添加设备
 $input('manual-addr').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
@@ -210,11 +228,7 @@ if (navBtnConsume) {
   navBtnConsume.onclick = () => switchView('consume');
 }
 
-// 消费舞台返回管理视图按钮
-const stageBackBtn = $('stage-back-btn');
-if (stageBackBtn) {
-  stageBackBtn.onclick = () => switchView('manage');
-}
+// 消费舞台「浏览局域网节点」按钮：切回共享（顶部导航已提供「共享」入口）
 const emptyGoManageBtn = $('empty-go-manage-btn');
 if (emptyGoManageBtn) {
   emptyGoManageBtn.onclick = () => switchView('manage');

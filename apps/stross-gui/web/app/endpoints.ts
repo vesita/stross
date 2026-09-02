@@ -34,7 +34,7 @@ function renderLocalDevices(): void {
   if (!box) return;
   box.innerHTML = '';
   if (!localCatalog.endpoints.length) {
-    box.appendChild(emptyState('server', '本机暂无可共享的内容', '未检测到可用的屏幕、摄像头或音频采集设备'));
+    box.appendChild(emptyState('server', '本机暂无可共享的内容', '未检测到可用的屏幕、摄像头或音频采集源'));
     return;
   }
   for (const ep of localCatalog.endpoints) {
@@ -112,7 +112,7 @@ function openPublishModal(endpointId: string): void {
   if (!ep) return;
   publishTarget = { ep };
   $('pub-modal-title').textContent = `共享「${ep.name}」`;
-  $('pub-modal-sub').textContent = '开启后局域网其它设备可订阅并接收此内容';
+  $('pub-modal-sub').textContent = '开启后局域网其它节点可订阅并接收此内容';
   (document.querySelector('input[name="pub-vis"][value="confirm"]') as HTMLInputElement).checked = true;
   $('pub-error').classList.add('hidden');
   $('pub-modal').classList.remove('hidden');
@@ -216,7 +216,7 @@ function renderRemoteDir(dev: DeviceView, dir: RemoteDir): void {
   title.textContent = '可订阅的内容';
   container.appendChild(title);
   if (!dir.endpoints.length) {
-    container.appendChild(emptyState('radio', '该设备暂未共享任何内容', '对方可以在其设备列表中点击「共享」开启推流'));
+    container.appendChild(emptyState('radio', '该节点暂未共享任何内容', '对方可以在其节点列表中点击「共享」开启推流'));
     return;
   }
   for (const ep of dir.endpoints) {

@@ -117,7 +117,10 @@ async function syncAndroidSurfaceBounds(): Promise<void> {
   const el = $('recv-canvas-wrap');
   if (!el) return;
   const r = el.getBoundingClientRect();
-  if (r.width < 1 || r.height < 1) return;
+  if (r.width < 1 || r.height < 1) {
+    await hideActiveSurface();
+    return;
+  }
   const dpr = window.devicePixelRatio || 1;
   try {
     await call('set_playback_surface_bounds', {
@@ -150,7 +153,7 @@ function androidVideoLink(): RecvLinkState | null {
 async function syncAndroidSurface(): Promise<void> {
   if (!IS_ANDROID) return;
   const vlink = androidVideoLink();
-  if (!receiving || !vlink) {
+  if (uiFSM.viewMode !== 'consume' || !receiving || !vlink) {
     await hideActiveSurface();
     return;
   }

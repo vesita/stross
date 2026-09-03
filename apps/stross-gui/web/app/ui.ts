@@ -250,6 +250,7 @@ async function handleNativeFullscreenChanged(active: boolean): Promise<void> {
 /** 切换全局主视图模式（设备与共享管理 vs 消费播放台）——经过状态机派发。 */
 function switchView(mode: 'manage' | 'consume'): void {
   dispatchUIAction({ type: 'SWITCH_VIEW', mode });
+  void syncAndroidSurface();
 }
 
 /** 兼容旧移动端分段 Tab。 */
@@ -269,6 +270,7 @@ function initFSMUI(): void {
     const btnConsume = $('nav-btn-consume');
     if (btnManage) btnManage.classList.toggle('active', state.viewMode === 'manage');
     if (btnConsume) btnConsume.classList.toggle('active', state.viewMode === 'consume');
+    void syncAndroidSurface();
 
     const empty = $('recv-empty');
     const canvasWrap = $('recv-canvas-wrap');

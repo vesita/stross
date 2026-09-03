@@ -184,6 +184,7 @@ fn video_writer_loop(rx: std::sync::mpsc::Receiver<Frame>, shared: Arc<VideoShar
     let mut child: Option<Child> = None;
     let mut stdin: Option<ChildStdin> = None;
     let mut reader: Option<JoinHandle<()>> = None;
+    let mut cached_config: Option<Vec<u8>> = None;
     loop {
         let frame = match rx.recv() {
             Ok(f) => f,
@@ -193,8 +194,12 @@ fn video_writer_loop(rx: std::sync::mpsc::Receiver<Frame>, shared: Arc<VideoShar
             break;
         }
         let keyframe = frame.header.is_keyframe();
-        if keyframe {
-            // 关键帧携带 SPS（编码侧 repeat_headers=1）：解析分辨率 → 帧大小
+        let is_config = frame.header.is_config();
+        if is_config {
+            cached_config = Some(frame.payload.to_vec());
+        }
+        if keyframe || is_config {
+            // 关键帧或配置帧携带 SPS（编码侧 repeat_headers=1 或 FLAG_CONFIG）：解析分辨率 → 帧大小
             if let Some((w, h)) = parse_sps_size(&frame.payload) {
                 let mut size = shared.size.lock().unwrap();
                 if *size != Some((w, h)) {
@@ -202,8 +207,12 @@ fn video_writer_loop(rx: std::sync::mpsc::Receiver<Frame>, shared: Arc<VideoShar
                     *shared.frame_size.lock().unwrap() = Some(w as usize * h as usize * 4);
                 }
             }
+            // 若解码进程已有 stdin 且到达独立配置帧，直接写入 stdin 保证解码器拥有最新 SPS/PPS
+            if is_config && let Some(si) = stdin.as_mut() {
+                let _ = si.write_all(&frame.payload);
+            }
             // 失步或子进程缺失 → 以关键帧为对齐点重建
-            if stdin.is_none() || shared.resync.load(Ordering::Relaxed) {
+            if keyframe && (stdin.is_none() || shared.resync.load(Ordering::Relaxed)) {
                 kill_child(child.take());
                 drop(stdin.take());
                 if let Some(r) = reader.take() {
@@ -214,9 +223,15 @@ fn video_writer_loop(rx: std::sync::mpsc::Receiver<Frame>, shared: Arc<VideoShar
                 // 时间戳回退（被调度层当 stale 丢）或跳变（触发重锚定）。
                 shared.pts.lock().unwrap().clear();
                 match spawn_video_decode() {
-                    Ok((c, si, so)) => {
+                    Ok((c, mut si, so)) => {
                         shared.resync.store(false, Ordering::Relaxed);
                         shared.stats.lock().unwrap().video_resyncs += 1;
+                        // 若此前暂存了独立配置头（SPS/PPS）且本关键帧不含 SPS，先喂配置头
+                        if let Some(cfg_bytes) = cached_config.as_deref()
+                            && parse_sps_size(&frame.payload).is_none()
+                        {
+                            let _ = si.write_all(cfg_bytes);
+                        }
                         let s2 = shared.clone();
                         reader = Some(
                             std::thread::Builder::new()
@@ -501,6 +516,12 @@ fn audio_reader_gen(
 
 /// 从关键帧载荷（Annex-B：SPS/PPS/IDR…）解析分辨率。
 fn parse_sps_size(payload: &[u8]) -> Option<(u32, u32)> {
+    if let Some(cfg) = crate::codec::nal::extract_avc_config(payload)
+        && cfg.width > 0
+        && cfg.height > 0
+    {
+        return Some((cfg.width, cfg.height));
+    }
     let mut splitter = AnnexBSplitter::new();
     for nal in splitter.feed(payload) {
         if nal_type(&nal) == Some(NAL_SPS)

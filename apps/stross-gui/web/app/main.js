@@ -302,9 +302,10 @@ initFSMUI();
 void listen('native-fullscreen-changed', (p) => {
     void handleNativeFullscreenChanged(p.active);
 });
-// 尺寸/方向变化时重定位原生播放 Surface（Android Surface 路径；幂等）。
+// 尺寸/方向/滚动变化时重定位原生播放 Surface（Android Surface 路径；幂等）。
 window.addEventListener('resize', () => { void syncAndroidSurface(); });
 window.addEventListener('orientationchange', () => { void syncAndroidSurface(); });
+window.addEventListener('scroll', () => { void syncAndroidSurface(); }, { passive: true });
 // 全局播放器快捷键（F 全屏、M/Space 静音、D 诊断、A 比例、0 重置缩放、方向键 亮度/音量）
 window.addEventListener('keydown', (e) => {
     const target = e.target;

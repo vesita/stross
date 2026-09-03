@@ -249,6 +249,7 @@ async function handleNativeFullscreenChanged(active) {
 /** 切换全局主视图模式（设备与共享管理 vs 消费播放台）——经过状态机派发。 */
 function switchView(mode) {
     dispatchUIAction({ type: 'SWITCH_VIEW', mode });
+    void syncAndroidSurface();
 }
 /** 兼容旧移动端分段 Tab。 */
 function switchMobileTab(tab) {
@@ -269,6 +270,7 @@ function initFSMUI() {
             btnManage.classList.toggle('active', state.viewMode === 'manage');
         if (btnConsume)
             btnConsume.classList.toggle('active', state.viewMode === 'consume');
+        void syncAndroidSurface();
         const empty = $('recv-empty');
         const canvasWrap = $('recv-canvas-wrap');
         const overlay = $('recv-overlay');

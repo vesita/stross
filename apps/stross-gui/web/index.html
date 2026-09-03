@@ -377,65 +377,7 @@
             </button>
           </div>
         <div id="recv-error" class="error hidden"></div>
-        <!-- 多端点链接：接收链路列表（一次可同时接收多条流；每条链独立状态/停止） -->
-        <div id="recv-links" class="recv-links"></div>
-        <!-- AI 智能布局与流健康遥测工具条（接收中动态展开） -->
-        <div class="player-ai-bar hidden" id="player-ai-bar">
-          <div class="ai-pill-group">
-            <div class="ai-badge" id="ai-smart-layout-badge">
-              <svg class="ic"><use href="#i-sparkles" /></svg>
-              <span id="ai-layout-label">AI 智能自适应</span>
-            </div>
-            <button id="player-aspect-btn" class="aspect-toggle-btn" type="button" title="点击切换画面比例 (适应/铺满/拉伸/1:1)">
-              <svg class="ic"><use href="#i-ratio" /></svg>
-              <span id="player-aspect-label">等比适应</span>
-            </button>
-          </div>
-          <div class="ai-telemetry-pill" id="player-telemetry-pill" title="点击查看 AI 链路健康与网络遥测分析">
-            <span class="telemetry-dot live"></span>
-            <span id="telemetry-fps-text">~60fps</span>
-            <span class="telemetry-divider">·</span>
-            <span id="telemetry-health-badge" class="health-ok">极佳 (0丢包)</span>
-            <svg class="ic chevron"><use href="#i-chevron-right" /></svg>
-          </div>
-        </div>
-
-        <!-- AI 智能诊断浮层（点击遥测胶囊展开） -->
-        <div class="player-diag-drawer hidden" id="player-diag-drawer">
-          <div class="diag-header">
-            <div class="diag-title">
-              <svg class="ic"><use href="#i-cpu" /></svg>
-              <span>AI 实时流媒体诊断分析</span>
-            </div>
-            <button id="diag-close-btn" class="icon-btn-sm" type="button" title="关闭诊断">
-              <svg class="ic"><use href="#i-x" /></svg>
-            </button>
-          </div>
-          <div class="diag-grid">
-            <div class="diag-item">
-              <span class="diag-lbl">解码管线</span>
-              <span class="diag-val" id="diag-val-pipeline">Android MediaCodec (硬解直通)</span>
-            </div>
-            <div class="diag-item">
-              <span class="diag-lbl">渲染帧率</span>
-              <span class="diag-val ok" id="diag-val-fps">~60 fps (稳定)</span>
-            </div>
-            <div class="diag-item">
-              <span class="diag-lbl">抖动抗性</span>
-              <span class="diag-val" id="diag-val-jitter">&lt; 15 ms (低抖动)</span>
-            </div>
-            <div class="diag-item">
-              <span class="diag-lbl">音频输出</span>
-              <span class="diag-val" id="diag-val-audio">48kHz 立体声 (低延迟)</span>
-            </div>
-          </div>
-          <div class="diag-tip" id="diag-ai-tip">
-            <svg class="ic"><use href="#i-sparkles" /></svg>
-            <span>AI 优化建议：当前局域网质量优异，已自动开启低延迟极速渲染与音频防抖。</span>
-          </div>
-        </div>
-
-        <!-- 接收画面：有视频帧时显示，纯音频隐藏 -->
+        <!-- 接收画面：有视频帧时显示，纯音频隐藏（置顶嵌入式播放器舞台） -->
         <div class="canvas-wrap hidden aspect-fit" id="recv-canvas-wrap">
           <canvas id="recv-canvas" width="640" height="360"></canvas>
           <!-- 画面缩放/平移重置浮动芯片（非 1.0x 缩放时展示） -->
@@ -492,6 +434,65 @@
           <div class="audio-viz-title" id="recv-audio-title">音频流播放中</div>
           <div class="audio-viz-sub hint" id="recv-audio-sub">低延迟音频接收 · 原生输出</div>
         </div>
+
+        <!-- AI 智能布局与流健康遥测工具条（接收中动态展开） -->
+        <div class="player-ai-bar hidden" id="player-ai-bar">
+          <div class="ai-pill-group">
+            <div class="ai-badge" id="ai-smart-layout-badge">
+              <svg class="ic"><use href="#i-sparkles" /></svg>
+              <span id="ai-layout-label">AI 智能自适应</span>
+            </div>
+            <button id="player-aspect-btn" class="aspect-toggle-btn" type="button" title="点击切换画面比例 (适应/铺满/拉伸/1:1)">
+              <svg class="ic"><use href="#i-ratio" /></svg>
+              <span id="player-aspect-label">等比适应</span>
+            </button>
+          </div>
+          <div class="ai-telemetry-pill" id="player-telemetry-pill" title="点击查看 AI 链路健康与网络遥测分析">
+            <span class="telemetry-dot live"></span>
+            <span id="telemetry-fps-text">~60fps</span>
+            <span class="telemetry-divider">·</span>
+            <span id="telemetry-health-badge" class="health-ok">极佳 (0丢包)</span>
+            <svg class="ic chevron"><use href="#i-chevron-right" /></svg>
+          </div>
+        </div>
+
+        <!-- AI 智能诊断浮层（点击遥测胶囊展开） -->
+        <div class="player-diag-drawer hidden" id="player-diag-drawer">
+          <div class="diag-header">
+            <div class="diag-title">
+              <svg class="ic"><use href="#i-cpu" /></svg>
+              <span>AI 实时流媒体诊断分析</span>
+            </div>
+            <button id="diag-close-btn" class="icon-btn-sm" type="button" title="关闭诊断">
+              <svg class="ic"><use href="#i-x" /></svg>
+            </button>
+          </div>
+          <div class="diag-grid">
+            <div class="diag-item">
+              <span class="diag-lbl">解码管线</span>
+              <span class="diag-val" id="diag-val-pipeline">Android MediaCodec (硬解直通)</span>
+            </div>
+            <div class="diag-item">
+              <span class="diag-lbl">渲染帧率</span>
+              <span class="diag-val ok" id="diag-val-fps">~60 fps (稳定)</span>
+            </div>
+            <div class="diag-item">
+              <span class="diag-lbl">抖动抗性</span>
+              <span class="diag-val" id="diag-val-jitter">&lt; 15 ms (低抖动)</span>
+            </div>
+            <div class="diag-item">
+              <span class="diag-lbl">音频输出</span>
+              <span class="diag-val" id="diag-val-audio">48kHz 立体声 (低延迟)</span>
+            </div>
+          </div>
+          <div class="diag-tip" id="diag-ai-tip">
+            <svg class="ic"><use href="#i-sparkles" /></svg>
+            <span>AI 优化建议：当前局域网质量优异，已自动开启低延迟极速渲染与音频防抖。</span>
+          </div>
+        </div>
+
+        <!-- 多端点链接：接收链路列表（一次可同时接收多条流；每条链独立状态/停止） -->
+        <div id="recv-links" class="recv-links"></div>
         <div class="status-line hidden" id="recv-status-line">
           <span class="dot idle" id="recv-dot"></span>
           <span id="recv-status">未接收</span>

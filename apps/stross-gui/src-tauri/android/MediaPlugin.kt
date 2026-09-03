@@ -7,7 +7,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -81,6 +83,7 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
     private var virtualDisplay: VirtualDisplay? = null
     private var projection: MediaProjection? = null
     private var encodeThread: HandlerThread? = null
+    private var cachedConfig: ByteArray? = null
 
     // 音频
     private var audioRecord: AudioRecord? = null
@@ -357,7 +360,19 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
                     if (info.size <= 0) continue
                     val keyframe = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                     val config = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
-                    sendFrame(0, keyframe, config, info.presentationTimeUs / 1000, data)
+                    var toSend = data
+                    if (config) {
+                        cachedConfig = data.clone()
+                    } else if (keyframe) {
+                        val cfg = cachedConfig
+                        if (cfg != null && !hasSps(data)) {
+                            val merged = ByteArray(cfg.size + data.size)
+                            System.arraycopy(cfg, 0, merged, 0, cfg.size)
+                            System.arraycopy(data, 0, merged, cfg.size, data.size)
+                            toSend = merged
+                        }
+                    }
+                    sendFrame(0, keyframe, config, info.presentationTimeUs / 1000, toSend)
                 }
             }
         } catch (e: Exception) {
@@ -373,10 +388,32 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
         } catch (_: Exception) {
         }
         encoder = null
+        cachedConfig = null
         virtualDisplay?.release()
         virtualDisplay = null
         proj.stop()
         channel = null
+    }
+
+    private fun hasSps(data: ByteArray): Boolean {
+        var i = 0
+        val len = data.size
+        while (i < len - 4) {
+            if (data[i].toInt() == 0 && data[i + 1].toInt() == 0) {
+                var codeEnd = -1
+                if (data[i + 2].toInt() == 1) {
+                    codeEnd = i + 3
+                } else if (data[i + 2].toInt() == 0 && data[i + 3].toInt() == 1) {
+                    codeEnd = i + 4
+                }
+                if (codeEnd in 1 until len) {
+                    val nalType = data[codeEnd].toInt() and 0x1F
+                    if (nalType == 7) return true
+                }
+            }
+            i++
+        }
+        return false
     }
 
     // ------------------------------------------------------------------
@@ -385,31 +422,102 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
 
     private fun startAudio() {
         val sampleRate = 48_000
-        val minBuf = AudioRecord.getMinBufferSize(
+        var channelConfig = AudioFormat.CHANNEL_IN_STEREO
+        var channelCount = 2
+        var minBuf = AudioRecord.getMinBufferSize(
             sampleRate,
-            AudioFormat.CHANNEL_IN_STEREO,
+            channelConfig,
             AudioFormat.ENCODING_PCM_16BIT
         )
         if (minBuf <= 0) {
-            Log.w(TAG, "AudioRecord 不支持 48k 立体声")
+            channelConfig = AudioFormat.CHANNEL_IN_MONO
+            channelCount = 1
+            minBuf = AudioRecord.getMinBufferSize(
+                sampleRate,
+                channelConfig,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+        }
+        if (minBuf <= 0) {
+            Log.w(TAG, "AudioRecord 不支持 48k 采样")
             if (micOnly) failCapture("麦克风初始化失败（AudioRecord 不可用）")
             return
         }
-        val record = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            sampleRate,
-            AudioFormat.CHANNEL_IN_STEREO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            minBuf * 2
-        )
-        if (record.state != AudioRecord.STATE_INITIALIZED) {
+
+        var record: AudioRecord? = null
+        val proj = projection
+        // Android 10+ 且为屏幕投影时，优先捕获系统内部声音（媒体/应用音频）；失败降级到 MIC
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && proj != null && !micOnly) {
+            try {
+                val captureConfig = AudioPlaybackCaptureConfiguration.Builder(proj)
+                    .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                    .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                    .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                    .build()
+                val r = AudioRecord.Builder()
+                    .setAudioPlaybackCaptureConfig(captureConfig)
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(channelConfig)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(minBuf * 2)
+                    .build()
+                if (r.state == AudioRecord.STATE_INITIALIZED) {
+                    record = r
+                    Log.i(TAG, "AudioPlaybackCapture 系统声音录制初始化成功")
+                } else {
+                    r.release()
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "AudioPlaybackCapture 不可用，降级到 MIC: ${e.message}")
+            }
+        }
+
+        if (record == null) {
+            record = try {
+                AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    sampleRate,
+                    channelConfig,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    minBuf * 2
+                )
+            } catch (e: Throwable) {
+                null
+            }
+            if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
+                record?.release()
+                if (channelConfig != AudioFormat.CHANNEL_IN_MONO) {
+                    channelConfig = AudioFormat.CHANNEL_IN_MONO
+                    channelCount = 1
+                    minBuf = AudioRecord.getMinBufferSize(sampleRate, channelConfig, AudioFormat.ENCODING_PCM_16BIT)
+                    record = try {
+                        AudioRecord(
+                            MediaRecorder.AudioSource.MIC,
+                            sampleRate,
+                            channelConfig,
+                            AudioFormat.ENCODING_PCM_16BIT,
+                            minBuf * 2
+                        )
+                    } catch (_: Throwable) {
+                        null
+                    }
+                }
+            }
+        }
+
+        if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
             Log.w(TAG, "AudioRecord 初始化失败")
-            if (micOnly) failCapture("麦克风初始化失败")
+            if (micOnly) failCapture("音频初始化失败")
             return
         }
         audioRecord = record
+        aacChannels = channelCount
 
-        val aacFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, 2).apply {
+        val aacFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channelCount).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
             setInteger(MediaFormat.KEY_BIT_RATE, 128_000)
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16 * 1024)
@@ -428,7 +536,7 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
                 put("started", true)
             })
         }
-        Log.i(TAG, "麦克风采集启动")
+        Log.i(TAG, "音频采集启动（${channelCount}声道）")
     }
 
     private fun drainAudioLoop(record: AudioRecord) {
@@ -459,8 +567,12 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
                         val data = ByteArray(info.size)
                         codec.getOutputBuffer(outIdx)?.get(data)
                         codec.releaseOutputBuffer(outIdx, false)
-                        if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
-                            sendFrame(1, false, false, info.presentationTimeUs / 1000, withAdtsHeader(data))
+                        if (info.size > 0) {
+                            if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                                parseAacConfigFromBuffer(data)
+                            } else {
+                                sendFrame(1, false, false, info.presentationTimeUs / 1000, withAdtsHeader(data))
+                            }
                         }
                     } else {
                         break
@@ -497,18 +609,33 @@ class MediaPlugin(activity: Activity) : Plugin(activity) {
         aacChannels = (b1 shr 3) and 0x0F
     }
 
-    /** 给裸 AAC 帧加 7 字节 ADTS 头（观看端 jmuxer 依赖）。 */
+    private fun parseAacConfigFromBuffer(data: ByteArray) {
+        if (data.size < 2) return
+        val b0 = data[0].toInt() and 0xFF
+        val b1 = data[1].toInt() and 0xFF
+        aacProfile = (b0 shr 3) and 0x1F
+        aacFreqIdx = ((b0 and 0x07) shl 1) or ((b1 shr 7) and 0x01)
+        aacChannels = (b1 shr 3) and 0x0F
+    }
+
+    /** 计算 ADTS profile: AOT (Audio Object Type) 为 2 (AAC-LC) 时 ADTS profile 为 1 (LC)。 */
+    private fun adtsProfile(): Int {
+        val aot = if (aacProfile in 1..4) aacProfile else 2
+        return (aot - 1) and 0x03
+    }
+
+    /** 给裸 AAC 帧加 7 字节 ADTS 头（观看端 ffmpeg / jmuxer 依赖）。 */
     private fun withAdtsHeader(payload: ByteArray): ByteArray {
         val frameLen = payload.size + 7
+        val prof = adtsProfile()
         val h = ByteArray(7)
         h[0] = 0xFF.toByte()
         h[1] = 0xF1.toByte() // MPEG-4, layer 0, no CRC
-        h[2] = (((aacProfile and 0x03) shl 6) or ((aacFreqIdx and 0x0F) shl 2) or ((aacChannels shr 2) and 0x01)).toByte()
+        h[2] = (((prof and 0x03) shl 6) or ((aacFreqIdx and 0x0F) shl 2) or ((aacChannels shr 2) and 0x01)).toByte()
         h[3] = (((aacChannels and 0x03) shl 6) or ((frameLen shr 11) and 0x03)).toByte()
         h[4] = ((frameLen shr 3) and 0xFF).toByte()
         h[5] = (((frameLen and 0x07) shl 5) or 0x1F).toByte()
         h[6] = 0xFC.toByte()
-        // ByteArray 不支持 + 运算，手工拼接
         val out = ByteArray(frameLen)
         System.arraycopy(h, 0, out, 0, 7)
         System.arraycopy(payload, 0, out, 7, payload.size)

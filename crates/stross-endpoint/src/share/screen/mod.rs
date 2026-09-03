@@ -64,7 +64,14 @@ impl MediaSourceEndpoint for ScreenEndpoint {
         Some(VideoSource::Screen)
     }
     fn audio(&self) -> Option<AudioSourceConfig> {
-        None
+        #[cfg(target_os = "android")]
+        {
+            Some(AudioSourceConfig::default())
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            None
+        }
     }
 }
 

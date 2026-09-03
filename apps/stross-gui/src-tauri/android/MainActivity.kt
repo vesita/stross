@@ -108,23 +108,32 @@ class MainActivity : TauriActivity() {
 
     /** 是否正在显示原生播放 Surface。 */
     fun isPlaybackSurfaceShown(): Boolean {
-        return playbackSurfaceView?.visibility == View.VISIBLE
+        val sv = playbackSurfaceView ?: return false
+        val lp = sv.layoutParams as? FrameLayout.LayoutParams
+        return sv.visibility == View.VISIBLE && (lp?.leftMargin ?: 0) >= 0
     }
 
     /** 显示 SurfaceView（重置为 1×1 占位不缺省全窗口；前端随后用
      *  [`showPlaybackSurface(rect)`] 重定位）。 */
     fun showPlaybackSurface() {
         val sv = playbackSurfaceView ?: return
+        lastPlayerRect?.let { r ->
+            showPlaybackSurface(r)
+            return
+        }
         sv.layoutParams = FrameLayout.LayoutParams(1, 1)
         if (sv.visibility != View.VISIBLE) sv.visibility = View.VISIBLE
         sv.bringToFront()
     }
 
-    /** 播放开始时显示 SurfaceView 并给到**真实尺寸**（铺满窗口）——确保 surface
-     *  创建（1×1 在本机不触发 surfaceCreated）。前端随后上报播放区矩形重定位，
-     *  避免盖住整个 UI 的时间被拉长。 */
+    /** 播放开始时显示 SurfaceView。若已有最近播放区定位则按该定位显示，
+     *  避免无条件全屏盖住整个 UI；无定位时铺满窗口确保 surface 就绪。 */
     fun showPlaybackSurfaceFullWindow() {
         val sv = playbackSurfaceView ?: return
+        lastPlayerRect?.let { r ->
+            showPlaybackSurface(r)
+            return
+        }
         sv.layoutParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT,
@@ -147,9 +156,17 @@ class MainActivity : TauriActivity() {
         lastPlayerRect = rect
     }
 
-    /** 隐藏 SurfaceView（退出播放 / 暂停）。 */
+    /** 隐藏 SurfaceView（退出播放 / 切换到共享页等）。
+     *  设为 INVISIBLE 并移出视口，既避免销毁底层 Surface 导致解码器崩溃，
+     *  又彻底防止遮挡与挤占 WebView 的点击事件与内容画面。 */
     fun hidePlaybackSurface() {
-        playbackSurfaceView?.visibility = View.GONE
+        val sv = playbackSurfaceView ?: return
+        sv.visibility = View.INVISIBLE
+        val params = FrameLayout.LayoutParams(1, 1).apply {
+            leftMargin = -9999
+            topMargin = -9999
+        }
+        sv.layoutParams = params
     }
 
     /** 原生全屏：SurfaceView 铺满 + 隐藏系统栏（沉浸式）。 */

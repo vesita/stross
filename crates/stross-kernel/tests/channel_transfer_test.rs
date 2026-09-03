@@ -317,6 +317,22 @@ async fn channel_cancel_file_transfer() {
         }
     }
     assert!(b_failed, "B 应感知到文件传输已中断/取消");
-
     let _ = tokio::fs::remove_dir_all(&temp_root).await;
+}
+
+#[tokio::test]
+async fn channel_path_traversal_defense() {
+    use stross_kernel::channel::session::sanitize_file_name;
+
+    assert_eq!(sanitize_file_name("../../etc/passwd"), "passwd");
+    assert_eq!(sanitize_file_name("/etc/shadow"), "shadow");
+    assert_eq!(
+        sanitize_file_name("..\\..\\windows\\system32\\calc.exe"),
+        "calc.exe"
+    );
+    assert!(sanitize_file_name("../../../").starts_with("file_"));
+    assert!(sanitize_file_name("..").starts_with("file_"));
+    assert!(sanitize_file_name(".").starts_with("file_"));
+    assert_eq!(sanitize_file_name("hello/world.txt"), "world.txt");
+    assert_eq!(sanitize_file_name("normal_file.png"), "normal_file.png");
 }

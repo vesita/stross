@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -312,15 +312,19 @@ async fn ws_channel(
     State(state): State<RelayState>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
 ) -> Response {
+    let Some(mgr) = state.channel_manager() else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ChannelManager 未就绪",
+        )
+            .into_response();
+    };
     let peer_id = crate::kernel::id::Id::from(q.peer_id);
     let peer_name = q.peer_name.unwrap_or_else(|| "Unknown".into());
-    let mgr = state.channel_manager();
     ws.on_upgrade(move |socket| async move {
-        if let Some(mgr) = mgr {
-            let session = WsTransport::new().from_socket(Box::new(AxumWs::new(socket)), Some(peer));
-            let chan = mgr.register_session(peer_id, &peer_name, session).await;
-            chan.wait_closed().await;
-        }
+        let session = WsTransport::new().from_socket(Box::new(AxumWs::new(socket)), Some(peer));
+        let chan = mgr.register_session(peer_id, &peer_name, session).await;
+        chan.wait_closed().await;
     })
 }
 
@@ -376,7 +380,15 @@ impl stross_transport::ws::WsIo for AxumWs {
                 }
                 Some(Ok(M::Binary(b))) => return Ok(Some(stross_transport::ws::WsMsg::Binary(b))),
                 Some(Ok(M::Close(_))) | None => return Ok(None),
-                Some(Ok(M::Ping(_)) | Ok(M::Pong(_))) => continue, // 忽略心跳
+                Some(Ok(M::Ping(p))) => {
+                    use futures_util::SinkExt;
+                    let mut guard = self.sink.lock().await;
+                    if let Some(sink) = guard.as_mut() {
+                        let _ = sink.send(M::Pong(p)).await;
+                    }
+                    continue;
+                }
+                Some(Ok(M::Pong(_))) => continue,
                 Some(Err(e)) => return Err(TransportError::Io(e.to_string())),
             }
         }

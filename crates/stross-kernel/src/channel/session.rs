@@ -228,10 +228,7 @@ impl ChannelSession {
 
             loop {
                 if cancelled.load(Ordering::Relaxed) {
-                    let _ = events_tx.send(ChannelEvent::FileFailed {
-                        transfer_id,
-                        reason: "传输已取消".into(),
-                    });
+                    // cancel_transfer 已主动发出 FileFailed 事件，无需重复发送
                     return;
                 }
 
@@ -246,7 +243,7 @@ impl ChannelSession {
                     }
                 };
 
-                let is_eof = (offset + n as u64 >= size) || (size == 0);
+                let is_eof = (n == 0) || (offset + n as u64 >= size) || (size == 0);
                 let flags = if is_eof {
                     ChannelChunkHeader::FLAG_EOF
                 } else {
@@ -319,17 +316,24 @@ impl ChannelSession {
 
     /// 取消某次传输任务。
     pub async fn cancel_transfer(&self, transfer_id: TransferId) -> Result<()> {
+        let mut was_active = false;
         {
             let mut out = self.outbounds.lock().await;
             if let Some(t) = out.remove(&transfer_id) {
                 t.cancelled.store(true, Ordering::Relaxed);
+                was_active = true;
             }
         }
         {
             let mut inb = self.inbounds.lock().await;
             if let Some(t) = inb.remove(&transfer_id) {
                 let _ = tokio::fs::remove_file(&t.tmp_path).await;
+                was_active = true;
             }
+        }
+
+        if !was_active {
+            return Ok(());
         }
 
         let cancel = ChannelMsg::FileCancel {
@@ -355,13 +359,28 @@ impl ChannelSession {
         if !self.closed.swap(true, Ordering::Relaxed) {
             self.closed_notify.notify_waiters();
             let _ = self.session.close().await;
+
+            // 清理未完成的在途接收临时文件，防止垃圾残留
+            {
+                let mut inb = self.inbounds.lock().await;
+                for (_, t) in inb.drain() {
+                    let _ = tokio::fs::remove_file(&t.tmp_path).await;
+                }
+            }
+            // 标记在途上传任务已取消
+            {
+                let mut out = self.outbounds.lock().await;
+                for (_, t) in out.drain() {
+                    t.cancelled.store(true, Ordering::Relaxed);
+                }
+            }
+
             let _ = self.events_tx.send(ChannelEvent::Disconnected {
                 peer_id: self.peer_id.to_string(),
             });
         }
         Ok(())
     }
-
     /// 后台消息与分块读取循环。
     async fn receive_loop(self_weak: std::sync::Weak<Self>, session: Arc<dyn DataSession>) {
         loop {
@@ -496,6 +515,7 @@ impl ChannelSession {
     /// 接受对端推送的文件并准备临时文件。
     async fn accept_inbound(&self, transfer_id: TransferId, name: String, size: u64) -> Result<()> {
         let _ = tokio::fs::create_dir_all(&self.out_dir).await;
+        let safe_name = sanitize_file_name(&name);
         let tmp_name = format!(".tmp-recv-{}-{}", transfer_id, unix_secs());
         let tmp_path = self.out_dir.join(tmp_name);
         let file = tokio::fs::File::create(&tmp_path)
@@ -507,7 +527,7 @@ impl ChannelSession {
             inb.insert(
                 transfer_id,
                 InboundTransfer {
-                    name,
+                    name: safe_name,
                     size,
                     transferred: 0,
                     tmp_path,
@@ -515,7 +535,6 @@ impl ChannelSession {
                 },
             );
         }
-
         // 发送同意决策
         let dec = ChannelMsg::FileDecision {
             transfer_id,
@@ -534,16 +553,36 @@ impl ChannelSession {
         let Some(header) = ChannelChunkHeader::decode(&frame.payload) else {
             return;
         };
-        let chunk_data = if frame.payload.len() > CHANNEL_CHUNK_HEADER_LEN {
-            &frame.payload[CHANNEL_CHUNK_HEADER_LEN..]
-        } else {
-            &[]
-        };
+        let chunk_len = header.chunk_len as usize;
+        if frame.payload.len() < CHANNEL_CHUNK_HEADER_LEN + chunk_len {
+            tracing::warn!(
+                "文件分块载荷长度不足: 期望 {chunk_len}, 实际载荷 {}",
+                frame.payload.len()
+            );
+            return;
+        }
+        let chunk_data =
+            &frame.payload[CHANNEL_CHUNK_HEADER_LEN..CHANNEL_CHUNK_HEADER_LEN + chunk_len];
 
         let mut inb = self.inbounds.lock().await;
         let Some(t) = inb.get_mut(&header.transfer_id) else {
             return;
         };
+
+        // 防御流式载荷溢出（单任务超出声明尺寸容限，防磁盘耗尽 Dos）
+        if t.transferred + chunk_data.len() as u64 > t.size.saturating_add(1024 * 1024) {
+            tracing::error!(
+                "文件块传输超出声明大小，中止传输: id={}",
+                header.transfer_id
+            );
+            let transfer_id = header.transfer_id;
+            if let Some(t) = inb.remove(&transfer_id) {
+                let _ = tokio::fs::remove_file(&t.tmp_path).await;
+            }
+            drop(inb);
+            let _ = self.cancel_transfer(transfer_id).await;
+            return;
+        }
 
         if !chunk_data.is_empty() {
             if let Err(e) = t.file.write_all(chunk_data).await {
@@ -575,6 +614,7 @@ impl ChannelSession {
             let final_path = resolve_unique_path(&self.out_dir, &name);
             if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
                 tracing::error!("重命名接收文件失败: {e}");
+                let _ = tokio::fs::remove_file(&tmp_path).await;
                 let _ = self.events_tx.send(ChannelEvent::FileFailed {
                     transfer_id,
                     reason: format!("落盘重命名失败: {e}"),
@@ -603,14 +643,44 @@ impl ChannelSession {
     }
 }
 
-/// 解析唯一落盘文件名（同名自动加 (1), (2)）。
+/// 清洗不可信对端发来的文件名，彻底防御路径穿越（Path Traversal）与保留名注入。
+pub fn sanitize_file_name(raw_name: &str) -> String {
+    // 跨平台提取最末端文件名：同时兼容 POSIX ('/') 与 Windows ('\\') 分隔符
+    let normalized = raw_name.replace('\\', "/");
+    let file_name = Path::new(&normalized)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let sanitized: String = file_name
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    let trimmed = sanitized.trim().trim_matches('.');
+    if trimmed.is_empty() || trimmed == ".." || trimmed == "." {
+        return format!("file_{}", unix_secs());
+    }
+    trimmed.to_string()
+}
+
+/// 解析唯一落盘文件名（同名自动加 (1), (2)），确保落盘路径绝不越界。
 fn resolve_unique_path(dir: &Path, name: &str) -> PathBuf {
-    let base = dir.join(name);
+    let safe_name = sanitize_file_name(name);
+    let base = dir.join(&safe_name);
+    if !base.starts_with(dir) {
+        return dir.join(format!("file_{}", unix_secs()));
+    }
     if !base.exists() {
         return base;
     }
-    let p = Path::new(name);
-    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let p = Path::new(&safe_name);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(&safe_name);
     let ext = p.extension().and_then(|e| e.to_str());
     let mut i = 1;
     loop {

@@ -5512,6 +5512,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "bytes",
  "fastrand",
  "futures-util",
  "mdns",

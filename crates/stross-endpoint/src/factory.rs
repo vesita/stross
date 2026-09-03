@@ -10,6 +10,7 @@ use stross_proto::message::{MediaKind, Platform};
 
 use crate::contract::ShareEndpoint;
 use crate::share::audio::{MicEndpoint, SystemAudioEndpoint};
+use crate::share::channel::FileChannelEndpoint;
 use crate::share::screen::ScreenEndpoint;
 
 /// 端点注入目标（内核实现）：登记端点 + 查询平台。端点层不依赖内核类型。
@@ -63,6 +64,10 @@ pub fn platform_endpoints(platform: Platform) -> Vec<Box<dyn ShareEndpoint>> {
         Box::new(ScreenEndpoint::new("屏幕", probes.0)),
         Box::new(MicEndpoint::new("麦克风", probes.1)),
         Box::new(SystemAudioEndpoint::new("系统声音", probes.2)),
+        Box::new(FileChannelEndpoint::new(
+            stross_proto::message::EndpointId::new(MediaKind::File, 0),
+            "文件互传".into(),
+        )),
     ];
 
     if matches!(platform, Platform::Android) {
@@ -96,6 +101,7 @@ mod tests {
         );
         assert!(list.iter().any(|e| e.kind() == MediaKind::Mic));
         assert!(list.iter().any(|e| e.kind() == MediaKind::SystemAudio));
+        assert!(list.iter().any(|e| e.kind() == MediaKind::File));
     }
 
     #[test]
@@ -104,5 +110,6 @@ mod tests {
         assert!(list.iter().any(|e| e.kind() == MediaKind::Screen));
         assert!(list.iter().any(|e| e.kind() == MediaKind::Mic));
         assert!(list.iter().any(|e| e.kind() == MediaKind::SystemAudio));
+        assert!(list.iter().any(|e| e.kind() == MediaKind::File));
     }
 }

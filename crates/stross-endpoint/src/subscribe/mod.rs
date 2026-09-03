@@ -7,8 +7,10 @@
 //! * [`media`]：Graph / Audio 能力族的统一订阅端（收流 + 解码，播放器入端点）
 //! * [`file`]：File 能力族的订阅端（接收落盘）
 
+pub mod channel;
 pub mod file;
 pub mod media;
 
+pub use channel::FileChannelSubscribeEndpoint;
 pub use file::FileReceiveEndpoint;
 pub use media::MediaReceiveEndpoint;

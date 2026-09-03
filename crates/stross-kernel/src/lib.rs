@@ -32,6 +32,7 @@
 //! 平台知识一律经 [`stross_bridge`] 注入（base_dir / hostname / 设备清单）。
 
 pub mod bootstrap;
+pub mod channel;
 pub mod control;
 #[cfg(feature = "discovery")]
 pub mod discovery;
@@ -53,11 +54,11 @@ pub mod watch;
 
 // 传输层（独立 crate stross-transport）：
 // `stross_kernel::transport::*` 与 `stross_kernel::net::*` 路径保持兼容。
+pub use channel::{ChannelManager, ChannelSession};
+pub use control::{CtrlRequest, CtrlResponse, CtrlServer, DEFAULT_CTRL_PORT};
 pub use stross_transport as transport;
 pub use stross_transport::net;
 pub use stross_transport::{DataSession, SessionPacket, Transport, TransportError, TransportStats};
-
-pub use control::{CtrlRequest, CtrlResponse, CtrlServer, DEFAULT_CTRL_PORT};
 // 发现子系统（discovery v0.2.0）：扫描聚合 + 统一发现清单（需 discovery feature）。
 #[cfg(feature = "discovery")]
 pub use discovery::{ScannedDevice, StreamView, probe_base, scan, scan_lan, to_views};
@@ -67,7 +68,7 @@ pub use file_xfer::{ReceivedFile, receive_file, receive_file_session};
 pub use kernel::{
     AuthError, AuthPolicy, DataPlaneBackend, EndpointEntry, EndpointRegistration, EndpointRegistry,
     FileSource, Kernel, KernelEvent, NodeInfo, NodeRegistration, NodeRole, PinAuthPolicy,
-    RelayDataPlane, Session, SessionPrefs, TransportAddr, UnifiedRegistry,
+    RelayDataPlane, Session, SessionPrefs, TransportAddr, UnifiedRegistry, id::Id,
 };
 pub use negotiator::{
     CliUi, DEFAULT_NEGOTIATOR_PORT, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest,

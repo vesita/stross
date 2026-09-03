@@ -76,6 +76,7 @@ pub(super) fn router(state: RelayState) -> Router {
         .route("/api/webrtc/answer", post(api_webrtc_answer))
         .route("/ws/push", get(ws_push))
         .route("/ws/watch", get(ws_watch))
+        .route("/ws/channel", get(ws_channel))
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(axum::middleware::from_fn(cors_layer))
         .with_state(state)
@@ -298,17 +299,49 @@ async fn ws_push(
     })
 }
 
-/// axum 服务端 WS socket 适配：把已升级的 axum WebSocket 桥到传输层
-/// [`WsIo`]（docs/layering-architecture.md：HTTP 契约在 core，传输层不依赖
-/// 具体 HTTP 框架；适配器随中继 HTTP 实现留存）。
+#[derive(Debug, Deserialize)]
+struct ChannelQuery {
+    peer_id: String,
+    #[serde(default)]
+    peer_name: Option<String>,
+}
+
+async fn ws_channel(
+    ws: WebSocketUpgrade,
+    Query(q): Query<ChannelQuery>,
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+) -> Response {
+    let peer_id = crate::kernel::id::Id::from(q.peer_id);
+    let peer_name = q.peer_name.unwrap_or_else(|| "Unknown".into());
+    let mgr = state.channel_manager();
+    ws.on_upgrade(move |socket| async move {
+        if let Some(mgr) = mgr {
+            let session = WsTransport::new().from_socket(Box::new(AxumWs::new(socket)), Some(peer));
+            let chan = mgr.register_session(peer_id, &peer_name, session).await;
+            chan.wait_closed().await;
+        }
+    })
+}
+
+/// axum 服务端 WS socket 适配：读写分离架构（SplitSink + SplitStream），
+/// 避免全双工通道收发互锁。
+type AxumWsSink =
+    futures_util::stream::SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>;
+type AxumWsStream = futures_util::stream::SplitStream<axum::extract::ws::WebSocket>;
+
 struct AxumWs {
-    inner: Mutex<Option<axum::extract::ws::WebSocket>>,
+    sink: Mutex<Option<AxumWsSink>>,
+    stream: Mutex<Option<AxumWsStream>>,
 }
 
 impl AxumWs {
     fn new(socket: axum::extract::ws::WebSocket) -> Self {
+        use futures_util::StreamExt;
+        let (sink, stream) = socket.split();
         Self {
-            inner: Mutex::new(Some(socket)),
+            sink: Mutex::new(Some(sink)),
+            stream: Mutex::new(Some(stream)),
         }
     }
 }
@@ -317,40 +350,47 @@ impl AxumWs {
 impl stross_transport::ws::WsIo for AxumWs {
     async fn send_msg(&self, msg: stross_transport::ws::WsMsg) -> Result<(), TransportError> {
         use axum::extract::ws::Message as M;
+        use futures_util::SinkExt;
         let msg = match msg {
             stross_transport::ws::WsMsg::Text(s) => M::Text(s.into()),
             stross_transport::ws::WsMsg::Binary(b) => M::Binary(b),
         };
-        let mut guard = self.inner.lock().await;
-        let socket = guard.as_mut().ok_or(TransportError::Closed)?;
-        socket
-            .send(msg)
+        let mut guard = self.sink.lock().await;
+        let sink = guard.as_mut().ok_or(TransportError::Closed)?;
+        sink.send(msg)
             .await
             .map_err(|e| TransportError::Io(e.to_string()))
     }
-
     async fn recv_msg(&self) -> Result<Option<stross_transport::ws::WsMsg>, TransportError> {
         use axum::extract::ws::Message as M;
+        use futures_util::StreamExt;
         loop {
-            let mut guard = self.inner.lock().await;
-            let socket = guard.as_mut().ok_or(TransportError::Closed)?;
-            match socket.recv().await {
+            let item = {
+                let mut guard = self.stream.lock().await;
+                let stream = guard.as_mut().ok_or(TransportError::Closed)?;
+                stream.next().await
+            };
+            match item {
                 Some(Ok(M::Text(t))) => {
                     return Ok(Some(stross_transport::ws::WsMsg::Text(t.to_string())));
                 }
                 Some(Ok(M::Binary(b))) => return Ok(Some(stross_transport::ws::WsMsg::Binary(b))),
                 Some(Ok(M::Close(_))) | None => return Ok(None),
-                Some(Ok(M::Ping(_)) | Ok(M::Pong(_))) => continue, // 不主动发 ping，忽略
+                Some(Ok(M::Ping(_)) | Ok(M::Pong(_))) => continue, // 忽略心跳
                 Some(Err(e)) => return Err(TransportError::Io(e.to_string())),
             }
         }
     }
 
     async fn close(&self) -> Result<(), TransportError> {
-        let mut guard = self.inner.lock().await;
-        if let Some(mut socket) = guard.take() {
-            let _ = socket.send(axum::extract::ws::Message::Close(None)).await;
+        use futures_util::SinkExt;
+        let mut sink_guard = self.sink.lock().await;
+        if let Some(mut sink) = sink_guard.take() {
+            let _ = sink.send(axum::extract::ws::Message::Close(None)).await;
+            let _ = sink.close().await;
         }
+        let mut stream_guard = self.stream.lock().await;
+        stream_guard.take();
         Ok(())
     }
 }

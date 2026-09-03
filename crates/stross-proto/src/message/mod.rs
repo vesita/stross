@@ -16,6 +16,7 @@
 //! * [`token`]：一次性接入凭证
 
 pub mod capability;
+pub mod channel;
 pub mod control;
 pub mod discovery;
 pub mod endpoint;
@@ -30,6 +31,7 @@ pub mod stream;
 pub mod token;
 
 pub use capability::{CapabilityDescriptor, RoutePath, SessionEventKind, TransportOffer};
+pub use channel::{CHANNEL_CHUNK_HEADER_LEN, ChannelChunkHeader, ChannelMsg, MsgId, TransferId};
 pub use control::ControlMessage;
 pub use discovery::{DiscoveryInfo, TXT_KEY_DISCOVERY};
 pub use endpoint::{

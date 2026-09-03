@@ -96,6 +96,8 @@ pub enum ControlMessage {
         session_id: String,
         event: SessionEventKind,
     },
+    /// 节点对等通道消息（即时文字/文件互传/信令）
+    Channel { msg: super::channel::ChannelMsg },
 }
 
 impl ControlMessage {

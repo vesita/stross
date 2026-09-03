@@ -172,6 +172,8 @@ pub struct Kernel {
     pub(crate) identity: Mutex<Option<DeviceIdentity>>,
     /// 实例启动时刻（控制面 Status 的 uptime 统计源）。
     pub(crate) started: std::time::Instant,
+    /// 节点间对等通道管理器（全双工文字与文件互传）。
+    pub channel_manager: Arc<crate::channel::ChannelManager>,
 }
 
 /// 本机锚点（免先连：应用打开即自动建立；推流 / 观看 / 局域网发现共用）。
@@ -238,6 +240,10 @@ impl Kernel {
             receivers: Mutex::new(HashMap::new()),
             identity: Mutex::new(None),
             started: std::time::Instant::now(),
+            channel_manager: Arc::new(crate::channel::ChannelManager::new(
+                std::env::temp_dir().join("stross-downloads"),
+                true,
+            )),
         }
     }
 

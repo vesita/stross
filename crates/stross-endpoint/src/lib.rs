@@ -66,6 +66,9 @@ pub use playback::{
     AudioOut, AudioOutSpec, PlaybackConfig, PlaybackError, PlaybackSession, PlaybackSink,
     PlaybackStats, RenderedFrame, VideoOut,
 };
-pub use share::{FileEndpoint, FilePushOptions, MicEndpoint, ScreenEndpoint, SystemAudioEndpoint};
+pub use share::{
+    FileChannelEndpoint, FileEndpoint, FilePushOptions, MicEndpoint, ScreenEndpoint,
+    SystemAudioEndpoint,
+};
 pub use stross_types::impl_media_source_endpoint;
-pub use subscribe::{FileReceiveEndpoint, MediaReceiveEndpoint};
+pub use subscribe::{FileChannelSubscribeEndpoint, FileReceiveEndpoint, MediaReceiveEndpoint};

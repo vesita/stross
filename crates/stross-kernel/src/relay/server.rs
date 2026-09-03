@@ -74,6 +74,11 @@ impl RelayHandle {
         self.state.authorize_stream(id);
     }
 
+    /// 注入节点通道管理器（全双工文字与文件互传）。
+    pub fn set_channel_manager(&self, mgr: std::sync::Arc<crate::channel::ChannelManager>) {
+        self.state.set_channel_manager(mgr);
+    }
+
     /// 按媒体类型自动选择推流地址（与接收端 auto 模式同规则）：
     ///
     /// 视频/音频统一走**无损**（QUIC > WS）：视频是帧粒度 H.264，有损路径

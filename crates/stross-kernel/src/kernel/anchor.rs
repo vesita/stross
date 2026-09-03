@@ -158,6 +158,7 @@ impl Kernel {
                 RelayServer::start_controlled(0).await?
             };
         let port = handle.port;
+        handle.set_channel_manager(self.channel_manager.clone());
         // 中继接入内核（数据面后端）：订阅流事件、会话预授权
         self.attach_data_plane(Arc::new(crate::kernel::RelayDataPlane::new(&handle)));
         // 把本机注册进内核设备图（含采集能力，供会话协商）

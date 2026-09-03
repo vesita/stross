@@ -30,9 +30,11 @@ use stross_proto::message::{
     Delivery, EndpointId, EndpointManifest, EndpointSummary, MediaKind, RoleId, TransportId,
 };
 
+pub mod channel;
 /// 端点 SPI（分享端 / 订阅端契约）——**内核约定特性、端点实现**。
 /// 单一真源在本模块；内核与端点插件区经本 crate 重导出（见 [`contract`]）。
 pub mod contract;
+pub use channel::{ChannelEvent, ChannelStatus};
 
 /// 平台无关的主机名/设备名判定（桥接层与内核共用，单一真源）。
 pub mod hostname;

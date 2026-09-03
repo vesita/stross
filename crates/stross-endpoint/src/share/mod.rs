@@ -9,9 +9,11 @@
 //! * [`file`]：文件（File 能力族，确定目标）
 
 pub mod audio;
+pub mod channel;
 pub mod file;
 pub mod screen;
 
 pub use audio::{MicEndpoint, SystemAudioEndpoint};
+pub use channel::FileChannelEndpoint;
 pub use file::{FileEndpoint, FilePushOptions};
 pub use screen::ScreenEndpoint;

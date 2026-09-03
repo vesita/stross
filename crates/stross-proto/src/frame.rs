@@ -214,12 +214,16 @@ pub const TRACK_AUDIO: u8 = 1;
 /// 中继对非视频轨不做关键帧门控/补发，逐帧直通——文件轨必须等观看者接入
 /// 才开始推（公开方按 `/api/streams` 观看数驱动）。
 pub const TRACK_FILE: u8 = 2;
+/// 节点对等通道轨（即时消息/双向文件互传专用）。
+pub const TRACK_CHANNEL: u8 = 3;
 
 // ---- codec ----
 pub const CODEC_H264: u8 = 1;
 pub const CODEC_AAC: u8 = 2;
 /// 文件轨编解码占位（无编解码语义；`TRACK_FILE` 帧专用）。
 pub const CODEC_FILE: u8 = 3;
+/// 通道数据编解码占位（无媒体编解码语义；`TRACK_CHANNEL` 帧专用）。
+pub const CODEC_CHANNEL: u8 = 4;
 
 // ---- flags ----
 pub const FLAG_KEYFRAME: u8 = 0x01;

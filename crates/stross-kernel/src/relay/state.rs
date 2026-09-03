@@ -82,6 +82,8 @@ pub struct RelayState {
     allowed: Arc<Mutex<HashSet<Id>>>,
     /// 接入凭证校验器（跨设备推流；`None` = 不接受凭证接入）。
     token_validator: Arc<Mutex<Option<Arc<dyn ShareTokenValidator>>>>,
+    /// 节点通道管理器（全双工文字与文件互传）。
+    channel_manager: Arc<Mutex<Option<Arc<crate::channel::ChannelManager>>>>,
     /// 是否受控：仅允许 [`Self::allowed`] 中的 stream id 推流。
     controlled: bool,
     /// 本机 HTTP/WS 监听端口（`/api/info` 上报用）。
@@ -107,6 +109,7 @@ impl Default for RelayState {
             proxies: Arc::new(Mutex::new(HashMap::new())),
             allowed: Arc::new(Mutex::new(HashSet::new())),
             token_validator: Arc::new(Mutex::new(None)),
+            channel_manager: Arc::new(Mutex::new(None)),
             controlled: false,
             port: 0,
             srt_port: None,
@@ -243,6 +246,16 @@ impl RelayState {
     /// 注入接入凭证校验器（内核调用；`None` 关闭凭证接入，行为与现状一致）。
     pub fn set_token_validator(&self, validator: Option<Arc<dyn ShareTokenValidator>>) {
         *self.token_validator.lock_poisoned() = validator;
+    }
+
+    /// 注入节点通道管理器（全双工文字与文件互传）。
+    pub fn set_channel_manager(&self, mgr: Arc<crate::channel::ChannelManager>) {
+        *self.channel_manager.lock_poisoned() = Some(mgr);
+    }
+
+    /// 获取通道管理器引用。
+    pub fn channel_manager(&self) -> Option<Arc<crate::channel::ChannelManager>> {
+        self.channel_manager.lock_poisoned().clone()
     }
 
     fn is_authorized(&self, id: &str) -> bool {

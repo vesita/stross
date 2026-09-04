@@ -1,6 +1,6 @@
 //! `stross relay`：启动局域网中继（等同独立 `stross-relay`）。
 //!
-//! 分层（docs/layering-architecture.md）：启动样板统一在
+//! 分层（docs/framework-v3.md）：启动样板统一在
 //! `RelayServer::run_standalone`（stross-core），本命令与 `stross-relay`
 //! 二进制同源，只解析参数 + 取主机名（平台适配）。
 

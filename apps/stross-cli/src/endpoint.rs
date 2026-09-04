@@ -1,13 +1,13 @@
-//! `stross endpoint`：端点框架（docs/endpoint-model-v2.md）的**订阅方交互面**。
+//! `stross endpoint`：端点框架（docs/framework-v3.md）的**订阅方交互面**。
 //!
-//! 分层（docs/layering-architecture.md）：本文件只做**参数解析 + 展示**；
+//! 分层（docs/framework-v3.md）：本文件只做**参数解析 + 展示**；
 //! 目录拉取（`fetch_directory`）、订阅编排（本地接收准备 + 握手 + watch/重试）
 //! 全部收敛在 stross-app 库接口（`subscribe_file`），CLI 不再自带协议客户端。
 //!
 //! * `ls`：拉取远端节点的 **L2 目录**（类型化 `EndpointDir`）——节点 + 设备 +
 //!   可订阅端点（含可见性 / delivery / 传输）；
 //! * `subscribe`：订阅远端端点并接收数据。文件端点落盘到 `--out`；
-//!   订阅驱动定稿（docs/endpoint-model-v2.md §4）只走 pull——连公开方
+//!   订阅驱动定稿（docs/framework-v3.md §4）只走 pull——连公开方
 //!   中继 watch（端点声明 both 亦按 pull 交付）。
 //!
 //! 本地双端演示：

@@ -16,27 +16,31 @@ crates/
                     message/negotiator.rs）
   stross-transport  传输层：SRT / QUIC / WS / WebRTC、RelayUrl、
                     net（local_ips / advertise_ip / fake-IP 判定）
-  stross-types      应用契约层：跨壳层类型单一真源（强类型 ID 中心 id.rs、展示视图
-                    AppInfo/RelayInfo/StreamStatus…、控制面载荷 CtrlPayload、
-                    DTO CameraEndpoint/PendingRequest/MediaSubscribeOutcome；依赖只到 proto）
-  stross-endpoint   数据源/宿插件区（端点层）：Endpoint 契约（端点化 + 数据还原，
-                    EndpointApp 经契约调内核调度）+ 具体端点 screen/（linux
-                    Wayland portal+pipewire / X11、windows gdigrab）、audio/、
-                    file/；采集与还原机制（capture FfmpegBackend、pipeline
-                    StreamConfig、playback PlaybackSink、sources 枚举、codec/
-                    convert 数据处理辅助）；新增数据源 = 加目录实现契约即挂载
+  stross-node       节点概念 crate：Node trait + NodeInfo/NodeRole/TransportAddr
+  stross-endpoint   端点概念 crate（契约+实现同仓）：Endpoint/ShareEndpoint/
+                    SubscribeEndpoint 契约 + 数据契约（StreamConfig 等）+ 四能力
+                    trait（StreamHost/FileHost/MediaHost/Runtime，端点经契约调
+                    内核调度）+ 具体端点 screen/（linux Wayland portal+pipewire /
+                    X11、windows gdigrab）、audio/、file/；采集与还原机制
+                    （capture、pipeline、playback、sources、codec/convert）
+  stross-share      共享概念 crate：ShareService 契约（内容源侧编排，内核实现）
+  stross-subscribe  订阅概念 crate：SubscribeService 契约（接收方侧编排，内核实现）
+  stross-serialize  序列化协议 crate：Loader/Unloader 契约 + Passthrough 实现
+  stross-pick       pick 规则 crate：Interpreter/Pacing 契约 + RealtimePacing/
+                    StrictOrdered/JitterBuffer/InterpretRegistry 实现
+  stross-discovery  广播发现 crate：Discovery 契约 + mDNS/子网扫描实现
+                    （MdnsDiscovery 实现 struct）
+  stross-view       展示视图 crate：跨壳层纯展示类型/DTO/端口（内核产出、壳层只读）
   stross-kernel     ★ 内核（纯管理调度，单一门面 Kernel）：
                     中继 server + 中继 HTTP 客户端（relay/，契约单一真源）、
-                    mDNS Discovery、sender/watch、pick 规则层 pick/
-                    （装载 load.rs / 解读 interpret.rs / 注册表 manager.rs /
-                    抖动缓冲 buffer.rs，docs/comm-mode-v2.md §3.0）、
                     控制面 CtrlServer + client（D7）、凭证协商
                     ShareNegotiator + client、
-                    端点注册表 kernel/endpoint.rs（会话/路由/鉴权/登记）、
+                    注册表 kernel/endpoint.rs（节点表持端点引用 + 独立端点表）、
                     订阅方编排 subscriber、文件传输 file_xfer、引导 bootstrap、
-                    扫描聚合 nodes、推流引擎 engine、接收 receiver、view 展示视图构造
-                    （pub use stross_types::* 与端点契约重导出保持壳层路径兼容；
-                    零媒体数据面细节，经 EndpointApp 契约调度端点层）
+                    推流引擎 engine、接收 receiver、view 展示视图构造
+                    （实现 stross-share/stross-subscribe 契约；零媒体数据面细节，
+                    经四能力 trait（StreamHost/FileHost/MediaHost/Runtime）
+                    契约调度端点层）
   stross-bridge     平台适应桥接层：paths（数据目录）/ hostname / 平台判定
                     （端点构造委托 stross-endpoint factory，只产出参数，不持有状态）
   mdns              mdns-sd 0.21 的本地 fork（workspace crate；跨设备发现修复都在这里）
@@ -45,16 +49,17 @@ apps/
                     （只做参数解析+展示，流程全部调 stross-kernel 库接口）
   stross-gui        Tauri GUI（桌面 + Android 共用一套 web 前端）
   stross-relay      独立中继 CLI
-scripts/            构建 / 测试 / 真机回归脚本（见 §5）
-docs/               设计文档（layering-architecture.md 是分层判据；endpoint-model-v2.md
-                    是端点框架规格）
+scripts/            Python+uv 工具链（uv run python -m scripts <子命令>；见 §5）
+docs/               设计文档（framework-v3.md 是唯一架构源；旧分层手册/端点模型/
+                    通信模式/插件架构已废弃归档）
 ```
 
-**分层铁律（docs/layering-architecture.md）**：线协议类型 → proto；全部服务
-提供 → stross-kernel（数据面/信令/编排，单一 `Kernel` 门面）；平台适应 →
-stross-bridge 与壳层；壳层只做参数解析 + 展示 + 平台适配。**内核必须平台
-无关**（kernel 零路径约定、零 OS 调用、零平台分支；base_dir / hostname /
-端点清单一律注入）。壳层禁止再写 HTTP 客户端、响应结构体或复制 IP 过滤规则。
+**分层铁律（docs/framework-v3.md §2）**：线协议类型 → proto；八概念各为
+crate（契约+实现同仓），内核只依赖各概念 crate 的 trait（`Box<dyn Trait>`），
+**不认识任何具体实现**；平台适应 → stross-bridge 与壳层；壳层只做参数解析 +
+展示 + 平台适配。**内核必须平台无关**（kernel 零路径约定、零 OS 调用、零平台
+分支；base_dir / hostname / 端点清单一律注入）。壳层禁止再写 HTTP 客户端、
+响应结构体或复制 IP 过滤规则。
 
 ## 2. 关键概念与端口约定
 
@@ -83,8 +88,8 @@ stross-bridge 与壳层；壳层只做参数解析 + 展示 + 平台适配。**�
 ## 3. 构建
 
 ```bash
-scripts/build.sh cli             # stross-cli（debug）
-scripts/build.sh android         # Android APK（需先 scripts/setup-android.sh）
+uv run python -m scripts build cli      # stross-cli（debug）
+uv run python -m scripts build android  # Android APK（需先 uv run python -m scripts android）
 # 前端 TS → JS（web/app/*.js 是编译产物，随仓库提交）：
 npx tsc -p apps/stross-gui/web/tsconfig.json
 ```
@@ -137,17 +142,20 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
   中继发布，PC 连手机中继 watch 取流。也可 `stross push`（手动凭证推流，
   保留作为独立推流工具，不经端点框架）。
 
-## 5. 回归脚本（scripts/）
+## 5. 回归脚本（scripts/，Python+uv 工具链）
 
-| 脚本 | 覆盖 |
+入口：`uv run python -m scripts <子命令>`（等价旧 scripts/*.sh / *.mjs，
+已全部迁移删除）。
+
+| 子命令 | 覆盖 |
 |------|------|
-| `quic-stale-stream-test.sh` | QUIC 硬断连（SIGKILL 推流端）→ 流 16s 内回收 |
-| `srt-push-silence-cleanup-test.sh` | SRT 静默看门狗 10s + 观看端自愈 |
-| `share-token-test.sh` | 受控中继凭证推流 |
-| `dual-node-file-test.sh` | 端点框架双节点文件互发（pull/push/pull 逐字节一致） |
-| `test-frontend.mjs` | 前端无头交互（stub `__TAURI__` + 覆写 fetch） |
-| `check.sh` / `check-frontend.sh` | 构建 + 单测门禁 |
-| `dual-device-test.sh` / `weaknet-test.sh` / `latency-stability-test.sh` | 双机/弱网/延迟 |
+| `test-e2e quic-stale-stream` | QUIC 硬断连（SIGKILL 推流端）→ 流 16s 内回收 |
+| `test-e2e srt-push-silence-cleanup` | SRT 静默看门狗 10s + 观看端自愈 |
+| `test-e2e share-token` | 受控中继凭证推流 |
+| `test-e2e dual-node-file` | 端点框架双节点文件互发（pull/push/pull 逐字节一致） |
+| `frontend test` | 前端无头交互（stub `__TAURI__` + 覆写 fetch，jsdom） |
+| `check` / `frontend sync` | 构建 + 单测门禁 / 前端产物同步检查 |
+| `test-e2e dual-device` / `weaknet` / `latency-stability` | 双机/弱网/延迟 |
 
 ## 6. 已知坑（改动前必读）
 
@@ -158,8 +166,8 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
   点不开（曾两次复现）。
 - **Android 虚拟接口**：手机 rndis0（10.159.157.x USB 共享）、vgate0（OPPO
   游戏 VPN /32）会进 `local_ips()`；它们不是局域网可达地址。PC 端还有
-  Clash TUN fake-IP（198.18.0.0/15）。过滤/选址逻辑见 crates/stross-kernel
-  src/discovery.rs 与 crates/stross-transport/src/net.rs。
+  Clash TUN fake-IP（198.18.0.0/15）。过滤/选址逻辑见 crates/stross-discovery
+  src/scan.rs 与 crates/stross-transport/src/net.rs。
 - **协商端点只在 serve/GUI 有**：CLI `serve` 会启动 18779；其它进程若需
   被自动协商必须自己起 `ShareNegotiator`。
 - **Android 明文 HTTP**：Tauri 前端 fetch 对端 `http://ip:18779` 需 CORS
@@ -200,5 +208,5 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
   （其余只写指针，如 Android 构建→android-build.md）；用户可见术语统一「共享/订阅」；
   压缩对话前把套路/坑写进 docs/dev-playbook.md。
 - **代码整洁纪律（零 dead_code）**：严禁 `#[allow(dead_code)]`，无用代码就地删除；RAII 守护字段原生使用 `_` 前缀（如 `_wayland`/`_tx`）；平台特定逻辑用精确 `#[cfg(...)]` 条件编译，杜绝掩盖告警。
-- **强类型标识符铁律（零 bare String 作为键/ID）**：实体标识符（节点、流、链路、策略、传输、消息等）以及字典键严禁使用裸 `String` / `&str`，一律使用 `stross_types::id::*` 中的强类型 newtype 或枚举（`NodeId`, `StreamId`, `StreamKey`, `LinkId`, `StrategyId`, `TransferId`, `MsgId`）。
+- **强类型标识符铁律（零 bare String 作为键/ID）**：实体标识符（节点、流、链路、策略、传输、消息等）以及字典键严禁使用裸 `String` / `&str`，一律使用 `stross_view::id::*` 或 `stross_proto::message::*` 中的强类型 newtype 或枚举（`NodeId`, `StreamId`, `StreamKey`, `LinkId`, `StrategyId`, `TransferId`, `MsgId`）。
 - **领域模型命名红线（废除「设备（Device）」概念与字眼）**：本项目领域模型与架构中彻底废除「设备（Device）」概念与命名，统一以「端点（Endpoint）」表达能力与数据源/宿实体，以「节点（Node）」表达网络拓扑中的互联主体（如 `NodeId`, `NodeIdentity`, `TrustedNode`, `ScannedNode`, `CameraEndpoint`, `EndpointSourceList`）。彻底切换，严禁引入向后兼容别名（包括 `type ...Device = ...` 或 `serde(alias = ...)`）。

@@ -9,7 +9,7 @@ use stross_proto::message::{
 };
 
 use crate::contract::{
-    Endpoint, EndpointApp, EndpointBase, ShareEndpoint, SubscribeCtx, TargetKind,
+    Endpoint, EndpointBase, Runtime, ShareEndpoint, ShareHost, SubscribeCtx, TargetKind,
 };
 
 /// 节点文件与消息互传通道端点（分享侧）。
@@ -66,7 +66,7 @@ impl ShareEndpoint for FileChannelEndpoint {
         self.base.last_error = None;
         Ok(())
     }
-    fn share(&self, _app: Arc<dyn EndpointApp>, _ctx: SubscribeCtx) {
+    fn share(&self, _host: Arc<dyn ShareHost>, _runtime: Arc<dyn Runtime>, _ctx: SubscribeCtx) {
         // 服务端接入由中继 /ws/channel 配合内核 ChannelManager 驱动
     }
 }

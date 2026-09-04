@@ -1,5 +1,5 @@
-//! QUIC 传输实现（quinn 0.11 + rustls-ring；设计文档 docs/plugin-architecture.md §4.4、
-//! 通信模式 v2 docs/comm-mode-v2.md §5 Phase C「连接复用」）。
+//! QUIC 传输实现（quinn 0.11 + rustls-ring；设计文档 docs/framework-v3.md §4.4、
+//! 通信模式 v2 docs/framework-v3.md §5 Phase C「连接复用」）。
 //!
 //! QUIC 是 Lossless 契约。**v2（Phase C）：一条连接 = 一条节点间链路，承载 N 条媒体流**——
 //! 替代 v1「每流一会话」（control/media 双 stream 只服务一条流）：
@@ -8,7 +8,7 @@
 //!   （新增 [`ControlMessage::OpenStream`] / `StreamOpened` / `CloseStream`：
 //!   流级登记 / 确认 / 拆解，互不级联）；
 //! * stream 1..N = 媒体流：每条流一条 QUIC bi stream（stream 即类型，短 id 映射，
-//!   docs/comm-mode-v2.md §6），消息 = `u32 LE 长度` + **v2 紧凑帧头**
+//!   docs/framework-v3.md §6），消息 = `u32 LE 长度` + **v2 紧凑帧头**
 //!   （14 字节：track/flags/pts/seq/len，见 [`stross_proto::frame::Frame2`]）
 //!   + 载荷——codec 由 OpenStream 协商声明，接收侧按 track 路由即可。
 //!
@@ -30,8 +30,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::sync::{Mutex, mpsc};
 
 use stross_proto::frame::{Frame, Frame2, FrameHeader2, HEADER2_LEN};
+use stross_proto::message::StreamId;
 use stross_proto::message::{ControlMessage, ReliabilityProfile, StreamRole, TransportId};
-use stross_types::id::StreamId;
 
 use super::{
     DataSession, PeerAddr, SessionPacket, SessionParams, SharedStats, Transport, TransportError,

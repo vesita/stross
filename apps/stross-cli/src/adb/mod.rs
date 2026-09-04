@@ -11,7 +11,7 @@
 //! （手机监听 → PC）在部分 adb 版本/传输上注册却不生效，故统一用 forward。
 //!
 //! 模块划分（平台桥——adb 是设备层的平台粘合，**无内核逻辑**；探测契约
-//! 复用 `stross_kernel::relay::client` 与 `stross_kernel::discovery`）：
+//! 复用 `stross_kernel::relay::client` 与 `stross_discovery`）：
 //! * [`status`]：手机状态聚合 + 展示视图
 //! * [`ui`]：uiautomator 视图树解析 + UI 状态/点按辅助
 //! * [`device`]：adb 进程执行 / forward / 截屏 / 输入
@@ -28,7 +28,7 @@ use self::status::{phone_status, print_status};
 
 /// 中继 WS 端口探测列表默认值：Android GUI 固定 8777 + 协议默认 18777。
 /// 端口真源在库层（`stross_kernel::relay::{GUI_PORT, DEFAULT_PORT}`），
-/// 壳层不得硬编码端口号（docs/layering-architecture.md）。
+/// 壳层不得硬编码端口号（docs/framework-v3.md）。
 fn default_probe_ports() -> String {
     format!(
         "{},{}",

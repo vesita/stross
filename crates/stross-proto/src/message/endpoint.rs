@@ -1,6 +1,6 @@
 //! 端点框架（节点 → 端点 → 策略）：**三层注册**与 L1 摘要。
 //!
-//! 设计规格：docs/endpoint-model-v2.md（v2 演进，取代 v1 单层模型；
+//! 设计规格：docs/framework-v3.md（v2 演进，取代 v1 单层模型；
 //! v1 已删除（历史见 git））。
 //!
 //! * **端点**：节点上可共享的能力实体（屏幕 / 麦克风 / 摄像头 / 系统声音 /
@@ -105,7 +105,7 @@ pub struct TransportPreference {
 }
 
 /// 策略 id：端点内**独立可寻址**（同一内容可有多种处理组合；
-/// docs/endpoint-model-v2.md §2——订阅按 `(节点, 端点, 策略)` 精确取）。
+/// docs/framework-v3.md §2——订阅按 `(节点, 端点, 策略)` 精确取）。
 /// 强类型枚举，具备零堆分配、穷尽匹配与编译期检查。
 #[derive(
     Debug,
@@ -171,7 +171,7 @@ impl From<&str> for StrategyId {
 }
 
 /// 序列化规则（SerializeRule）：数据 ↔ 管线格式的转换（装载/解装载，含分包）——
-/// 端点自定，内核不碰编码细节（docs/endpoint-model-v2.md §0/§2）。
+/// 端点自定，内核不碰编码细节（docs/framework-v3.md §0/§2）。
 ///
 /// 与 [`PickRule`]（管线内怎么解读）正交：本枚举描述「怎么把数据转成管线
 /// 格式」；**枚举（确定性，wire 可比对）**，端点实现按变体映射装载/解装载模块。
@@ -188,7 +188,7 @@ pub enum SerializeRule {
 
 /// 端点策略：注册表只记录「这个数据包怎么处理」的两要素——
 /// 序列化规则（[`SerializeRule`]：怎么装载/解装载，含分包）+ pick 规则
-/// （[`PickRule`]：管线里怎么解读，docs/comm-mode-v2.md §3.0）。
+/// （[`PickRule`]：管线里怎么解读，docs/framework-v3.md §3.0）。
 ///
 /// 传输档案（[`ReliabilityProfile`]）**不进注册表**（端点声明、传输模块执行）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -209,7 +209,7 @@ impl EndpointStrategy {
     /// 直通序列化 + 指定 pick 规则的默认策略（当前唯一实现组合）。
     ///
     /// 全仓构造默认策略的**单一真源**（此前各处手写字面量重复，见
-    /// docs/endpoint-model-v2.md §3）；新增序列化规则时在此扩展构造函数。
+    /// docs/framework-v3.md §3）；新增序列化规则时在此扩展构造函数。
     pub fn passthrough(pick: PickRule) -> Self {
         Self {
             strategy_id: StrategyId::Default,
@@ -219,7 +219,7 @@ impl EndpointStrategy {
     }
 }
 
-/// 订阅规格（订阅端点生成依据，docs/endpoint-model-v2.md §3）：
+/// 订阅规格（订阅端点生成依据，docs/framework-v3.md §3）：
 /// 从注册表取 `(节点, 端点, 策略)` → 策略组合 → 生成订阅端点。
 ///
 /// 方向挂载在端点层（节点只是「拥有多个端点」的容器，不承载方向）；
@@ -304,7 +304,7 @@ pub struct EndpointManifest {
     #[serde(default)]
     pub transport_profile: ReliabilityProfile,
     /// pick 规则（装载/解读语义：严格即时/严格顺序/无；发送侧装载逻辑与
-    /// 接收侧解读模块共用，docs/comm-mode-v2.md §3.0）。缺省 Realtime。
+    /// 接收侧解读模块共用，docs/framework-v3.md §3.0）。缺省 Realtime。
     ///
     /// **v2 演进**：pick 规则收敛进 [`EndpointStrategy`]（与序列化规则组合成
     /// 策略）；本平铺字段保留为**默认策略的协商摘要**（wire 兼容旧对端），
@@ -312,7 +312,7 @@ pub struct EndpointManifest {
     #[serde(default)]
     pub pick_rule: PickRule,
     /// 端点自主声明的策略组合（策略独立可寻址；订阅按 `(节点, 端点, 策略)`
-    /// 精确取，docs/endpoint-model-v2.md §2）。缺省 = 由平铺
+    /// 精确取，docs/framework-v3.md §2）。缺省 = 由平铺
     /// `serialize(直通) + pick_rule` 推导的单默认策略。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub strategies: Vec<EndpointStrategy>,
@@ -326,7 +326,7 @@ pub struct EndpointManifest {
 }
 
 impl EndpointManifest {
-    /// 解析端点策略（**确定性单一真源**，docs/endpoint-model-v2.md §2）：
+    /// 解析端点策略（**确定性单一真源**，docs/framework-v3.md §2）：
     /// 按订阅方选定的策略 id 精确取；`None` = 端点默认策略（首个）；清单无
     /// 策略列表时由平铺 `pick_rule` 推导直通 + pick 的默认策略（旧对端兼容）。
     ///
@@ -344,7 +344,7 @@ impl EndpointManifest {
     }
 }
 
-/// 文件端点元数据（docs/endpoint-model-v2.md §3）：作为文件流**首帧**（FLAG_CONFIG）
+/// 文件端点元数据（docs/framework-v3.md §3）：作为文件流**首帧**（FLAG_CONFIG）
 /// 的 JSON 载荷下发给接收方。路径只存在于公开方本地（`EndpointRegistry.file_sources`），
 /// **绝不进入本结构 / 目录 / mDNS 摘要**。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

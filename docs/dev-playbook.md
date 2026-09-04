@@ -39,7 +39,7 @@
 - `.ts` 是真源，`app/*.js` 是 tsc 产物**提交进仓库**；改 `.ts` 后必须生成 `.js` 并同步：
   ```bash
   npx -y -p typescript@5.9.3 tsc -p apps/stross-gui/web/tsconfig.json --pretty false   # 生成
-  # 同步校验（check.sh --quick 会做）：
+  # 同步校验（uv run python -m scripts check --quick 会做）：
   npx -y -p typescript@5.9.3 tsc -p apps/stross-gui/web/tsconfig.json --pretty false --outDir /tmp/x
   cmp -s /tmp/x/endpoints.js apps/stross-gui/web/app/endpoints.js
   ```
@@ -63,8 +63,8 @@
   全部服务于 **Android 采集/播放**，只在 `cfg(mobile)` 下编译（桌面 `cfg(not(mobile))` 不碰）。
 - 6 个 Kotlin `@Command`（startCapture/stopCapture/startPlayback/stopPlayback/feedAudio/feedVideo）
   全被 `src/mobile.rs` 经 `run_mobile_plugin` 调用。`ProjectionService` 被 `MediaPlugin` 引用。
-- 真源 `android/` 与 `gen/android/.../java/dev/stross/sender/` 副本**保持同步**（setup-android.sh 复制）——
-  改 Kotlin 只改 `android/`，重跑 `scripts/setup-android.sh` 才进 gen/。
+- 真源 `android/` 与 `gen/android/.../java/dev/stross/sender/` 副本**保持同步**（`uv run python -m scripts android` 复制）——
+  改 Kotlin 只改 `android/`，重跑 `uv run python -m scripts android` 才进 gen/。
 - `mobile_jni.rs`（Kotlin⇄Rust JNI 直传）仅 `cfg(all(mobile,target_os="android"))` 编译。
 
 ## 4. `scan_lan` 发现聚合（kernel discovery/aggregate.rs）
@@ -105,25 +105,24 @@ adb logcat -d 2>/dev/null | grep -iE "stross_kernel::discovery::aggregate|触发
 ## 7. 常用门禁 / 验证
 
 ```bash
-bash scripts/check.sh --quick   # fmt + clippy + 前端 tsc/同步（秒级）
-bash scripts/check.sh           # 全量（再加 workspace 测试 + jsdom）
-node scripts/test-frontend.mjs  # 前端 jsdom 交互断言
-bash scripts/discovery-test.sh  # 统一发现链路回归
-bash scripts/dual-node-file-test.sh  # 本地双端文件互传
+uv run python -m scripts check --quick   # fmt + clippy + 前端 tsc/同步（秒级）
+uv run python -m scripts check           # 全量（再加 workspace 测试 + jsdom）
+uv run python -m scripts frontend test   # 前端 jsdom 交互断言
+uv run python -m scripts test-e2e discovery  # 统一发现链路回归
+uv run python -m scripts test-e2e dual-node-file  # 本地双端文件互传
 cargo test -p stross-kernel --lib discovery   # 发现相关单测
 ```
 
 ## 8. 会话中已确认/还在的坑（压缩前捞回）
 
-- **端点 v2.1（分享/订阅独立契约 + 能力族）已落地**（docs/endpoint-model-v2.md §3）：
-  - **契约单一真源在 stross-types/contract.rs**（内核声明、端点实现）：`Endpoint`/
-    `ShareEndpoint`/`SubscribeEndpoint`/`MediaSourceEndpoint`/`EndpointApp`/
-    `SubscribeCtx`/`StreamConfig`/`VideoSource`/`AudioSourceConfig`/`Quality`/
-    `FilePushOptions`/`impl_media_source_endpoint!` 全部上移；stross-endpoint 的
-    `contract.rs` 只是 `pub use stross_types::contract::*` shim，pipeline/file
-    重导出数据契约（路径兼容）。**改契约去 stross-types，别在 endpoint 里加**；
-  - `EndpointApp` 新增 `spawn_task`（内核实现为 `tokio::spawn`）——契约层零
-    tokio 依赖，端点 fire-and-forget 一律经它；
+- **端点 v3 已落地**（docs/framework-v3.md §3.2，唯一真源）：
+  - **契约单一真源在 stross-endpoint**（内核声明、端点实现）：`Endpoint`/
+    `ShareEndpoint`/`SubscribeEndpoint`/`MediaSourceEndpoint`/`SubscribeCtx`/
+    `StreamConfig`/`VideoSource`/`AudioSourceConfig`/`Quality`/
+    `FilePushOptions`/`impl_media_source_endpoint!` 全部随概念 crate 同仓；
+  - **四能力 trait**：`StreamHost`/`FileHost`/`MediaHost`/`Runtime`（+ 组合
+    `ShareHost`/`SubscribeHost`）——端点只见自己需要的能力，不再见聚合
+    `EndpointApp`；`spawn_task` 在 `Runtime`（内核实现为 `tokio::spawn`）；
   - **契约拆分**：`Endpoint`（公共视图：身份/kind/class/策略）→ `ShareEndpoint`
     （load/available/share）+ `SubscribeEndpoint`（subscribe）——**没有双向占位**；
     注册表持 `Box<dyn ShareEndpoint>`，订阅端点生成返回 `Box<dyn SubscribeEndpoint>`；
@@ -145,7 +144,7 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
 - **端点框架 v2（三层注册表 + 双特性）已落地**（docs/endpoint-model-v2.md）：
   - `UnifiedRegistry`（kernel/endpoint.rs）= 本机 `EndpointRegistry`（行为对象）+ 互联节点表（目录拉取映射）；订阅统一 `resolve_strategy(node_id, endpoint_id, strategy_id)` 查表，本机走 `strategy()` 单一真源、远端走目录映射；
   - **策略**：`EndpointStrategy { strategy_id, serialize, pick }`，端点 `strategy()` 组合方法（替代 v1 `pick_rule()`）；平铺 `transport_profile`/`pick_rule` 保留为默认策略协商摘要（旧对端兼容，勿删）；
-  - **订阅端点生成**：`UnifiedRegistry::generate_subscribe_endpoint` + `Kernel::subscribe_via_endpoint`；文件订阅端 `FileReceiveEndpoint` 经 `EndpointApp::receive_file` 落盘（`receive_file_retry` 竞态兜底在 kernel 实现，CLI 与订阅端点共用）；
+  - **订阅端点生成**：`UnifiedRegistry::generate_subscribe_endpoint`（工厂注册表，按 `EndpointClass` 分派，不再硬编码具体类）+ `Kernel::subscribe_via_endpoint`；文件订阅端 `FileReceiveEndpoint` 经 `FileHost::receive_file` 落盘（`receive_file_retry` 竞态兜底在 kernel 实现，CLI 与订阅端点共用）；
   - 改 `Endpoint` trait 时注意：所有测试 fixture（kernel/endpoint.rs、negotiator/mod.rs 的 CountingEndpoint/RecordingEndpoint）都要补 `strategy()`；`SubscribeCtx` 用 `strategy` 字段（不再是 `pick_rule`）。
 - `negotiator_respond` 已改 **async**（同步 tauri 命令在 GTK 主线程调 `tokio::spawn` 无 reactor → panic）。
 - **凡同步 tauri 命令可能走到 `tokio::spawn`/`tokio::time`/`tokio::net` 都必须改 async**：`endpoint_stop_share` 已改（`stop_share_by_stream` 内 `tokio::spawn` 优雅停流）。前端 invoke 对 sync/async 命令一致，无需改前端。

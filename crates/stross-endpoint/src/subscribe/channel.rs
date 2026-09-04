@@ -7,7 +7,9 @@ use stross_proto::message::{
     EndpointId, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SubscribeSpec,
 };
 
-use crate::contract::{Endpoint, EndpointApp, EndpointBase, SubscribeEndpoint, TargetKind};
+use crate::contract::{
+    Endpoint, EndpointBase, Runtime, SubscribeEndpoint, SubscribeHost, TargetKind,
+};
 
 /// 节点文件与消息互传通道订阅端点。
 pub struct FileChannelSubscribeEndpoint {
@@ -50,9 +52,14 @@ impl Endpoint for FileChannelSubscribeEndpoint {
 }
 
 impl SubscribeEndpoint for FileChannelSubscribeEndpoint {
-    fn subscribe(&self, app: Arc<dyn EndpointApp>, spec: SubscribeSpec) {
+    fn subscribe(
+        &self,
+        _host: Arc<dyn SubscribeHost>,
+        runtime: Arc<dyn Runtime>,
+        spec: SubscribeSpec,
+    ) {
         let endpoint_id = self.id();
-        app.spawn_task(Box::pin(async move {
+        runtime.spawn_task(Box::pin(async move {
             tracing::info!(
                 "文件通道订阅端点 {endpoint_id} 已就绪: stream={}, 策略={}",
                 spec.stream_id,

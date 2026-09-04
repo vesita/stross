@@ -6,16 +6,23 @@
 //! * 流生命周期事件（StreamStarted / StreamEnded / WatchersChanged）
 //!   经数据面后端转发为 [`KernelEvent`]；
 //! * 会话拆除后预授权撤销，同一 id 不再可推流。
+//!
+//! v3 P3 方法面收敛：会话 / 凭证命令一律经**控制面**（`CtrlServer` +
+//! `control::client`）——Kernel 门面不再暴露 create_session / teardown /
+//! create_share_token（壳层与外部测试同走控制面，docs/framework-v3.md §4）。
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use stross_kernel::KernelEvent;
+use stross_kernel::control::{CtrlRequest, CtrlServer};
 use stross_kernel::relay::RelayServer;
 use stross_kernel::{Kernel, Platform, RelayDataPlane};
-use stross_kernel::{KernelEvent, SessionPrefs};
 use stross_proto::frame::{Frame, TRACK_VIDEO};
-use stross_proto::message::{CodecId, ControlMessage, EndpointId, MediaKind, TrackInfo};
+use stross_proto::message::{
+    CodecId, ControlMessage, EndpointId, MediaKind, ShareToken, TrackInfo,
+};
 use tokio_tungstenite::tungstenite::Message;
 
 fn hello(stream_id: &str) -> ControlMessage {
@@ -58,6 +65,53 @@ fn video_frame() -> Vec<u8> {
     .to_vec()
 }
 
+/// 启动回环控制面（随机端口），返回服务器句柄 + 连接基址。
+async fn ctrl_server(kernel: &Arc<Kernel>) -> (CtrlServer, String) {
+    let server = CtrlServer::start(kernel.clone(), 0, None).await.unwrap();
+    let connect = format!("ws://127.0.0.1:{}/ws/ctrl", server.port);
+    (server, connect)
+}
+
+/// 经控制面创建会话（Kernel 门面无 create_session，命令收敛在控制面）。
+async fn ctrl_create_session(connect: &str, title: &str) -> stross_kernel::SessionCreatedView {
+    stross_kernel::control::client::request_as(
+        connect,
+        CtrlRequest::CreateSession {
+            title: title.into(),
+            sinks: vec!["local".into()],
+        },
+    )
+    .await
+    .expect("控制面建会话")
+}
+
+/// 会话是否已登记（经控制面 ListSessions 查询内部会话表）。
+async fn ctrl_has_session(connect: &str, session_id: &stross_proto::message::StreamId) -> bool {
+    let payload: stross_kernel::SessionsPayload =
+        stross_kernel::control::client::request_as(connect, CtrlRequest::ListSessions)
+            .await
+            .expect("控制面列出会话");
+    payload.sessions.iter().any(|s| &s.session_id == session_id)
+}
+
+/// 经控制面签发一次性接入凭证，还原为 [`ShareToken`]（篡改 / 过期断言用）。
+async fn ctrl_issue_token(
+    connect: &str,
+    session_id: &stross_proto::message::StreamId,
+    ttl_secs: u64,
+) -> ShareToken {
+    let issued: stross_kernel::IssuedShareTokenView = stross_kernel::control::client::request_as(
+        connect,
+        CtrlRequest::ShareToken {
+            session_id: session_id.to_string(),
+            ttl_secs,
+        },
+    )
+    .await
+    .expect("控制面签发凭证");
+    ShareToken::from_token_string(&issued.token).expect("凭证字符串可还原为 ShareToken")
+}
+
 /// 订阅内核事件并断言下一条匹配指定模式（带超时）。
 macro_rules! expect_event {
     ($rx:expr, $pat:pat => $body:block) => {
@@ -79,20 +133,23 @@ async fn kernel_session_drives_controlled_relay() {
     let port = relay.port;
     let kernel = Arc::new(Kernel::new(Platform::Desktop));
     kernel.attach_data_plane(Arc::new(RelayDataPlane::new(&relay)));
+    let (ctrl, connect) = ctrl_server(&kernel).await;
     let mut events = kernel.subscribe();
 
-    // 1) 创建会话：id 由内核签发并预授权
-    let session = kernel
-        .create_session("local", &["local".into()], &SessionPrefs::default())
-        .unwrap();
-    expect_event!(events, KernelEvent::SessionStarted { .. } => {});
-    assert!(kernel.has_session(&session.id), "会话应已登记");
+    // 1) 创建会话（经控制面）：id 由内核签发并预授权
+    let created = ctrl_create_session(&connect, "内核会话测试").await;
+    let session_id = created.session_id;
+    let session_id_expected = session_id.clone();
+    assert!(
+        ctrl_has_session(&connect, &session_id).await,
+        "会话应已登记"
+    );
 
     // 2) 用会话 id 推流 → 受控中继应接受，并上报 StreamStarted
     let (mut push, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/push"))
         .await
         .expect("连接推流端点");
-    push.send(Message::Text(hello(&session.id).to_text().into()))
+    push.send(Message::Text(hello(&session_id).to_text().into()))
         .await
         .unwrap();
     let welcome = push.next().await.unwrap().unwrap();
@@ -100,20 +157,20 @@ async fn kernel_session_drives_controlled_relay() {
     assert_eq!(
         ControlMessage::from_text(&welcome.into_text().unwrap()).unwrap(),
         ControlMessage::Welcome {
-            stream_id: session.id.clone()
+            stream_id: session_id.clone()
         }
     );
     push.send(Message::Binary(video_frame().into()))
         .await
         .unwrap();
     expect_event!(events, KernelEvent::StreamStarted { session_id, .. } => {
-        assert_eq!(session_id, session.id);
+        assert_eq!(session_id, session_id_expected);
     });
 
     // 3) 观看端接入 → WatchersChanged（计数 ≥ 1）
     let (mut watch, _) = tokio_tungstenite::connect_async(format!(
         "ws://127.0.0.1:{port}/ws/watch?stream={}",
-        session.id
+        session_id
     ))
     .await
     .expect("连接观看端点");
@@ -122,11 +179,11 @@ async fn kernel_session_drives_controlled_relay() {
     assert_eq!(
         ControlMessage::from_text(&first.into_text().unwrap()).unwrap(),
         ControlMessage::Ready {
-            stream_id: session.id.clone()
+            stream_id: session_id.clone()
         }
     );
     expect_event!(events, KernelEvent::WatchersChanged { session_id, watchers } => {
-        assert_eq!(session_id, session.id);
+        assert_eq!(session_id, session_id_expected);
         assert!(watchers >= 1, "观看者计数应 ≥ 1，实际 {watchers}");
     });
 
@@ -140,38 +197,29 @@ async fn kernel_session_drives_controlled_relay() {
         .await
         .unwrap();
     let err = bad_push.next().await.unwrap().unwrap();
-    let ctrl = ControlMessage::from_text(&err.into_text().unwrap()).unwrap();
+    let ctrl_msg = ControlMessage::from_text(&err.into_text().unwrap()).unwrap();
     assert!(
-        matches!(ctrl, ControlMessage::Error { .. }),
-        "未授权推流应收到 Error，得到 {ctrl:?}"
+        matches!(ctrl_msg, ControlMessage::Error { .. }),
+        "未授权推流应收到 Error，得到 {ctrl_msg:?}"
     );
 
-    // 5) 会话拆除 → 预授权撤销 + 流被同步拆除（SessionEnded 内核直发、
-    //    StreamEnded 经数据面转发，顺序不保证，收集两者）
-    kernel.teardown(&session.id).unwrap();
-    assert!(!kernel.has_session(&session.id), "会话应已拆除");
-    let mut seen_session_ended = false;
-    let mut seen_stream_ended = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while tokio::time::Instant::now() < deadline && !(seen_session_ended && seen_stream_ended) {
-        let ev = tokio::time::timeout(Duration::from_secs(3), events.recv())
-            .await
-            .expect("等待拆除事件超时")
-            .expect("内核事件通道关闭");
-        match ev {
-            KernelEvent::SessionEnded { session_id } => {
-                assert_eq!(session_id, session.id);
-                seen_session_ended = true;
-            }
-            KernelEvent::StreamEnded { session_id } => {
-                assert_eq!(session_id, session.id);
-                seen_stream_ended = true;
-            }
-            other => panic!("期望 SessionEnded/StreamEnded，得到 {other:?}"),
-        }
-    }
-    assert!(seen_session_ended, "应收到 SessionEnded");
-    assert!(seen_stream_ended, "应收到 StreamEnded（流被同步拆除）");
+    // 5) 会话拆除（经控制面）→ 预授权撤销 + 流被同步拆除（StreamEnded 经
+    //    数据面转发；§7.1 后 SessionEnded 事件变体已删除，只收 StreamEnded）
+    let _: stross_kernel::TeardownView = stross_kernel::control::client::request_as(
+        &connect,
+        CtrlRequest::Teardown {
+            session_id: session_id.to_string(),
+        },
+    )
+    .await
+    .expect("控制面拆除会话");
+    assert!(
+        !ctrl_has_session(&connect, &session_id).await,
+        "会话应已拆除"
+    );
+    expect_event!(events, KernelEvent::StreamEnded { session_id } => {
+        assert_eq!(session_id, session_id_expected);
+    });
 
     // 6) 拆除后同一 id 再推流 → 拒绝（预授权已撤销）
     let (mut re_push, _) =
@@ -179,20 +227,21 @@ async fn kernel_session_drives_controlled_relay() {
             .await
             .unwrap();
     re_push
-        .send(Message::Text(hello(&session.id).to_text().into()))
+        .send(Message::Text(hello(&session_id).to_text().into()))
         .await
         .unwrap();
     let err = re_push.next().await.unwrap().unwrap();
-    let ctrl = ControlMessage::from_text(&err.into_text().unwrap()).unwrap();
+    let ctrl_msg = ControlMessage::from_text(&err.into_text().unwrap()).unwrap();
     assert!(
-        matches!(ctrl, ControlMessage::Error { .. }),
-        "拆除后的 id 不应再可推流，得到 {ctrl:?}"
+        matches!(ctrl_msg, ControlMessage::Error { .. }),
+        "拆除后的 id 不应再可推流，得到 {ctrl_msg:?}"
     );
 
     watch.close(None).await.unwrap();
     bad_push.close(None).await.unwrap();
     re_push.close(None).await.unwrap();
     drop(push);
+    ctrl.stop().await;
     relay.stop().await;
 }
 
@@ -224,23 +273,20 @@ async fn uncontrolled_relay_keeps_open_push() {
 #[tokio::test]
 async fn share_token_grants_cross_node_push() {
     use stross_kernel::relay::RelayHandle;
-    use stross_proto::message::MediaKind;
 
     let relay: RelayHandle = RelayServer::start_controlled(0).await.unwrap();
     let port = relay.port;
-    let kernel = Kernel::new(Platform::Desktop);
+    let kernel = Arc::new(Kernel::new(Platform::Desktop));
+    let (ctrl, connect) = ctrl_server(&kernel).await;
     // 不 attach_data_plane：会话创建**不会**预授权给中继，只有凭证能放行
-    let session = kernel
-        .create_session("local", &["local".into()], &SessionPrefs::default())
-        .unwrap();
+    let created = ctrl_create_session(&connect, "跨设备推流").await;
+    let session_id = created.session_id;
     assert!(relay.is_controlled(), "受控模式");
     // 注入内核的凭证校验器（attach_data_plane 之外直接注入，模拟"凭证接入"路径）
     relay
         .state()
         .set_token_validator(Some(kernel.token_validator()));
-    let token = kernel
-        .create_share_token(&session.id, vec![MediaKind::Mic], Duration::from_secs(300))
-        .unwrap();
+    let token = ctrl_issue_token(&connect, &session_id, 300).await;
     let token_str = token.to_token_string();
 
     // 1) 未授权 id + 无凭证 → 拒绝（F2.2 语义保持）
@@ -248,7 +294,7 @@ async fn share_token_grants_cross_node_push() {
         .await
         .unwrap();
     plain
-        .send(Message::Text(hello(&session.id).to_text().into()))
+        .send(Message::Text(hello(&session_id).to_text().into()))
         .await
         .unwrap();
     let err = plain.next().await.unwrap().unwrap();
@@ -266,7 +312,7 @@ async fn share_token_grants_cross_node_push() {
         .await
         .unwrap();
     push.send(Message::Text(
-        hello_with_token(&session.id, &token_str).to_text().into(),
+        hello_with_token(&session_id, &token_str).to_text().into(),
     ))
     .await
     .unwrap();
@@ -274,7 +320,7 @@ async fn share_token_grants_cross_node_push() {
     assert_eq!(
         ControlMessage::from_text(&welcome.into_text().unwrap()).unwrap(),
         ControlMessage::Welcome {
-            stream_id: session.id.clone()
+            stream_id: session_id.clone()
         },
         "有效凭证应放行推流"
     );
@@ -289,7 +335,7 @@ async fn share_token_grants_cross_node_push() {
         .await
         .unwrap();
     bad.send(Message::Text(
-        hello_with_token(&session.id, &forged.to_token_string())
+        hello_with_token(&session_id, &forged.to_token_string())
             .to_text()
             .into(),
     ))
@@ -306,15 +352,13 @@ async fn share_token_grants_cross_node_push() {
     bad.close(None).await.unwrap();
 
     // 4) 凭证过期 → 拒绝
-    let expired = kernel
-        .create_share_token(&session.id, vec![MediaKind::Mic], Duration::ZERO)
-        .unwrap();
+    let expired = ctrl_issue_token(&connect, &session_id, 0).await;
     let (mut stale, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/push"))
         .await
         .unwrap();
     stale
         .send(Message::Text(
-            hello_with_token(&session.id, &expired.to_token_string())
+            hello_with_token(&session_id, &expired.to_token_string())
                 .to_text()
                 .into(),
         ))
@@ -331,6 +375,7 @@ async fn share_token_grants_cross_node_push() {
     stale.close(None).await.unwrap();
 
     push.close(None).await.unwrap();
+    ctrl.stop().await;
     relay.stop().await;
 }
 
@@ -340,16 +385,15 @@ async fn share_token_grants_cross_node_push() {
 async fn remote_source_requires_token_even_when_authorized() {
     use stross_kernel::net::local_ips;
     use stross_kernel::relay::RelayHandle;
-    use stross_proto::message::MediaKind;
 
     let relay: RelayHandle = RelayServer::start_controlled(0).await.unwrap();
     let port = relay.port;
     let kernel = Arc::new(Kernel::new(Platform::Desktop));
+    let (ctrl, connect) = ctrl_server(&kernel).await;
     // 正常接线：create_session 会把 id 预授权给受控中继
     kernel.attach_data_plane(Arc::new(RelayDataPlane::new(&relay)));
-    let session = kernel
-        .create_session("local", &["local".into()], &SessionPrefs::default())
-        .unwrap();
+    let created = ctrl_create_session(&connect, "来源感知门控").await;
+    let session_id = created.session_id;
     let lan_ip = local_ips()
         .into_iter()
         .next()
@@ -361,7 +405,7 @@ async fn remote_source_requires_token_even_when_authorized() {
         .await
         .expect("经局域网 IP 连接（模拟另一台设备）");
     remote
-        .send(Message::Text(hello(&session.id).to_text().into()))
+        .send(Message::Text(hello(&session_id).to_text().into()))
         .await
         .unwrap();
     let err = remote.next().await.unwrap().unwrap();
@@ -375,14 +419,12 @@ async fn remote_source_requires_token_even_when_authorized() {
     remote.close(None).await.unwrap();
 
     // 2) 同一来源出示凭证 → 放行
-    let token = kernel
-        .create_share_token(&session.id, vec![MediaKind::Mic], Duration::from_secs(300))
-        .unwrap();
+    let token = ctrl_issue_token(&connect, &session_id, 300).await;
     let (mut push, _) = tokio_tungstenite::connect_async(format!("ws://{lan_ip}:{port}/ws/push"))
         .await
         .unwrap();
     push.send(Message::Text(
-        hello_with_token(&session.id, &token.to_token_string())
+        hello_with_token(&session_id, &token.to_token_string())
             .to_text()
             .into(),
     ))
@@ -392,11 +434,12 @@ async fn remote_source_requires_token_even_when_authorized() {
     assert_eq!(
         ControlMessage::from_text(&welcome.into_text().unwrap()).unwrap(),
         ControlMessage::Welcome {
-            stream_id: session.id.clone()
+            stream_id: session_id.clone()
         },
         "跨设备来源出示凭证应放行"
     );
     push.close(None).await.unwrap();
+    ctrl.stop().await;
     relay.stop().await;
 }
 
@@ -405,7 +448,6 @@ async fn remote_source_requires_token_even_when_authorized() {
 /// 清共享登记 + 本机会话拆除（会话生命周期 = 流生命周期）+ 流从数据面回收。
 #[tokio::test]
 async fn endpoint_share_stops_after_last_watcher_leaves() {
-    use stross_kernel::EndpointApp;
     use stross_proto::message::Delivery;
 
     let relay = RelayServer::start_controlled(0).await.unwrap();
@@ -415,22 +457,21 @@ async fn endpoint_share_stops_after_last_watcher_leaves() {
     kernel.set_share_lifecycle_delays(Duration::from_millis(150), Duration::from_secs(60));
     let kernel = Arc::new(kernel);
     kernel.attach_data_plane(Arc::new(RelayDataPlane::new(&relay)));
+    let (ctrl, connect) = ctrl_server(&kernel).await;
 
     // 端点共享登记（真实路径：订阅达成 → share → start_stream 成功 → note_share_active）
     let screen_id = EndpointId::new(MediaKind::Screen, 0);
-    let session = kernel
-        .create_session("local", &["local".into()], &SessionPrefs::default())
-        .unwrap();
-    let weak: std::sync::Weak<dyn EndpointApp> =
-        Arc::downgrade(&(kernel.clone() as Arc<dyn EndpointApp>));
-    kernel.note_share_active(weak, screen_id, &session.id, Delivery::Pull);
+    let created = ctrl_create_session(&connect, "端点共享收尾").await;
+    let session_id = created.session_id;
+    let weak: std::sync::Weak<Kernel> = Arc::downgrade(&kernel);
+    kernel.note_share_active(weak, screen_id, &session_id, Delivery::Pull);
     assert!(kernel.active_share_by_endpoint(screen_id).is_some());
 
     // 推流端（模拟端点自动推流进受控中继）
     let (mut push, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/push"))
         .await
         .unwrap();
-    push.send(Message::Text(hello(&session.id).to_text().into()))
+    push.send(Message::Text(hello(&session_id).to_text().into()))
         .await
         .unwrap();
     let _welcome = push.next().await.unwrap().unwrap();
@@ -441,7 +482,7 @@ async fn endpoint_share_stops_after_last_watcher_leaves() {
     // 观看端接入 → watchers=1（消费 Ready + 关键帧）
     let (mut watch, _) = tokio_tungstenite::connect_async(format!(
         "ws://127.0.0.1:{port}/ws/watch?stream={}",
-        session.id
+        session_id
     ))
     .await
     .unwrap();
@@ -473,7 +514,7 @@ async fn endpoint_share_stops_after_last_watcher_leaves() {
         "watchers=0 后端点共享登记应清除"
     );
     assert!(
-        !kernel.has_session(&session.id),
+        !ctrl_has_session(&connect, &session_id).await,
         "流结束后续会话应拆除（会话生命周期 = 流生命周期）"
     );
     assert!(
@@ -481,10 +522,11 @@ async fn endpoint_share_stops_after_last_watcher_leaves() {
             .state()
             .streams()
             .iter()
-            .all(|s| s.stream_id != session.id),
+            .all(|s| s.stream_id != session_id),
         "流应从数据面回收"
     );
 
     push.close(None).await.unwrap();
+    ctrl.stop().await;
     relay.stop().await;
 }

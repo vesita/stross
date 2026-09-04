@@ -10,7 +10,7 @@
 //! 媒体帧的消费（抖动缓冲/播放）由调用方负责。
 
 use stross_proto::message::ControlMessage;
-use stross_types::id::StreamId;
+use stross_view::id::StreamId;
 
 use crate::error::WatchError;
 use crate::transport::{DataSession, PeerAddr, RelayUrl, SessionPacket, SessionParams};
@@ -32,7 +32,7 @@ pub async fn connect_watch(
         addr,
     };
     let params = SessionParams {
-        session_id: stream_id.to_string(),
+        session_id: StreamId::from(stream_id),
         profile: transport.profile(),
     };
     let session = transport

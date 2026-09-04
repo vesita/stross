@@ -12,7 +12,7 @@ use std::time::Duration;
 use stross_kernel::channel::ChannelManager;
 use stross_kernel::kernel::id::Id;
 use stross_kernel::relay::RelayServer;
-use stross_types::channel::ChannelEvent;
+use stross_view::channel::ChannelEvent;
 use tokio::time::timeout;
 
 /// 构造带有随机内容的测试文件。

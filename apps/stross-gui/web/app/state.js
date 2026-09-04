@@ -66,8 +66,6 @@ let manualRelays = [];
 let deviceViews = [];
 /** 当前选中的设备 key（展开态保持）。 */
 let expandedDevice = null;
-/** 流 id → 流信息缓存（接收传输自动选择按 video/audio 类型决策）。 */
-const remoteStreams = new Map();
 /** 设备搜索过滤关键词（为空时显示全部）。 */
 let deviceFilterQuery = '';
 const uiFSM = {

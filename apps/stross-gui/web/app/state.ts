@@ -118,8 +118,6 @@ let manualRelays: string[] = [];
 let deviceViews: DeviceView[] = [];
 /** 当前选中的设备 key（展开态保持）。 */
 let expandedDevice: string | null = null;
-/** 流 id → 流信息缓存（接收传输自动选择按 video/audio 类型决策）。 */
-const remoteStreams = new Map<string, RemoteStream>();
 /** 设备搜索过滤关键词（为空时显示全部）。 */
 let deviceFilterQuery = '';
 /** 全局主视图模式（管理界面 Manage vs 消费播放台 Consume）。 */

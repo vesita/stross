@@ -1,4 +1,4 @@
-//! 凭证协商 / 订阅握手线协议（docs/endpoint-model-v2.md §4）。
+//! 凭证协商 / 订阅握手线协议（docs/framework-v3.md §4）。
 //!
 //! 端到端消费者：`ShareNegotiator` 服务端（stross-app，axum）、订阅方客户端
 //! （stross-app `subscriber` 模块）、CLI 与 Tauri 前端（经命令调库接口）。
@@ -48,14 +48,14 @@ pub struct RelayAddr {
 pub struct ShareRequest {
     pub node_id: super::ids::NodeId,
     pub node_name: String,
-    /// 订阅目标端点数值子 id（端点框架，docs/endpoint-model-v2.md §4）。
+    /// 订阅目标端点数值子 id（端点框架，docs/framework-v3.md §4）。
     #[serde(default)]
     pub endpoint_id: Option<u32>,
     /// 订阅目标端点能力族（与 `endpoint_id` 组合成内部 `EndpointId`）。
     #[serde(default)]
     pub endpoint_kind: Option<MediaKind>,
     /// 订阅方选定的策略 id（注册表第三层；`None` = 取端点默认策略，
-    /// docs/endpoint-model-v2.md §2）。仅端点语义生效。
+    /// docs/framework-v3.md §2）。仅端点语义生效。
     #[serde(default)]
     pub strategy_id: Option<super::endpoint::StrategyId>,
     /// 订阅方期望的 delivery（端点声明 `Both` 时生效；其余以端点声明为准）。
@@ -65,7 +65,7 @@ pub struct ShareRequest {
     /// 出站推送的目标）。
     #[serde(default)]
     pub relay_addr: Option<String>,
-    /// push 模式下订阅方**自签**的一次性接入凭证（docs/endpoint-model-v2.md §4：
+    /// push 模式下订阅方**自签**的一次性接入凭证（docs/framework-v3.md §4：
     /// 凭证校验器挂在订阅方内核，公开方签发的凭证在订阅方中继校验不过）。
     #[serde(default)]
     pub share_token: Option<String>,
@@ -87,7 +87,7 @@ pub struct ShareGrant {
     /// 公开方接受的传输列表（按公开者声明的优先序；订阅方据此选择/降级）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transports: Option<Vec<TransportId>>,
-    /// 协商定稿的传输层可靠性档案（端点语义；通信模式 v2，docs/comm-mode-v2.md §3）。
+    /// 协商定稿的传输层可靠性档案（端点语义；通信模式 v2，docs/framework-v3.md §3）。
     /// `None` = 旧语义（无端点）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_profile: Option<ReliabilityProfile>,
@@ -95,7 +95,7 @@ pub struct ShareGrant {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pick_rule: Option<PickRule>,
     /// 协商定稿的策略组合（序列化规则 + pick 规则；注册表 `(节点, 端点, 策略)`
-    /// 解析结果，docs/endpoint-model-v2.md §2）。缺省 = 由 `pick_rule` 推导。
+    /// 解析结果，docs/framework-v3.md §2）。缺省 = 由 `pick_rule` 推导。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<EndpointStrategy>,
     /// pull 模式：公开方中继地址；push 模式为 `None`（公开方凭凭证出站）。

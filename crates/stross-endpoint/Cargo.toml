@@ -14,7 +14,7 @@ wayland-capture = ["dep:ashpd", "dep:lamco-pipewire", "dep:lamco-portal"]
 
 [dependencies]
 stross-proto.workspace = true
-stross-types.workspace = true
+stross-view.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

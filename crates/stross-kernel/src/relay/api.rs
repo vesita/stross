@@ -21,7 +21,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use stross_proto::message::StreamInfo;
-use stross_types::id::StreamId;
+use stross_view::id::StreamId;
 
 use crate::relay::data_plane::{handle_push, handle_watch};
 use crate::relay::dto::{

@@ -42,9 +42,9 @@ use stross_proto::frame::{CODEC_AAC, CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_AUD
 use crate::codec::adts::AdtsSplitter;
 use crate::codec::nal::{AccessUnitBuilder, AnnexBSplitter};
 
-/// 数据契约（推流配置）单一真源在 stross-types（分享端与订阅端之间传输的
+/// 数据契约（推流配置）单一真源在 stross-endpoint（分享端与订阅端之间传输的
 /// 纯数据载荷）；此处重导出保持 `stross_endpoint::pipeline::*` 路径兼容。
-pub use stross_types::contract::{AudioSourceConfig, Quality, StreamConfig, VideoSource};
+pub use crate::contract::{AudioSourceConfig, Quality, StreamConfig, VideoSource};
 
 // ---------------------------------------------------------------------------
 // 会话：启动子进程 + 读取管道

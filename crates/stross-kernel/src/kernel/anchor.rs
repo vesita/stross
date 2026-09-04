@@ -1,6 +1,6 @@
 //! 内核锚点域（`impl Kernel`）：常驻受控中继 + mDNS 广播 + 统一发现清单。
 //!
-//! docs/layering-architecture.md：`Kernel` 是全部服务提供的**单一门面**；
+//! docs/framework-v3.md：`Kernel` 是全部服务提供的**单一门面**；
 //! 本文件把「锚定（start_relay*）/ 可被发现（mDNS）/ 发现清单」这一域的
 //! 实现从 `mod.rs` 拆出，方法与公共 API 不变。
 
@@ -9,12 +9,14 @@ use std::sync::atomic::Ordering;
 
 use stross_proto::message::{DiscoveryInfo, MediaKind};
 
-use crate::discovery::Discovery;
+// v3 P2b：mDNS 广播句柄迁至 stross-discovery（struct 改名 MdnsDiscovery，
+// 避让契约 trait `Discovery`）。
 use crate::error::Result;
 use crate::lock::MutexExt;
 use crate::relay::{DEFAULT_PORT, RelayServer};
 use crate::view;
 use crate::{Kernel, RelayInfo};
+use stross_discovery::MdnsDiscovery;
 
 use super::LocalAnchor;
 
@@ -82,14 +84,14 @@ impl Kernel {
     }
 
     /// 注册 mDNS 广播本机中继；失败告警并返回 `None`（中继仍可用）。
-    pub(crate) fn try_register_mdns(&self, hostname: &str, port: u16) -> Option<Discovery> {
+    pub(crate) fn try_register_mdns(&self, hostname: &str, port: u16) -> Option<MdnsDiscovery> {
         let hex = self
             .identity
             .lock_poisoned()
             .as_ref()
             .map(|id| id.node_id.to_hex());
         let instance = relay_mdns_instance(hex.as_deref(), port);
-        match Discovery::start(
+        match MdnsDiscovery::start(
             &instance,
             &crate::net::local_ips(),
             port,
@@ -165,7 +167,7 @@ impl Kernel {
         // mDNS 广播本机中继：**仅当「可被发现」开启时**才广播（显式用户开关，
         // 默认关）。开启由 `set_discoverable(true)` 触发（或锚定前已开）。
         // 能力描述统一走 DiscoveryInfo 单 key JSON（F1.2 / 1d）；多网卡广播
-        // 全部局域网 IP（Discovery::start 内部处理空列表回退回环），避免只广播
+        // 全部局域网 IP（MdnsDiscovery::start 内部处理空列表回退回环），避免只广播
         // 第一个 IP 导致其它网卡网段扫描不到本机。
         let hostname = hostname.to_string();
         let discovery = if self.discoverable.load(Ordering::Relaxed) {
@@ -223,7 +225,7 @@ impl Kernel {
             .map(|a| (a.port, a.handle.srt_port, a.handle.quic_port))
     }
 
-    /// 统一发现清单（`/api/discovery` 数据源，见 [`crate::discovery::DiscoveryResp`]）：
+    /// 统一发现清单（`/api/discovery` 数据源，见 [`stross_view::DiscoveryResp`]）：
     /// 从当前锚定中继 + 身份 + 能力组装。未锚定（无中继入口）返回 `None`（非可发现节点）。
     /// `name` 用身份名，与 mDNS 广播的展示名一致（mDNS 与子网扫描都指向同一节点）。
     ///
@@ -231,7 +233,7 @@ impl Kernel {
     /// 隐私开关，关闭时**所有**发现路径（mDNS 广播 + 子网单播扫描回退）都不可见。
     /// 子网回退主动探测 `18779/api/discovery`，若不此处门控，mDNS 关闭仍会被
     /// 扫描发现，违背隐私优先语义（用户反馈 bug）。
-    pub fn discovery_manifest(&self) -> Option<crate::discovery::DiscoveryResp> {
+    pub fn discovery_manifest(&self) -> Option<stross_view::DiscoveryResp> {
         // 可被发现关闭 → 不对外提供发现清单（含子网单播回退的探测口径）
         if !self.discoverable() {
             return None;
@@ -239,7 +241,7 @@ impl Kernel {
         let (relay_port, srt_port, quic_port) = self.relay_ports()?;
         let identity = self.node_identity()?;
         let info = self.mdns_info(&identity.node_name);
-        Some(crate::discovery::DiscoveryResp {
+        Some(stross_view::DiscoveryResp {
             node_id: identity.node_id,
             name: info.name,
             relay_port,

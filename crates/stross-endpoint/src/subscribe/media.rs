@@ -1,12 +1,12 @@
 //! 媒体订阅端点（v3 能力族：Graph / Audio 类的**统一订阅端**，播放器入端点）。
 //!
 //! 由内核按注册表 `(节点, 端点, 策略)` 解析后**生成**（订阅端点生成），
-//! 订阅时经 [`EndpointApp::receive_media`] 连公开方中继收流、按订阅规格的
-//! pick 规则解读并解码——**视频播放器 / 音频播放这类"数据还原"被纳入端点
-//! 概念**：Graph 类（屏幕/窗口/摄像头）与 Audio 类（麦克风/系统声音）共用
-//! 本实现，不再逐个端点写订阅样板。
+//! 订阅时经 [`crate::contract::MediaHost::receive_media`] 连公开方中继收流、按
+//! 订阅规格的 pick 规则解读并解码——**视频播放器 / 音频播放这类"数据还原"被
+//! 纳入端点概念**：Graph 类（屏幕/窗口/摄像头）与 Audio 类（麦克风/系统声音）
+//! 共用本实现，不再逐个端点写订阅样板。
 //!
-//! 订阅端与分享端是**独立契约**（[`SubscribeEndpoint`]，docs/endpoint-model-v2.md
+//! 订阅端与分享端是**独立契约**（[`SubscribeEndpoint`]，docs/framework-v3.md
 //! §3 演进）——本端点只有 `subscribe`，无分享占位；不进通告/目录，仅订阅
 //! 编排内部构造。文件类的订阅端见 [`crate::subscribe::file::FileReceiveEndpoint`]。
 
@@ -16,7 +16,7 @@ use stross_proto::message::{
     EndpointId, EndpointStrategy, MediaKind, PickRule, ReliabilityProfile, SubscribeSpec,
 };
 
-use crate::contract::{Endpoint, EndpointApp, EndpointBase, TargetKind};
+use crate::contract::{Endpoint, EndpointBase, Runtime, SubscribeHost, TargetKind};
 
 /// 媒体订阅端点（Graph / Audio 类统一订阅端）。
 pub struct MediaReceiveEndpoint {
@@ -63,13 +63,20 @@ impl Endpoint for MediaReceiveEndpoint {
 }
 
 impl crate::contract::SubscribeEndpoint for MediaReceiveEndpoint {
-    fn subscribe(&self, app: Arc<dyn EndpointApp>, spec: SubscribeSpec) {
+    fn subscribe(
+        &self,
+        host: Arc<dyn SubscribeHost>,
+        runtime: Arc<dyn Runtime>,
+        spec: SubscribeSpec,
+    ) {
         let endpoint_id = self.id().to_string();
-        // 端点自驱动统一经 `EndpointApp::spawn_task`（与分享端 `share` 同构，
-        // docs/endpoint-model-v2.md §3：运行时由内核注入）。
-        let app2 = app.clone();
-        app.spawn_task(Box::pin(async move {
-            match app2.receive_media(&spec).await {
+        // 端点自驱动统一经 `Runtime::spawn_task`（与分享端 `share` 同构，
+        // docs/framework-v3.md §3：运行时由内核注入）。
+        // `host` 是 SubscribeHost（MediaHost + FileHost 组合）：媒体订阅端
+        // 只用 MediaHost 部分（receive_media）。
+        let host2 = host.clone();
+        runtime.spawn_task(Box::pin(async move {
+            match host2.receive_media(&spec).await {
                 Ok(frames) => tracing::info!(
                     "媒体订阅端点 {endpoint_id} 接收完成（节点 {}，端点 {}，策略 {}，解码 {frames} 帧）",
                     spec.node_id,

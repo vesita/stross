@@ -13,7 +13,7 @@
 //! 数据面转发（[`data_plane::handle_push`] / [`data_plane::handle_watch`]）只依赖
 //! [`Transport`](crate::transport::Transport) 抽象，不感知具体传输；
 //! 当前经 [`WsTransport`](crate::transport::ws::WsTransport) 从 HTTP 升级处接入
-//! （见 docs/plugin-architecture.md §4）。
+//! （见 docs/framework-v3.md §4）。
 //!
 //! 观看端接入时机：视频只在关键帧（IDR）后开始转发（ffmpeg 已在关键帧前重复
 //! SPS/PPS，因此等待关键帧即可）；音频 ADTS 自带配置，可直接转发。

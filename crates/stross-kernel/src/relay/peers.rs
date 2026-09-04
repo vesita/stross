@@ -42,7 +42,7 @@ pub struct PeerInfo {
 
 /// 周期浏览局域网内其它 Stross 中继，更新 [`RelayState`] 的设备缓存。
 ///
-/// 每 `BROWSE_INTERVAL` 浏览一次（每次 [`crate::discovery::Discovery::browse`]
+/// 每 `BROWSE_INTERVAL` 浏览一次（每次 [`stross_discovery::MdnsDiscovery::browse`]
 /// 内置超时）；被浏览到的本机广播实例（本机 IP + 本机端口）会被剔除。
 #[cfg(feature = "discovery")]
 pub(super) fn spawn_peer_refresh(
@@ -57,7 +57,7 @@ pub(super) fn spawn_peer_refresh(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    match crate::discovery::Discovery::browse(crate::discovery::BROWSE_TIMEOUT).await {
+                    match stross_discovery::MdnsDiscovery::browse(stross_discovery::BROWSE_TIMEOUT).await {
                         Ok(found) => {
                             let self_ips = crate::net::local_ips();
                             let peers = filter_self(found, self_port, &self_ips);
@@ -76,7 +76,7 @@ pub(super) fn spawn_peer_refresh(
 /// 从 mDNS 浏览结果剔除本机中继（自己广播的实例），并映射为设备表。
 #[cfg(feature = "discovery")]
 fn filter_self(
-    found: Vec<crate::discovery::Discovered>,
+    found: Vec<stross_discovery::Discovered>,
     self_port: u16,
     self_ips: &[IpAddr],
 ) -> HashMap<String, PeerInfo> {
@@ -93,7 +93,7 @@ fn filter_self(
 
 /// 把一条 mDNS 浏览记录映射为 [`PeerInfo`]（能力引导缺失时回退默认值）。
 #[cfg(feature = "discovery")]
-fn peer_from_discovered(d: &crate::discovery::Discovered) -> PeerInfo {
+fn peer_from_discovered(d: &stross_discovery::Discovered) -> PeerInfo {
     // 单 key JSON 解码（F1.2 / 1d）；旧设备 / 缺失时回退默认
     let info = DiscoveryInfo::from_txt(&d.txt);
     let ip_str = d.ip.to_string();
@@ -124,8 +124,8 @@ mod tests {
     use std::collections::HashMap;
 
     #[cfg(feature = "discovery")]
-    fn discovered(ip: &str, port: u16, txt: Vec<(String, String)>) -> crate::discovery::Discovered {
-        crate::discovery::Discovered {
+    fn discovered(ip: &str, port: u16, txt: Vec<(String, String)>) -> stross_discovery::Discovered {
+        stross_discovery::Discovered {
             instance: format!("relay-{port}._stross._tcp.local."),
             ip: ip.parse().expect("测试 IP"),
             port,

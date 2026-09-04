@@ -73,17 +73,17 @@ pub(crate) struct SessionManager {
 
 impl SessionManager {
     /// 会话是否存在。
-    pub(super) fn contains(&self, id: &Id) -> bool {
+    pub(crate) fn contains(&self, id: &Id) -> bool {
         self.sessions.lock_poisoned().contains_key(id)
     }
 
     /// 会话快照（不存在 → `None`）。
-    pub(super) fn get(&self, id: &Id) -> Option<Session> {
+    pub(crate) fn get(&self, id: &Id) -> Option<Session> {
         self.sessions.lock_poisoned().get(id).cloned()
     }
 
     /// 登记会话。
-    pub(super) fn insert(&self, session: Session) {
+    pub(crate) fn insert(&self, session: Session) {
         // `Session.id` 是线序/壳层可见的 String；登记时经 Id 定为内部 key。
         self.sessions
             .lock_poisoned()
@@ -91,12 +91,12 @@ impl SessionManager {
     }
 
     /// 移除会话（返回被移除项；不存在 → `None`）。
-    pub(super) fn remove(&self, id: &Id) -> Option<Session> {
+    pub(crate) fn remove(&self, id: &Id) -> Option<Session> {
         self.sessions.lock_poisoned().remove(id)
     }
 
     /// 全量快照（按 id 排序）。
-    pub(super) fn snapshot(&self) -> Vec<Session> {
+    pub(crate) fn snapshot(&self) -> Vec<Session> {
         let guard = self.sessions.lock_poisoned();
         let mut v: Vec<_> = guard.values().cloned().collect();
         v.sort_by(|a, b| a.id.cmp(&b.id));
@@ -104,7 +104,7 @@ impl SessionManager {
     }
 
     /// 控制操作前的鉴权门禁：会话必须存在且已授权（F2.5 / 设计文档 §7）。
-    pub(super) fn require_authorized(&self, id: &Id) -> Result<()> {
+    pub(crate) fn require_authorized(&self, id: &Id) -> Result<()> {
         let guard = self.sessions.lock_poisoned();
         let s = guard
             .get(id)
@@ -112,19 +112,8 @@ impl SessionManager {
         s.require_authorized()
     }
 
-    /// 改道：校验鉴权后更新传输路径（F2.3 会话内动态改道）。
-    pub(super) fn route(&self, id: &Id, path: RoutePath) -> Result<()> {
-        let mut guard = self.sessions.lock_poisoned();
-        let s = guard
-            .get_mut(id)
-            .ok_or_else(|| Error::SessionNotFound(id.to_string()))?;
-        s.require_authorized()?;
-        s.path = path;
-        Ok(())
-    }
-
     /// 标记已鉴权（访问码校验成功后调用）。
-    pub(super) fn mark_authorized(&self, id: &Id) -> Result<()> {
+    pub(crate) fn mark_authorized(&self, id: &Id) -> Result<()> {
         let mut guard = self.sessions.lock_poisoned();
         let s = guard
             .get_mut(id)

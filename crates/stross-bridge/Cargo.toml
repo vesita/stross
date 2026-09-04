@@ -9,5 +9,5 @@ license.workspace = true
 stross-kernel.workspace = true
 stross-endpoint.workspace = true
 stross-proto.workspace = true
-stross-types.workspace = true
+stross-view.workspace = true
 hostname.workspace = true

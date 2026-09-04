@@ -1,4 +1,4 @@
-//! WebRTC 传输实现（str0m 0.23，Sans-IO；设计文档 docs/plugin-architecture.md §4）。
+//! WebRTC 传输实现（str0m 0.23，Sans-IO；设计文档 docs/framework-v3.md §4）。
 //!
 //! 中继侧 WebRTC peer：一个 UDP socket + 一个 [`str0m::Rtc`] 实例，两个 data channel：
 //!
@@ -28,7 +28,7 @@ use str0m::{Candidate, Event, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc, watch};
 
-use stross_proto::message::{ReliabilityProfile, TransportId};
+use stross_proto::message::{ReliabilityProfile, StreamId, TransportId};
 
 use super::{
     DataSession, PeerAddr, SessionPacket, SessionParams, SharedStats, Transport, TransportError,
@@ -64,7 +64,7 @@ impl WebRtcTransport {
     /// （如 `0.0.0.0:0` 让系统分配并监听所有接口）。
     pub async fn start_peer(
         &self,
-        session_id: &str,
+        session_id: &StreamId,
         bind: SocketAddr,
     ) -> Result<(String, WebRtcPeer), TransportError> {
         let udp = Arc::new(
@@ -118,7 +118,7 @@ impl WebRtcTransport {
         Ok((
             sdp,
             WebRtcPeer {
-                session_id: session_id.to_string(),
+                session_id: session_id.clone(),
                 udp,
                 rtc: Some(rtc),
                 pending: Some(pending),
@@ -169,7 +169,7 @@ impl Transport for WebRtcTransport {
 
 /// 中继侧待完成信令的 WebRTC peer（start 与 answer 之间存于 relay 状态）。
 pub struct WebRtcPeer {
-    session_id: String,
+    session_id: StreamId,
     udp: Arc<UdpSocket>,
     rtc: Option<Rtc>,
     pending: Option<SdpPendingOffer>,
@@ -183,7 +183,7 @@ pub struct WebRtcPeer {
 
 impl WebRtcPeer {
     /// 会话 id（观看端要看的流）。
-    pub fn session_id(&self) -> &str {
+    pub fn session_id(&self) -> &StreamId {
         &self.session_id
     }
 

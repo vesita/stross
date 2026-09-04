@@ -38,7 +38,7 @@ use stross_proto::message::{
     TransportId, Visibility, derive_stream_id,
 };
 use stross_proto::time::unix_secs;
-use stross_types::id::{NodeId, StrategyId};
+use stross_view::id::{NodeId, StrategyId};
 use tokio::sync::oneshot;
 
 use crate::Kernel;
@@ -54,8 +54,8 @@ mod dto;
 pub use dto::{RelayAddr, ShareGrant, ShareRequest, ShareTokenView};
 
 /// 协商端点默认端口（LAN 可达；防火墙需放行该 TCP 端口）。真源在
-/// [`stross_types::ports`]（`NEGOTIATOR_DISCOVERY`：协商与发现权威同一端口）。
-pub use stross_types::ports::NEGOTIATOR_DISCOVERY as DEFAULT_NEGOTIATOR_PORT;
+/// [`stross_view::ports`]（`NEGOTIATOR_DISCOVERY`：协商与发现权威同一端口）。
+pub use stross_view::ports::NEGOTIATOR_DISCOVERY as DEFAULT_NEGOTIATOR_PORT;
 /// 等待人工确认的超时（秒）。
 const PENDING_TIMEOUT_SECS: u64 = 60;
 /// 签发凭证默认有效期（秒）。
@@ -186,10 +186,10 @@ pub fn load_or_create_identity(base_dir: &std::path::Path, name: &str) -> NodeId
 
 /// 设备名是否无标识意义（空 / `localhost` / `android`——Android 主机名恒为
 /// localhost，直接广播会得到无意义名字）。判定**单一真源在 stross-types**
-/// （`stross_types::hostname::is_placeholder`，桥接层与内核共用；分层铁律：
+/// （`stross_view::hostname::is_placeholder`，桥接层与内核共用；分层铁律：
 /// 内核不依赖 stross-bridge，故上移到双方依赖的契约层）。
 fn is_placeholder_name(name: &str) -> bool {
-    stross_types::hostname::is_placeholder(name)
+    stross_view::hostname::is_placeholder(name)
 }
 
 /// 生成随机节点标识（16 字节随机原语）。
@@ -202,7 +202,7 @@ fn new_node_id() -> NodeId {
 // ---------------------------------------------------------------------------
 
 /// 待人工确认的请求（纯数据 DTO，定义收敛至 stross-types——应用契约层单一真源）。
-pub use stross_types::PendingRequest;
+pub use stross_view::PendingRequest;
 
 /// UI 层回调接口：有挂起请求时通知（Tauri 层实现为 emit 事件）。
 pub trait NegotiatorUi: Send + Sync {
@@ -278,6 +278,9 @@ impl ShareNegotiator {
         base_dir: &std::path::Path,
         port: u16,
     ) -> anyhow::Result<Self> {
+        // 登记 Arc 自引用（契约 ShareService::on_subscribed 需要 Arc<dyn ShareHost>
+        // 能力对象触发端点 share；幂等）
+        app.remember_self(&app);
         let state = Arc::new(ServerState {
             app,
             store: Arc::new(TrustStore::load(base_dir)),
@@ -402,7 +405,7 @@ impl ShareNegotiator {
     }
 
     /// 订阅达成事件：构造 [`SubscribeCtx`] 触发公开方驱动开推
-    /// （docs/endpoint-model-v2.md §4 联动；只对端点语义生效）。
+    /// （docs/framework-v3.md §4 联动；只对端点语义生效）。
     ///
     /// * pull：数据面流 id = 公开方本机会话（`grant.view.stream_id`），
     ///   推入自己的受控中继，无需凭证；
@@ -500,7 +503,7 @@ pub(crate) async fn handle_request(
         None => req.media.clone(),
     };
 
-    // 按可见性决策（端点语义）或旧信任语义（docs/endpoint-model-v2.md §4）
+    // 按可见性决策（端点语义）或旧信任语义（docs/framework-v3.md §4）
     match policy_decision(&state.store, endpoint.as_ref(), &req.node_id) {
         Decision::Grant => {
             let (title, media) = match &endpoint {
@@ -604,7 +607,7 @@ enum Decision {
     Reject(&'static str),
 }
 
-/// 可见性决策表（docs/endpoint-model-v2.md §4）：
+/// 可见性决策表（docs/framework-v3.md §4）：
 /// Public 免确认；Confirm 已信任自动、未信任挂起；Private 白名单自动、否则拒绝；
 /// 无端点（旧语义）= 信任自动、未信任挂起。
 fn policy_decision(
@@ -663,7 +666,7 @@ fn compose_grant(
     if let Some(m) = endpoint
         && let Some((sid, _)) = app.active_share_by_endpoint(EndpointId::new(m.kind, m.endpoint_id))
     {
-        // 订阅驱动（docs/endpoint-model-v2.md §4 定稿）：只在 pull 复用——
+        // 订阅驱动（docs/framework-v3.md §4 定稿）：只在 pull 复用——
         // 同端点已有活动共享（只走 pull），订阅方只用 stream_id（watch 路径）
         // 复用同一流，凭证/中继地址同现流。
         tracing::info!(
@@ -671,7 +674,7 @@ fn compose_grant(
             m.name
         );
         return Ok(ShareGrant {
-            view: stross_types::ShareTokenView {
+            view: stross_view::ShareTokenView {
                 token: String::new(),
                 stream_id: sid,
                 pin: String::new(),
@@ -690,7 +693,7 @@ fn compose_grant(
             }),
         });
     }
-    // 数据面流 id 来源（订阅驱动 pull，docs/comm-mode-v2.md §6「配套改动」）：
+    // 数据面流 id 来源（订阅驱动 pull，docs/framework-v3.md §6「配套改动」）：
     // * 端点语义 → **语义 id 派生**：`derive(endpoint_id, transport_profile,
     //   pick_rule)` 确定性三要素——订阅方本地可推导、同端点收敛同流、
     //   停一路不级联；pull 不需要凭证，token 为空；
@@ -724,7 +727,7 @@ fn compose_grant(
             }
         }
     };
-    // 订阅驱动（docs/endpoint-model-v2.md §4 定稿）：数据流一律由订阅方发起并
+    // 订阅驱动（docs/framework-v3.md §4 定稿）：数据流一律由订阅方发起并
     // 主动取（pull），共享方只在本地中继发布、不做任何主动出站推送。delivery
     // 定稿恒为 Pull（保留枚举 wire 兼容——对端旧版本字段仍可解析，但本端
     // 协商不再产出 push/both 路径）。
@@ -758,7 +761,7 @@ fn compose_grant(
 
 /// 策略 → 定稿（按订阅方选定的策略 id 精确取，缺省默认策略）并**校验内核
 /// 序列化工具支持**：未实现的序列化规则（如预留的 Chunked 分包）拒绝授予，
-/// 不静默降级——数据契约在协商边界就锁定（docs/endpoint-model-v2.md §0）。
+/// 不静默降级——数据契约在协商边界就锁定（docs/framework-v3.md §0）。
 fn checked_strategy(
     m: &EndpointManifest,
     strategy_id: Option<StrategyId>,
@@ -766,7 +769,7 @@ fn checked_strategy(
     // 策略解析单一真源：`EndpointManifest::strategy`（按 id → 首个 → 推导默认，
     // 确定性；见 proto 定义）。
     let strategy = m.strategy(strategy_id.map(|s| s.as_str()));
-    if crate::pick::loader_for(&strategy).is_none() {
+    if stross_serialize::loader_for(&strategy).is_none() {
         return Err(format!(
             "内核不支持序列化规则 {:?}（端点 {} 策略 {}）——协商拒绝，不静默降级",
             strategy.serialize,
@@ -778,10 +781,10 @@ fn checked_strategy(
 }
 
 /// 订阅达成事件（自由函数版，`handle_request` / `respond` 共用）：构造
-/// [`SubscribeCtx`] 触发端点 `share` 自动开推（docs/endpoint-model-v2.md §3
+/// [`SubscribeCtx`] 触发端点 `share` 自动开推（docs/framework-v3.md §3
 /// 契约 / §4 数据流联动；只对端点语义生效）。
 ///
-/// 订阅驱动（docs/endpoint-model-v2.md §4 定稿）：只走 pull——数据面流 id =
+/// 订阅驱动（docs/framework-v3.md §4 定稿）：只走 pull——数据面流 id =
 /// 公开方本机会话（`grant.view.stream_id`），推入自己的受控中继，无需凭证；
 /// 订阅方连公开方中继 watch 取流（无 push 出站路径）。
 fn notify_subscribed(
@@ -792,6 +795,10 @@ fn notify_subscribed(
     _relay_addr: Option<&str>,
     _share_token: Option<&str>,
 ) {
+    // 契约回调前置条件：登记 Arc 自引用（`ShareService::on_subscribed` 需要
+    // `Arc<dyn ShareHost>` 能力对象触发端点 share；幂等——`ShareNegotiator::start`
+    // 亦已登记，此处覆盖直接构造协商器的测试路径）
+    app.remember_self(app);
     let Some(endpoint_id) = endpoint_id else {
         return; // 旧语义（无端点）不触发联动
     };
@@ -819,7 +826,13 @@ fn notify_subscribed(
         relay_addr: None,
         share_token: None,
     };
-    app.on_endpoint_subscribed(app.clone(), endpoint_id, &ctx);
+    // v3 P2d：订阅达成回调经契约 `stross_share::ShareService::on_subscribed`
+    // 走通——订阅达成即登记 active_share（note_share_active 生产链已断，
+    // 在此接回；P2e 完善收尾）+ 委托注册表触发端点自驱动 share。
+    let ep = app.registry.lock_poisoned().endpoint_arc(endpoint_id);
+    if let Some(ep) = ep {
+        stross_share::ShareService::on_subscribed(app.as_ref(), ep.as_ref(), &ctx, endpoint_id);
+    }
 }
 
 /// 目录 API（L2）：本节点**已通告**端点（不可挂载端点可见但不可订阅——
@@ -894,7 +907,7 @@ pub(crate) async fn handle_unsubscribe(
     path = "/api/discovery",
     tag = "negotiator",
     responses(
-        (status = 200, description = "本节点统一发现清单（身份+能力+中继入口端口）", body = crate::discovery::DiscoveryResp),
+        (status = 200, description = "本节点统一发现清单（身份+能力+中继入口端口）", body = stross_view::DiscoveryResp),
         (status = 404, description = "本节点未锚定（无中继入口，非可发现节点）", body = dto::ApiError)
     )
 )]
@@ -1113,8 +1126,7 @@ mod tests {
             "订阅达成后共享端点立即记 1 个订阅者"
         );
         // 模拟端点共享已登记（最后一个订阅者离开即停止共享）
-        let weak: std::sync::Weak<dyn crate::EndpointApp> =
-            std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
+        let weak: std::sync::Weak<Kernel> = std::sync::Arc::downgrade(&app);
         app.note_share_active(weak, MIC, "sess-1", Delivery::Pull);
         assert!(app.active_share_by_endpoint(MIC).is_some());
         // 另一订阅者加入 → 2
@@ -1233,8 +1245,7 @@ mod tests {
         let sid1 = g1.view.stream_id;
         assert!(!sid1.is_empty());
         // 模拟端点共享已登记（真实路径：share → start_stream 成功 → note_share_active）
-        let weak: std::sync::Weak<dyn crate::EndpointApp> =
-            std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
+        let weak: std::sync::Weak<Kernel> = std::sync::Arc::downgrade(&app);
         app.note_share_active(weak, MIC, &sid1, Delivery::Pull);
         // 第二个订阅者：复用同一流
         let g2 = neg
@@ -1248,7 +1259,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 语义 id 派生（docs/comm-mode-v2.md §6）：端点订阅的 grant 流 id =
+    /// 语义 id 派生（docs/framework-v3.md §6）：端点订阅的 grant 流 id =
     /// `derive(endpoint_id, transport_profile, pick_rule)` 确定性三要素——
     /// 同端点必然同 id（结构性订阅收敛），且该 id 已建内核会话
     /// （受控中继预授权接入的基础）。
@@ -1319,8 +1330,7 @@ mod tests {
             .unwrap();
         assert_eq!(g1.delivery, Some(Delivery::Pull), "订阅驱动收敛为 pull");
         let sid1 = g1.view.stream_id;
-        let weak: std::sync::Weak<dyn crate::EndpointApp> =
-            std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
+        let weak: std::sync::Weak<Kernel> = std::sync::Arc::downgrade(&app);
         app.note_share_active(weak, MIC, &sid1, Delivery::Pull);
         // 第二个订阅者：复用同一流（不再报「正被使用」）
         let g2 = neg
@@ -1378,7 +1388,8 @@ mod tests {
             }
             fn share(
                 &self,
-                _app: std::sync::Arc<dyn stross_endpoint::contract::EndpointApp>,
+                _host: std::sync::Arc<dyn stross_endpoint::contract::ShareHost>,
+                _runtime: std::sync::Arc<dyn stross_endpoint::contract::Runtime>,
                 ctx: stross_endpoint::SubscribeCtx,
             ) {
                 self.fired.lock().unwrap().push(ctx);

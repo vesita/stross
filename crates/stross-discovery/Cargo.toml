@@ -1,0 +1,23 @@
+[package]
+name = "stross-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stross v3 概念 crate：广播发现（Discovery 契约 + mDNS/子网扫描实现）"
+authors.workspace = true
+
+[dependencies]
+stross-proto.workspace = true
+stross-node.workspace = true
+stross-view.workspace = true
+stross-transport.workspace = true
+# mDNS 服务发现：fork 自 mdns-sd 0.21（crates/mdns），本地维护以修跨设备
+# 发现（SO_REUSEPORT 端口竞争等）上游未覆盖的问题。
+mdns.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+reqwest.workspace = true

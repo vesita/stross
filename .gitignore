@@ -2,6 +2,9 @@
 /target
 **/target
 
+# python产物
+__pycache__
+
 # 前端依赖与产物（web/ 由 tsc 编译，app.js 受版本控制）
 node_modules
 apps/stross-gui/web/node_modules/

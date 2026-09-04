@@ -109,7 +109,7 @@ pub enum CtrlCommand {
         #[arg(long)]
         remember: bool,
     },
-    /// 端点框架命令（公开 / 取消公开 / 目录；docs/endpoint-model-v2.md）
+    /// 端点框架命令（公开 / 取消公开 / 目录；docs/framework-v3.md）
     Endpoint {
         #[command(subcommand)]
         cmd: EndpointCommand,
@@ -119,7 +119,7 @@ pub enum CtrlCommand {
 /// `stross ctrl endpoint` 子命令。
 #[derive(Subcommand, Debug)]
 pub enum EndpointCommand {
-    /// 公开端点（端点框架 docs/endpoint-model-v2.md）
+    /// 公开端点（端点框架 docs/framework-v3.md）
     Publish {
         /// 端点标识（`stross ctrl endpoint list` 可查，如 mic:0, screen:0）
         #[arg(long)]
@@ -163,7 +163,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 title,
                 sinks: sinks.split(',').map(|s| s.trim().to_string()).collect(),
             };
-            let r: stross_types::SessionCreatedView = request_as(&args.connect, req).await?;
+            let r: stross_view::SessionCreatedView = request_as(&args.connect, req).await?;
             tracing::info!("sessionId: {}", r.session_id);
         }
         CtrlCommand::Authorize { session_id, code } => {
@@ -171,14 +171,14 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 session_id: session_id.clone(),
                 access_code: code,
             };
-            let _: stross_types::AuthorizedView = request_as(&args.connect, req).await?;
+            let _: stross_view::AuthorizedView = request_as(&args.connect, req).await?;
             tracing::info!("已鉴权: {session_id}");
         }
         CtrlCommand::Teardown { session_id } => {
             let req = CtrlRequest::Teardown {
                 session_id: session_id.clone(),
             };
-            let _: stross_types::TeardownView = request_as(&args.connect, req).await?;
+            let _: stross_view::TeardownView = request_as(&args.connect, req).await?;
             tracing::info!("已拆除会话: {session_id}");
         }
         CtrlCommand::ShareToken { session_id, ttl } => {
@@ -186,7 +186,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 session_id: session_id.clone(),
                 ttl_secs: ttl,
             };
-            let r: stross_types::IssuedShareTokenView = request_as(&args.connect, req).await?;
+            let r: stross_view::IssuedShareTokenView = request_as(&args.connect, req).await?;
             tracing::info!(
                 "已签发接入凭证: streamId={} pin={} expiresAt={}",
                 r.stream_id,
@@ -214,7 +214,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 config,
                 relay_url: relay,
             };
-            let r: stross_types::StartResult = request_as(&args.connect, req).await?;
+            let r: stross_view::StartResult = request_as(&args.connect, req).await?;
             tracing::info!(
                 "推流已启动: streamId={} relayPort={} watchUrls={:?}",
                 r.stream_id,
@@ -223,18 +223,17 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
             );
         }
         CtrlCommand::StopStream => {
-            let _: stross_types::StoppedView =
+            let _: stross_view::StoppedView =
                 request_as(&args.connect, CtrlRequest::StopStream).await?;
             tracing::info!("推流已停止");
         }
         CtrlCommand::ListSessions => {
-            let r: stross_types::SessionsPayload =
+            let r: stross_view::SessionsPayload =
                 request_as(&args.connect, CtrlRequest::ListSessions).await?;
             tracing::info!("会话: {}", serde_json::to_string(&r)?);
         }
         CtrlCommand::Status { json } => {
-            let r: stross_types::StatusView =
-                request_as(&args.connect, CtrlRequest::Status).await?;
+            let r: stross_view::StatusView = request_as(&args.connect, CtrlRequest::Status).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&r)?);
                 return Ok(());
@@ -243,7 +242,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
         }
         CtrlCommand::Events { secs } => events(&args.connect, secs).await?,
         CtrlCommand::NegotiatorList { json } => {
-            let r: stross_types::PendingRequestsPayload =
+            let r: stross_view::PendingRequestsPayload =
                 request_as(&args.connect, CtrlRequest::NegotiatorPending).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&r)?);
@@ -272,7 +271,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
             deny,
             remember,
         } => {
-            let r: stross_types::GrantResponseView = request_as(
+            let r: stross_view::GrantResponseView = request_as(
                 &args.connect,
                 CtrlRequest::NegotiatorRespond {
                     req_id: req_id.clone(),
@@ -308,7 +307,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                     transports: None,
                     codecs: None,
                 };
-                let m: stross_types::EndpointPublishedView = request_as(&args.connect, req).await?;
+                let m: stross_view::EndpointPublishedView = request_as(&args.connect, req).await?;
                 println!(
                     "已公开端点 {}（{}）delivery={}",
                     EndpointId::new(m.kind, m.endpoint_id),
@@ -327,7 +326,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                     visibility: parse_visibility(&visibility, &nodes)?,
                     delivery: parse_delivery(&delivery)?,
                 };
-                let r: stross_types::FilePublishedView = request_as(&args.connect, req).await?;
+                let r: stross_view::FilePublishedView = request_as(&args.connect, req).await?;
                 println!(
                     "已公开文件端点 {}（{}，{} 字节）delivery={}",
                     r.endpoint_id,
@@ -340,11 +339,11 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                 let req = CtrlRequest::EndpointUnpublish {
                     endpoint_id: endpoint_id.clone(),
                 };
-                let _: stross_types::UnpublishedView = request_as(&args.connect, req).await?;
+                let _: stross_view::UnpublishedView = request_as(&args.connect, req).await?;
                 println!("已取消公开端点: {endpoint_id}");
             }
             EndpointCommand::List { json } => {
-                let r: stross_types::EndpointListPayload =
+                let r: stross_view::EndpointListPayload =
                     request_as(&args.connect, CtrlRequest::EndpointList).await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&r)?);
@@ -421,7 +420,7 @@ async fn events(connect: &str, secs: u64) -> anyhow::Result<()> {
 }
 
 /// 人类可读的实例状态输出（`stross ctrl status`）。
-fn print_status(s: &stross_types::StatusView) {
+fn print_status(s: &stross_view::StatusView) {
     println!("Stross 实例状态");
     println!("  版本      v{} ({})", s.version, s.platform);
     println!("  运行时长  {}", fmt_dur(s.uptime_secs));

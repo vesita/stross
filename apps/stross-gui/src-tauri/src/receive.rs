@@ -53,7 +53,7 @@ const RECV_MAX_W: u32 = 720;
 
 /// 桌面帧转发任务：解码帧通道 → 双线性缩放 → `STRF` 二进制通道推到前端 canvas。
 /// `start_receive`（main 槽）与 `start_receive_link`（多链路）桌面分支共用
-/// 同一显示管线（曾各写一份，docs/endpoint-model-v2.md 接收端多链路）。
+/// 同一显示管线（曾各写一份，docs/framework-v3.md 接收端多链路）。
 #[cfg(not(target_os = "android"))]
 fn spawn_frame_forwarder(
     ch: Channel<Vec<u8>>,
@@ -156,9 +156,7 @@ pub fn stop_receive_link(_app: tauri::AppHandle, state: State<'_, Arc<Kernel>>, 
 
 /// 全部接收链路快照（linkId + 统计；前端面板逐条展示）。
 #[tauri::command]
-pub fn receive_links(
-    state: State<'_, Arc<Kernel>>,
-) -> Vec<stross_kernel::receiver::ReceiveLinkView> {
+pub fn receive_links(state: State<'_, Arc<Kernel>>) -> Vec<stross_kernel::ReceiveLinkView> {
     state.receive_links()
 }
 

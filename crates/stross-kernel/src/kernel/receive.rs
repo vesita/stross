@@ -1,6 +1,6 @@
 //! 内核接收编排域（`impl Kernel`）：多链路接收 + 旧 `main` 槽兼容。
 //!
-//! docs/layering-architecture.md：`Kernel` 单一门面；本文件承载「接收播放」
+//! docs/framework-v3.md：`Kernel` 单一门面；本文件承载「接收播放」
 //! 一域的实现，方法与公共 API 不变。
 
 use std::sync::Arc;
@@ -159,10 +159,11 @@ impl Kernel {
         audio_out: AudioOut,
     ) -> Result<Arc<Receiver>> {
         self.stop_receive_link(&Id::from(link_id.as_str()));
-        let r = Receiver::start(relay_url, stream_id, audio_out, self.local_proxy()).await?;
-        self.receivers
-            .lock_poisoned()
-            .insert(Id::from(link_id), r.clone());
+        let r =
+            Receiver::start(relay_url, stream_id.clone(), audio_out, self.local_proxy()).await?;
+        let id = Id::from(link_id);
+        self.receivers.lock_poisoned().insert(id.clone(), r.clone());
+        self.record_receive_link_meta(&id, stream_id);
         Ok(r)
     }
 
@@ -175,18 +176,33 @@ impl Kernel {
         stream_id: String,
     ) -> Result<Arc<Receiver>> {
         self.stop_receive_link(&Id::from(link_id.as_str()));
-        let r = Receiver::start_raw(relay_url, stream_id, self.local_proxy()).await?;
-        self.receivers
-            .lock_poisoned()
-            .insert(Id::from(link_id), r.clone());
+        let r = Receiver::start_raw(relay_url, stream_id.clone(), self.local_proxy()).await?;
+        let id = Id::from(link_id);
+        self.receivers.lock_poisoned().insert(id.clone(), r.clone());
+        self.record_receive_link_meta(&id, stream_id);
         Ok(r)
     }
 
     /// 停止指定链路的接收（其它链路不受影响；不存在时静默成功）。
     pub fn stop_receive_link(&self, link_id: &str) {
-        if let Some(r) = self.receivers.lock_poisoned().remove(&Id::from(link_id)) {
+        let id = Id::from(link_id);
+        if let Some(r) = self.receivers.lock_poisoned().remove(&id) {
             r.stop();
         }
+        self.receive_link_meta.lock_poisoned().remove(&id);
+    }
+
+    /// 记录接收链路元数据（[`SubscribeService::links`] 投影补充）：壳层链路只
+    /// 登记流 id（节点/端点未知——契约 `subscribe` 登记完整三元组）。
+    fn record_receive_link_meta(&self, id: &Id, stream_id: String) {
+        self.receive_link_meta.lock_poisoned().insert(
+            id.clone(),
+            super::ReceiveLinkMeta {
+                node_id: stross_proto::message::NodeId::NIL,
+                endpoint_id: None,
+                stream_id: Some(StreamId::from(stream_id)),
+            },
+        );
     }
 
     /// 全部接收链路快照（link_id + 统计；GUI 面板逐条展示）。

@@ -3,7 +3,7 @@
 //!
 //! 消费方：CLI `devices` / `adb status` 探测、`endpoint ls` 目录拉取、
 //! 文件泵等观看者轮询（stross-app `file_xfer`）。任何一处解析 `/api/*`
-//! 响应都应经本模块——禁止在壳层再手写 HTTP 客户端（docs/layering-architecture.md）。
+//! 响应都应经本模块——禁止在壳层再手写 HTTP 客户端（docs/framework-v3.md）。
 //!
 //! 兼容性：`/api/streams` 历史上有「裸数组」与「`{streams:[...]}`」两种形态
 //! （前端双形态兼容），此处统一收敛为 [`StreamsResp`] 一次解析。
@@ -166,7 +166,7 @@ pub async fn stream_watchers(
 /// `/api/streams` 端点（受控 / 普通中继都提供的只读端点）。不可达返回 `false`。
 ///
 /// GUI「手动添加设备」校验地址用——壳层不再手写 `/api/*` 探测客户端
-/// （docs/layering-architecture.md：解析 `/api/*` 只允许在 stross-kernel）。
+/// （docs/framework-v3.md：解析 `/api/*` 只允许在 stross-kernel）。
 pub async fn probe_base(base: &str, timeout: Duration) -> bool {
     let url = format!("{}/api/streams", base.trim_end_matches('/'));
     get_json::<serde_json::Value>(&url, timeout).await.is_ok()

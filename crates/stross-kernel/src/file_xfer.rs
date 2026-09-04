@@ -1,4 +1,4 @@
-//! 文件端点传输（docs/endpoint-model-v2.md §3）：文件泵（推）/ 文件接收（拉）。
+//! 文件端点传输（docs/framework-v3.md §3）：文件泵（推）/ 文件接收（拉）。
 //!
 //! 走**既有数据面零改动**：文件以 `TRACK_FILE` 轨作为普通媒体流推送/观看；
 //! 中继不缓存不门控该轨，因此**公开方必须等到 ≥1 个观看者接入后才开始发帧**
@@ -136,7 +136,7 @@ async fn wait_for_watcher(base: &str, stream_id: &str) -> anyhow::Result<()> {
 /// 拉取中继 `/api/streams`，返回指定流的观看者数（探测失败 = 0）。
 ///
 /// 走 core 官方客户端（`crate::relay::client`，与 server 同契约；
-/// docs/layering-architecture.md——壳层/应用层禁止再手写 HTTP 客户端）。
+/// docs/framework-v3.md——壳层/应用层禁止再手写 HTTP 客户端）。
 async fn watchers_of(streams_url: &str, stream_id: &str) -> Option<u32> {
     let resp: relay_http::StreamsResp = relay_http::get_json(streams_url, Duration::from_secs(2))
         .await
@@ -150,7 +150,7 @@ async fn watchers_of(streams_url: &str, stream_id: &str) -> Option<u32> {
 /// 接收结果（GUI 命令 / CLI 展示共用；JSON 序列化供前端消费）。
 /// 应用契约层单一真源在 stross-types（`subscribe_file` / 订阅端点经此返回）；
 /// 此处重导出保持 `stross_kernel::file_xfer::ReceivedFile` 路径兼容。
-pub use stross_types::ReceivedFile;
+pub use stross_view::ReceivedFile;
 
 /// 连接并接收一个文件流到 `out_dir`（返回落盘结果）。
 pub async fn receive_file(

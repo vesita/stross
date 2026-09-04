@@ -1,7 +1,7 @@
 //! 控制消息（JSON 文本帧）与协议载荷类型。
 //!
 //! 协议 v2 在原有会话控制（Hello/Bye/Welcome/Ready/Error/Info）基础上，
-//! 增加**能力协商**与**路由控制**（见 docs/plugin-architecture.md §5.2）：
+//! 增加**能力协商**与**路由控制**（见 docs/framework-v3.md §5.2）：
 //! 推流端/观看端上报能力（`Capabilities`），会话建立时协商传输与编解码
 //! （`Offer`/`Answer`），会话存续期间可动态改道（`Route`）。
 //!
@@ -12,7 +12,7 @@
 //! * [`stream`]：流信息（推流声明与流列表共用）
 //! * [`control`]：[`ControlMessage`] 控制消息
 //! * [`discovery`]：mDNS 发现能力引导（单 key JSON）
-//! * [`endpoint`]：端点框架（节点 → 设备 → 端点，见 docs/endpoint-model-v2.md）
+//! * [`endpoint`]：端点框架（节点 → 设备 → 端点，见 docs/framework-v3.md）
 //! * [`token`]：一次性接入凭证
 
 pub mod capability;

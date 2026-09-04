@@ -19,7 +19,7 @@ use stross_proto::message::{
 };
 use stross_proto::time::unix_secs;
 use stross_transport::{DataSession, SessionPacket};
-use stross_types::channel::ChannelEvent;
+use stross_view::channel::ChannelEvent;
 
 use crate::kernel::id::Id;
 

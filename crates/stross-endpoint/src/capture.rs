@@ -39,7 +39,7 @@ pub struct CaptureStatus {
 pub trait CaptureBackend: Send + Sync {
     /// 能力描述（能力广播 / 协商用；默认实现返回未知）。
     ///
-    /// 见 docs/plugin-architecture.md §6.1——Source 能力向内核能力注册表上报。
+    /// 见 docs/framework-v3.md §6.1——Source 能力向内核能力注册表上报。
     fn descriptor(&self) -> CapabilityDescriptor {
         CapabilityDescriptor::unknown()
     }

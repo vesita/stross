@@ -1,4 +1,4 @@
-//! 集成测试：QUIC 连接复用（通信模式 v2 Phase C，docs/comm-mode-v2.md §5）。
+//! 集成测试：QUIC 连接复用（通信模式 v2 Phase C，docs/framework-v3.md §5）。
 //!
 //! 场景 = 真实中继 + 真实上层路径（`RelayClient` 推流 / `connect_watch` 观看，
 //! 二者经传输层链路管理器自动共享同 (host, port) 的 QUIC 连接）：

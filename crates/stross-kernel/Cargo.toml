@@ -7,9 +7,19 @@ license.workspace = true
 
 [dependencies]
 stross-proto.workspace = true
-stross-types.workspace = true
+stross-view.workspace = true
 stross-transport.workspace = true
 stross-endpoint.workspace = true
+# v3 概念契约 crate（P1 建，P2d 内核实现）：共享 / 订阅两端编排契约——
+# 依赖方向 kernel → 契约 crate 单向（契约 crate 只放 trait 与纯类型，
+# 实现放内核 impl，见 docs/framework-v3.md §3.3/§3.4）。
+stross-share.workspace = true
+stross-subscribe.workspace = true
+# v3 概念 crate：pick 规则层（解读/缓冲/注册表）与序列化装载（Loader/loader_for）、
+# 广播发现（mDNS/子网扫描实现，P2b 迁出自本 crate discovery/ 模块）。
+stross-pick.workspace = true
+stross-serialize.workspace = true
+stross-discovery.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -33,13 +43,15 @@ quinn.workspace = true
 utoipa = { workspace = true, features = ["axum_extras"] }
 # 中继 / 协商端点挂 /docs（swagger-ui）。
 utoipa-swagger-ui = { workspace = true, features = ["axum"] }
-mdns = { workspace = true, optional = true }
 
 [features]
 # mDNS 服务发现默认开启（内核自身含浏览/广播消费方：scan_lan / 引导锚定）；
-# 纯粹的中继消费方可用 default-features = false 剪掉。
+# 纯粹的中继消费方可用 default-features = false 剪掉。实现本体已随 v3 P2b
+# 迁至 stross-discovery（kernel 非可选依赖）；本 feature 仅裁剪内核内的
+# 消费点（peers 周期浏览 / 中继广播 / 壳层 discovery 薄壳）与
+# stross-transport 的 mDNS 解析能力。
 default = ["discovery"]
-discovery = ["dep:mdns", "stross-transport/discovery"]
+discovery = ["stross-transport/discovery"]
 
 [dev-dependencies]
 futures-util.workspace = true

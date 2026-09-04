@@ -1,4 +1,4 @@
-//! SRT 传输实现（rsrt 0.3，纯 Rust；设计文档 docs/plugin-architecture.md §4.4）。
+//! SRT 传输实现（rsrt 0.3，纯 Rust；设计文档 docs/framework-v3.md §4.4）。
 //!
 //! SRT（Secure Reliable Transport）是 UDP 之上的可靠实时传输：TSBPD（时基
 //! 包投递）+ ARQ（重传）+ too-late 丢包，即 [`ReliabilityProfile::Adaptive`]。

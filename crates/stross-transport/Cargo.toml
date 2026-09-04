@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 stross-proto.workspace = true
-stross-types.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true

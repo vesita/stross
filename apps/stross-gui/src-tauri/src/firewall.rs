@@ -162,7 +162,7 @@ To                         Action      From
     fn missing_detects_uncovered_ports() {
         let s = parse_ufw_verbose(SAMPLE);
         // 本应放行的端口：真源在库层常量（防火墙规则不得自持端口号，
-        // docs/layering-architecture.md：端口真源统一在库层）
+        // docs/framework-v3.md：端口真源统一在库层）
         let required: Vec<String> = vec![
             format!("{}/tcp", stross_kernel::relay::DEFAULT_PORT),
             format!("{}/tcp", stross_kernel::DEFAULT_NEGOTIATOR_PORT),

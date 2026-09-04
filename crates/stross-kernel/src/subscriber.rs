@@ -1,6 +1,6 @@
-//! 订阅方编排（docs/endpoint-model-v2.md §4 的**订阅侧库接口**）。
+//! 订阅方编排（docs/framework-v3.md §4 的**订阅侧库接口**）。
 //!
-//! 分层（docs/layering-architecture.md）：订阅流程（本地接收准备 + 握手 +
+//! 分层（docs/framework-v3.md）：订阅流程（本地接收准备 + 握手 +
 //! watch/重试）是应用编排，收敛在 stross-app；壳层（CLI `endpoint` 子命令、
 //! 未来 GUI 命令）只解析参数、调这里并格式化输出。
 //!
@@ -66,11 +66,11 @@ pub struct SubscribeOutcome {
 /// 媒体端点订阅结果（GUI 命令 / 未来 CLI 共用）：握手后交给既有接收链路
 /// `start_receive(relay_url, stream_id)` 实际观看 / 播放。
 /// （纯数据 DTO，定义收敛至 stross-types——应用契约层单一真源。）
-pub use stross_types::MediaSubscribeOutcome;
+pub use stross_view::MediaSubscribeOutcome;
 
 /// 订阅远端媒体端点并返回观看入口（订阅驱动：只走 pull——连公开方中继
 /// watch 取流，公开方在本地中继发布；无 push 出站路径）。
-/// 订阅达成后公开方经端点驱动自动开推（docs/endpoint-model-v2.md §4：
+/// 订阅达成后公开方经端点驱动自动开推（docs/framework-v3.md §4：
 /// 媒体端点 pull 推本机中继）。
 pub async fn subscribe_media(
     app: &Arc<Kernel>,
@@ -102,7 +102,7 @@ pub async fn subscribe_media(
                 grant.view.stream_id.clone(),
             )
         }
-        // 订阅驱动定稿（docs/endpoint-model-v2.md §4）：只走 pull，无 push
+        // 订阅驱动定稿（docs/framework-v3.md §4）：只走 pull，无 push
         Delivery::Push => {
             return Err(anyhow::anyhow!(
                 "公开方授予了 push（对端版本偏差？——订阅驱动只走 pull）"
@@ -180,7 +180,7 @@ async fn request_endpoint_grant(
     strategy_id: Option<StrategyId>,
 ) -> anyhow::Result<EndpointGrant> {
     // 1) 目录拉取 → 映射进统一注册表（节点 → 端点 → 策略 三层；
-    //    docs/endpoint-model-v2.md §4「订阅分享注册表」）
+    //    docs/framework-v3.md §4「订阅分享注册表」）
     let mut node_id = NodeId::NIL;
     if let Ok(dir) = fetch_directory(host, port).await {
         node_id = dir.node.node_id;
@@ -191,7 +191,7 @@ async fn request_endpoint_grant(
         .node_identity()
         .ok_or_else(|| anyhow::anyhow!("身份未初始化"))?;
 
-    // 订阅驱动定稿（docs/endpoint-model-v2.md §4）：只走 pull，无 push——
+    // 订阅驱动定稿（docs/framework-v3.md §4）：只走 pull，无 push——
     // 不建本机会话/自签凭证/锚定中继；订阅方只连公开方中继 watch 取流。
     let req = ShareRequest {
         node_id: identity.node_id,
@@ -214,7 +214,7 @@ async fn request_endpoint_grant(
     Ok(EndpointGrant { grant, node_id })
 }
 
-/// 构建订阅规格（v2「订阅端点生成」依据，docs/endpoint-model-v2.md §2/§3）：
+/// 构建订阅规格（v2「订阅端点生成」依据，docs/framework-v3.md §2/§3）：
 /// 从统一注册表 `registry[节点][端点][策略]` 解析策略组合（订阅方选定的
 /// 策略 id，缺省 = 端点默认策略）。回退链：注册表 → 授予携带策略 →
 /// 平铺 `pick_rule` 推导默认策略——保证旧对端 / 目录拉取失败时不阻断订阅。
@@ -235,7 +235,7 @@ fn build_subscribe_spec(
                 grant.pick_rule.unwrap_or_default(),
             )
         });
-    // 语义 id 一致性校验（docs/comm-mode-v2.md §6「配套改动」）：订阅方用
+    // 语义 id 一致性校验（docs/framework-v3.md §6「配套改动」）：订阅方用
     // (端点, 传输档案, pick 规则) 本地推导，与授予的 stream_id 比对——
     // 同源同版本必然一致（watch 用自己能算出的 id）；旧对端不派生时仅告警，
     // 仍按授予继续（不阻断订阅）。
@@ -297,7 +297,7 @@ pub async fn subscribe_file(
             let watch_url = format!("ws://{host}:{}", relay.ws_port);
             receive_file_retry(&watch_url, &spec.stream_id, out).await?
         }
-        // 订阅驱动定稿（docs/endpoint-model-v2.md §4）：只走 pull，无 push
+        // 订阅驱动定稿（docs/framework-v3.md §4）：只走 pull，无 push
         Delivery::Push => {
             return Err(anyhow::anyhow!(
                 "公开方授予了 push（对端版本偏差？——订阅驱动只走 pull）"
@@ -313,7 +313,7 @@ pub async fn subscribe_file(
 }
 
 /// 订阅远端文件端点并**经订阅端点生成**接收落盘（v2 订阅端框架路径，
-/// docs/endpoint-model-v2.md §3）：注册表 `(节点, 端点, 策略)` → 生成订阅
+/// docs/framework-v3.md §3）：注册表 `(节点, 端点, 策略)` → 生成订阅
 /// 端点（[`FileReceiveEndpoint`]）→ 委托其 `subscribe`（端点自驱动，与分享端
 /// `share` 同构）。与 [`subscribe_file`]（返回落盘结果）共用握手与规格构建；
 /// 本路径面向「不需要同步结果」的自主订阅（后台接收 / 未来剪贴板同步等）。
@@ -335,9 +335,9 @@ pub async fn subscribe_file_via_endpoint(
 /// 接收文件（对「流尚未出现」重试）：只对建流竞态重试，其它错误
 /// （中途断开 / 文件不完整）是真实失败，直接上报。
 ///
-/// `pub(crate)`：订阅端点（[`EndpointApp::receive_file`]）与 CLI
+/// `pub(crate)`：订阅端点（[`stross_endpoint::FileHost::receive_file`]）与 CLI
 /// `subscribe_file` 共用此兜底——订阅端点生成路径同样要扛住
-/// 「授予响应先于流注册到达」的竞态（docs/endpoint-model-v2.md §4）。
+/// 「授予响应先于流注册到达」的竞态（docs/framework-v3.md §4）。
 pub(crate) async fn receive_file_retry(
     watch_url: &str,
     stream_id: &str,
@@ -426,7 +426,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
-    /// v2 订阅端点生成闭环（docs/endpoint-model-v2.md §3）：订阅方目录拉取 →
+    /// v2 订阅端点生成闭环（docs/framework-v3.md §3）：订阅方目录拉取 →
     /// 统一注册表映射（节点→端点→策略）→ 注册表解析策略组合 → 生成订阅端点
     /// （[`FileReceiveEndpoint`]）→ 委托 `subscribe` 落盘。
     /// 覆盖：三层注册表查表 + 订阅端点生成的完整框架路径（文件接收）。

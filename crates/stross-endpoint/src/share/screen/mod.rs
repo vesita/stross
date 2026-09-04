@@ -1,4 +1,4 @@
-//! 屏幕端点（Graph 能力族，docs/endpoint-model-v2.md §3）：load 探测采集
+//! 屏幕端点（Graph 能力族，docs/framework-v3.md §3）：load 探测采集
 //! 可用性（probe 由平台层注入——无图形会话 / 后端缺失时标记不可挂载，
 //! 屏幕获取失败前置化）；分享端走 [`MediaSourceEndpoint`] 统一实现
 //! （纯视频源组流推流）。订阅端（播放器）是独立契约

@@ -24,7 +24,7 @@
 //! * `len`: 载荷长度
 //!
 //! 头部小端序，共 24 字节，与平台无关。v2 在 WS 上取 `seq=0, frag_cnt=0`
-//! 时语义与 v1 等价（见 docs/plugin-architecture.md §5）。
+//! 时语义与 v1 等价（见 docs/framework-v3.md §5）。
 
 use bytes::Bytes;
 use thiserror::Error;
@@ -38,7 +38,7 @@ pub const VERSION: u8 = 2;
 pub const HEADER_LEN: usize = 24;
 
 // ---------------------------------------------------------------------------
-// v2 紧凑帧头（通信模式 v2 Phase C「字段简化」，docs/comm-mode-v2.md §2/§5）
+// v2 紧凑帧头（通信模式 v2 Phase C「字段简化」，docs/framework-v3.md §2/§5）
 // ---------------------------------------------------------------------------
 
 /// v2 紧凑帧头（QUIC 复用连接上的媒体流专用）。
@@ -59,7 +59,7 @@ pub const HEADER_LEN: usize = 24;
 /// * **frag 分片字段去掉**（QUIC 整帧发送，无单消息大小限制，与 WS 一致）。
 ///
 /// 每包只带 `track + flags + pts/seq + len`（14 字节）；流身份（语义 id）由
-/// QUIC stream 承载（stream 即类型，短 id 映射见 docs/comm-mode-v2.md §6）。
+/// QUIC stream 承载（stream 即类型，短 id 映射见 docs/framework-v3.md §6）。
 /// v1 24 字节头保留给 WS/SRT 单流连接（单流回退路径不受影响）。
 pub const HEADER2_LEN: usize = 14;
 
@@ -210,7 +210,7 @@ impl Frame2 {
 // ---- track ----
 pub const TRACK_VIDEO: u8 = 0;
 pub const TRACK_AUDIO: u8 = 1;
-/// 文件传输轨（端点框架文件端点，docs/endpoint-model-v2.md §3；Lossless 路径）。
+/// 文件传输轨（端点框架文件端点，docs/framework-v3.md §3；Lossless 路径）。
 /// 中继对非视频轨不做关键帧门控/补发，逐帧直通——文件轨必须等观看者接入
 /// 才开始推（公开方按 `/api/streams` 观看数驱动）。
 pub const TRACK_FILE: u8 = 2;

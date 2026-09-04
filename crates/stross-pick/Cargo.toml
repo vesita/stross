@@ -1,0 +1,10 @@
+[package]
+name = "stross-pick"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stross v3 概念 crate：pick 规则（Interpreter/Pacing 契约）"
+authors.workspace = true
+
+[dependencies]
+stross-proto.workspace = true

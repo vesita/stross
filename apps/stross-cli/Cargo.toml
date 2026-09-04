@@ -11,10 +11,13 @@ path = "src/main.rs"
 
 [dependencies]
 stross-kernel.workspace = true
-stross-types.workspace = true
+stross-view.workspace = true
 stross-bridge.workspace = true
 stross-endpoint.workspace = true
 stross-proto.workspace = true
+# 广播发现概念 crate（P3：壳层不再经 stross_kernel::discovery 薄壳引用，
+# 实现单一真源在 stross-discovery，docs/framework-v3.md §3.8）。
+stross-discovery.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 futures-util.workspace = true

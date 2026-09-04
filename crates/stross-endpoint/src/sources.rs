@@ -12,8 +12,8 @@ use std::process::Command;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use crate::pipeline::ffmpeg_bin;
 
-/// 摄像头硬件端点（纯数据 DTO，定义收敛至 stross-types——应用契约层单一真源）。
-pub use stross_types::CameraEndpoint;
+/// 摄像头硬件端点（纯数据 DTO，定义收敛至 stross-view——应用契约层单一真源）。
+pub use stross_view::CameraEndpoint;
 
 /// 枚举摄像头。
 pub fn list_cameras() -> Vec<CameraEndpoint> {

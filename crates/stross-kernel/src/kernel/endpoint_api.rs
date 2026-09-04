@@ -1,28 +1,29 @@
 //! 内核端点框架域（`impl Kernel`）：通告 / 三层注册表 / 共享生命周期。
 //!
-//! docs/layering-architecture.md：`Kernel` 单一门面；本文件承载「端点框架
+//! docs/framework-v3.md：`Kernel` 单一门面；本文件承载「端点框架
 //! （通告 / 注册表 / 订阅联动 / 共享生命周期治理）」一域的实现，
 //! 方法与公共 API 不变。
 
 use std::path::Path;
 use std::sync::Arc;
 
-use stross_endpoint::EndpointApp;
+use stross_endpoint::{Runtime, SubscribeHost};
 use stross_proto::message::{
     CodecId, Delivery, EndpointId, EndpointManifest, EndpointState, NodeId, SubscribeSpec,
     Visibility,
 };
-use stross_types::LocalCatalog;
+use stross_share::{ActiveShare, ShareService};
+use stross_view::LocalCatalog;
 
 use crate::Kernel;
 use crate::error::{Error, Result};
 use crate::lock::MutexExt;
 
-use super::{ActiveShare, EndpointRegistry, Id, StreamId, SubscribeCtx};
+use super::{EndpointRegistry, Id, StreamId};
 
 impl Kernel {
     // -----------------------------------------------------------------------
-    // 端点框架（三层端点模型：节点 → 端点 → 策略，见 docs/endpoint-model-v2.md）
+    // 端点框架（三层端点模型：节点 → 端点 → 策略，见 docs/framework-v3.md）
     // -----------------------------------------------------------------------
 
     /// 通告端点为可订阅（可见性 / delivery / 传输由公开者声明）。
@@ -56,8 +57,18 @@ impl Kernel {
     ///
     /// **活动共享联动**：该端点若正在被订阅观看，先停止共享并拆除会话
     /// （取消通告 = 不再共享，踢出当前订阅者）。
+    ///
+    /// 同步内核（无 await；保留 async 签名兼容既有调用方），契约
+    /// `ShareService::unpublish` 走 [`Kernel::unpublish_endpoint_inner`]。
     pub async fn unpublish_endpoint(&self, endpoint_id: EndpointId) -> Result<()> {
-        self.stop_endpoint_share(endpoint_id)?;
+        self.unpublish_endpoint_inner(endpoint_id)
+    }
+
+    /// 取消通告的同步内核（契约 `ShareService::unpublish` 委托）。
+    pub(crate) fn unpublish_endpoint_inner(&self, endpoint_id: EndpointId) -> Result<()> {
+        // P2e：生命周期收尾经契约 `ShareService::stop`（UFCS；自有方法
+        // stop_endpoint_share 已收敛为薄转发，壳层 GUI 仍经它调用）。
+        ShareService::stop(self, endpoint_id).map_err(Error::Message)?;
         self.registry.lock_poisoned().unpublish(endpoint_id)?;
         // 取消通告 → 立即刷新 mDNS 端点摘要（锁外）
         self.apply_discoverable();
@@ -65,7 +76,7 @@ impl Kernel {
     }
 
     /// 公开本地文件为文件端点（动态端点 `file:<名>`；本地路径登记但不出现在
-    /// 目录 / 摘要 / wire，见 docs/endpoint-model-v2.md §3）。
+    /// 目录 / 摘要 / wire，见 docs/framework-v3.md §3）。
     pub fn publish_file_endpoint(
         &self,
         path: &Path,
@@ -89,22 +100,10 @@ impl Kernel {
             .cloned()
     }
 
-    /// 订阅达成事件（协商层授予成功后调用）：触发端点 `share`（端点自驱动，
-    /// 内核不做类型分派）。
-    ///
-    /// share 在注册表锁**外**调用（端点实现会再次访问内核），持锁回调会死锁。
-    pub fn on_endpoint_subscribed(
-        &self,
-        app: Arc<Self>,
-        endpoint_id: EndpointId,
-        ctx: &SubscribeCtx,
-    ) {
-        // 严格出锁调用：提取端点 Arc 后立即释放注册表锁，防止端点实现重入内核引发死锁
-        let ep = self.registry.lock_poisoned().endpoint_arc(endpoint_id);
-        if let Some(ep) = ep {
-            ep.share(app, ctx.clone());
-        }
-    }
+    // 订阅达成事件自 v3 P2d 起经契约 `stross_share::ShareService::on_subscribed`
+    // 走通（登记 active_share + 委托注册表触发端点 share）；旧内核方法
+    // `on_endpoint_subscribed` 已删除——协商层 `notify_subscribed` 直调契约，
+    // 单一真源。
 
     /// 端点清单查询（订阅握手 / 目录 API 用）。
     pub fn endpoint_manifest(&self, endpoint_id: EndpointId) -> Option<EndpointManifest> {
@@ -128,7 +127,7 @@ impl Kernel {
     }
 
     // -----------------------------------------------------------------------
-    // 统一注册表（v2 三层：节点 → 端点 → 策略；docs/endpoint-model-v2.md §2）
+    // 统一注册表（v2 三层：节点 → 端点 → 策略；docs/framework-v3.md §2）
     // -----------------------------------------------------------------------
 
     /// 把目录响应（`GET /api/endpoints`）的互联节点映射进统一注册表
@@ -159,7 +158,7 @@ impl Kernel {
         self.registry.lock_poisoned().node_registrations()
     }
 
-    /// 订阅端点生成 + 委托（v2 订阅端，docs/endpoint-model-v2.md §3）：
+    /// 订阅端点生成 + 委托（v2 订阅端，docs/framework-v3.md §3）：
     /// 从注册表 `(节点, 端点, 策略)` 生成订阅端点并调其 `subscribe`——
     /// 与分享端 `share` 同构（端点自驱动，内核不分派）。订阅目标类型暂无
     /// 订阅端点宿主时返回错误（媒体播放由接收链路承担）。
@@ -179,20 +178,36 @@ impl Kernel {
                     EndpointId::new(spec.kind, spec.endpoint_id)
                 ))
             })?;
-        ep.subscribe(app, spec.clone());
+        let host: Arc<dyn SubscribeHost> = app.clone();
+        let runtime: Arc<dyn Runtime> = app;
+        ep.subscribe(host, runtime, spec.clone());
         Ok(())
     }
 
+    /// 注册订阅端点生成工厂（v3 §2.2 策略注册表模式）：按能力族扩展订阅端点
+    /// 宿主——新增端点类（Clipboard/Input/Service）注册工厂即扩展，不碰分派
+    /// 逻辑（委托 [`UnifiedRegistry::register_subscribe_factory`]）。
+    pub fn register_subscribe_factory(
+        &self,
+        class: stross_endpoint::EndpointClass,
+        factory: super::SubscribeEndpointFactory,
+    ) {
+        self.registry
+            .lock_poisoned()
+            .register_subscribe_factory(class, factory);
+    }
+
     // -----------------------------------------------------------------------
-    // 端点共享生命周期（iteration-plan.md 第十二轮）
+    // 端点共享生命周期（iteration-plan.md 第十二轮；P2e 迁 stross-share 契约）
     // -----------------------------------------------------------------------
 
-    /// 端点共享登记（媒体端点 `start_stream` 成功后由端点层回调，
-    /// 见 [`EndpointApp::note_share_active`]）：登记 + 状态置 Active +
+    /// 端点共享登记核心（契约 `ShareService::on_subscribed` 的登记段 + 测试模拟
+    /// 共用——P2e 归属 stross-share 生命周期；**非新门面方法**，P3 随契约面
+    /// 收敛可收紧为 `pub(crate)`）：登记 active_share + 状态置 Active +
     /// 启动"无观看者接入窗口"兜底检查（订阅者从未接入时停止）。
     pub fn note_share_active(
         &self,
-        self_weak: std::sync::Weak<dyn EndpointApp>,
+        self_weak: std::sync::Weak<Kernel>,
         endpoint_id: EndpointId,
         stream_id: &str,
         delivery: Delivery,
@@ -204,6 +219,9 @@ impl Kernel {
                 ActiveShare {
                     endpoint_id,
                     delivery,
+                    // 订阅者节点集投影真源在注册表（note_endpoint_subscribed
+                    // 维护）；契约 `ShareService::active` 读取时补全。
+                    subscriber_nodes: Vec::new(),
                 },
             );
         }
@@ -219,28 +237,24 @@ impl Kernel {
         tokio::spawn(async move {
             tokio::time::sleep(idle).await;
             if let Some(app) = self_weak.upgrade() {
-                app.stop_share_if_unwatched(&stream_id);
+                ShareService::reap_if_unwatched(&*app, &stream_id);
             }
         });
     }
 
-    /// 停止指定端点的活动共享（幂等：无活动共享时直接成功）。
+    /// **P2e→P3 薄转发**：契约 `ShareService::stop`（壳层 GUI
+    /// `endpoint_stop_share` 命令仍经本方法调用；P3 壳层迁移后改直调契约并
+    /// 删除本转发）。幂等：无活动共享时直接成功。
     pub fn stop_endpoint_share(&self, endpoint_id: EndpointId) -> Result<()> {
-        let sid = self
-            .active_shares
-            .lock_poisoned()
-            .iter()
-            .find_map(|(sid, s)| (s.endpoint_id == endpoint_id).then(|| sid.clone()));
-        let Some(sid) = sid else {
-            return Ok(()); // 无活动共享
-        };
-        self.stop_share_by_stream(&sid);
-        Ok(())
+        ShareService::stop(self, endpoint_id).map_err(Error::Message)
     }
 
     /// 按流停止端点共享：清登记 + 复位状态 + 优雅停流 + 拆除本机会话。
     /// （同步：停流仅取出引擎并 spawn 收尾，不在本路径 await。）
-    fn stop_share_by_stream(&self, stream_id: &Id) {
+    /// P2e：本方法是生命周期收尾公共核心（契约 `ShareService::stop` /
+    /// `reap_if_unwatched` 与本机数据面事件共用），`pub(crate)` 供同 crate
+    /// 契约实现文件调用。
+    pub(crate) fn stop_share_by_stream(&self, stream_id: &Id) {
         if let Some(endpoint_id) = self.reap_stream(stream_id) {
             tracing::info!("端点共享停止: {endpoint_id} (stream={stream_id})");
         }
@@ -276,17 +290,6 @@ impl Kernel {
         endpoint_id
     }
 
-    /// watchers 归零复查：仍无人观看才停（期间有新观众接入则放弃）。
-    pub(crate) fn stop_share_if_unwatched(&self, stream_id: &Id) {
-        let Some(dp) = self.data_plane.lock_poisoned().clone() else {
-            return;
-        };
-        // 流已消失（StreamEnded 路径清理）或有观众接入时不动
-        if let Some(0) = dp.stream_watchers(stream_id.as_str()) {
-            self.stop_share_by_stream(stream_id);
-        }
-    }
-
     /// 生命周期治理延迟（默认 stop 4s / idle 10s；测试与嵌入式调用方可按需收紧）。
     pub fn set_share_lifecycle_delays(
         &mut self,
@@ -310,13 +313,17 @@ impl Kernel {
     ///
     /// `remaining == 0` 时立即停止该端点共享（不再等数据面 watchers 断连
     /// 的延迟复查）——共享端端点状态在订阅终止瞬间收敛到已共享/待连接。
+    ///
+    /// P2e 归属：显式订阅者登记（`note_endpoint_subscribed`）与终止（本方法）
+    /// 是**契约方法之外的内部细节**（协商层 notify_subscribed / unsubscribe
+    /// 调用），保留为内核自有方法（trait 无对应签名）。
     pub fn note_endpoint_unsubscribed(&self, endpoint_id: EndpointId, node_id: NodeId) -> u32 {
         let remaining = self
             .registry
             .lock_poisoned()
             .note_unsubscriber(endpoint_id, node_id);
         if remaining == 0 {
-            let _ = self.stop_endpoint_share(endpoint_id);
+            let _ = ShareService::stop(self, endpoint_id);
         }
         remaining
     }

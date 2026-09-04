@@ -1,7 +1,7 @@
 //! 接收播放引擎（1e）：从局域网中继**接收并原生解码**。
 //!
 //! 链路：`watch`（WS / SRT / QUIC，按 relay URL scheme 选传输，见
-//! [`crate::watch::connect_watch`]）→ pick 规则解读模块（[`crate::pick`]）
+//! [`crate::watch::connect_watch`]）→ pick 规则解读模块（[`stross_pick`]）
 //! （1b）→ [`FfmpegPlaybackSink`] 解码（1c，D6）→ 解码帧通道交给上层
 //! （GUI 绘制 / 录制）。与发送侧对称，是"接收端有选择权"（F2.1）的实现基础。
 //!
@@ -13,10 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::SessionPacket;
-use crate::pick::manager::InterpretRegistry;
-use crate::pick::manager::channel_kind_for_url;
 use crate::relay::RelayState;
 use crate::watch;
+use stross_pick::InterpretRegistry;
+use stross_proto::message::StreamId;
 // 桌面解码播放路径（ffmpeg 子进程）；Android 走 `start_raw` 编码帧转发，
 // 由 Kotlin MediaCodec 解码（见 stross-gui `mobile::spawn_android_playback`）。
 use stross_endpoint::playback::RenderedFrame;
@@ -33,31 +33,9 @@ use crate::error::{Error, Result};
 
 use crate::lock::MutexExt;
 
-/// 接收统计（可观测、可测试）。
-#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReceiveStats {
-    /// 是否在接收中。
-    pub running: bool,
-    /// 收到的协议帧数。
-    pub received: u64,
-    /// 解码产出的视频帧数。
-    pub decoded_video: u64,
-    /// 解码产出的音频块数（playback `audio_blocks_out`；`audio_blocks_in` 见下）。
-    pub audio_blocks: u64,
-    /// 解码器收到的音频块数（对应 CLI `receive` 日志「音频块 out/in」的 in）。
-    pub audio_blocks_in: u64,
-    /// 帧通道满被丢弃的帧数（消费者慢）。
-    pub dropped: u64,
-    /// 调度层：过水位丢帧数（PTS 调度追平实时）。
-    pub paced_dropped: u64,
-    /// 调度层：大 PTS 跳变重置锚点次数（流切换 / 重连）。
-    pub paced_reanchors: u64,
-    /// 调度层：等待到 play 时刻后按时发出的帧数。
-    pub paced_held: u64,
-    /// 失败原因（连接失败 / 流不存在等）。
-    pub error: Option<String>,
-}
+/// 接收统计（§7.1 类型去重：单一真源在 [`stross_view::ReceiveStats`]，本文件
+/// 旧定义已删除——kernel 统一引用展示视图类型，壳层只读）。
+pub use stross_view::ReceiveStats;
 
 /// 「本机中继的代理能力：直连锚点失败时，经它级联拉流（跨网段/防火墙兜底）。
 ///
@@ -85,6 +63,20 @@ pub struct ReceiveLinkView {
     pub link_id: String,
     /// 该链路接收统计。
     pub stats: ReceiveStats,
+}
+
+/// 按 relay URL scheme 的传输可靠性契约分流（SRT = Adaptive → 有损路径进
+/// 抖动缓冲；WS/QUIC = Lossless → 直通零延迟）。推流端 `RelayClient` /
+/// 观看端 `connect_watch` 的同一 scheme 判断见 [`crate::transport::transport_for_url`]。
+///
+/// 本判断留在内核（stross-pick 依赖方向只有 proto，不依赖 transport）：
+/// 调用方自行计算 [`ChannelKind`](stross_pick::ChannelKind) 后传给
+/// stross-pick 的解读模块。
+fn channel_kind_for_url(relay_url: &str) -> stross_pick::ChannelKind {
+    match crate::transport::transport_for_url(relay_url).profile() {
+        stross_proto::message::ReliabilityProfile::Adaptive => stross_pick::ChannelKind::Lossy,
+        _ => stross_pick::ChannelKind::Lossless,
+    }
 }
 
 /// watch 主循环公共核心：连接（含级联兜底）→ 每帧经解读模块 →
@@ -140,6 +132,8 @@ async fn watch_consume_loop_connected<C, S>(
     // 通道按传输可靠性分流（B5）：SRT（Adaptive，ARQ 超时即丢/可能乱序）→
     // 有损路径进抖动缓冲；WS/QUIC（全序不丢）→ 直通。
     let channel_kind = channel_kind_for_url(relay_url);
+    // 强类型流 id（注册表键；热路径只转换一次）
+    let stream_key = StreamId::from(stream_id);
     // 统计低频同步（热路径只做帧转发；查询/锁每 100ms 一次）
     let mut last_sync = Instant::now();
     loop {
@@ -150,10 +144,10 @@ async fn watch_consume_loop_connected<C, S>(
             Ok(Some(SessionPacket::Media(frame))) => {
                 inner.received.fetch_add(1, Ordering::Relaxed);
                 // 单次借用通道：push + poll 共用一个 &mut（热路径）
-                let adapter = mgr.adapter(stream_id, pick_rule, channel_kind);
-                adapter.push(frame, Instant::now());
+                let adapter = mgr.adapter(&stream_key, pick_rule, channel_kind);
+                adapter.push(frame);
                 // 消息驱动：立即产出
-                for f in adapter.poll(Instant::now()) {
+                while let Some(f) = adapter.poll() {
                     consume(f);
                 }
             }

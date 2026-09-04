@@ -39,7 +39,7 @@ pub struct ServeArgs {
 }
 
 /// 数据目录解析（identity.json / trusted_devices.json 所在）：
-/// 单一真源收敛在 `stross_bridge::data_dir`（docs/layering-architecture.md）。
+/// 单一真源收敛在 `stross_bridge::data_dir`（docs/framework-v3.md）。
 fn base_dir(data_dir: Option<PathBuf>) -> PathBuf {
     stross_bridge::data_dir(data_dir)
 }
@@ -50,9 +50,9 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     app.set_backend(Arc::new(FfmpegBackend::new()));
     // 平台设备清单（桥接层单一来源：桌面 = 屏幕/麦克风/系统声音）
     seed_platform_endpoints(&app);
-    // 端点订阅驱动：订阅达成自动开推（文件泵 / 媒体推流），docs/endpoint-model-v2.md §4
+    // 端点订阅驱动：订阅达成自动开推（文件泵 / 媒体推流），docs/framework-v3.md §4
     // —— 已收敛为 bootstrap::start 的默认行为（幂等），此处无需再手动接线。
-    // 引导层（docs/endpoint-model-v2.md §4）：身份注入 → 锚定受控中继并广播
+    // 引导层（docs/framework-v3.md §4）：身份注入 → 锚定受控中继并广播
     // mDNS L1 摘要（节点 → 设备清单）→ 目录/订阅握手端点；
     // 与 GUI 桌面共用同一套启动原语（主机名经桥接层注入，内核零 OS 调用）。
     let base = base_dir(args.data_dir.clone());

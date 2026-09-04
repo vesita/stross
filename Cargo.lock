@@ -5437,7 +5437,7 @@ dependencies = [
  "stross-endpoint",
  "stross-kernel",
  "stross-proto",
- "stross-types",
+ "stross-view",
 ]
 
 [[package]]
@@ -5451,14 +5451,33 @@ dependencies = [
  "serde",
  "serde_json",
  "stross-bridge",
+ "stross-discovery",
  "stross-endpoint",
  "stross-kernel",
  "stross-proto",
- "stross-types",
+ "stross-view",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "stross-discovery"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "mdns",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "stross-node",
+ "stross-proto",
+ "stross-transport",
+ "stross-view",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5477,7 +5496,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stross-proto",
- "stross-types",
+ "stross-view",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -5495,9 +5514,11 @@ dependencies = [
  "serde",
  "serde_json",
  "stross-bridge",
+ "stross-discovery",
  "stross-endpoint",
  "stross-kernel",
  "stross-proto",
+ "stross-transport",
  "tauri",
  "tauri-build",
  "tokio",
@@ -5515,17 +5536,21 @@ dependencies = [
  "bytes",
  "fastrand",
  "futures-util",
- "mdns",
  "quinn",
  "reqwest",
  "serde",
  "serde_json",
  "smol_str",
  "str0m",
+ "stross-discovery",
  "stross-endpoint",
+ "stross-pick",
  "stross-proto",
+ "stross-serialize",
+ "stross-share",
+ "stross-subscribe",
  "stross-transport",
- "stross-types",
+ "stross-view",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -5534,6 +5559,21 @@ dependencies = [
  "tungstenite 0.30.0",
  "utoipa",
  "utoipa-swagger-ui",
+]
+
+[[package]]
+name = "stross-node"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "stross-proto",
+]
+
+[[package]]
+name = "stross-pick"
+version = "0.2.0"
+dependencies = [
+ "stross-proto",
 ]
 
 [[package]]
@@ -5562,6 +5602,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "stross-serialize"
+version = "0.2.0"
+dependencies = [
+ "stross-proto",
+]
+
+[[package]]
+name = "stross-share"
+version = "0.2.0"
+dependencies = [
+ "stross-endpoint",
+ "stross-proto",
+]
+
+[[package]]
+name = "stross-subscribe"
+version = "0.2.0"
+dependencies = [
+ "stross-endpoint",
+ "stross-proto",
+]
+
+[[package]]
 name = "stross-transport"
 version = "0.2.0"
 dependencies = [
@@ -5577,7 +5640,6 @@ dependencies = [
  "serde",
  "str0m",
  "stross-proto",
- "stross-types",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -5587,14 +5649,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "stross-types"
+name = "stross-view"
 version = "0.2.0"
 dependencies = [
- "anyhow",
- "async-trait",
  "serde",
  "stross-proto",
- "tracing",
+ "utoipa",
 ]
 
 [[package]]

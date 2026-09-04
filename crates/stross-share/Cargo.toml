@@ -1,0 +1,11 @@
+[package]
+name = "stross-share"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stross v3 概念 crate：共享（内容源侧编排契约）"
+authors.workspace = true
+
+[dependencies]
+stross-proto.workspace = true
+stross-endpoint.workspace = true

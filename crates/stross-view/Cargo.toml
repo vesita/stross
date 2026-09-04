@@ -1,0 +1,13 @@
+[package]
+name = "stross-view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stross v3 概念 crate：跨壳层展示视图与 DTO（内核产出、壳层只读）"
+authors.workspace = true
+
+[dependencies]
+stross-proto.workspace = true
+serde.workspace = true
+# OpenAPI 文档：DiscoveryResp 作 /api/discovery 的响应体（utoipa ToSchema derive）。
+utoipa.workspace = true

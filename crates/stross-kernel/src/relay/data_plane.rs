@@ -173,7 +173,7 @@ pub(super) fn spawn_accept_loop<L: AcceptLoop + 'static>(
 }
 
 // ---------------------------------------------------------------------------
-// QUIC 连接复用（通信模式 v2 Phase C，docs/comm-mode-v2.md §5）：
+// QUIC 连接复用（通信模式 v2 Phase C，docs/framework-v3.md §5）：
 // 一条 QUIC 连接 = 一条节点间链路，承载 N 条媒体流。
 // 链路级 peer 循环把 control OpenStream ↔ accept_bi 媒体流 FIFO 配对，
 // 维护 [quic_stream_id → (语义 stream_id, 方向)] demux 表；每条流独立

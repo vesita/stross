@@ -1,12 +1,15 @@
 //! 手机状态聚合 + 展示视图（经 adb forward 直通中继 HTTP；探测契约复用
-//! `stross_kernel::relay::client`，展示投影复用 `stross_kernel::discovery`）。
+//! `stross_kernel::relay::client`，展示投影复用 `stross_discovery`）。
 
 use std::time::Duration;
 
 use serde::Serialize;
+// P3 后清理：中继 HTTP 客户端（`relay::client`）是 kernel 内部服务，尚无
+// Kernel 门面等价方法；暂保留经 kernel 模块路径引用（类型 StreamInfo 真源
+// stross-proto、InfoResp 真源 kernel relay/dto）。
 use stross_kernel::relay::client as relay_http;
 
-use stross_kernel::discovery::StreamView;
+use stross_discovery::StreamView;
 
 use super::device::{adb_forward, adb_forward_remove, adb_sh, free_local_port, pick_device};
 
@@ -82,7 +85,7 @@ pub(crate) async fn phone_status(ports_arg: &str) -> anyhow::Result<PhoneStatus>
             status.quic_port = info.quic_port;
             // /api/streams（同一 forward 会话）
             if let Ok(list) = relay_http::streams("127.0.0.1", local_port, probe).await {
-                status.streams = stross_kernel::discovery::to_views(list);
+                status.streams = stross_discovery::to_views(list);
             }
         } else {
             // 该端口不是中继（或无 HTTP），清理后试下一个

@@ -1,7 +1,7 @@
 //! 本机主机名（平台适应：OS 调用收敛在桥接层）。
 //!
 //! 内核红线：零 OS 调用。mDNS 广播名 / 默认设备名等需要主机名的地方，
-//! 一律由壳层经这里取值后**注入**内核（`Discovery::start`、`ensure_identity`
+//! 一律由壳层经这里取值后**注入**内核（`MdnsDiscovery::start`、`ensure_identity`
 //! 等都接收 hostname 参数）。
 
 /// 本机主机名；失败时回退 `fallback`（调用方按用途给默认值）。
@@ -11,7 +11,7 @@ pub fn hostname_or(fallback: &str) -> String {
 
 /// 占位主机名判定（空 / `localhost` / `android`）：**单一真源在 stross-types**
 /// （桥接层与内核共用——内核不依赖本层，故上移到双方依赖的契约层）。
-pub use stross_types::hostname::is_placeholder as is_placeholder_hostname;
+pub use stross_view::hostname::is_placeholder as is_placeholder_hostname;
 
 #[cfg(target_os = "android")]
 fn android_device_model() -> Option<String> {

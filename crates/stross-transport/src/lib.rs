@@ -1,4 +1,4 @@
-//! # stross-transport —— 可插拔传输层（设计文档 docs/plugin-architecture.md §4）
+//! # stross-transport —— 可插拔传输层（设计文档 docs/framework-v3.md §4）
 //!
 //! 内核与上层只看到 [`Transport`] / [`DataSession`]，不关心具体线格式：
 //!
@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use stross_proto::frame::Frame;
-use stross_proto::message::{ControlMessage, ReliabilityProfile, TransportId};
+use stross_proto::message::{ControlMessage, ReliabilityProfile, StreamId, TransportId};
 use thiserror::Error;
 
 /// 传输统计数据（供内核事件 / 观看端 stats UI 使用）。
@@ -95,7 +95,8 @@ impl serde::Serialize for TransportStats {
 /// 会话建立参数。
 #[derive(Debug, Clone)]
 pub struct SessionParams {
-    pub session_id: String,
+    /// 数据面流 id（强类型；v3 不再用裸字符串）。
+    pub session_id: StreamId,
     pub profile: ReliabilityProfile,
 }
 

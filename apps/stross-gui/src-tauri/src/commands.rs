@@ -1,5 +1,5 @@
 //! GUI 命令面（Tauri `invoke` 薄命令层）——**桥**：前端 JS 不直接当协议
-//! 客户端，一律经这里调 `stross_app` 库接口（docs/layering-architecture.md）。
+//! 客户端，一律经这里调 `stross_app` 库接口（docs/framework-v3.md）。
 //!
 //! 与原桌面/Android 共用同一命令面；命令只做参数转译 + 错误 -> String，
 //! 逻辑全部在库层（`Kernel` / `subscriber` / `devices` 等）。
@@ -168,8 +168,8 @@ pub async fn start_relay(
 // 桥接：局域网扫描 / 目录 / 订阅 / 凭证申请（前端不再自写协议客户端）
 // ---------------------------------------------------------------------------
 
-/// 全量扫描局域网设备（与 CLI `stross devices` 同源
-/// `stross_kernel::discovery::scan_lan`：mDNS 浏览 + HTTP 探测聚合 + 手动地址
+/// 全量扫描局域网设备（与 CLI `stross nodes` 同源
+/// `stross_discovery::scan_lan`：mDNS 浏览 + HTTP 探测聚合 + 手动地址
 /// 并入全在库层）。返回含在线共享 / SRT / QUIC 的完整视图，
 /// 前端每轮刷新只需调它，不再自行 fetch `/api/info` `/api/streams`。
 ///
@@ -179,10 +179,10 @@ pub async fn scan_nodes(
     probe_ms: u64,
     timeout_ms: Option<u64>,
     extra_base_urls: Vec<String>,
-) -> Result<Vec<stross_kernel::discovery::ScannedNode>, String> {
+) -> Result<Vec<stross_discovery::ScannedNode>, String> {
     let browse = std::time::Duration::from_millis(timeout_ms.unwrap_or(2000));
     let probe = std::time::Duration::from_millis(probe_ms);
-    stross_kernel::discovery::scan_lan(browse, probe, extra_base_urls)
+    stross_discovery::scan_lan(browse, probe, extra_base_urls)
         .await
         .map_err(|e| format!("局域网扫描失败: {e}"))
 }
@@ -190,7 +190,8 @@ pub async fn scan_nodes(
 /// 手动地址可达性探测（`/api/streams` 是受控/普通中继都提供的只读端点；
 /// 供「手动添加设备」校验地址用）。探测逻辑收敛在
 /// `stross_kernel::relay::client::probe_base`（壳层不再手写 `/api/*` 客户端，
-/// docs/layering-architecture.md 红线）。
+/// docs/framework-v3.md 红线）。P3 后清理：尚无 Kernel 门面等价方法，
+/// 暂保留经 kernel 模块路径引用。
 #[tauri::command]
 pub async fn probe_relay(base: String) -> bool {
     stross_kernel::relay::client::probe_base(&base, std::time::Duration::from_secs(3)).await
@@ -308,7 +309,7 @@ pub async fn endpoint_subscribe_media(
 /// 应答凭证协商请求（电脑端授权确认弹窗操作后调用）。
 ///
 /// **必须 async**：`respond()` 会触发端点 `share()` → `spawn_media_share` 内部
-/// `tokio::spawn`，需要 Tokio runtime 上下文（Rust 核心契约，docs/endpoint-model-v2.md §4 联动）。
+/// `tokio::spawn`，需要 Tokio runtime 上下文（Rust 核心契约，docs/framework-v3.md §4 联动）。
 /// 同步 `tauri::command` 在 GTK 主线程执行、无 reactor，会 panic
 /// 「there is no reactor running」；async 命令跑在 tokio runtime 上。
 #[tauri::command]
@@ -373,7 +374,7 @@ pub async fn firewall_status(
         ));
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let ips = stross_kernel::net::local_ips();
+    let ips = stross_transport::net::local_ips();
     let subnet = crate::firewall::lan_subnet(&ips);
     let mut status = crate::firewall::parse_ufw_verbose(&text);
     let (tcp, udp) = required_firewall_ports(&state);
@@ -403,7 +404,7 @@ pub async fn firewall_status(
 #[cfg(all(not(mobile), target_os = "linux"))]
 #[tauri::command]
 pub async fn firewall_allow(state: State<'_, Arc<Kernel>>) -> Result<(), String> {
-    let ips = stross_kernel::net::local_ips();
+    let ips = stross_transport::net::local_ips();
     let subnet = crate::firewall::lan_subnet(&ips)
         .ok_or_else(|| "未找到局域网 IPv4 地址，无法生成放行规则（请先连接网络）".to_string())?;
     // 只放行当前确实缺失的端口

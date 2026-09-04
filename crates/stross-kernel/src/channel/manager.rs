@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, broadcast};
 
 use stross_proto::message::{MsgId, TransferId};
 use stross_transport::{DataSession, Transport};
-use stross_types::channel::{ChannelEvent, ChannelStatus};
+use stross_view::channel::{ChannelEvent, ChannelStatus};
 
 use crate::channel::session::ChannelSession;
 use crate::kernel::id::Id;
@@ -100,7 +100,7 @@ impl ChannelManager {
             addr: url,
         };
         let params = stross_transport::SessionParams {
-            session_id: format!("chan-{self_id}-{peer_id}"),
+            session_id: stross_proto::message::StreamId::new(format!("chan-{self_id}-{peer_id}")),
             profile: stross_proto::message::ReliabilityProfile::Lossless,
         };
 

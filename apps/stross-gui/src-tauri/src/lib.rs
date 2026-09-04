@@ -10,7 +10,7 @@
 //! 平台差异（ffmpeg 桌面采集 vs Android 原生采集）被隔离在采集后端里：
 //! 桌面用 [`stross_endpoint::capture::FfmpegBackend`]，Android 用 `mobile::AndroidCapture`。
 //!
-//! 模块划分（docs/layering-architecture.md：命令层只做参数转译 + 展示粘合）：
+//! 模块划分（docs/framework-v3.md：命令层只做参数转译 + 展示粘合）：
 //! * [`commands`]：命令面（含桥接命令：扫描 / 目录 / 订阅 / 凭证申请）
 //! * [`receive`]：接收播放域命令（帧缩放 / base64 / 事件转发）
 //! * [`firewall`]：防火墙自动放行（仅 Linux 桌面）
@@ -150,7 +150,7 @@ pub fn run() {
                         app: app_handle.clone(),
                     };
                     let app_state = app_handle.state::<Arc<Kernel>>().inner().clone();
-                    // 引导层（docs/endpoint-model-v2.md §4）：目录（L2）与订阅握手端点
+                    // 引导层（docs/framework-v3.md §4）：目录（L2）与订阅握手端点
                     match stross_kernel::bootstrap::start_handshake(app_state, Arc::new(ui), &base)
                         .await
                     {

@@ -1,6 +1,6 @@
 //! 协商端点（18779）的**客户端**（订阅握手 / 申请凭证）。
 //!
-//! 分层（docs/layering-architecture.md）：协商端点的服务端在
+//! 分层（docs/framework-v3.md）：协商端点的服务端在
 //! [`crate::negotiator`]（stross-app 拥有该 API），客户端据此收敛同层的
 //! `request_grant`——CLI 订阅（`subscriber.rs`）、GUI 命令（`request_share_token`）、
 //! 未来任何订阅方都从这里走，禁止壳层再手写 HTTP 握手。

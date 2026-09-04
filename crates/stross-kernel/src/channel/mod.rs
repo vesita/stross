@@ -11,4 +11,4 @@ pub mod session;
 pub use manager::ChannelManager;
 pub use session::ChannelSession;
 pub use stross_proto::message::{MsgId, TransferId};
-pub use stross_types::channel::{ChannelEvent, ChannelStatus};
+pub use stross_view::channel::{ChannelEvent, ChannelStatus};

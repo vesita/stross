@@ -1,4 +1,4 @@
-//! 音频分享端点（Audio 能力族，docs/endpoint-model-v2.md §3）：麦克风 /
+//! 音频分享端点（Audio 能力族，docs/framework-v3.md §3）：麦克风 /
 //! 系统声音。
 //!
 //! load 探测音频采集可用性（ffmpeg 依赖，probe 由平台注入）；

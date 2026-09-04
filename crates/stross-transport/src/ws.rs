@@ -5,7 +5,7 @@
 //!
 //! 传输层不依赖任何 HTTP 框架：服务端 socket 由调用方（HTTP 层，如
 //! `stross-core::relay::http`）把已升级的连接适配成 [`WsIo`] 传入，
-//! axum 类型只存在于调用方（docs/layering-architecture.md：core 拥有
+//! axum 类型只存在于调用方（docs/framework-v3.md：core 拥有
 //! 中继 HTTP API，transport 只描述传输）。
 //!
 //! 控制消息走文本帧（JSON），媒体帧走二进制帧（帧头 + 载荷），与现有

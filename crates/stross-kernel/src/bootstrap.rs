@@ -1,4 +1,4 @@
-//! 引导层（docs/endpoint-model-v2.md §4）：节点间「链接建立」的编排门面。
+//! 引导层（docs/framework-v3.md §4）：节点间「链接建立」的编排门面。
 //!
 //! 框架语义（程序负责相互发现，**引导模块负责引导链接建立**）：
 //!
@@ -10,7 +10,7 @@
 //!    `POST /api/negotiator/request`（订阅握手，见 [`ShareNegotiator`]）。
 //!
 //! 数据面与传输（SRT/QUIC/WS/WebRTC）**不在此层**；端点传输协议由公开者
-//! 在 [`EndpointManifest`] 里声明（docs/endpoint-model-v2.md）。
+//! 在 [`EndpointManifest`] 里声明（docs/framework-v3.md）。
 //!
 //! CLI serve 与 GUI 桌面共用这套启动原语：CLI 用完整组合 [`start`]；
 //! GUI 桌面按自身生命周期分步（setup 只起目录/握手，锚定由前端触发，
@@ -81,7 +81,7 @@ pub async fn anchor(
 
 /// 第 3 步（目录 + 订阅握手）：启动协商端点（LAN 可达，CORS 放行）。
 ///
-/// 订阅联动由端点**自驱动**（`share` 契约，docs/endpoint-model-v2.md §3）——
+/// 订阅联动由端点**自驱动**（`share` 契约，docs/framework-v3.md §3）——
 /// 协商层授予成功后直接调用端点 share，无需壳层接线（曾需安装订阅驱动，
 /// GUI 漏装导致"订阅了不推流"；契约化后行为天然一致）。
 ///

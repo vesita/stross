@@ -10,6 +10,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use axum::Router;
@@ -19,14 +20,15 @@ use axum::response::Response;
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
 use stross_endpoint::pipeline::StreamConfig;
-use stross_proto::message::{Delivery, EndpointId, TransportPreference, Visibility};
+use stross_proto::message::{Delivery, EndpointId, StreamId, TransportPreference, Visibility};
 
 use crate::Kernel;
 use crate::SessionPrefs;
+use crate::error::Result;
 use crate::negotiator::ShareNegotiator;
 
-/// 控制面默认端口（回环）；真源在 [`stross_types::ports`]，此处仅别名保持路径兼容。
-pub use stross_types::ports::CTRL as DEFAULT_CTRL_PORT;
+/// 控制面默认端口（回环）；真源在 [`stross_view::ports`]，此处仅别名保持路径兼容。
+pub use stross_view::ports::CTRL as DEFAULT_CTRL_PORT;
 
 /// 接入凭证默认有效期（秒，5 分钟）。
 const fn default_token_ttl() -> u64 {
@@ -75,7 +77,7 @@ pub enum CtrlRequest {
         #[serde(default)]
         remember: bool,
     },
-    /// 公开端点（端点框架，docs/endpoint-model-v2.md §2；P1 1:1）。
+    /// 公开端点（端点框架，docs/framework-v3.md §2；P1 1:1）。
     EndpointPublish {
         endpoint_id: EndpointId,
         visibility: Visibility,
@@ -117,7 +119,7 @@ impl CtrlResponse {
     }
 
     /// 把类型化载荷序列化为 `Ok` 响应——wire 键由 serde 派生（单一真源），
-    /// 不再手写 JSON 字符串键（docs/layering-architecture.md：壳层只消费
+    /// 不再手写 JSON 字符串键（docs/framework-v3.md：壳层只消费
     /// 内核产出的类型，不自行定义响应结构）。
     fn ok_json<T: Serialize>(payload: T) -> Self {
         match serde_json::to_value(payload) {
@@ -213,6 +215,17 @@ async fn handle_client(mut ws: WebSocket, state: Arc<CtrlState>) {
     }
 }
 
+/// 会话鉴权：校验访问码（[`crate::kernel::AuthPolicy`]）+ 标记已授权。
+///
+/// v3 P3 方法面收敛：Kernel 门面无 `authorize`，控制面命令直连内部状态
+/// （`auth` 策略表 + 会话表 `mark_authorized`，与旧 `Kernel::authorize`
+/// 完全相同的两步，对外语义不变）。
+fn authorize_session(app: &Kernel, session_id: &str, access_code: Option<&str>) -> Result<()> {
+    app.auth.authorize(session_id, access_code)?;
+    app.sessions
+        .mark_authorized(&crate::kernel::id::Id::from(session_id))
+}
+
 async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
     let app = &state.app;
     let req: CtrlRequest = match serde_json::from_str(text) {
@@ -224,7 +237,7 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             let Some(neg) = &state.negotiator else {
                 return CtrlResponse::err("凭证协商服务未启动（serve 未启用协商端点）");
             };
-            CtrlResponse::ok_json(stross_types::PendingRequestsPayload {
+            CtrlResponse::ok_json(stross_view::PendingRequestsPayload {
                 pending: neg.pending_requests(),
             })
         }
@@ -237,14 +250,14 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
                 return CtrlResponse::err("凭证协商服务未启动（serve 未启用协商端点）");
             };
             match neg.respond(&req_id, allow, remember) {
-                Ok(Some(grant)) => CtrlResponse::ok_json(stross_types::GrantResponseView {
+                Ok(Some(grant)) => CtrlResponse::ok_json(stross_view::GrantResponseView {
                     stream_id: Some(grant.view.stream_id),
                     pin: Some(grant.view.pin),
                     expires_at: Some(grant.view.expires_at),
                     trusted: grant.trusted,
                     denied: false,
                 }),
-                Ok(None) => CtrlResponse::ok_json(stross_types::GrantResponseView {
+                Ok(None) => CtrlResponse::ok_json(stross_view::GrantResponseView {
                     stream_id: None,
                     pin: None,
                     expires_at: None,
@@ -271,7 +284,7 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
         } => match app.publish_file_endpoint(std::path::Path::new(&path), visibility, delivery) {
             Ok(m) => {
                 let endpoint_id = EndpointId::new(m.kind, m.endpoint_id);
-                CtrlResponse::ok_json(stross_types::FilePublishedView {
+                CtrlResponse::ok_json(stross_view::FilePublishedView {
                     size: app.file_source(endpoint_id).map_or(0, |s| s.size),
                     endpoint_id,
                     name: m.name,
@@ -285,7 +298,7 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
                 return CtrlResponse::err(format!("非法端点标识: {endpoint_id}"));
             };
             match app.unpublish_endpoint(endpoint_id).await {
-                Ok(()) => CtrlResponse::ok_json(stross_types::UnpublishedView {
+                Ok(()) => CtrlResponse::ok_json(stross_view::UnpublishedView {
                     endpoint_id,
                     unpublished: true,
                 }),
@@ -294,19 +307,25 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
         }
         CtrlRequest::EndpointList => {
             // 单层端点模型：一张端点表（含未通告），published/available 自标注
-            CtrlResponse::ok_json(stross_types::EndpointListPayload {
+            CtrlResponse::ok_json(stross_view::EndpointListPayload {
                 endpoints: app.endpoint_catalog(),
             })
         }
         CtrlRequest::CreateSession { title, sinks } => {
             // 源节点固定为本机（register_local_node 注册的 "local"）；
-            // title 随会话存储（UI 展示），不再是死字段
+            // title 随会话存储（UI 展示），不再是死字段。
+            // v3 P3 方法面收敛：Kernel 门面无 `create_session`，命令处理逻辑
+            // 下沉到控制面内部（id 签发 + 共享构建核心 `build_session` 直连）。
             let prefs = SessionPrefs {
                 title,
                 ..Default::default()
             };
-            match app.create_session("local", &sinks, &prefs) {
-                Ok(s) => CtrlResponse::ok_json(stross_types::SessionCreatedView {
+            let id = StreamId::new(format!(
+                "sess-{:x}",
+                app.next_id.fetch_add(1, Ordering::Relaxed)
+            ));
+            match app.build_session(id, "local", &sinks, &prefs) {
+                Ok(s) => CtrlResponse::ok_json(stross_view::SessionCreatedView {
                     session_id: s.id,
                     title: s.title,
                 }),
@@ -316,15 +335,15 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
         CtrlRequest::Authorize {
             session_id,
             access_code,
-        } => match app.authorize(&session_id, access_code.as_deref()) {
-            Ok(()) => CtrlResponse::ok_json(stross_types::AuthorizedView {
+        } => match authorize_session(app, &session_id, access_code.as_deref()) {
+            Ok(()) => CtrlResponse::ok_json(stross_view::AuthorizedView {
                 session_id: session_id.into(),
                 authorized: true,
             }),
             Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::Teardown { session_id } => match app.teardown(&session_id) {
-            Ok(()) => CtrlResponse::ok_json(stross_types::TeardownView {
+            Ok(()) => CtrlResponse::ok_json(stross_view::TeardownView {
                 session_id: session_id.into(),
             }),
             Err(e) => CtrlResponse::err(e.to_user_string()),
@@ -346,7 +365,7 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
                 media,
                 std::time::Duration::from_secs(ttl_secs),
             ) {
-                Ok(token) => CtrlResponse::ok_json(stross_types::IssuedShareTokenView {
+                Ok(token) => CtrlResponse::ok_json(stross_view::IssuedShareTokenView {
                     token: token.to_token_string(),
                     stream_id: token.stream_id,
                     pin: token.pin,
@@ -357,28 +376,28 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             }
         }
         CtrlRequest::StopStream => match app.stop_stream().await {
-            Ok(()) => CtrlResponse::ok_json(stross_types::StoppedView { stopped: true }),
+            Ok(()) => CtrlResponse::ok_json(stross_view::StoppedView { stopped: true }),
             Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::ListSessions => {
-            let sessions: Vec<stross_types::SessionView> = app
+            let sessions: Vec<stross_view::SessionView> = app
                 .sessions()
                 .iter()
-                .map(|s| stross_types::SessionView {
+                .map(|s| stross_view::SessionView {
                     session_id: s.id.clone(),
                     source: s.source.clone(),
                     sinks: s.sinks.clone(),
                     requires_pin: s.requires_pin,
                 })
                 .collect();
-            CtrlResponse::ok_json(stross_types::SessionsPayload { sessions })
+            CtrlResponse::ok_json(stross_view::SessionsPayload { sessions })
         }
         CtrlRequest::Status => {
             let status = app.stream_status();
             let (ws_port, srt_port, quic_port) =
                 app.relay_ports()
                     .unwrap_or((app.stream_relay_port(), None, None));
-            CtrlResponse::ok_json(stross_types::StatusView {
+            CtrlResponse::ok_json(stross_view::StatusView {
                 version: env!("CARGO_PKG_VERSION").into(),
                 platform: app.platform_str().to_string(),
                 uptime_secs: app.uptime_secs(),
@@ -397,7 +416,7 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
 
 /// 控制面客户端（回环 WS）：请求/响应信封解析与事件流订阅**收敛在此**，
 /// 壳层（CLI `ctrl`）不再手写 WS 客户端与 JSON `Value` 信封断言
-/// （docs/layering-architecture.md：控制面协议契约与 [`CtrlServer`] 同层，
+/// （docs/framework-v3.md：控制面协议契约与 [`CtrlServer`] 同层，
 /// 壳层只做参数解析 + 展示）。
 pub mod client {
     use std::time::Duration;

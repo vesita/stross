@@ -1,10 +1,10 @@
-//! 内核 id 模块：统一从 [`stross_types::id`] 接入强类型 ID 单一真源。
+//! 内核 id 模块：统一从 [`stross_view::id`] 接入强类型 ID 单一真源。
 //!
 //! **代码规范铁律**：严禁直接使用裸 `String` / `&str` 作 key 或 id。
 //! 全仓一律采用强类型新类型 / 枚举：[`NodeId`], [`StreamId`], [`StreamKey`],
 //! [`LinkId`], [`EndpointId`], [`StrategyId`], [`TransferId`], [`MsgId`]。
 
-pub use stross_types::id::*;
+pub use stross_view::id::*;
 
 /// 内核会话/流标识向后兼容别名（已收敛至强类型 [`StreamId`]）。
 pub type Id = StreamId;

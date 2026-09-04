@@ -1,0 +1,11 @@
+[package]
+name = "stross-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stross v3 概念 crate：节点（网络拓扑主体）契约 + 视图"
+authors.workspace = true
+
+[dependencies]
+stross-proto.workspace = true
+serde.workspace = true

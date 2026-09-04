@@ -6,7 +6,7 @@
 //! 错误体统一 [`ApiError`]。
 
 use stross_proto::message::MediaKind;
-use stross_types::id::NodeId;
+use stross_view::id::NodeId;
 use utoipa::ToSchema;
 
 pub use stross_proto::message::{RelayAddr, ShareGrant, ShareRequest, ShareTokenView};

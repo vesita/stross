@@ -1,0 +1,10 @@
+[package]
+name = "stross-serialize"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stross v3 概念 crate：序列化协议（Loader/Unloader 契约）"
+authors.workspace = true
+
+[dependencies]
+stross-proto.workspace = true

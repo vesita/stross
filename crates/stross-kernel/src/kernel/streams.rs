@@ -1,10 +1,13 @@
 //! 内核推流域（`impl Kernel`）：推流引擎 / 采集状态 / 并发流管理。
 //!
-//! docs/layering-architecture.md：`Kernel` 单一门面；本文件承载「推流」
+//! docs/framework-v3.md：`Kernel` 单一门面；本文件承载「推流」
 //! 一域的实现，方法与公共 API 不变。
 
+use std::sync::atomic::Ordering;
+
 use stross_endpoint::pipeline::StreamConfig;
-use stross_types::{CaptureStatusView, StartResult, StreamStatus};
+use stross_proto::message::StreamId;
+use stross_view::{CaptureStatusView, StartResult, StreamStatus};
 
 use crate::engine::SenderEngine;
 use crate::error::Result;
@@ -105,7 +108,14 @@ impl Kernel {
             "stream_id {} 未关联内核会话，自动创建本机会话",
             cfg.stream_id
         );
-        let session = self.create_session(
+        // v3 P3 方法面收敛：推流域直连共享构建核心（id 签发 + build_session，
+        // 与旧 `Kernel::create_session` 语义一致——受控中继只接受内核会话 id）。
+        let id = StreamId::new(format!(
+            "sess-{:x}",
+            self.next_id.fetch_add(1, Ordering::Relaxed)
+        ));
+        let session = self.build_session(
+            id,
             "local",
             &["local".into()],
             &SessionPrefs {

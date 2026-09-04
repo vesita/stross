@@ -2,10 +2,16 @@
 resolver = "3"
 members = [
     "crates/stross-proto",
-    "crates/stross-types",
-    "crates/stross-transport",
-    "crates/stross-kernel",
+    "crates/stross-node",
     "crates/stross-endpoint",
+    "crates/stross-share",
+    "crates/stross-subscribe",
+    "crates/stross-transport",
+    "crates/stross-serialize",
+    "crates/stross-pick",
+    "crates/stross-discovery",
+    "crates/stross-view",
+    "crates/stross-kernel",
     "crates/stross-bridge",
     "apps/stross-relay",
     "apps/stross-cli",
@@ -88,10 +94,16 @@ utoipa-swagger-ui = "9"
 # （需要开启 feature 的成员可写 `xxx = { workspace = true, features = [...] }`）。
 # ---------------------------------------------------------------------------
 stross-proto = { path = "crates/stross-proto", version = "0.2.0" }
-stross-types = { path = "crates/stross-types", version = "0.2.0" }
-stross-transport = { path = "crates/stross-transport", version = "0.2.0" }
-stross-kernel = { path = "crates/stross-kernel", version = "0.2.0" }
+stross-node = { path = "crates/stross-node", version = "0.2.0" }
 stross-endpoint = { path = "crates/stross-endpoint", version = "0.2.0" }
+stross-share = { path = "crates/stross-share", version = "0.2.0" }
+stross-subscribe = { path = "crates/stross-subscribe", version = "0.2.0" }
+stross-transport = { path = "crates/stross-transport", version = "0.2.0" }
+stross-serialize = { path = "crates/stross-serialize", version = "0.2.0" }
+stross-pick = { path = "crates/stross-pick", version = "0.2.0" }
+stross-discovery = { path = "crates/stross-discovery", version = "0.2.0" }
+stross-view = { path = "crates/stross-view", version = "0.2.0" }
+stross-kernel = { path = "crates/stross-kernel", version = "0.2.0" }
 stross-bridge = { path = "crates/stross-bridge", version = "0.2.0" }
 
 # mDNS 服务发现：fork 自 mdns-sd 0.21（crates/mdns），本地维护以修跨设备

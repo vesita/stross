@@ -1,14 +1,13 @@
 //! `stross nodes`：扫描局域网节点（PC + 手机），展示节点能力与在线共享状态。
 //!
-//! 分层（docs/layering-architecture.md）：**聚合与探测收敛在
-//! `stross_kernel::discovery::scan_lan`**（内核层，CLI 与 GUI 共用）；本文件只做
+//! 分层（docs/framework-v3.md）：**聚合与探测收敛在
+//! `stross_discovery::scan_lan`**（发现概念 crate，CLI 与 GUI 共用）；本文件只做
 //! **参数解析 + 中文标签 + 展示**。
 
 use std::time::Duration;
 
 use clap::Args;
-use stross_kernel::discovery::BROWSE_TIMEOUT;
-use stross_kernel::discovery::ScannedNode;
+use stross_discovery::{BROWSE_TIMEOUT, ScannedNode};
 use stross_proto::message::{MediaKind, RoleId};
 
 #[derive(Args, Debug)]
@@ -27,7 +26,7 @@ pub struct NodesArgs {
 pub async fn run(args: NodesArgs) -> anyhow::Result<()> {
     let browse = Duration::from_secs(args.timeout);
     let probe = Duration::from_millis(args.probe_ms);
-    let nodes = stross_kernel::discovery::scan_lan(browse, probe, Vec::new()).await?;
+    let nodes = stross_discovery::scan_lan(browse, probe, Vec::new()).await?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&nodes)?);
@@ -171,7 +170,7 @@ fn media_label(m: &MediaKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stross_kernel::discovery::StreamView;
+    use stross_discovery::StreamView;
     use stross_proto::StreamId;
 
     #[test]

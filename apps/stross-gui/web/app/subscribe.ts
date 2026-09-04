@@ -57,7 +57,7 @@ function currentRelay(): TargetRelay | null {
 /** 按流媒体类型自动选传输：统一无损优先（QUIC > WS）。视频是帧粒度 H.264，
  *  有损路径（SRT）丢一帧即撕裂整个 GOP → 花屏直到下一关键帧（最长 2s），
  *  因此默认不走 SRT（SRT 仅显式 `--relay srt://` 场景用）。 */
-function autoRelayUrl(stream: RemoteStream | null): string {
+function autoRelayUrl(): string {
   const r = currentRelay();
   if (!r) return '';
   if (r.quicUrl) return r.quicUrl;
@@ -201,8 +201,7 @@ async function startReceiveLink(opts: {
 }): Promise<boolean> {
   hideRecvError();
   const linkId = linkIdOf(opts.host, opts.endpointId);
-  const stream = remoteStreams.get(opts.streamId) || null;
-  const relay = autoRelayUrl(stream);
+  const relay = autoRelayUrl();
   if (!relay) {
     showRecvError('无可用接收目标（本机锚点未就绪）');
     return false;
@@ -408,7 +407,6 @@ function calcSmartLayout(): void {
   if (aiBar) aiBar.classList.toggle('hidden', !receiving);
   if (!receiving) return;
 
-  const totalLinks = recvLinks.size;
   const activeVideo = activeVideoLink ? recvLinks.get(activeVideoLink) : null;
   const hasVideo = !!activeVideo && ((activeVideo.frames ?? 0) > 0 || (activeVideo.decodedVideo ?? 0) > 0);
   const audioCount = Array.from(recvLinks.values()).filter((l) => l.audioBlocks > 0 || l.name.includes('声音') || l.name.includes('麦克风')).length;

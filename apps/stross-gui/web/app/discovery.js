@@ -226,8 +226,6 @@ async function refreshDevices(force = false) {
                 });
             }
         });
-        // 填充流类型缓存（订阅握手后的 start_receive 按 video/audio 选传输）
-        cards.forEach((c) => c.streams.forEach((s) => remoteStreams.set(s.streamId, s)));
         // 保留已展开状态；本机卡片由渲染器恒置首位
         const keepExpanded = expandedDevice;
         const before = deviceListSignature();

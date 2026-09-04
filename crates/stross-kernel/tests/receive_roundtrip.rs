@@ -213,7 +213,7 @@ async fn concurrent_streams_both_start() {
 }
 
 /// 媒体订阅端点（Graph/Audio 类统一订阅端，播放器入端点）的接收执行：
-/// `EndpointApp::receive_media` 连公开方中继收流、按订阅规格 pick 规则解读并
+/// `MediaHost::receive_media` 连公开方中继收流、按订阅规格 pick 规则解读并
 /// 解码，阻塞到流结束返回解码帧数（>0 = 播放器入端点的数据链路打通）。
 #[tokio::test]
 async fn receive_media_decodes_subscribe_spec_stream() {
@@ -221,7 +221,7 @@ async fn receive_media_decodes_subscribe_spec_stream() {
         eprintln!("跳过：未找到 ffmpeg");
         return;
     }
-    use stross_endpoint::contract::EndpointApp;
+    use stross_endpoint::contract::MediaHost;
     use stross_proto::message::{EndpointStrategy, PickRule, SubscribeSpec};
 
     let app = Arc::new(Kernel::new(Platform::Desktop));
@@ -245,7 +245,7 @@ async fn receive_media_decodes_subscribe_spec_stream() {
         relay_url: Some(relay_ws),
     };
     // 媒体订阅端点执行：阻塞到流结束 → 返回解码帧数
-    let frames = EndpointApp::receive_media(app.as_ref(), &spec)
+    let frames = MediaHost::receive_media(app.as_ref(), &spec)
         .await
         .expect("媒体订阅端点接收应成功");
     assert!(frames > 0, "播放器入端点应解码出视频帧（实收 {frames}）");

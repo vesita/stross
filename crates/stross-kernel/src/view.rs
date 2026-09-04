@@ -7,9 +7,9 @@
 //!
 //! 新代码请优先引用 `stross_types`（或顶层重导出 `stross_kernel::XxxView`）。
 
-use stross_proto::message::{EndpointSummary, RoleId, TransportId};
+use stross_proto::message::EndpointSummary;
 
-pub use stross_types::*;
+pub use stross_view::*;
 
 /// 本机中继入口视图（含多网卡全部局域网 IP）。
 ///

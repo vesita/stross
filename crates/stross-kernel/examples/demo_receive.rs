@@ -10,7 +10,7 @@
 //! #        -i <输出目录>/frame_%04d.rgba <输出目录>/out.mp4
 //! ```
 //!
-//! 链路：`/ws/watch?stream=`（WS，全序不丢）→ pick 规则解读模块（[`crate::pick`]）
+//! 链路：`/ws/watch?stream=`（WS，全序不丢）→ pick 规则解读模块（[`stross_pick`]）
 //! 无损通道（1b）→ [`FfmpegPlaybackSink`] 解码（1c）→ RGBA 帧落盘；
 //! 音频轨解码但丢弃（`AudioOut::Discard`，统计块数证明解码链路）。
 
@@ -21,9 +21,9 @@ use futures_util::StreamExt;
 use stross_endpoint::playback::{
     AudioOut, AudioOutSpec, FfmpegPlaybackSink, PlaybackConfig, PlaybackSink, VideoOut,
 };
-use stross_kernel::pick::manager::{ChannelKind, InterpretRegistry};
+use stross_pick::{ChannelKind, InterpretRegistry};
 use stross_proto::frame::Frame;
-use stross_proto::message::{ControlMessage, PickRule};
+use stross_proto::message::{ControlMessage, PickRule, StreamId};
 use tokio_tungstenite::connect_async;
 
 #[tokio::main]
@@ -78,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 无损通道（WS 全序不丢）：收帧 → 通道缓存 → 轮询产出 → 播放
     let mut mgr = InterpretRegistry::default();
+    let sid = StreamId::from(stream_id.as_str());
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let mut received = 0u64;
     while Instant::now() < deadline {
@@ -98,12 +99,8 @@ async fn main() -> anyhow::Result<()> {
                         let data = m.into_data();
                         if let Ok(frame) = Frame::from_bytes(&data) {
                             received += 1;
-                            mgr.adapter(
-                                &stream_id,
-                                PickRule::Realtime,
-                                ChannelKind::Lossless,
-                            )
-                            .push(frame, Instant::now());
+                            mgr.adapter(&sid, PickRule::Realtime, ChannelKind::Lossless)
+                                .push(frame);
                         }
                     }
                 }
@@ -115,14 +112,14 @@ async fn main() -> anyhow::Result<()> {
             },
         }
         // 通道 → 播放（lossless 直通，按序产出）
-        let adapter = mgr.adapter(&stream_id, PickRule::Realtime, ChannelKind::Lossless);
-        for f in adapter.poll(Instant::now()) {
+        let adapter = mgr.adapter(&sid, PickRule::Realtime, ChannelKind::Lossless);
+        while let Some(f) = adapter.poll() {
             let _ = session.push(f);
         }
     }
     // 收尾：冲净通道 + 停止播放（后台线程收尾后画面通道关闭）
-    let adapter = mgr.adapter(&stream_id, PickRule::Realtime, ChannelKind::Lossless);
-    for f in adapter.poll(Instant::now()) {
+    let adapter = mgr.adapter(&sid, PickRule::Realtime, ChannelKind::Lossless);
+    while let Some(f) = adapter.poll() {
         let _ = session.push(f);
     }
     session.stop();

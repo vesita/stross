@@ -116,7 +116,7 @@ async fn run_ls(host: &str, port: u16, json: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     println!("节点 {}（{}）", dir.node.node_name, dir.node.node_id);
-    println!("已通告端点（{} 个）：", dir.endpoints.len());
+    println!("已共享端点（{} 个）：", dir.endpoints.len());
     for e in &dir.endpoints {
         let avail = if e.available {
             "可用".to_string()
@@ -162,7 +162,7 @@ async fn run_subscribe(
         .iter()
         .find(|e| e.kind == endpoint_id.kind && e.endpoint_id == endpoint_id.id)
         .map(|e| e.kind)
-        .ok_or_else(|| anyhow::anyhow!("目录中未找到端点 {endpoint_id}（是否已通告？）"))?;
+        .ok_or_else(|| anyhow::anyhow!("目录中未找到端点 {endpoint_id}（是否已共享？）"))?;
     if kind == MediaKind::File {
         let outcome = subscribe_file(&app, base, host, port, endpoint_id, delivery_wish, out)
             .await

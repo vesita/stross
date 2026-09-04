@@ -107,7 +107,7 @@ fn print_node(node: &ScannedNode) {
             .iter()
             .map(|e| {
                 let avail = if e.available { "" } else { "（不可用）" };
-                let pub_ = if e.published { "（已通告）" } else { "" };
+                let pub_ = if e.published { "（已共享）" } else { "" };
                 format!("{}{}{}", e.name, avail, pub_)
             })
             .collect();

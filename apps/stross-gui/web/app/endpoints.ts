@@ -214,19 +214,12 @@ async function loadRemoteDir(dev: DeviceView, force = false): Promise<void> {
   const cachedAt = remoteDirAt.get(dev.key);
   if (!force && cached && cachedAt && Date.now() - cachedAt < REMOTE_DIR_TTL_MS) {
     renderRemoteDir(dev, cached);
-    if (selectedDevice?.key === dev.key) {
-      renderBrowsePaneEndpoints(dev, cached);
-    }
     return;
   }
   if (remoteDirLoading.has(dev.key)) return;
   remoteDirLoading.add(dev.key);
   const box = document.querySelector(`[data-role="remote-dir"][data-key="${dev.key}"] .dir-status`);
   if (box) box.textContent = '目录加载中…';
-  const browseBox = $('node-browse-endpoints');
-  if (selectedDevice?.key === dev.key && browseBox && !browseBox.querySelector('.node-ep-card')) {
-    browseBox.innerHTML = '<div class="hint" style="padding: 16px; text-align: center;">加载端点中…</div>';
-  }
   try {
     const dir = await Promise.race([
       call<RemoteDir>('endpoint_ls', { host }),
@@ -235,16 +228,10 @@ async function loadRemoteDir(dev: DeviceView, force = false): Promise<void> {
     remoteDirs.set(dev.key, dir);
     remoteDirAt.set(dev.key, Date.now());
     renderRemoteDir(dev, dir);
-    if (selectedDevice?.key === dev.key) {
-      renderBrowsePaneEndpoints(dev, dir);
-    }
   } catch (e) {
     if (box) {
       box.textContent = '目录不可用（' + errMsg(e) + '）';
       box.classList.add('hint');
-    }
-    if (selectedDevice?.key === dev.key && browseBox) {
-      browseBox.innerHTML = `<div class="hint" style="padding: 16px; text-align: center; color: var(--err);">端点获取失败（${errMsg(e)}）</div>`;
     }
   } finally {
     remoteDirLoading.delete(dev.key);
@@ -297,12 +284,42 @@ function renderRemoteDir(dev: DeviceView, dir: RemoteDir): void {
     } else if (
       subscribedEndpoints.has(deviceHostOf(dev) + '/' + endpointIdStr(ep)) ||
       subscribedEndpoints.has(endpointIdStr(ep)) ||
-      recvLinks.has(deviceHostOf(dev) + '/' + endpointIdStr(ep))
+      recvLinks.has(deviceHostOf(dev) + '/' + endpointIdStr(ep)) ||
+      Array.from(recvLinks.keys()).some((k) => k.endsWith('/' + endpointIdStr(ep)) || k === endpointIdStr(ep))
     ) {
+      const epId = endpointIdStr(ep);
+      const devHost = deviceHostOf(dev);
+      const directLinkId = devHost ? devHost + '/' + epId : epId;
+      const matchedLink =
+        Array.from(recvLinks.keys()).find((k) => k === directLinkId || k.endsWith('/' + epId) || k === epId) ||
+        directLinkId;
+
+      const actGroup = document.createElement('div');
+      actGroup.className = 'ep-acts-group';
+
       const badge = document.createElement('span');
       badge.className = 'badge ep-badge live';
       badge.textContent = '已订阅 · 接收中';
-      row.appendChild(badge);
+      actGroup.appendChild(badge);
+
+      const stopBtn = document.createElement('button');
+      stopBtn.type = 'button';
+      stopBtn.className = 'sm danger ep-act';
+      stopBtn.dataset.act = 'stop-endpoint-sub';
+      stopBtn.dataset.link = matchedLink;
+      stopBtn.title = '停止接收此端点媒体流';
+      stopBtn.innerHTML = icon('stop') + '<span>停止</span>';
+      actGroup.appendChild(stopBtn);
+
+      const viewBtn = document.createElement('button');
+      viewBtn.type = 'button';
+      viewBtn.className = 'sm ghost ep-act';
+      viewBtn.dataset.act = 'view-endpoint-sub';
+      viewBtn.title = '前往全屏流媒体舞台观看';
+      viewBtn.innerHTML = icon('monitor') + '<span>查看</span>';
+      actGroup.appendChild(viewBtn);
+
+      row.appendChild(actGroup);
     } else if (
       subscribingEndpoint &&
       subscribingEndpoint.host === deviceHostOf(dev) &&
@@ -325,88 +342,6 @@ function renderRemoteDir(dev: DeviceView, dir: RemoteDir): void {
       row.appendChild(sub);
     }
     container.appendChild(row);
-  }
-  if (expandedDevice === dev.key) {
-    renderBrowsePaneEndpoints(dev, dir);
-  }
-}
-
-/** 专属端点浏览面板渲染（节点二级页的「端点浏览」Tab 内容）。 */
-function renderBrowsePaneEndpoints(dev: DeviceView, dir: RemoteDir): void {
-  const browseBox = $('node-browse-endpoints');
-  const countEl = $('node-browse-count');
-  if (countEl) {
-    countEl.textContent = dir.endpoints.length ? `共 ${dir.endpoints.length} 个可订阅端点` : '暂无可订阅端点';
-  }
-  const specIp = $('spec-ip');
-  const specPort = $('spec-port');
-  const specOnline = $('spec-online');
-  if (specIp) specIp.textContent = dev.meta;
-  if (specPort) specPort.textContent = dev.quicPort ? `QUIC ${dev.quicPort}` : (dev.base ? dev.base.split(':')[2] || '8777' : '8777');
-  if (specOnline) {
-    const isOnline = !dev.name.includes('不可达');
-    specOnline.textContent = isOnline ? '在线可连接' : '离线不可达';
-    specOnline.className = 'specs-v ' + (isOnline ? 'ok' : 'err');
-  }
-
-  if (!browseBox) return;
-  browseBox.innerHTML = '';
-  if (!dir.endpoints.length) {
-    browseBox.appendChild(emptyState('radio', '该节点暂未共享任何端点', '对方开启屏幕、麦克风或文件共享后将在此处呈现'));
-    return;
-  }
-  for (const ep of dir.endpoints) {
-    const card = document.createElement('div');
-    card.className = 'node-ep-card';
-    const main = document.createElement('div');
-    main.className = 'node-ep-main';
-    const ic = document.createElement('span');
-    ic.className = 'node-ep-ic';
-    ic.innerHTML = icon(deviceKindIcon(ep.kind));
-    const info = document.createElement('div');
-    info.className = 'node-ep-info';
-    const name = document.createElement('span');
-    name.className = 'node-ep-name';
-    name.textContent = ep.name;
-    const meta = document.createElement('span');
-    meta.className = 'node-ep-meta';
-    meta.textContent =
-      labelOf(DEVICE_KIND_LABELS, ep.kind) +
-      ' · ' +
-      labelOf(VISIBILITY_LABELS, ep.visibility) +
-      (ep.subscribers ? ` · ${ep.subscribers} 正在订阅` : '');
-    info.appendChild(name);
-    info.appendChild(meta);
-    main.appendChild(ic);
-    main.appendChild(info);
-    card.appendChild(main);
-
-    const isSubbed =
-      subscribedEndpoints.has(deviceHostOf(dev) + '/' + endpointIdStr(ep)) ||
-      subscribedEndpoints.has(endpointIdStr(ep)) ||
-      recvLinks.has(deviceHostOf(dev) + '/' + endpointIdStr(ep));
-
-    if (isSubbed) {
-      const badge = document.createElement('span');
-      badge.className = 'badge ep-badge live';
-      badge.textContent = '已订阅 · 接收中';
-      card.appendChild(badge);
-    } else if (!ep.available) {
-      const hint = document.createElement('span');
-      hint.className = 'hint';
-      hint.textContent = '不可用';
-      card.appendChild(hint);
-    } else {
-      const subBtn = document.createElement('button');
-      subBtn.type = 'button';
-      subBtn.className = 'sm primary ep-act';
-      subBtn.innerHTML = icon('download') + '<span>订阅</span>';
-      subBtn.onclick = () => {
-        openSubscribeModal(deviceHostOf(dev), endpointIdStr(ep));
-      };
-      card.appendChild(subBtn);
-    }
-    browseBox.appendChild(card);
   }
 }
 
@@ -440,7 +375,9 @@ async function confirmSubscribe(): Promise<void> {
   if (!subscribeTarget) return;
   const btn = $btn('sub-confirm-btn');
   setBtnLoading(btn, true);
+  btn.textContent = '正在向对端申请凭证…';
   $('sub-error').classList.add('hidden');
+  dispatchUIAction({ type: 'SET_CONNECTION_PHASE', phase: 'negotiating', message: '正在向对端申请凭证…' });
   try {
     subscribingEndpoint = {
       host: subscribeTarget.host,
@@ -452,6 +389,7 @@ async function confirmSubscribe(): Promise<void> {
       endpointId: endpointIdStr(subscribeTarget.ep),
       delivery: subscribeTarget.ep.delivery === 'push' ? 'push' : undefined,
     });
+    dispatchUIAction({ type: 'SET_CONNECTION_PHASE', phase: 'connecting', message: '凭证已签发，正在建立媒体直连…' });
     subscribingEndpoint = null;
     $('sub-modal').classList.add('hidden');
     targetRelay = { wsBase: r.relayUrl, srtUrl: null, quicUrl: null };
@@ -461,22 +399,23 @@ async function confirmSubscribe(): Promise<void> {
       endpointName: subscribeTarget.ep.name,
       streamId: r.streamId,
       kind: subscribeTarget.ep.kind,
+      negotiateHost: r.host,
+      negotiatePort: r.port,
     });
     if (ok) {
       subscribedEndpoints.add(subscribeTarget.host + '/' + endpointIdStr(subscribeTarget.ep));
       showToast(`已订阅「${subscribeTarget.ep.name}」`, 'ok');
-      switchMobileTab('recv');
-      switchNodeSubtab('player');
-      const dot = $('node-player-dot');
-      if (dot) dot.classList.remove('hidden');
+      switchMainBottomTab('consume');
     }
     renderDeviceList();
   } catch (e) {
     subscribingEndpoint = null;
+    dispatchUIAction({ type: 'SET_CONNECTION_PHASE', phase: 'error', message: errMsg(e) });
     renderDeviceList();
     $('sub-error').textContent = '订阅失败：' + errMsg(e);
     $('sub-error').classList.remove('hidden');
   } finally {
+    btn.textContent = '确认订阅';
     setBtnLoading(btn, false);
   }
 }

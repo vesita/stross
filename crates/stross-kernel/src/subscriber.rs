@@ -113,6 +113,10 @@ pub async fn subscribe_media(
         delivery,
         relay_url,
         stream_id,
+        // 共享方协商端点地址：订阅终止时前端经它显式通知共享方（POST
+        // /api/negotiator/unsubscribe），让共享端点即时更新「订阅中」状态。
+        host: host.to_string(),
+        port,
     })
 }
 

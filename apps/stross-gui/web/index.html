@@ -148,6 +148,9 @@
     <symbol id="i-chevron-down" viewBox="0 0 24 24">
       <polyline points="6 9 12 15 18 9" />
     </symbol>
+    <symbol id="i-chevron-left" viewBox="0 0 24 24">
+      <polyline points="15 18 9 12 15 6" />
+    </symbol>
     <symbol id="i-chevron-right" viewBox="0 0 24 24">
       <polyline points="9 18 15 12 9 6" />
     </symbol>
@@ -300,6 +303,19 @@
       <!-- ── 1. 管理界面：设备资产、共享配置、目录发现 ── -->
       <div id="view-manage" class="view-panel active">
 
+        <!-- 桌面端工作区分段导航（发现节点 vs 本机共享：整页切换，免纵向滚动） -->
+        <nav class="manage-segmented-bar" id="manage-segmented-bar" aria-label="管理视区分段">
+          <button id="seg-tab-discover" class="seg-btn active" type="button" data-seg="discover">
+            <svg class="ic"><use href="#i-grid" /></svg>
+            <span>发现节点</span>
+            <span id="seg-discover-count" class="seg-badge hidden">0</span>
+          </button>
+          <button id="seg-tab-local" class="seg-btn" type="button" data-seg="local">
+            <svg class="ic"><use href="#i-radio" /></svg>
+            <span>本机共享</span>
+          </button>
+        </nav>
+
         <!-- 独立本机管理控制面板 (Local Management Pane) -->
         <section class="card local-pane hidden" id="local-pane">
           <div class="pane-head">
@@ -351,7 +367,7 @@
           <div class="pane-head">
             <div class="pane-title-wrap">
               <svg class="ic"><use href="#i-grid" /></svg>
-              <h2>局域网其它节点</h2>
+              <h2>发现节点</h2>
             </div>
             <button id="scan-btn" type="button" class="btn-scan">
               <svg class="ic"><use href="#i-refresh" /></svg><span>刷新扫描</span>
@@ -391,6 +407,16 @@
             </div>
             <div id="recent-list" class="recent-chips"></div>
           </div>
+          <!-- 局域网节点分页控制器（免纵向滑动，一键快速翻页） -->
+          <div id="device-pager" class="device-pager hidden">
+            <button id="pager-prev-btn" class="pager-btn" type="button" title="上一页 (←)" aria-label="上一页">
+              <svg class="ic"><use href="#i-chevron-left" /></svg>
+            </button>
+            <span id="pager-info" class="pager-info">第 1 / 1 页</span>
+            <button id="pager-next-btn" class="pager-btn" type="button" title="下一页 (→)" aria-label="下一页">
+              <svg class="ic"><use href="#i-chevron-right" /></svg>
+            </button>
+          </div>
         </section>
       </div>
 
@@ -399,9 +425,6 @@
         <section class="card stage-card" id="recv-pane">
           <div class="pane-head stage-head">
             <div class="stage-title-wrap">
-              <button id="mobile-back-btn" class="mobile-back-btn hidden" type="button" title="返回节点列表" aria-label="返回">
-                <svg class="ic"><use href="#i-arrow-left" /></svg>
-              </button>
               <div class="stage-avatar" id="stage-avatar">
                 <svg class="ic"><use href="#i-monitor" /></svg>
               </div>
@@ -412,44 +435,7 @@
               <span id="stage-live-badge" class="badge ok hidden">正在播放</span>
             </div>
             <div class="stage-actions">
-              <button id="recv-stop-btn" class="sm danger hidden" type="button">
-                <svg class="ic"><use href="#i-stop" /></svg><span>停止全部</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- 节点二级页面子标签切换条（置顶分段器：[ 🎬 订阅 ] [ 📋 浏览 ]） -->
-          <nav class="node-tabs-bar" id="node-tabs-bar" aria-label="节点交互切换">
-            <button id="node-tab-player" class="node-subtab-btn" type="button" data-subpane="player">
-              <svg class="ic"><use href="#i-monitor" /></svg>
-              <span>订阅</span>
-              <span id="node-player-dot" class="subtab-live-dot hidden"></span>
-            </button>
-            <button id="node-tab-browse" class="node-subtab-btn active" type="button" data-subpane="browse">
-              <svg class="ic"><use href="#i-layers" /></svg>
-              <span>浏览</span>
-            </button>
-          </nav>
-          <div id="node-pane-browse" class="node-subpane hidden">
-            <div class="node-browse-head">
-              <div class="node-browse-title">
-                <svg class="ic"><use href="#i-layers" /></svg>
-                <span>节点可订阅端点</span>
-              </div>
-              <span class="hint" id="node-browse-count">选择端点发起订阅</span>
-            </div>
-            <div id="node-browse-endpoints" class="node-browse-endpoints"></div>
-            <div class="node-specs-card" id="node-specs-card">
-              <div class="specs-title">
-                <svg class="ic"><use href="#i-info" /></svg>
-                <span>节点网络与属性</span>
-              </div>
-              <div class="specs-grid" id="node-specs-grid">
-                <div class="specs-item"><span class="specs-k">可达地址</span><span class="specs-v" id="spec-ip">-</span></div>
-                <div class="specs-item"><span class="specs-k">中继端口</span><span class="specs-v" id="spec-port">-</span></div>
-                <div class="specs-item"><span class="specs-k">传输协议</span><span class="specs-v" id="spec-transports">QUIC / SRT / WS</span></div>
-                <div class="specs-item"><span class="specs-k">在线状态</span><span class="specs-v ok" id="spec-online">在线可连接</span></div>
-              </div>
+              <button id="recv-stop-btn" class="hidden" style="display: none !important;" type="button" aria-hidden="true"></button>
             </div>
           </div>
 
@@ -500,9 +486,7 @@
             <button id="recv-fs-btn" class="ctrl-btn" type="button" title="全屏 / 退出全屏 (快捷键 F)">
               <svg class="ic"><use href="#i-maximize" /></svg>
             </button>
-            <button id="recv-fs-stop-btn" class="ctrl-btn danger" type="button" title="停止全部接收链路">
-              <svg class="ic"><use href="#i-stop" /></svg>
-            </button>
+            <button id="recv-fs-stop-btn" class="hidden" style="display: none !important;" type="button" aria-hidden="true"></button>
           </div>
         </div>
         <!-- 音频流可视化：纯音频接收时展示动态声波 -->
@@ -523,33 +507,29 @@
           <div class="audio-viz-sub hint" id="recv-audio-sub">低延迟音频接收 · 原生输出</div>
         </div>
 
-        <!-- AI 智能布局与流健康遥测工具条（接收中动态展开） -->
+        <!-- 流健康遥测工具条（接收中动态展开） -->
         <div class="player-ai-bar hidden" id="player-ai-bar">
           <div class="ai-pill-group">
-            <div class="ai-badge" id="ai-smart-layout-badge">
-              <svg class="ic"><use href="#i-sparkles" /></svg>
-              <span id="ai-layout-label">AI 智能自适应</span>
-            </div>
             <button id="player-aspect-btn" class="aspect-toggle-btn" type="button" title="点击切换画面比例 (适应/铺满/拉伸/1:1)">
               <svg class="ic"><use href="#i-ratio" /></svg>
               <span id="player-aspect-label">等比适应</span>
             </button>
           </div>
-          <div class="ai-telemetry-pill" id="player-telemetry-pill" title="点击查看 AI 链路健康与网络遥测分析">
+          <div class="ai-telemetry-pill" id="player-telemetry-pill" title="点击查看链路健康与网络遥测">
             <span class="telemetry-dot live"></span>
             <span id="telemetry-fps-text">~60fps</span>
             <span class="telemetry-divider">·</span>
-            <span id="telemetry-health-badge" class="health-ok">极佳 (0丢包)</span>
+            <span id="telemetry-health-badge" class="health-ok">稳定 (0丢包)</span>
             <svg class="ic chevron"><use href="#i-chevron-right" /></svg>
           </div>
         </div>
 
-        <!-- AI 智能诊断浮层（点击遥测胶囊展开） -->
+        <!-- 链路健康诊断浮层（点击遥测胶囊展开） -->
         <div class="player-diag-drawer hidden" id="player-diag-drawer">
           <div class="diag-header">
             <div class="diag-title">
               <svg class="ic"><use href="#i-cpu" /></svg>
-              <span>AI 实时流媒体诊断分析</span>
+              <span>链路健康与网络遥测</span>
             </div>
             <button id="diag-close-btn" class="icon-btn-sm" type="button" title="关闭诊断">
               <svg class="ic"><use href="#i-x" /></svg>
@@ -574,8 +554,7 @@
             </div>
           </div>
           <div class="diag-tip" id="diag-ai-tip">
-            <svg class="ic"><use href="#i-sparkles" /></svg>
-            <span>AI 优化建议：当前局域网质量优异，已自动开启低延迟极速渲染与音频防抖。</span>
+            <span>当前局域网质量优异，已自动开启低延迟极速渲染与音频防抖。</span>
           </div>
         </div>
 
@@ -586,37 +565,6 @@
           <span id="recv-status">未接收</span>
         </div>
         <div id="recv-meta" class="meta"></div>
-        <!-- 节点协作与传输交互区：即时便签、快速端点共享与文件互传 -->
-        <div class="chat-workspace" id="chat-workspace">
-          <div class="chat-timeline" id="chat-timeline">
-            <div class="chat-notice">
-              <svg class="ic"><use href="#i-shield" /></svg>
-              <span>局域网节点直连 · 共享与订阅端对端安全传输</span>
-            </div>
-          </div>
-          <div class="chat-bottom-bar" id="chat-bottom-bar">
-            <div class="chat-quick-actions">
-              <button type="button" class="chat-action-chip" id="chat-act-file" title="向节点发送文件">
-                <svg class="ic"><use href="#i-file" /></svg>
-                <span>共享文件</span>
-              </button>
-              <button type="button" class="chat-action-chip" id="chat-act-screen" title="向节点共享屏幕">
-                <svg class="ic"><use href="#i-monitor" /></svg>
-                <span>共享屏幕</span>
-              </button>
-              <button type="button" class="chat-action-chip" id="chat-act-mic" title="向节点共享声音">
-                <svg class="ic"><use href="#i-mic" /></svg>
-                <span>共享声音</span>
-              </button>
-            </div>
-            <div class="chat-input-row">
-              <input type="text" id="chat-note-input" class="chat-input" placeholder="发送便签或剪贴板文本到当前节点…" />
-              <button type="button" id="chat-send-btn" class="chat-send-btn" title="发送 (Enter)">
-                <svg class="ic"><use href="#i-send" /></svg>
-              </button>
-            </div>
-          </div>
-        </div>
           </div>
 
         </section>
@@ -636,7 +584,7 @@
       </button>
       <button id="main-tab-consume" class="main-tab-btn" type="button" data-tab="consume">
         <svg class="ic"><use href="#i-monitor" /></svg>
-        <span>订阅浏览</span>
+        <span>接收播放</span>
         <span id="main-consume-badge" class="bottom-badge hidden">0</span>
       </button>
     </nav>

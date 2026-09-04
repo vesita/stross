@@ -10,7 +10,7 @@ use std::sync::Arc;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use super::{ServerState, handle_discovery, handle_endpoints, handle_request};
+use super::{ServerState, handle_discovery, handle_endpoints, handle_request, handle_unsubscribe};
 
 /// OpenAPI 文档（`/api-docs/openapi.json` + swagger-ui /docs）。
 #[derive(OpenApi)]
@@ -18,7 +18,8 @@ use super::{ServerState, handle_discovery, handle_endpoints, handle_request};
     paths(
         crate::negotiator::handle_request,
         crate::negotiator::handle_endpoints,
-        crate::negotiator::handle_discovery
+        crate::negotiator::handle_discovery,
+        crate::negotiator::handle_unsubscribe
     ),
     tags((name = "negotiator", description = "凭证自动协商：申请出站凭证 / 目录 / 统一发现"))
 )]
@@ -73,6 +74,7 @@ pub(super) async fn cors_layer(
 pub(super) fn router(state: Arc<ServerState>) -> Router {
     Router::new()
         .route("/api/negotiator/request", post(handle_request))
+        .route("/api/negotiator/unsubscribe", post(handle_unsubscribe))
         .route("/api/endpoints", get(handle_endpoints))
         .route("/api/discovery", get(handle_discovery))
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))

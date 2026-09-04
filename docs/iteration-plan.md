@@ -401,6 +401,8 @@ GStreamer 流水线。
 
 | 轮次 | 一句话 |
 |---|---|
+| 第三十五轮 | **显式取消订阅生命周期闭环与 GUI 视区体验重构**：新增 `POST /api/negotiator/unsubscribe` 显式退订协议并在共享端维护 `subscriber_nodes` 登记，末位订阅者退出即时收敛停发（根治 watchers 延迟检测导致的僵尸推流）；全仓扫除「通告」残留字眼，统一为「共享/订阅」；前端重构桌面分段导航栏（Segmented Bar）与节点翻页器（Device Pager），彻底消除多余纵向滚动；订阅管理统一收敛至发现节点页（停止/前往），消费舞台纯化为播放画板；双向绑定 ResizeObserver 与 repaintLastFrame，修复 Tab 切换黑屏 |
+| 第三十四轮 | **全仓强类型标识符重构并彻底废除设备命名概念**：集中定义并全局强制 `NodeId`、`StreamId`、`StreamKey`、`LinkId`、`StrategyId` 等强类型标识符，彻底消除 bare `String` 实体 ID 与字典键；领域模型彻底废除「设备（Device）」概念，全面切换为「端点（Endpoint）」与「节点（Node）」，拒绝向后兼容别名与 serde alias；节点身份与信任清单切换为 `NodeIdentity` 与 `TrustedNode`（`trusted_nodes.json` 单一真源）；`NodeGraph` 与 `UnifiedRegistry` 表键强类型化；CLI/GUI/Bridge 接口与命令全面类型对齐 |
 | 第三十三轮 | **代码质量提升、零 dead_code 落地与技术债清理**：彻底清除全仓所有 `#[allow(dead_code)]`（零容忍）；RAII 守护字段规范使用 `_wayland`/`_tx` 下划线原生命名；平台专属逻辑改用精确 `#[cfg(...)]` 条件编译；移除 `FirewallStatus::ok` 等死代码；消除跨帧内存重构/协商过程中的冗余 `.clone()`；合并同构 match 分支；加固跨线程测试防抖时序；全仓 407 个单测与集成测试 100% 通过，clippy 零告警 |
 | 第三十二轮 | **PC-安卓双端真机联调 + 性能诊断**：打通「PC serve 公开屏幕/系统声音 → 手机订阅播放」与「手机共享麦克风 → 电脑订阅」两条链路（Android 播放/采集/并发多链路/人工确认授权全通）；实测定位：帧率 ~7fps 为**源静止屏产帧少**（手机消费 `try_send`/不背压、`dropped=0`，非 base64 消费瓶颈——初判已修正），`serve` 静止屏仍 ~45–65% CPU（hot tokio worker 线程 ~78%）为**功耗异常点**；出优化预案（静止降频 / 动态画面复测定帧率上限 / 排 SPA_CHUNK_FLAG_CORRUPTED） |
 | 第七轮 | 统一化重构：stross-core→stross-kernel 吸收 stross-app，单一 Kernel 门面 + stross-bridge 独立 |

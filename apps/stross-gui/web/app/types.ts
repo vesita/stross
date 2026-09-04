@@ -51,9 +51,7 @@ interface WindowWithTauri extends Window {
   toggleMute?: () => void;
   updateMuteButtonUI?: () => void;
   updateZoomChipUI?: () => void;
-  appendChatTimelineMessage?: (text: string, isSelf: boolean) => void;
   switchManageSubtab?: (subtab: 'discover' | 'local') => void;
-  switchNodeSubtab?: (subtab: 'browse' | 'player') => void;
   switchMainBottomTab?: (tab: 'local' | 'discover' | 'consume') => void;
   getSelectedDevice?: () => DeviceView | null;
   loadRemoteDir?: (dev: DeviceView, force?: boolean) => Promise<void>;
@@ -175,7 +173,7 @@ interface Anchor {
   srtUrl: string | null;
   quicUrl: string | null;
 }
-interface AppInfo { version: string; platform: string; ffmpeg: boolean; ips: string[]; }
+interface AppInfo { version: string; platform: string; ffmpeg: boolean; ips: string[]; nodeId: string; }
 /** 应用设置（`discoverable_status` / `set_discoverable`）。 */
 interface Settings { discoverable: boolean; }
 interface RelayInfo {
@@ -340,11 +338,14 @@ interface RemoteDir {
   endpoints: EndpointManifest[];
 }
 
-/** 媒体端点订阅结果（Rust `MediaSubscribeOutcome`：watch 入口 + 流 id）。 */
+/** 媒体端点订阅结果（Rust `MediaSubscribeOutcome`：watch 入口 + 流 id + 共享方协商端点）。
+ *  host/port 供订阅终止时向共享方 `POST /api/negotiator/unsubscribe` 显式通知。 */
 interface MediaSubscribeOutcome {
   delivery: string;
   relayUrl: string;
   streamId: string;
+  host: string;
+  port: number;
 }
 
 /** 防火墙自检结果（Rust `firewall_status`，仅 Linux 桌面）。 */

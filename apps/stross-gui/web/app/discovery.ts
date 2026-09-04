@@ -322,8 +322,52 @@ function renderDeviceList(): void {
     );
     return;
   }
-  for (const dev of filtered) {
+  // 同步桌面端分段导航徽标数量
+  const segCount = $('seg-discover-count');
+  if (segCount) {
+    segCount.textContent = String(filtered.length);
+    segCount.classList.toggle('hidden', filtered.length === 0);
+  }
+
+  // 节点分页控制器（免纵向滑动，一键快速翻页）
+  const pager = $('device-pager');
+  const pagerInfo = $('pager-info');
+  const prevBtn = $btn('pager-prev-btn');
+  const nextBtn = $btn('pager-next-btn');
+
+  const pageSize = uiFSM.devicePageSize || 3;
+  const totalPages = Math.ceil(filtered.length / pageSize) || 1;
+  if (uiFSM.devicePage > totalPages) {
+    uiFSM.devicePage = totalPages;
+  }
+  const startIndex = (uiFSM.devicePage - 1) * pageSize;
+  const pageItems = filtered.slice(startIndex, startIndex + pageSize);
+
+  for (const dev of pageItems) {
     box.appendChild(deviceCard(dev));
+  }
+
+  if (pager && pagerInfo && prevBtn && nextBtn) {
+    if (totalPages > 1) {
+      pager.classList.remove('hidden');
+      pagerInfo.textContent = `第 ${uiFSM.devicePage} / ${totalPages} 页 (共 ${filtered.length} 节点)`;
+      prevBtn.disabled = uiFSM.devicePage <= 1;
+      nextBtn.disabled = uiFSM.devicePage >= totalPages;
+      prevBtn.onclick = () => {
+        if (uiFSM.devicePage > 1) {
+          dispatchUIAction({ type: 'SET_DEVICE_PAGE', page: uiFSM.devicePage - 1 });
+          renderDeviceList();
+        }
+      };
+      nextBtn.onclick = () => {
+        if (uiFSM.devicePage < totalPages) {
+          dispatchUIAction({ type: 'SET_DEVICE_PAGE', page: uiFSM.devicePage + 1 });
+          renderDeviceList();
+        }
+      };
+    } else {
+      pager.classList.add('hidden');
+    }
   }
 }
 
@@ -432,32 +476,4 @@ function updateStageForDevice(dev: DeviceView): void {
     avatar.innerHTML = icon(dev.manual ? 'link' : isPhone ? 'phone' : 'monitor');
   }
 
-  // 若当前无针对该设备的活跃播放画面，默认切入「端点浏览」以便用户查看可订阅端点
-  const stageLiveBadge = $('stage-live-badge');
-  const isStreaming = stageLiveBadge && !stageLiveBadge.classList.contains('hidden');
-  if (!isStreaming) {
-    switchNodeSubtab('browse');
-  }
-
-  const dir = remoteDirs.get(dev.key);
-  if (dir) {
-    renderBrowsePaneEndpoints(dev, dir);
-  } else {
-    const browseBox = $('node-browse-endpoints');
-    if (browseBox) browseBox.innerHTML = '<div class="hint" style="padding: 16px; text-align: center;">加载端点中…</div>';
-    void loadRemoteDir(dev);
-  }
-  const specIp = $('spec-ip');
-  const specPort = $('spec-port');
-  const specOnline = $('spec-online');
-  if (specIp) specIp.textContent = dev.meta;
-  if (specPort) specPort.textContent = dev.quicPort ? `QUIC ${dev.quicPort}` : (dev.base ? dev.base.split(':')[2] || '8777' : '8777');
-  if (specOnline) {
-    const isOnline = !dev.name.includes('不可达');
-    specOnline.textContent = isOnline ? '在线可连接' : '离线不可达';
-    specOnline.className = 'specs-v ' + (isOnline ? 'ok' : 'err');
-  }
-  if (window.innerWidth <= 900) {
-    switchView('consume');
-  }
 }

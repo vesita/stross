@@ -184,7 +184,7 @@ pub async fn start_receive(
         }
         // 3) 启新接收会话 + 新播放链，句柄入 static 供下次序列化。
         state
-            .start_receive_raw(relay.clone(), stream.clone())
+            .start_receive_raw(relay.clone(), stream.clone().into())
             .await
             .map_err(|e| e.to_user_string())?;
         let frames = match state.take_receive_raw_frames() {

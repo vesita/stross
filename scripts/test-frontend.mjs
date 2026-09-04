@@ -361,6 +361,10 @@ await sleep(100);
 const cardAfterSub = Array.from(document.querySelectorAll('#device-list .dev-card')).find((c) => c.textContent.includes('手机A'));
 const dirAfterSub = cardAfterSub?.querySelector('[data-role="remote-dir"]');
 check('订阅后端点键显示「已订阅 · 接收中」', !!dirAfterSub?.textContent.includes('已订阅 · 接收中'), dirAfterSub?.textContent.trim());
+check('订阅后发现节点页出现管理按钮（停止订阅）', !!dirAfterSub?.querySelector('[data-act="stop-endpoint-sub"]'));
+check('订阅后发现节点页出现管理按钮（前往查看）', !!dirAfterSub?.querySelector('[data-act="view-endpoint-sub"]'));
+check('订阅浏览页为纯消费舞台（无 node-tabs-bar 二级切换条）', !$('node-tabs-bar'));
+check('订阅浏览页为纯消费舞台（无 node-pane-browse 端点浏览子面板）', !$('node-pane-browse'));
 
 console.log('\n[3b] 断流自愈：流结束后接收 UI 自动回到空闲态');
 {
@@ -437,7 +441,10 @@ console.log('\n[3d] 多端点链接：第二条链路并存，逐条停止互不
     return between.length === 0;
   })(), JSON.stringify(calls.filter((c) => c.cmd === 'stop_receive_link')));
   // 逐条停止：停「屏幕」链路 → 「系统声」仍渲染（不级联）
-  const stopScreen = Array.from(document.querySelectorAll('#recv-links .recv-link-stop')).find((b) => b.dataset.link === '192.168.1.51/screen:0');
+  // 逐条停止：在发现节点页管理订阅点击「停止」（架构统一：发现页管理，消费页纯播放）
+  const stopScreen =
+    Array.from(document.querySelectorAll('[data-act="stop-endpoint-sub"]')).find((b) => b.dataset.link === '192.168.1.51/screen:0') ||
+    Array.from(document.querySelectorAll('#recv-links .recv-link-stop')).find((b) => b.dataset.link === '192.168.1.51/screen:0');
   stopScreen?.click();
   await sleep(300);
   const rows3 = document.querySelectorAll('#recv-links .recv-link-row');
@@ -634,10 +641,14 @@ check('音频可视化隐藏', $('recv-audio-viz').classList.contains('hidden'))
 console.log('\n[14] 管理界面与消费界面导航切换（Main Bottom Bar & Panels）验证');
 const navBar = $('main-bottom-bar');
 check('全局主导航栏存在', !!navBar);
+const btnLocal = $('main-tab-local');
 const btnDiscover = $('main-tab-discover');
 const btnConsume = $('main-tab-consume');
 const panelManage = $('view-manage');
 const panelConsume = $('view-consume');
+const lPane = $('local-pane');
+const dPane = $('device-pane');
+check('本机管理导航按钮存在', !!btnLocal);
 check('发现节点导航按钮存在', !!btnDiscover);
 check('订阅浏览导航按钮存在', !!btnConsume);
 check('管理视区面板与消费视区面板均存在', !!panelManage && !!panelConsume);
@@ -645,8 +656,15 @@ btnConsume?.click();
 await sleep(50);
 check('点击订阅浏览按钮后消费面板激活', panelConsume?.classList.contains('active') && !panelManage?.classList.contains('active'));
 check('订阅浏览按钮处于 active 态', btnConsume?.classList.contains('active'));
+btnLocal?.click();
+await sleep(50);
+check('点击本机管理按钮后本机面板显示且发现面板隐藏', !lPane?.classList.contains('hidden') && !!dPane?.classList.contains('hidden'));
+check('本机管理按钮处于 active 态', btnLocal?.classList.contains('active') && !btnDiscover?.classList.contains('active'));
 btnDiscover?.click();
 await sleep(50);
-check('点击发现节点按钮后管理面板激活', panelManage?.classList.contains('active') && !panelConsume?.classList.contains('active'));
-check('发现节点按钮处于 active 态', btnDiscover?.classList.contains('active'));
+check('点击发现节点按钮后管理面板激活且发现面板显示', panelManage?.classList.contains('active') && !lPane?.classList.contains('hidden') === false && !dPane?.classList.contains('hidden'));
+check('发现节点按钮处于 active 态', btnDiscover?.classList.contains('active') && !btnLocal?.classList.contains('active'));
+check('订阅浏览页无二级返回键（纯 Tab 驱动）', !$('mobile-back-btn'));
+const cssContent = readFileSync(join(root, 'apps/stross-gui/web/style.css'), 'utf8');
+check('桌面端 CSS 包含 UI 展平规则（本机与发现节点共存）', cssContent.includes('#view-manage #local-pane') && cssContent.includes('#view-manage #device-pane'));
 process.exit(failures === 0 ? 0 : 1);

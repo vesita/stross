@@ -92,6 +92,15 @@
   --sar: env(safe-area-inset-right, 0px);
   --sab: env(safe-area-inset-bottom, 0px);
   --sal: env(safe-area-inset-left, 0px);
+
+  /* —— 布局标尺 (Layout Tokens) —— */
+  --nav-rail-w: 76px;
+  --bottom-bar-h: 56px;
+  --sidebar-w: 380px;
+  --header-h: 56px;
+  --z-nav: 100;
+  --z-modal: 500;
+  --z-toast: 1000;
 }
 
 * { box-sizing: border-box; }
@@ -1299,7 +1308,7 @@ header {
   height: 9px;
   border-radius: 50%;
   background: var(--ok);
-  border: 2px solid var(--bg);
+  border: 2px solid var(--surface-2);
   box-shadow: 0 0 6px var(--ok-glow);
 }
 .card-status-dot.offline {
@@ -1493,6 +1502,12 @@ header {
   white-space: nowrap;
 }
 .ep-act { flex-shrink: 0; }
+.ep-acts-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
 
 .ep-actions {
   display: flex;
@@ -1996,6 +2011,25 @@ legend {
 }
 
 @media (max-width: 900px) {
+  .view-container {
+    padding: 10px 10px calc(68px + var(--sab));
+  }
+
+  /* 移动端展平容器套娃：消除顶层大卡片外壳，业务卡片直接依托全屏视区流式排布 */
+  #view-manage > .card,
+  #view-consume > .card {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
+  .pane-head {
+    padding: 4px 4px 10px;
+    margin-bottom: 8px;
+  }
   .mobile-recv-bar:not(.hidden) {
     display: flex;
     align-items: center;
@@ -2045,18 +2079,34 @@ legend {
     animation: none;
   }
   #view-manage {
-    width: 380px;
+    width: 400px;
     flex-shrink: 0;
+    gap: 18px;
+  }
+  /* PC 桌面端：UI 展平布局驱动，本机管理与发现节点展平共存，上下排列，零互斥隐藏 */
+  #view-manage #local-pane,
+  #view-manage #device-pane {
+    display: block !important;
   }
   #view-consume {
     flex: 1;
     min-width: 0;
   }
   .stage-card {
-    min-height: 520px;
+    min-height: 560px;
   }
-  .mobile-back-btn {
-    display: none !important;
+}
+
+/* 聚焦平滑动画（桌面端导航点击定位卡片） */
+.card-focus-glow {
+  animation: cardPulseGlow 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes cardPulseGlow {
+  0% {
+    box-shadow: 0 0 0 2px var(--accent-light), 0 8px 30px rgba(67, 97, 238, 0.35);
+  }
+  100% {
+    box-shadow: var(--shadow-card);
   }
 }
 
@@ -2193,222 +2243,6 @@ legend {
   color: var(--text-3);
   font-family: var(--font-mono);
 }
-
-.mobile-back-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  padding: 0;
-  min-height: unset;
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  color: var(--text-1);
-  cursor: pointer;
-}
-.mobile-back-btn .ic { width: 18px; height: 18px; }
-
-.chat-workspace {
-  margin-top: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  flex: 1;
-}
-
-.chat-timeline {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 10px 4px;
-  min-height: 80px;
-  max-height: 240px;
-  overflow-y: auto;
-}
-
-.chat-notice {
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 14px;
-  border-radius: var(--r-pill);
-  font-size: 11.5px;
-  color: var(--text-muted);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border-subtle);
-}
-.chat-notice .ic { width: 13px; height: 13px; opacity: 0.7; }
-
-.chat-msg {
-  display: flex;
-  flex-direction: column;
-  max-width: 85%;
-  animation: fadeIn 0.2s ease;
-}
-.chat-msg.self {
-  align-self: flex-end;
-  align-items: flex-end;
-}
-.chat-msg.peer {
-  align-self: flex-start;
-  align-items: flex-start;
-}
-.chat-msg-bubble {
-  padding: 8px 14px;
-  border-radius: 14px;
-  font-size: 13px;
-  line-height: 1.45;
-  word-break: break-word;
-}
-.chat-msg.self .chat-msg-bubble {
-  background: var(--accent-grad);
-  color: #fff;
-  border-bottom-right-radius: 4px;
-  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.35);
-}
-.chat-msg.peer .chat-msg-bubble {
-  background: var(--surface-2);
-  color: var(--text-1);
-  border: 1px solid var(--border);
-  border-bottom-left-radius: 4px;
-}
-.chat-msg-time {
-  font-size: 10px;
-  color: var(--text-muted);
-  margin-top: 3px;
-  padding: 0 4px;
-}
-
-.chat-file-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  border-radius: var(--r-md);
-  background: var(--surface-2);
-  border: 1px solid var(--border-accent);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-}
-.chat-file-ic {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  background: rgba(16, 185, 129, 0.14);
-  color: var(--ok-light);
-  display: grid;
-  place-items: center;
-  flex: none;
-}
-.chat-file-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  flex: 1;
-}
-.chat-file-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.chat-file-meta {
-  font-size: 11px;
-  color: var(--text-3);
-  font-family: var(--font-mono);
-}
-
-.chat-bottom-bar {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: auto;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.chat-quick-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.chat-action-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  min-height: unset;
-  border-radius: var(--r-pill);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  color: var(--text-2);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.16s ease;
-}
-.chat-action-chip:hover {
-  background: var(--surface-3);
-  color: var(--text-1);
-  border-color: var(--border-accent);
-  transform: translateY(-1px);
-}
-.chat-action-chip .ic { width: 14px; height: 14px; color: var(--accent-light); }
-
-.chat-input-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.chat-input {
-  flex: 1;
-  min-width: 0;
-  background: var(--surface-recessed);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: 8px 14px;
-  color: var(--text-1);
-  font-size: 13.5px;
-  transition: all 0.18s ease;
-}
-.chat-input:focus {
-  outline: none;
-  border-color: var(--border-accent);
-  background: var(--surface-2);
-  box-shadow: 0 0 14px rgba(99, 102, 241, 0.25);
-}
-
-.chat-send-btn {
-  width: 36px;
-  height: 36px;
-  min-height: unset;
-  border-radius: var(--r-md);
-  padding: 0;
-  display: grid;
-  place-items: center;
-  background: var(--accent-grad);
-  border: none;
-  color: #fff;
-  cursor: pointer;
-  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.4);
-  transition: all 0.18s ease;
-  flex: none;
-}
-.chat-send-btn:hover {
-  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.6);
-  transform: translateY(-1px);
-}
-.chat-send-btn .ic { width: 16px; height: 16px; }
-
-
 .local-head-info {
   display: flex;
   align-items: center;
@@ -2654,9 +2488,11 @@ legend {
   height: 19px;
   transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-.main-tab-btn:hover {
-  color: var(--text-1);
-  background: rgba(255, 255, 255, 0.04);
+@media (hover: hover) {
+  .main-tab-btn:hover {
+    color: var(--text-1);
+    background: rgba(255, 255, 255, 0.04);
+  }
 }
 .main-tab-btn.active {
   color: #fff;
@@ -2691,15 +2527,171 @@ legend {
   bottom: calc(68px + var(--sab)) !important;
 }
 
+/* ---------------- 桌面端工作区分段导航 (Segmented Bar) ---------------- */
+.manage-segmented-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+.seg-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+  border-radius: calc(var(--r-md) - 2px);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+.seg-btn:hover {
+  color: var(--text-1);
+  background: rgba(255, 255, 255, 0.04);
+}
+.seg-btn.active {
+  background: var(--surface-3);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+.seg-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  color: var(--accent-light);
+}
+
+/* ---------------- 局域网节点分页控制器 (Device Pager) ---------------- */
+.device-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  margin-top: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  flex-shrink: 0;
+}
+.pager-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  color: var(--text-1);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.pager-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+.pager-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.pager-info {
+  font-size: 12px;
+  color: var(--text-2);
+  font-weight: 500;
+  font-family: var(--font-mono);
+}
+
+/* 移动端隐藏分段导航（移动端由底栏驱动） */
+@media (max-width: 900px) {
+  .manage-segmented-bar {
+    display: none !important;
+  }
+}
+
+/* ---------------- 桌面端大屏：免滚动翻页工作室布局 (Zero-Scroll Studio) ---------------- */
 @media (min-width: 901px) {
-  /* 桌面端隐藏全局常驻底栏，使用宽屏侧边栏与头部一体化导航 */
+  /* PC 端不需要底栏/左轨，空间全量让渡给双栏工作台 */
   .main-bottom-bar {
-    display: none;
+    display: none !important;
   }
+
+  header {
+    margin-left: 0 !important;
+    width: 100% !important;
+  }
+
   .view-container {
-    padding-bottom: calc(36px + var(--sab)) !important;
+    margin-left: 0 !important;
+    width: 100% !important;
+    max-width: 1600px;
+    height: calc(100vh - var(--header-h) - 24px);
+    max-height: calc(100vh - var(--header-h) - 24px);
+    overflow: hidden;
+    display: flex;
+    gap: 20px;
+    align-items: stretch;
+    padding: 16px 24px calc(16px + var(--sab)) !important;
   }
-  .mobile-recv-bar {
-    bottom: calc(16px + var(--sab)) !important;
+
+  #view-manage {
+    width: 420px;
+    flex-shrink: 0;
+    height: 100%;
+    display: flex !important;
+    flex-direction: column;
+    overflow: hidden;
+    gap: 0;
   }
+
+  #view-consume {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    display: flex !important;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  #local-pane, #device-pane {
+    height: calc(100% - 50px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  #device-list {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .stage-card {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+}
+
+input::placeholder {
+  color: var(--text-2);
+  opacity: 0.8;
 }

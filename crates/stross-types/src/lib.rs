@@ -94,7 +94,7 @@ pub struct EndpointSourceList {
 // 展示视图（节点卡片 / 推流状态 / 中继入口 / 目录）
 // ---------------------------------------------------------------------------
 
-/// 应用信息（版本 / 平台 / ffmpeg 是否可用 / 本机 IP）。
+/// 应用信息（版本 / 平台 / ffmpeg 是否可用 / 本机 IP / 本机节点标识）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppInfo {
@@ -103,6 +103,9 @@ pub struct AppInfo {
     pub platform: String,
     pub ffmpeg: bool,
     pub ips: Vec<String>,
+    /// 本机节点 id（强类型 [`NodeId`]；序列化为 hex 字符串供前端使用，
+    /// 订阅终止通知向共享方出示）。
+    pub node_id: NodeId,
 }
 
 /// 中继入口信息（mDNS 能力引导；本机中继或扫描结果共用）。
@@ -209,6 +212,11 @@ pub struct MediaSubscribeOutcome {
     pub relay_url: String,
     /// 观看流 id（pull = 公开方会话；push = 本机自签会话）。
     pub stream_id: StreamId,
+    /// 共享方（协商端点）主机——订阅终止时经 `POST /api/negotiator/unsubscribe`
+    /// 显式通知共享方（免 mDNS 再发现）。
+    pub host: String,
+    /// 共享方协商端点端口（`NEGOTIATOR_DISCOVERY`）。
+    pub port: u16,
 }
 
 /// 文件接收结果（文件端点半程：握手 → 接收 → 落盘；GUI 命令 / CLI 展示共用，

@@ -258,10 +258,9 @@ impl Kernel {
         // ① 先取走登记（并发到达的停止请求只执行一次），并复位端点状态；
         //    非端点共享流无登记 → endpoint_id 为 None，其余清理仍继续。
         let endpoint_id = self.clear_active_share(stream_id).map(|share| {
-            let _ =
-                self.registry
-                    .lock_poisoned()
-                    .set_state(share.endpoint_id, EndpointState::Idle, 0);
+            let mut reg = self.registry.lock_poisoned();
+            reg.clear_subscribers(share.endpoint_id);
+            let _ = reg.set_state(share.endpoint_id, EndpointState::Idle, 0);
             share.endpoint_id
         });
         // ② 优雅停流：按 stream_id 从并发流表取出对应引擎，仅在存在时动作
@@ -296,6 +295,30 @@ impl Kernel {
     ) {
         self.share_stop_delay = stop_delay;
         self.share_idle_delay = idle_delay;
+    }
+
+    /// 订阅达成：记录订阅者到端点（`subscribers` 即时 +1；早于数据面
+    /// watchers 事件，共享端 UI「N 订阅中」即刻反映）。协商层授成功后调用。
+    pub fn note_endpoint_subscribed(&self, endpoint_id: EndpointId, node_id: NodeId) {
+        self.registry
+            .lock_poisoned()
+            .note_subscriber(endpoint_id, node_id);
+    }
+
+    /// 订阅终止（显式取消订阅通知）：从端点移除该订阅者并更新计数；
+    /// 返回移除后剩余的订阅者数（0 = 最后一个订阅者离开）。
+    ///
+    /// `remaining == 0` 时立即停止该端点共享（不再等数据面 watchers 断连
+    /// 的延迟复查）——共享端端点状态在订阅终止瞬间收敛到已共享/待连接。
+    pub fn note_endpoint_unsubscribed(&self, endpoint_id: EndpointId, node_id: NodeId) -> u32 {
+        let remaining = self
+            .registry
+            .lock_poisoned()
+            .note_unsubscriber(endpoint_id, node_id);
+        if remaining == 0 {
+            let _ = self.stop_endpoint_share(endpoint_id);
+        }
+        remaining
     }
 
     /// 查询端点当前活动共享（`(stream_id, delivery)`；订阅收敛用）。

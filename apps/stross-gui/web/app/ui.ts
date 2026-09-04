@@ -164,6 +164,16 @@ function drawReceiveFrame(w: number, h: number, rgba: Uint8Array): void {
   if (info.textContent !== label) info.textContent = label;
 }
 
+/** 重新绘制最近一帧位图到画布（防止 Tab 切回或布局重排后画布变黑/空帧）。 */
+function repaintLastFrame(): void {
+  const ctx = canvasCtx();
+  if (!ctx || !recvImg) return;
+  const canvas = ctx.canvas;
+  if (canvas.width !== recvVideoW) canvas.width = recvVideoW;
+  if (canvas.height !== recvVideoH) canvas.height = recvVideoH;
+  ctx.putImageData(recvImg, 0, 0);
+}
+
 // ---------------------------------------------------------------- 播放器全屏
 
 /** 把窗口级全屏状态应用到 UI：画布容器悬浮层 + 全屏按钮图标/标题 + 屏幕方向智能自适应。 */
@@ -250,7 +260,17 @@ async function handleNativeFullscreenChanged(active: boolean): Promise<void> {
 /** 切换全局主视图模式（设备与共享管理 vs 消费播放台）——经过状态机派发。 */
 function switchView(mode: 'manage' | 'consume'): void {
   dispatchUIAction({ type: 'SWITCH_VIEW', mode });
-  void syncAndroidSurface();
+  if (mode === 'consume') {
+    requestAnimationFrame(() => {
+      repaintLastFrame();
+      void syncAndroidSurface();
+      setTimeout(() => {
+        void syncAndroidSurface();
+      }, 60);
+    });
+  } else {
+    void syncAndroidSurface();
+  }
 }
 
 /** 兼容旧移动端分段 Tab。 */
@@ -264,53 +284,53 @@ function switchManageSubtab(subtab: 'discover' | 'local'): void {
   const devicePane = $('device-pane');
   if (localPane) localPane.classList.toggle('hidden', subtab !== 'local');
   if (devicePane) devicePane.classList.toggle('hidden', subtab !== 'discover');
-  const btnDiscover = $('subtab-discover');
-  const btnLocal = $('subtab-local');
-  if (btnDiscover) {
-    btnDiscover.classList.toggle('active', subtab === 'discover');
-    btnDiscover.setAttribute('aria-selected', String(subtab === 'discover'));
-  }
-  if (btnLocal) {
-    btnLocal.classList.toggle('active', subtab === 'local');
-    btnLocal.setAttribute('aria-selected', String(subtab === 'local'));
-  }
+
+  // 桌面端分段标签同步
+  const segDiscover = $('seg-tab-discover');
+  const segLocal = $('seg-tab-local');
+  if (segDiscover) segDiscover.classList.toggle('active', subtab === 'discover');
+  if (segLocal) segLocal.classList.toggle('active', subtab === 'local');
+
+  // 移动端底栏同步
   const mainTabLocal = $('main-tab-local');
   const mainTabDiscover = $('main-tab-discover');
   if (mainTabLocal) mainTabLocal.classList.toggle('active', subtab === 'local');
   if (mainTabDiscover) mainTabDiscover.classList.toggle('active', subtab === 'discover');
+
+  dispatchUIAction({ type: 'SET_PAGE_MODE', mode: subtab });
 }
 
-/** 切换特定节点二级页面的子标签（端点浏览 vs 订阅播放）。 */
-function switchNodeSubtab(subtab: 'browse' | 'player'): void {
-  const paneBrowse = $('node-pane-browse');
-  const panePlayer = $('node-pane-player');
-  if (paneBrowse) paneBrowse.classList.toggle('hidden', subtab !== 'browse');
-  if (panePlayer) panePlayer.classList.toggle('hidden', subtab !== 'player');
-
-  const tabBrowse = $('node-tab-browse');
-  const tabPlayer = $('node-tab-player');
-  if (tabBrowse) tabBrowse.classList.toggle('active', subtab === 'browse');
-  if (tabPlayer) tabPlayer.classList.toggle('active', subtab === 'player');
-
-  if (subtab === 'browse' && selectedDevice) {
-    const dir = remoteDirs.get(selectedDevice.key);
-    if (dir) {
-      renderBrowsePaneEndpoints(selectedDevice, dir);
-    } else {
-      void loadRemoteDir(selectedDevice);
-    }
-  }
+/** 给指定卡片添加短暂的呼吸高亮并在滚动后平滑定位（桌面端布局驱动交互） */
+function highlightPane(id: string): void {
+  const el = $(id);
+  if (!el) return;
+  el.classList.remove('card-focus-glow');
+  void el.offsetWidth;
+  el.classList.add('card-focus-glow');
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
-/** 切换全局主底部导航栏（本机管理 | 发现节点 | 订阅浏览）。 */
+
+/** 切换全局主底部/左侧导航栏（本机管理 | 发现节点 | 订阅浏览）。
+ *  - 移动端 (<= 900px)：纯 Tab 驱动单视区流式切换，零返回键冗余
+ *  - 桌面端 (> 900px)：UI 展平与布局驱动，双栏并列展开，导航用于锚点定位与聚焦 */
 function switchMainBottomTab(tab: 'local' | 'discover' | 'consume'): void {
   if (tab === 'local') {
     switchView('manage');
     switchManageSubtab('local');
+    if (typeof window !== 'undefined' && window.innerWidth > 900) {
+      highlightPane('local-pane');
+    }
   } else if (tab === 'discover') {
     switchView('manage');
     switchManageSubtab('discover');
+    if (typeof window !== 'undefined' && window.innerWidth > 900) {
+      highlightPane('device-pane');
+    }
   } else {
     switchView('consume');
+    if (typeof window !== 'undefined' && window.innerWidth > 900) {
+      highlightPane('recv-pane');
+    }
   }
   const tabLocal = $('main-tab-local');
   const tabDiscover = $('main-tab-discover');
@@ -332,18 +352,25 @@ function initFSMUI(): void {
     const tabDiscover = $('main-tab-discover');
     if (tabConsume) tabConsume.classList.toggle('active', state.viewMode === 'consume');
     if (state.viewMode === 'manage') {
-      const isLocal = $('device-pane')?.classList.contains('mode-local');
+      const isLocal = state.pageMode === 'local' || !$('local-pane')?.classList.contains('hidden');
       if (tabLocal) tabLocal.classList.toggle('active', !!isLocal);
       if (tabDiscover) tabDiscover.classList.toggle('active', !isLocal);
+      const segDiscover = $('seg-tab-discover');
+      const segLocal = $('seg-tab-local');
+      if (segLocal) segLocal.classList.toggle('active', !!isLocal);
+      if (segDiscover) segDiscover.classList.toggle('active', !isLocal);
     } else {
       if (tabLocal) tabLocal.classList.remove('active');
       if (tabDiscover) tabDiscover.classList.remove('active');
     }
- 
-    const mobBack = $('mobile-back-btn');
-    if (mobBack) {
-      mobBack.classList.toggle('hidden', state.viewMode !== 'consume');
+
+    if (state.connectionPhase === 'negotiating' || state.connectionPhase === 'connecting') {
+      const recvStatus = $('recv-status');
+      if (recvStatus && state.connectionMessage) {
+        recvStatus.textContent = state.connectionMessage;
+      }
     }
+ 
 
     const empty = $('recv-empty');
     const canvasWrap = $('recv-canvas-wrap');
@@ -376,7 +403,7 @@ function initFSMUI(): void {
         break;
       case 'audioOnly':
         if (empty) empty.classList.add('hidden');
-        if (canvasWrap) canvasWrap.classList.add('hidden');
+        if (canvasWrap && (!IS_ANDROID || !androidVideoLink())) canvasWrap.classList.add('hidden');
         if (overlay) overlay.classList.add('hidden');
         if (audioViz) audioViz.classList.remove('hidden');
         if (aiBar) aiBar.classList.remove('hidden');
@@ -736,26 +763,6 @@ winObj.toggleMute = toggleMute;
 winObj.updateMuteButtonUI = updateMuteButtonUI;
 winObj.updateZoomChipUI = updateZoomChipUI;
 winObj.switchManageSubtab = switchManageSubtab;
-winObj.switchNodeSubtab = switchNodeSubtab;
 winObj.switchMainBottomTab = switchMainBottomTab;
 
-/** 向协作时间线追加一条传输或便签气泡。 */
-function appendChatTimelineMessage(text: string, isSelf: boolean): void {
-  const timeline = $('chat-timeline');
-  if (!timeline) return;
-  const msg = document.createElement('div');
-  msg.className = 'chat-msg ' + (isSelf ? 'self' : 'peer');
-  const bubble = document.createElement('div');
-  bubble.className = 'chat-msg-bubble';
-  bubble.textContent = text;
-  const time = document.createElement('span');
-  time.className = 'chat-msg-time';
-  const now = new Date();
-  time.textContent = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-  msg.appendChild(bubble);
-  msg.appendChild(time);
-  timeline.appendChild(msg);
-  timeline.scrollTop = timeline.scrollHeight;
-}
 
-winObj.appendChatTimelineMessage = appendChatTimelineMessage;

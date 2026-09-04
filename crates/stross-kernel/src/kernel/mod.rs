@@ -303,6 +303,10 @@ impl Kernel {
                 .into_iter()
                 .map(|ip| ip.to_string())
                 .collect(),
+            node_id: self
+                .node_identity()
+                .map(|i| i.node_id)
+                .unwrap_or(NodeId::NIL),
         }
     }
 

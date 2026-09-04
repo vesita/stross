@@ -798,6 +798,10 @@ fn notify_subscribed(
     let Some(delivery) = grant.delivery else {
         return;
     };
+    // 显式订阅者登记：共享端「N 订阅中」即刻反映（早于数据面 watchers 事件）；
+    // 订阅终止通知据此精确移除该订阅者（强杀/断网等 watchers 断连有延迟时，
+    // 显式登记保证最后一个订阅者离开即收敛）。
+    app.note_endpoint_subscribed(endpoint_id, *subscriber);
     // 订阅收敛（iteration-plan.md 第十二轮）：该端点已有活动共享（复用场景）
     // → 不重复触发 share（流已在推，新订阅者直接 watch 同流）
     if app.active_share_by_endpoint(endpoint_id).is_some() {
@@ -842,6 +846,44 @@ pub(crate) async fn handle_endpoints(State(state): State<Arc<ServerState>>) -> J
         endpoints,
     };
     Json(dir)
+}
+
+/// 取消订阅通知（`POST /api/negotiator/unsubscribe`）：订阅方终止接收时
+/// 显式通知共享方——共享端点据此即时把它从「N 订阅中」移除，最后一个订阅者
+/// 离开即收敛到待连接（不再等数据面 watchers 断连的延迟复查）。
+#[utoipa::path(
+    post,
+    path = "/api/negotiator/unsubscribe",
+    tag = "negotiator",
+    request_body = dto::UnsubscribeRequest,
+    responses(
+        (status = 200, description = "已记录取消订阅", body = dto::UnsubscribeResp),
+        (status = 404, description = "端点不存在或未通告", body = dto::ApiError),
+        (status = 500, description = "内部错误", body = dto::ApiError)
+    )
+)]
+pub(crate) async fn handle_unsubscribe(
+    State(state): State<Arc<ServerState>>,
+    Json(req): Json<dto::UnsubscribeRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let endpoint_id = EndpointId::new(req.endpoint_kind, req.endpoint_id);
+    if state.app.endpoint_manifest(endpoint_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("端点不存在或未通告: {endpoint_id}") })),
+        );
+    }
+    let remaining = state
+        .app
+        .note_endpoint_unsubscribed(endpoint_id, req.node_id);
+    tracing::info!(
+        "订阅终止：端点 {endpoint_id} 移除订阅者 {}，剩余 {remaining} 个",
+        req.node_id
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "remainingSubscribers": remaining })),
+    )
 }
 
 /// 统一发现清单（`GET /api/discovery`）：本节点权威节点信息（身份 + 能力 +
@@ -1050,6 +1092,59 @@ mod tests {
         neg.respond("n3", false, false).unwrap();
         let res = rx.await.unwrap();
         assert!(res.is_err(), "拒绝时应返回错误给申请方");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 订阅取消通知（新协议）：订阅方终止时显式通知共享方——共享端点
+    /// 即时把它从「订阅中」移除；最后一个订阅者离开即收敛（待连接）。
+    /// 订阅取消通知（新协议）：订阅方终止时显式通知共享方——共享端点
+    /// 即时把它从「订阅中」移除；最后一个订阅者离开即收敛（待连接）。
+    #[tokio::test]
+    async fn unsubscribe_updates_endpoint_subscribers_and_stops_last() {
+        let dir = tmp_dir("unsub");
+        let app = Arc::new(desktop_kernel());
+        app.publish_endpoint(MIC, Visibility::Public, Delivery::Pull, None, None)
+            .expect("公开麦克风端点");
+        // 订阅达成（grant 记录订阅者，模拟 `notify_subscribed` 的登记动作）
+        app.note_endpoint_subscribed(MIC, NodeId::from("dev-a"));
+        assert_eq!(
+            app.endpoint_manifest(MIC).unwrap().subscribers,
+            1,
+            "订阅达成后共享端点立即记 1 个订阅者"
+        );
+        // 模拟端点共享已登记（最后一个订阅者离开即停止共享）
+        let weak: std::sync::Weak<dyn crate::EndpointApp> =
+            std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
+        app.note_share_active(weak, MIC, "sess-1", Delivery::Pull);
+        assert!(app.active_share_by_endpoint(MIC).is_some());
+        // 另一订阅者加入 → 2
+        app.note_endpoint_subscribed(MIC, NodeId::from("dev-b"));
+        assert_eq!(
+            app.endpoint_manifest(MIC).unwrap().subscribers,
+            2,
+            "两个订阅者"
+        );
+        // 第一个订阅者显式取消订阅 → 剩余 1，共享仍在
+        assert_eq!(
+            app.note_endpoint_unsubscribed(MIC, NodeId::from("dev-a")),
+            1
+        );
+        assert_eq!(app.endpoint_manifest(MIC).unwrap().subscribers, 1);
+        assert!(
+            app.active_share_by_endpoint(MIC).is_some(),
+            "仍有订阅者，共享不停止"
+        );
+        // 最后一个订阅者取消订阅 → 剩余 0，共享停止（状态收敛）
+        assert_eq!(
+            app.note_endpoint_unsubscribed(MIC, NodeId::from("dev-b")),
+            0
+        );
+        assert_eq!(app.endpoint_manifest(MIC).unwrap().subscribers, 0);
+        assert_eq!(
+            app.active_share_by_endpoint(MIC),
+            None,
+            "无订阅者 → 共享停止（待连接）"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

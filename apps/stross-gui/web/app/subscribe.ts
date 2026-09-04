@@ -22,6 +22,27 @@ function hostOfLink(linkId: string): string {
   return i > 0 ? linkId.slice(0, i) : '';
 }
 
+/** 订阅终止显式通知共享方（`POST /api/negotiator/unsubscribe`，best-effort）：
+ *  让共享端点即时更新「N 订阅中」，最后一个订阅者离开即收敛，不必等数据面
+ *  watchers 断连检测（强杀/断网有延迟）。失败静默（不阻断本地停止流程）。 */
+function notifyUnsubscribe(link: RecvLinkState): void {
+  if (!link.negotiateHost || !link.negotiatePort || !link.endpointId) return;
+  const p = link.endpointId.lastIndexOf(':');
+  const endpointKind = p >= 0 ? link.endpointId.slice(0, p) : 'screen';
+  const endpointId = Number(p >= 0 ? link.endpointId.slice(p + 1) : '0');
+  if (!localNodeId || Number.isNaN(endpointId)) return;
+  const body = {
+    nodeId: localNodeId,
+    endpointKind,
+    endpointId,
+  };
+  void fetch(`http://${link.negotiateHost}:${link.negotiatePort}/api/negotiator/unsubscribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
 /** 当前接收目标中继（点选的局域网设备锚点优先，否则本机锚点；均无则 null）。 */
 function currentRelay(): TargetRelay | null {
   if (targetRelay) return targetRelay;
@@ -175,6 +196,8 @@ async function startReceiveLink(opts: {
   endpointName: string;
   streamId: string;
   kind?: string;
+  negotiateHost?: string;
+  negotiatePort?: number;
 }): Promise<boolean> {
   hideRecvError();
   const linkId = linkIdOf(opts.host, opts.endpointId);
@@ -194,6 +217,9 @@ async function startReceiveLink(opts: {
       linkId,
       name: recvLinkName(opts.host, opts.endpointName),
       streamId: opts.streamId,
+      endpointId: opts.endpointId,
+      negotiateHost: opts.negotiateHost,
+      negotiatePort: opts.negotiatePort,
       startedAt: Date.now(),
       frames: 0,
       audioBlocks: 0,
@@ -206,7 +232,7 @@ async function startReceiveLink(opts: {
     renderRecvLinks();
     void pollReceiveLinks();
     // 订阅达成自动切入消费播放台
-    switchView('consume');
+    switchMainBottomTab('consume');
     const recvPane = $('recv-pane');
     if (recvPane && window.innerWidth <= 900) {
       setTimeout(() => recvPane.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
@@ -226,9 +252,13 @@ async function startReceiveLink(opts: {
 
 /** 停止指定链路（其它链路不受影响）。 */
 async function stopReceiveLink(linkId: string): Promise<void> {
+  const link = recvLinks.get(linkId);
   try {
     await call('stop_receive_link', { linkId });
   } catch {}
+  // 显式通知共享方（best-effort）：让共享端点即时更新「订阅中」状态，
+  // 最后一个订阅者离开即收敛（不必等数据面 watchers 断连检测）。
+  if (link) notifyUnsubscribe(link);
   recvLinks.delete(linkId);
   subscribedEndpoints.delete(linkId);
   if (activeVideoLink === linkId) activeVideoLink = null;
@@ -306,15 +336,8 @@ function renderRecvLinks(): void {
       : `${statusText(link)} · 收到 ${gotFrames} 帧${fpsText} · 音频 ${link.audioBlocks} 块`;
     body.appendChild(name);
     body.appendChild(meta);
-    const stop = document.createElement('button');
-    stop.type = 'button';
-    stop.className = 'sm danger recv-link-stop';
-    stop.innerHTML = icon('stop');
-    stop.title = '停止该链路';
-    stop.dataset.link = link.linkId;
     row.appendChild(dot);
     row.appendChild(body);
-    row.appendChild(stop);
     container.appendChild(row);
   }
   syncRecvUI();
@@ -334,18 +357,13 @@ function syncRecvUI(): void {
   // 消费播放台正在播放徽标
   const stageLiveBadge = $('stage-live-badge');
   if (stageLiveBadge) stageLiveBadge.classList.toggle('hidden', !receiving);
-
-  // 全局消费视区徽标更新
-  const consumeBadge = $('consume-badge');
+  // 底栏「接收播放」Tab 徽标（活跃链路数）
+  const consumeBadge = $('main-consume-badge');
   if (consumeBadge) {
     consumeBadge.textContent = String(n);
     consumeBadge.classList.toggle('hidden', n === 0);
   }
-  const tabBadge = $('tab-recv-badge');
-  if (tabBadge) {
-    tabBadge.textContent = String(n);
-    tabBadge.classList.toggle('hidden', n === 0);
-  }
+
   // 移动端快速跳转条
   const mobBar = $('mobile-recv-bar');
   if (mobBar) {
@@ -395,26 +413,14 @@ function calcSmartLayout(): void {
   const hasVideo = !!activeVideo && ((activeVideo.frames ?? 0) > 0 || (activeVideo.decodedVideo ?? 0) > 0);
   const audioCount = Array.from(recvLinks.values()).filter((l) => l.audioBlocks > 0 || l.name.includes('声音') || l.name.includes('麦克风')).length;
 
-  const label = $('ai-layout-label');
   const tip = $('diag-ai-tip');
-  if (label) {
-    if (hasVideo && audioCount > 0) {
-      label.textContent = 'AI 智能音画混排';
-    } else if (hasVideo && totalLinks > 1) {
-      label.textContent = 'AI 智能画中画 (PiP)';
-    } else if (!hasVideo && audioCount > 0) {
-      label.textContent = 'AI 动态音频工作台';
-    } else {
-      label.textContent = 'AI 极速低延迟视区';
-    }
-  }
   if (tip) {
     if (hasVideo && audioCount > 0) {
-      tip.innerHTML = `<svg class="ic"><use href="#i-sparkles"/></svg><span>AI 优化：已检测到音视频并发链路，视频主视口硬件渲染，音频流已开启低延迟直通与防破音保护。</span>`;
+      tip.innerHTML = `<span>已检测到音视频并发链路：视频主视口硬件渲染，音频流低延迟直通并开启防破音保护。</span>`;
     } else if (!hasVideo && audioCount > 0) {
-      tip.innerHTML = `<svg class="ic"><use href="#i-sparkles"/></svg><span>AI 优化：纯音频接收模式，已自动关闭视频显示管线以节省 90% 算力与电池消耗。</span>`;
+      tip.innerHTML = `<span>纯音频接收模式：已关闭视频显示管线以节省算力与电池消耗。</span>`;
     } else {
-      tip.innerHTML = `<svg class="ic"><use href="#i-sparkles"/></svg><span>AI 优化：局域网传输延迟极低（&lt;20ms），MediaCodec 硬解直通启动，屏幕常亮已激活。</span>`;
+      tip.innerHTML = `<span>局域网传输延迟极低（&lt;20ms），MediaCodec 硬解直通启动，屏幕常亮已激活。</span>`;
     }
   }
 }

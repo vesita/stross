@@ -366,9 +366,9 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
                         e.name,
                         avail,
                         if e.published {
-                            "已通告"
+                            "已共享"
                         } else {
-                            "未通告"
+                            "未共享"
                         },
                         e.kind.as_str(),
                         e.visibility.as_str(),

@@ -17,6 +17,7 @@ async function init() {
     try {
         const info = await call('app_info');
         IS_ANDROID = info.platform === 'android';
+        localNodeId = info.nodeId || '';
         $('ver-badge').textContent = 'v' + info.version;
         const fb = $('ffmpeg-badge');
         if (IS_ANDROID) {
@@ -163,6 +164,18 @@ const handleDeviceAction = (e) => {
                 openSubscribeModal(host, endpointId);
             break;
         }
+        case 'stop-endpoint-sub': {
+            const linkId = btn.dataset.link;
+            if (linkId) {
+                void stopReceiveLink(linkId);
+                showToast('已停止该端点订阅', 'ok');
+            }
+            break;
+        }
+        case 'view-endpoint-sub': {
+            switchMainBottomTab('consume');
+            break;
+        }
     }
 };
 $('device-list')?.addEventListener('click', handleDeviceAction);
@@ -189,17 +202,15 @@ $('sub-modal').addEventListener('click', (e) => {
 const subClose = $('sub-modal-close');
 if (subClose)
     subClose.onclick = () => $('sub-modal').classList.add('hidden');
-// 接收面板：停止接收
-$btn('recv-stop-btn').onclick = () => void stopReceive();
-// 接收链路行：逐条停止
-$('recv-links').addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-link]');
-    if (btn && btn.dataset.link)
-        void stopReceiveLink(btn.dataset.link);
-});
-// 播放器控制条：全屏 / 停止
+// 接收面板：兼容测试停止调用
+const recvStopBtn = $('recv-stop-btn');
+if (recvStopBtn)
+    recvStopBtn.onclick = () => void stopReceive();
+const fsStopBtn = $('recv-fs-stop-btn');
+if (fsStopBtn)
+    fsStopBtn.onclick = () => void stopReceive();
+// 播放器控制条：全屏
 $btn('recv-fs-btn').onclick = () => void togglePlayerFullscreen();
-$btn('recv-fs-stop-btn').onclick = () => void stopReceive();
 // 双击画面切换全屏
 $('recv-canvas').addEventListener('dblclick', () => void togglePlayerFullscreen());
 // ESC 退出全屏
@@ -220,15 +231,6 @@ $input('manual-addr').addEventListener('keydown', (e) => {
         void addManualRelay();
     }
 });
-// 节点二级页底部子标签切换（浏览 vs 订阅）
-const nodeTabBrowse = $('node-tab-browse');
-const nodeTabPlayer = $('node-tab-player');
-if (nodeTabBrowse) {
-    nodeTabBrowse.onclick = () => switchNodeSubtab('browse');
-}
-if (nodeTabPlayer) {
-    nodeTabPlayer.onclick = () => switchNodeSubtab('player');
-}
 // 全局主底部导航栏事件
 const mainTabLocal = $('main-tab-local');
 const mainTabDiscover = $('main-tab-discover');
@@ -242,11 +244,32 @@ if (mainTabDiscover) {
 if (mainTabConsume) {
     mainTabConsume.onclick = () => switchMainBottomTab('consume');
 }
-// 消费舞台空状态跳转到端点浏览
-const emptyGoBrowseBtn = $('empty-go-browse-btn');
-if (emptyGoBrowseBtn) {
-    emptyGoBrowseBtn.onclick = () => switchNodeSubtab('browse');
+// 桌面端分段导航切换事件 (Segmented Bar)
+const segTabDiscover = $('seg-tab-discover');
+if (segTabDiscover) {
+    segTabDiscover.onclick = () => switchManageSubtab('discover');
 }
+const segTabLocal = $('seg-tab-local');
+if (segTabLocal) {
+    segTabLocal.onclick = () => switchManageSubtab('local');
+}
+// 键盘翻页快捷键：在未聚焦输入框时，按左右方向键进行节点翻页
+window.addEventListener('keydown', (e) => {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
+        return;
+    if (e.key === 'ArrowLeft') {
+        const prevBtn = $btn('pager-prev-btn');
+        if (prevBtn && !prevBtn.disabled && !$('device-pager')?.classList.contains('hidden')) {
+            prevBtn.click();
+        }
+    }
+    else if (e.key === 'ArrowRight') {
+        const nextBtn = $btn('pager-next-btn');
+        if (nextBtn && !nextBtn.disabled && !$('device-pager')?.classList.contains('hidden')) {
+            nextBtn.click();
+        }
+    }
+});
 const emptyGoManageBtn = $('empty-go-manage-btn');
 if (emptyGoManageBtn) {
     emptyGoManageBtn.onclick = () => {
@@ -258,70 +281,7 @@ const mobJumpBtn = $('mobile-recv-jump-btn');
 if (mobJumpBtn) {
     mobJumpBtn.onclick = () => {
         switchMainBottomTab('consume');
-        switchNodeSubtab('player');
         $('recv-pane')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    };
-}
-// 移动端返回节点列表
-const mobBackBtn = $('mobile-back-btn');
-if (mobBackBtn) {
-    mobBackBtn.onclick = () => {
-        switchMainBottomTab('discover');
-    };
-}
-// 快速发送便签到当前节点
-const chatSendBtn = $('chat-send-btn');
-const chatNoteInput = document.getElementById('chat-note-input');
-const sendChatNote = () => {
-    if (!chatNoteInput)
-        return;
-    const text = chatNoteInput.value.trim();
-    if (!text)
-        return;
-    chatNoteInput.value = '';
-    appendChatTimelineMessage(text, true);
-    showToast('便签已发送到当前节点', 'ok');
-};
-if (chatSendBtn) {
-    chatSendBtn.onclick = sendChatNote;
-}
-if (chatNoteInput) {
-    chatNoteInput.onkeydown = (e) => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            sendChatNote();
-        }
-    };
-}
-// 快速共享屏幕 / 共享声音 / 共享文件
-const actScreen = $('chat-act-screen');
-if (actScreen) {
-    actScreen.onclick = () => {
-        const ep = localCatalog.endpoints.find((e) => e.kind === 'screen');
-        if (ep)
-            openPublishModal(endpointIdStr(ep));
-        else
-            showToast('未找到可用的屏幕共享源', 'err');
-    };
-}
-const actMic = $('chat-act-mic');
-if (actMic) {
-    actMic.onclick = () => {
-        const ep = localCatalog.endpoints.find((e) => e.kind === 'audio' || e.kind === 'microphone');
-        if (ep)
-            openPublishModal(endpointIdStr(ep));
-        else
-            showToast('未找到可用的声音共享源', 'err');
-    };
-}
-const actFile = $('chat-act-file');
-if (actFile) {
-    actFile.onclick = () => {
-        const ep = localCatalog.endpoints.find((e) => e.kind === 'file');
-        if (ep)
-            openPublishModal(endpointIdStr(ep));
-        else
-            showToast('可通过命令行将文件公开为端点供节点订阅', 'info');
     };
 }
 // 设备搜索/过滤输入框事件
@@ -380,7 +340,17 @@ void listen('native-fullscreen-changed', (p) => {
 // 尺寸/方向/滚动变化时重定位原生播放 Surface（Android Surface 路径；幂等）。
 window.addEventListener('resize', () => { void syncAndroidSurface(); });
 window.addEventListener('orientationchange', () => { void syncAndroidSurface(); });
-window.addEventListener('scroll', () => { void syncAndroidSurface(); }, { passive: true });
+window.addEventListener('scroll', () => { void syncAndroidSurface(); }, { passive: true, capture: true });
+// 播放容器（.canvas-wrap）自身尺寸/位置变化（比例切换、Tab 返回重排、布局流）也
+// 重定位原生 Surface——保证**图层与其容器关系一致**（Surface 始终贴合容器矩形，
+// 随容器缩放重排，不残留错位）。ResizeObserver 比 window resize 更精确（捕捉
+// 纯容器级变化），幂等回调。
+if (typeof ResizeObserver !== 'undefined') {
+    const wrap = $('recv-canvas-wrap');
+    if (wrap) {
+        new ResizeObserver(() => { void syncAndroidSurface(); }).observe(wrap);
+    }
+}
 // 全局播放器快捷键（F 全屏、M/Space 静音、D 诊断、A 比例、0 重置缩放、方向键 亮度/音量）
 window.addEventListener('keydown', (e) => {
     const target = e.target;

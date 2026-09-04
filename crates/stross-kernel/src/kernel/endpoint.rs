@@ -71,6 +71,11 @@ pub struct EndpointEntry {
     pub codecs: Vec<CodecId>,
     pub state: EndpointState,
     pub subscribers: u32,
+    /// **显式订阅节点集**（订阅终止通知用）：订阅达成时记入、显式取消订阅时
+    /// 移除——让共享端在「最后一个订阅者离开」的瞬间更新端点状态，不必等
+    /// 数据面 watchers 断连检测（后者对强杀/断网场景有延迟）。渲染的
+    /// `subscribers` 计数与该集大小一致（`set_state` 同源更新）。
+    pub subscriber_nodes: std::collections::HashSet<NodeId>,
     pub updated_at: u64,
 }
 
@@ -115,6 +120,7 @@ impl EndpointRegistry {
                 codecs: vec![],
                 state: EndpointState::Idle,
                 subscribers: 0,
+                subscriber_nodes: std::collections::HashSet::new(),
                 updated_at: unix_secs(),
             },
         );
@@ -330,6 +336,38 @@ impl EndpointRegistry {
         true
     }
 
+    /// 记录一个订阅者（订阅达成时调用）：加入端点订阅节点集并同步
+    /// `subscribers` 计数（即时反映「N 订阅中」，早于数据面 watchers 事件）。
+    pub fn note_subscriber(&mut self, endpoint_id: EndpointId, node_id: NodeId) {
+        let Some(entry) = self.endpoints.get_mut(&endpoint_id) else {
+            return;
+        };
+        entry.subscriber_nodes.insert(node_id);
+        entry.subscribers = entry.subscriber_nodes.len() as u32;
+        entry.updated_at = unix_secs();
+    }
+
+    /// 记录一个取消订阅者（显式订阅终止通知时调用）：从订阅节点集移除并
+    /// 同步计数；返回移除后仍存活的订阅者数（0 = 最后一个订阅者离开）。
+    pub fn note_unsubscriber(&mut self, endpoint_id: EndpointId, node_id: NodeId) -> u32 {
+        let Some(entry) = self.endpoints.get_mut(&endpoint_id) else {
+            return 0;
+        };
+        entry.subscriber_nodes.remove(&node_id);
+        entry.subscribers = entry.subscriber_nodes.len() as u32;
+        entry.updated_at = unix_secs();
+        entry.subscribers
+    }
+
+    /// 清空端点订阅者集（停流 / 流结束时调用）：订阅数归零。
+    pub fn clear_subscribers(&mut self, endpoint_id: EndpointId) {
+        let Some(entry) = self.endpoints.get_mut(&endpoint_id) else {
+            return;
+        };
+        entry.subscriber_nodes.clear();
+        entry.subscribers = 0;
+    }
+
     /// 订阅达成事件：出锁克隆端点对象后调用其 `share`（端点自驱动，
     /// 内核不做类型分派）。注意：调用方切勿持有本注册表锁。
     pub fn on_subscribed(&self, app: &Arc<Kernel>, endpoint_id: EndpointId, ctx: &SubscribeCtx) {
@@ -503,6 +541,18 @@ impl UnifiedRegistry {
 
     pub fn on_subscribed(&self, app: &Arc<Kernel>, endpoint_id: EndpointId, ctx: &SubscribeCtx) {
         self.local.on_subscribed(app, endpoint_id, ctx);
+    }
+
+    pub fn note_subscriber(&mut self, endpoint_id: EndpointId, node_id: NodeId) {
+        self.local.note_subscriber(endpoint_id, node_id);
+    }
+
+    pub fn note_unsubscriber(&mut self, endpoint_id: EndpointId, node_id: NodeId) -> u32 {
+        self.local.note_unsubscriber(endpoint_id, node_id)
+    }
+
+    pub fn clear_subscribers(&mut self, endpoint_id: EndpointId) {
+        self.local.clear_subscribers(endpoint_id);
     }
 
     pub fn default_transports(target: TargetKind) -> Vec<TransportPreference> {

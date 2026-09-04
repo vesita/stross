@@ -52,6 +52,8 @@ const remoteDirLoading = new Set();
 // —— 设备 / 锚点 / 采集 ——
 /** 运行平台 / 环境。 */
 let IS_ANDROID = false;
+/** 本机节点 id（app_info 注入；订阅终止时向共享方出示，供其精确取消订阅）。 */
+let localNodeId = '';
 /** 本机「可被发现」开关状态（布尔；localDeviceCard 渲染时用于初始化按钮态）。 */
 let discoverableOn = false;
 /** 本机采集端点源（相机/音频输入/系统声；由 list_sources 填充）。 */
@@ -72,6 +74,11 @@ const uiFSM = {
     appStage: 'idle',
     playerMode: 'empty',
     viewMode: 'manage',
+    pageMode: 'discover',
+    connectionPhase: 'idle',
+    connectionMessage: '',
+    devicePage: 1,
+    devicePageSize: 3,
     aspectRatio: 'fit',
     isFullscreen: false,
     activeModal: 'none',
@@ -87,6 +94,16 @@ function dispatchUIAction(action) {
         case 'SWITCH_VIEW':
             uiFSM.viewMode = action.mode;
             activeViewMode = action.mode;
+            break;
+        case 'SET_PAGE_MODE':
+            uiFSM.pageMode = action.mode;
+            break;
+        case 'SET_CONNECTION_PHASE':
+            uiFSM.connectionPhase = action.phase;
+            uiFSM.connectionMessage = action.message || '';
+            break;
+        case 'SET_DEVICE_PAGE':
+            uiFSM.devicePage = Math.max(1, action.page);
             break;
         case 'SET_ASPECT_RATIO':
             uiFSM.aspectRatio = action.mode;
@@ -113,7 +130,10 @@ function dispatchUIAction(action) {
     else {
         uiFSM.appStage = 'streaming';
         const activeVideo = activeVideoLink ? recvLinks.get(activeVideoLink) : null;
-        const hasVideo = !!activeVideo && activeVideo.frames > 0;
+        const hasVideo = !!activeVideo &&
+            (activeVideo.frames > 0 ||
+                (activeVideo.decodedVideo ?? 0) > 0 ||
+                (IS_ANDROID && !!activeVideo.video));
         const hasAudio = Array.from(recvLinks.values()).some((l) => l.audioBlocks > 0);
         if (!hasVideo && !hasAudio) {
             uiFSM.playerMode = 'buffering';

@@ -59,9 +59,9 @@ pub enum EndpointCommand {
         /// 期望方向（端点声明 Both 时生效；缺省按端点声明）
         #[arg(long, value_enum)]
         delivery: Option<DeliveryArg>,
-        /// 文件落盘目录（pull/push 通用）
-        #[arg(long, default_value = "stross-files")]
-        out: PathBuf,
+        /// 文件落盘目录（pull/push 通用；缺省为系统 Downloads 目录）
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -90,11 +90,20 @@ pub async fn run(args: EndpointArgs) -> anyhow::Result<()> {
             out,
         } => {
             let delivery = delivery.map(DeliveryArg::to_delivery);
+            let out_dir = out.unwrap_or_else(stross_bridge::paths::download_dir);
             // 用户输入为可读 "kind:id"，在壳层边界解析为强类型 EndpointId
             let endpoint_id = EndpointId::parse(&endpoint).ok_or_else(|| {
                 anyhow::anyhow!("非法端点标识: {endpoint}（期望形如 screen:0 / file:0）")
             })?;
-            run_subscribe(&args.host, args.port, endpoint_id, delivery, &out, &base).await
+            run_subscribe(
+                &args.host,
+                args.port,
+                endpoint_id,
+                delivery,
+                &out_dir,
+                &base,
+            )
+            .await
         }
     }
 }

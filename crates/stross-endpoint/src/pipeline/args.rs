@@ -62,10 +62,23 @@ fn screen_input_args(q: &Quality) -> Result<Vec<String>> {
     ])
 }
 
+#[cfg(target_os = "macos")]
+fn screen_input_args(q: &Quality) -> Result<Vec<String>> {
+    Ok(vec![
+        "-f".into(),
+        "avfoundation".into(),
+        "-framerate".into(),
+        q.fps.to_string(),
+        "-capture_cursor".into(),
+        "1".into(),
+        "-i".into(),
+        "default:none".into(),
+    ])
+}
+
 #[cfg(any(
-    target_os = "macos",
     target_os = "android",
-    not(any(target_os = "linux", target_os = "windows"))
+    not(any(target_os = "linux", target_os = "windows", target_os = "macos"))
 ))]
 fn screen_input_args(_q: &Quality) -> Result<Vec<String>> {
     bail!("当前平台不支持 ffmpeg 屏幕采集，请使用原生采集路径")
@@ -88,7 +101,14 @@ fn camera_input_args(device: Option<&str>, q: &Quality) -> Result<Vec<String>> {
 
 #[cfg(target_os = "windows")]
 fn camera_input_args(device: Option<&str>, q: &Quality) -> Result<Vec<String>> {
-    let dev = device.context("Windows 下必须指定摄像头设备名")?;
+    let dev = match device {
+        Some(d) => d.to_string(),
+        None => crate::devices::list_cameras()
+            .into_iter()
+            .next()
+            .map(|c| c.id)
+            .context("Windows 下未检测到可用摄像头设备（DirectShow video）")?,
+    };
     Ok(vec![
         "-f".into(),
         "dshow".into(),
@@ -101,10 +121,31 @@ fn camera_input_args(device: Option<&str>, q: &Quality) -> Result<Vec<String>> {
     ])
 }
 
+#[cfg(target_os = "macos")]
+fn camera_input_args(device: Option<&str>, q: &Quality) -> Result<Vec<String>> {
+    let dev = match device {
+        Some(d) => d.to_string(),
+        None => crate::devices::list_cameras()
+            .into_iter()
+            .next()
+            .map(|c| c.id)
+            .unwrap_or_else(|| "0".into()),
+    };
+    Ok(vec![
+        "-f".into(),
+        "avfoundation".into(),
+        "-video_size".into(),
+        format!("{}x{}", q.width, q.height),
+        "-framerate".into(),
+        q.fps.to_string(),
+        "-i".into(),
+        format!("{dev}:none"),
+    ])
+}
+
 #[cfg(any(
-    target_os = "macos",
     target_os = "android",
-    not(any(target_os = "linux", target_os = "windows"))
+    not(any(target_os = "linux", target_os = "windows", target_os = "macos"))
 ))]
 fn camera_input_args(_device: Option<&str>, _q: &Quality) -> Result<Vec<String>> {
     bail!("当前平台不支持 ffmpeg 摄像头采集，请使用原生采集路径")
@@ -198,7 +239,13 @@ fn mic_input_args(device: Option<&str>) -> Result<Vec<String>> {
 
 #[cfg(target_os = "windows")]
 fn mic_input_args(device: Option<&str>) -> Result<Vec<String>> {
-    let dev = device.context("Windows 下必须指定麦克风设备名")?;
+    let dev = match device {
+        Some(d) => d.to_string(),
+        None => crate::devices::list_audio_inputs()
+            .into_iter()
+            .next()
+            .context("Windows 下未检测到可用麦克风设备（DirectShow audio），请接入麦克风后重试")?,
+    };
     Ok(vec![
         "-f".into(),
         "dshow".into(),
@@ -207,10 +254,26 @@ fn mic_input_args(device: Option<&str>) -> Result<Vec<String>> {
     ])
 }
 
+#[cfg(target_os = "macos")]
+fn mic_input_args(device: Option<&str>) -> Result<Vec<String>> {
+    let dev = match device {
+        Some(d) => d.to_string(),
+        None => crate::devices::list_audio_inputs()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "default".into()),
+    };
+    Ok(vec![
+        "-f".into(),
+        "avfoundation".into(),
+        "-i".into(),
+        format!("none:{dev}"),
+    ])
+}
+
 #[cfg(any(
-    target_os = "macos",
     target_os = "android",
-    not(any(target_os = "linux", target_os = "windows"))
+    not(any(target_os = "linux", target_os = "windows", target_os = "macos"))
 ))]
 fn mic_input_args(_device: Option<&str>) -> Result<Vec<String>> {
     bail!("当前平台不支持 ffmpeg 音频采集")
@@ -236,10 +299,19 @@ fn system_input_args(device: &str) -> Result<Vec<String>> {
     ])
 }
 
+#[cfg(target_os = "macos")]
+fn system_input_args(device: &str) -> Result<Vec<String>> {
+    Ok(vec![
+        "-f".into(),
+        "avfoundation".into(),
+        "-i".into(),
+        format!("none:{device}"),
+    ])
+}
+
 #[cfg(any(
-    target_os = "macos",
     target_os = "android",
-    not(any(target_os = "linux", target_os = "windows"))
+    not(any(target_os = "linux", target_os = "windows", target_os = "macos"))
 ))]
 fn system_input_args(_device: &str) -> Result<Vec<String>> {
     bail!("当前平台不支持 ffmpeg 回环采集")

@@ -59,6 +59,65 @@ pub fn data_dir(data_dir: Option<PathBuf>) -> PathBuf {
     )
 }
 
+/// 接收文件默认落盘目录：优先标准 Downloads 目录（单一真源）。
+///
+/// 各平台规范：
+/// - Android：`/storage/emulated/0/Download` 或 `/sdcard/Download`
+/// - Windows：`%USERPROFILE%\Downloads`
+/// - macOS / Linux：`$XDG_DOWNLOAD_DIR` 或 `~/Downloads`
+/// - 最终回退：`temp_dir()`
+pub fn download_dir() -> PathBuf {
+    // 1. Android 标准公有下载目录
+    #[cfg(target_os = "android")]
+    {
+        let p = PathBuf::from("/storage/emulated/0/Download");
+        if p.exists() || std::fs::create_dir_all(&p).is_ok() {
+            return p;
+        }
+        let sd = PathBuf::from("/sdcard/Download");
+        if sd.exists() || std::fs::create_dir_all(&sd).is_ok() {
+            return sd;
+        }
+    }
+
+    // 2. Windows 用户 Downloads 目录
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(user_profile) = std::env::var("USERPROFILE")
+            && !user_profile.trim().is_empty()
+        {
+            return PathBuf::from(user_profile).join("Downloads");
+        }
+    }
+
+    // 3. macOS 用户 Downloads 目录
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME")
+            && !home.trim().is_empty()
+        {
+            return PathBuf::from(home).join("Downloads");
+        }
+    }
+
+    // 4. Linux: XDG_DOWNLOAD_DIR 或 ~/Downloads
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(xdg) = std::env::var("XDG_DOWNLOAD_DIR")
+            && !xdg.trim().is_empty()
+        {
+            return PathBuf::from(xdg);
+        }
+        if let Ok(home) = std::env::var("HOME")
+            && !home.trim().is_empty()
+        {
+            return PathBuf::from(home).join("Downloads");
+        }
+    }
+
+    std::env::temp_dir()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,6 +133,12 @@ mod tests {
     #[test]
     fn fallback_never_empty() {
         let p = data_dir(None);
+        assert!(!p.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn download_dir_never_empty() {
+        let p = download_dir();
         assert!(!p.as_os_str().is_empty());
     }
 }

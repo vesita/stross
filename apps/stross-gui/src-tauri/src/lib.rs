@@ -28,8 +28,7 @@ mod mobile;
 // Android 播放 JNI 桥（Kotlin ⇄ Rust 直传）：仅 Android 目标编译，依赖 jni。
 #[cfg(all(mobile, target_os = "android"))]
 mod mobile_jni;
-// 防火墙自动放行（权限自动化）：仅 Linux 桌面（ufw + polkit）。
-#[cfg(all(not(mobile), target_os = "linux"))]
+// 防火墙放行类型与自检（仅 Linux 桌面执行 ufw/pkexec；其他平台返回空状态）。
 mod firewall;
 
 mod commands;
@@ -82,9 +81,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         set_native_fullscreen,
         hide_playback_surface,
         negotiator_respond,
-        #[cfg(all(not(mobile), target_os = "linux"))]
         firewall_status,
-        #[cfg(all(not(mobile), target_os = "linux"))]
         firewall_allow
     ]
 }

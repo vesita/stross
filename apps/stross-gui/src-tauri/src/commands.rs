@@ -457,3 +457,22 @@ async fn run_pkexec_ufw(subnet: &str, ports: &[String], proto: &str) -> Result<(
     }
     Ok(())
 }
+
+#[cfg(any(mobile, not(target_os = "linux")))]
+#[tauri::command]
+pub async fn firewall_status(
+    _state: State<'_, Arc<Kernel>>,
+) -> Result<crate::firewall::FirewallStatus, String> {
+    Ok(crate::firewall::FirewallStatus {
+        ufw_active: false,
+        default_deny_incoming: false,
+        rules: Vec::new(),
+        missing: Vec::new(),
+    })
+}
+
+#[cfg(any(mobile, not(target_os = "linux")))]
+#[tauri::command]
+pub async fn firewall_allow(_state: State<'_, Arc<Kernel>>) -> Result<(), String> {
+    Ok(())
+}

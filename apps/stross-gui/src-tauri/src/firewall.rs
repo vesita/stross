@@ -66,6 +66,7 @@ impl FirewallStatus {
 /// 22/tcp                     ALLOW       Anywhere
 /// 18777/tcp                  ALLOW       192.168.11.0/24
 /// ```
+#[allow(dead_code)]
 pub fn parse_ufw_verbose(text: &str) -> FirewallStatus {
     let mut ufw_active = false;
     let mut default_deny_incoming = false;
@@ -103,6 +104,7 @@ pub fn parse_ufw_verbose(text: &str) -> FirewallStatus {
 ///
 /// * ufw 未启用 / 入站默认允许 → 无需任何规则（缺失为空）
 /// * 已启用且默认拒绝 → 每个必需端口须有规则来源覆盖 `subnet` 或 `Anywhere`
+#[allow(dead_code)]
 pub fn missing_rules(
     required: &[&str],
     rules: &[FirewallRule],
@@ -129,6 +131,7 @@ pub fn missing_rules(
 
 /// 本机局域网子网（CIDR /24）：取首个非回环 IPv4 → 192.168.x.0/24。
 /// 无 IPv4 局域网地址时返回 `None`（无法生成来源限定规则）。
+#[allow(dead_code)]
 pub fn lan_subnet(ips: &[IpAddr]) -> Option<String> {
     ips.iter().find_map(|ip| match ip {
         IpAddr::V4(v4) if !v4.is_loopback() => {

@@ -33,7 +33,9 @@ use std::time::{Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+#[cfg(all(target_os = "linux", feature = "wayland-capture"))]
+use tokio::sync::oneshot;
 
 use stross_proto::frame::{CODEC_AAC, CODEC_H264, FLAG_KEYFRAME, Frame, TRACK_AUDIO, TRACK_VIDEO};
 

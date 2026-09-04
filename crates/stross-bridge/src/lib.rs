@@ -18,4 +18,4 @@ pub mod paths;
 
 pub use devices::{platform_endpoints, seed_platform_endpoints};
 pub use hostname::{device_name_or, hostname_or};
-pub use paths::data_dir;
+pub use paths::{data_dir, download_dir};

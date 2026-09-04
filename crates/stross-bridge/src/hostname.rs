@@ -13,18 +13,55 @@ pub fn hostname_or(fallback: &str) -> String {
 /// （桥接层与内核共用——内核不依赖本层，故上移到双方依赖的契约层）。
 pub use stross_types::hostname::is_placeholder as is_placeholder_hostname;
 
+#[cfg(target_os = "android")]
+fn android_device_model() -> Option<String> {
+    let out = std::process::Command::new("getprop")
+        .arg("ro.product.model")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let model = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if model.is_empty() {
+        return None;
+    }
+    let brand = std::process::Command::new("getprop")
+        .arg("ro.product.brand")
+        .output()
+        .ok()
+        .and_then(|b| {
+            if b.status.success() {
+                let s = String::from_utf8_lossy(&b.stdout).trim().to_string();
+                if !s.is_empty() { Some(s) } else { None }
+            } else {
+                None
+            }
+        });
+    match brand {
+        Some(b) if !model.to_lowercase().contains(&b.to_lowercase()) => {
+            Some(format!("{b} {model}"))
+        }
+        _ => Some(model),
+    }
+}
+
 /// 本机**设备名**（mDNS 广播名 / 默认设备标识用）。
 ///
 /// 与 [`hostname_or`] 的区别：Android 平台主机名恒为 `localhost`
 /// （`/proc/sys/kernel/hostname`），直接广播会产生「localhost」这种
 /// 无标识意义的名字；这里把空值 / `localhost` / `android` 过滤掉，
-/// 回退调用方给的品牌名（如「Stross 设备」），其余平台返回真实主机名
-/// （对端看到的设备标识 = 设备自身主机名，消除「本机中继」式歧义）。
+/// 优先在 Android 读取系统品牌与型号（如「OnePlus PLC110」），其余平台返回真实主机名，
+/// 均无可用标识时回退调用方给的品牌名（如「Stross 设备」）。
 pub fn device_name_or(fallback: &str) -> String {
     let h = hostname::get()
         .map(|h| h.to_string_lossy().trim().to_string())
         .unwrap_or_default();
     if is_placeholder_hostname(&h) {
+        #[cfg(target_os = "android")]
+        if let Some(model) = android_device_model() {
+            return model;
+        }
         fallback.to_string()
     } else {
         h

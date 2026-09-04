@@ -57,7 +57,7 @@ const invoke = async (cmd, args) => {
   calls.push({ cmd, args: JSON.parse(JSON.stringify(args || {})) });
   switch (cmd) {
     case 'app_info':
-      return { version: '0.1.0', platform: 'desktop', ffmpeg: true, ips: ['192.168.1.50'] };
+      return { version: '0.2.0', platform: 'desktop', ffmpeg: true, ips: ['192.168.1.50'] };
     case 'list_devices':
       return { cameras: [], audioInputs: ['default'], systemAudio: [] };
     case 'device_identity':

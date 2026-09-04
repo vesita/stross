@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Stross — a LAN streaming toolkit written in Rust"
@@ -87,12 +87,12 @@ utoipa-swagger-ui = "9"
 # 工作区内部 crate：路径/版本统一在此；成员一律 `xxx.workspace = true` 引用
 # （需要开启 feature 的成员可写 `xxx = { workspace = true, features = [...] }`）。
 # ---------------------------------------------------------------------------
-stross-proto = { path = "crates/stross-proto", version = "0.1.0" }
-stross-types = { path = "crates/stross-types", version = "0.1.0" }
-stross-transport = { path = "crates/stross-transport", version = "0.1.0" }
-stross-kernel = { path = "crates/stross-kernel", version = "0.1.0" }
-stross-endpoint = { path = "crates/stross-endpoint", version = "0.1.0" }
-stross-bridge = { path = "crates/stross-bridge", version = "0.1.0" }
+stross-proto = { path = "crates/stross-proto", version = "0.2.0" }
+stross-types = { path = "crates/stross-types", version = "0.2.0" }
+stross-transport = { path = "crates/stross-transport", version = "0.2.0" }
+stross-kernel = { path = "crates/stross-kernel", version = "0.2.0" }
+stross-endpoint = { path = "crates/stross-endpoint", version = "0.2.0" }
+stross-bridge = { path = "crates/stross-bridge", version = "0.2.0" }
 
 # mDNS 服务发现：fork 自 mdns-sd 0.21（crates/mdns），本地维护以修跨设备
 # 发现（SO_REUSEPORT 端口竞争等）上游未覆盖的问题。

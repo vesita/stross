@@ -131,6 +131,11 @@ pub fn run() {
                 // 默认关——用户显式开启才被局域网扫描发现。
                 let discoverable = stross_kernel::load_settings(&base).discoverable;
                 app.state::<Arc<Kernel>>().set_discoverable(discoverable);
+                let kernel = app.state::<Arc<Kernel>>().inner().clone();
+                let download_dir = base.join("downloads");
+                tauri::async_runtime::spawn(async move {
+                    kernel.channel_manager.set_out_dir(download_dir).await;
+                });
             }
             // 凭证协商服务（权限自动化）：所有平台都启动。此前仅桌面启动、
             // Android 只作客户端；为支持「手机通告端点 → 对端订阅」的真机闭环，

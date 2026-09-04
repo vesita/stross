@@ -5431,7 +5431,7 @@ dependencies = [
 
 [[package]]
 name = "stross-bridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hostname",
  "stross-endpoint",
@@ -5442,7 +5442,7 @@ dependencies = [
 
 [[package]]
 name = "stross-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -5463,7 +5463,7 @@ dependencies = [
 
 [[package]]
 name = "stross-endpoint"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -5486,7 +5486,7 @@ dependencies = [
 
 [[package]]
 name = "stross-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5507,7 +5507,7 @@ dependencies = [
 
 [[package]]
 name = "stross-kernel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5538,7 +5538,7 @@ dependencies = [
 
 [[package]]
 name = "stross-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "serde",
@@ -5549,7 +5549,7 @@ dependencies = [
 
 [[package]]
 name = "stross-relay"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -5562,7 +5562,7 @@ dependencies = [
 
 [[package]]
 name = "stross-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5586,7 +5586,7 @@ dependencies = [
 
 [[package]]
 name = "stross-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",

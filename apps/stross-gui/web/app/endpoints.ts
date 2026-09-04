@@ -39,7 +39,11 @@ function renderLocalDevices(): void {
   }
   for (const ep of localCatalog.endpoints) {
     const row = document.createElement('div');
-    row.className = 'ep-row' + (ep.available ? '' : ' ep-unavail');
+    row.className =
+      'ep-row' +
+      (ep.available ? '' : ' ep-unavail') +
+      (ep.published ? ' ep-published' : '') +
+      (ep.state === 'active' ? ' ep-active' : '');
     const ic = document.createElement('span');
     ic.className = 'ep-ic';
     ic.innerHTML = icon(deviceKindIcon(ep.kind));
@@ -47,10 +51,36 @@ function renderLocalDevices(): void {
     body.className = 'ep-body';
     const name = document.createElement('span');
     name.className = 'ep-name';
-    name.textContent = ep.name;
+
+    const nameText = document.createElement('span');
+    nameText.textContent = ep.name;
+    name.appendChild(nameText);
+    if (ep.published) {
+      const pill = document.createElement('span');
+      pill.className = 'badge ep-badge' + (ep.state === 'active' ? ' live' : ' ok');
+      if (ep.state === 'active') {
+        pill.innerHTML =
+          '<span class="live-dot"></span><span>' +
+          (ep.subscribers ? `${ep.subscribers} 订阅中` : '正在共享') +
+          '</span>';
+      } else {
+        pill.textContent = '已共享';
+      }
+      name.appendChild(pill);
+    }
     const meta = document.createElement('span');
     meta.className = 'ep-meta';
-    meta.textContent = ep.available ? '' : '不可用（' + (ep.lastError || '未知原因') + '）';
+    if (!ep.available) {
+      meta.textContent = '不可用（' + (ep.lastError || '未知原因') + '）';
+    } else if (ep.published) {
+      meta.textContent =
+        labelOf(VISIBILITY_LABELS, ep.visibility) +
+        (ep.state === 'active'
+          ? (ep.subscribers ? ` · ${ep.subscribers} 台设备正在接收` : ' · 正在传输')
+          : ' · 待连接');
+    } else {
+      meta.textContent = '未开启共享';
+    }
     body.appendChild(name);
     body.appendChild(meta);
     row.appendChild(ic);
@@ -63,31 +93,32 @@ function renderLocalDevices(): void {
     } else if (ep.published) {
       const ops = document.createElement('span');
       ops.className = 'ep-actions';
-      const badge = document.createElement('span');
-      badge.className = 'badge ep-badge' + (ep.state === 'active' ? ' live' : '');
-      badge.textContent =
-        '已共享 · ' + labelOf(VISIBILITY_LABELS, ep.visibility) +
-        (ep.state === 'active'
-          ? (ep.subscribers ? ` · ${ep.subscribers} 订阅中` : ' · 正在共享')
-          : '');
-      ops.appendChild(badge);
       if (ep.state === 'active') {
-        // 运行中共享可停止（生命周期治理：停流 + 拆会话，保留共享状态）
         const stop = document.createElement('button');
         stop.type = 'button';
         stop.className = 'sm danger ep-act';
-        stop.innerHTML = icon('stop') + '<span>停止共享</span>';
+        stop.innerHTML = icon('stop') + '<span>停止推流</span>';
         stop.dataset.act = 'stop-share';
         stop.dataset.endpoint = endpointIdStr(ep);
         ops.appendChild(stop);
+
+        const unpub = document.createElement('button');
+        unpub.type = 'button';
+        unpub.className = 'icon-btn-sm ep-act';
+        unpub.title = '取消共享（完全下线）';
+        unpub.innerHTML = icon('x');
+        unpub.dataset.act = 'unpublish-endpoint';
+        unpub.dataset.endpoint = endpointIdStr(ep);
+        ops.appendChild(unpub);
+      } else {
+        const unpub = document.createElement('button');
+        unpub.type = 'button';
+        unpub.className = 'sm ep-act';
+        unpub.innerHTML = icon('x') + '<span>取消共享</span>';
+        unpub.dataset.act = 'unpublish-endpoint';
+        unpub.dataset.endpoint = endpointIdStr(ep);
+        ops.appendChild(unpub);
       }
-      const unpub = document.createElement('button');
-      unpub.type = 'button';
-      unpub.className = 'sm ep-act';
-      unpub.innerHTML = icon('x') + '<span>取消共享</span>';
-      unpub.dataset.act = 'unpublish-endpoint';
-      unpub.dataset.endpoint = endpointIdStr(ep);
-      ops.appendChild(unpub);
       row.appendChild(ops);
     } else {
       const pub = document.createElement('button');

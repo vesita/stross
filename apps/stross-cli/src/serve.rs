@@ -57,7 +57,9 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     // 与 GUI 桌面共用同一套启动原语（主机名经桥接层注入，内核零 OS 调用）。
     let base = base_dir(args.data_dir.clone());
     bootstrap::ensure_identity(&app, &base, &device_name_or("Stross 设备"));
-    // 「可被发现」：读持久化设置（默认关）；--discoverable 显式开启覆盖之。
+    app.channel_manager
+        .set_out_dir(base.join("downloads"))
+        .await;
     // 锚定中继时内核按此状态决定是否 mDNS 广播本机。
     let discoverable = if args.discoverable {
         true

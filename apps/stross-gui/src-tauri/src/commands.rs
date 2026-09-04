@@ -189,12 +189,13 @@ pub async fn scan_nodes(
 
 /// 手动地址可达性探测（`/api/streams` 是受控/普通中继都提供的只读端点；
 /// 供「手动添加设备」校验地址用）。探测逻辑收敛在
-/// `stross_kernel::relay::client::probe_base`（壳层不再手写 `/api/*` 客户端，
-/// docs/framework-v3.md 红线）。P3 后清理：尚无 Kernel 门面等价方法，
-/// 暂保留经 kernel 模块路径引用。
+/// `stross_kernel::relay::client::RelayClient` 服务对象（v3.1 §10.6——
+/// 壳层消费服务对象，不再手写 `/api/*` 客户端，docs/framework-v3.md 红线）。
 #[tauri::command]
 pub async fn probe_relay(base: String) -> bool {
-    stross_kernel::relay::client::probe_base(&base, std::time::Duration::from_secs(3)).await
+    stross_kernel::relay::client::RelayClient::new(std::time::Duration::from_secs(3))
+        .probe_base(&base)
+        .await
 }
 
 /// L2 目录（远端节点设备 + 可订阅端点；类型化 `EndpointDir`）。

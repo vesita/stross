@@ -43,7 +43,7 @@ impl SubscribeService for Kernel {
             .stream_profile(node, endpoint)
             .unwrap_or((ReliabilityProfile::Lossy, strategy.pick));
         let delivery = reg
-            .manifest(endpoint)
+            .manifest_for(node, endpoint)
             .map(|m| m.delivery)
             .unwrap_or(Delivery::Pull);
         let is_self = *node == reg.self_node_id();

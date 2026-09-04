@@ -10,8 +10,8 @@
 //! 网络说明：`adb forward`（PC 监听 → 手机）在本环境可用，`adb reverse`
 //! （手机监听 → PC）在部分 adb 版本/传输上注册却不生效，故统一用 forward。
 //!
-//! 模块划分（平台桥——adb 是设备层的平台粘合，**无内核逻辑**；探测契约
-//! 复用 `stross_kernel::relay::client` 与 `stross_discovery`）：
+//! 模块划分（平台桥——adb 是设备层的平台粘合，**无内核逻辑**；探测经
+//! kernel 的 `RelayClient` 服务对象与 `stross_discovery`）：
 //! * [`status`]：手机状态聚合 + 展示视图
 //! * [`ui`]：uiautomator 视图树解析 + UI 状态/点按辅助
 //! * [`device`]：adb 进程执行 / forward / 截屏 / 输入

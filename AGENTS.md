@@ -16,7 +16,9 @@ crates/
                     message/negotiator.rs）
   stross-transport  传输层：SRT / QUIC / WS / WebRTC、RelayUrl、
                     net（local_ips / advertise_ip / fake-IP 判定）
-  stross-node       节点概念 crate：Node trait + NodeInfo/NodeRole/TransportAddr
+  stross-node       节点概念 crate（**端点插件宿主**）：Node trait + NodeInfo/
+                    NodeRole/TransportAddr（NodeInfo 实现 Node trait；
+                    `Kernel::upsert_node<N: Node>` 泛型接纳任意节点形态）
   stross-endpoint   端点概念 crate（契约+实现同仓）：Endpoint/ShareEndpoint/
                     SubscribeEndpoint 契约 + 数据契约（StreamConfig 等）+ 四能力
                     trait（StreamHost/FileHost/MediaHost/Runtime，端点经契约调
@@ -32,10 +34,12 @@ crates/
                     （MdnsDiscovery 实现 struct）
   stross-view       展示视图 crate：跨壳层纯展示类型/DTO/端口（内核产出、壳层只读）
   stross-kernel     ★ 内核（纯管理调度，单一门面 Kernel）：
-                    中继 server + 中继 HTTP 客户端（relay/，契约单一真源）、
+                    中继 server + 中继 HTTP 客户端（relay/，契约单一真源；
+                    壳层经 `RelayClient` 服务对象消费，不直调内部模块）、
                     控制面 CtrlServer + client（D7）、凭证协商
                     ShareNegotiator + client、
-                    注册表 kernel/endpoint.rs（节点表持端点引用 + 独立端点表）、
+                    注册表 kernel/endpoint/（**插件挂载表**：`EndpointRef` 复合键
+                    （宿主节点+端点句柄），读路径一律节点限定；节点表持端点引用）、
                     订阅方编排 subscriber、文件传输 file_xfer、引导 bootstrap、
                     推流引擎 engine、接收 receiver、view 展示视图构造
                     （实现 stross-share/stross-subscribe 契约；零媒体数据面细节，
@@ -208,5 +212,5 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
   （其余只写指针，如 Android 构建→android-build.md）；用户可见术语统一「共享/订阅」；
   压缩对话前把套路/坑写进 docs/dev-playbook.md。
 - **代码整洁纪律（零 dead_code）**：严禁 `#[allow(dead_code)]`，无用代码就地删除；RAII 守护字段原生使用 `_` 前缀（如 `_wayland`/`_tx`）；平台特定逻辑用精确 `#[cfg(...)]` 条件编译，杜绝掩盖告警。
-- **强类型标识符铁律（零 bare String 作为键/ID）**：实体标识符（节点、流、链路、策略、传输、消息等）以及字典键严禁使用裸 `String` / `&str`，一律使用 `stross_view::id::*` 或 `stross_proto::message::*` 中的强类型 newtype 或枚举（`NodeId`, `StreamId`, `StreamKey`, `LinkId`, `StrategyId`, `TransferId`, `MsgId`）。
+- **强类型标识符铁律（零 bare String 作为键/ID）**：实体标识符（节点、流、链路、策略、传输、消息等）以及字典键严禁使用裸 `String` / `&str`，一律使用 `stross_view::id::*` 或 `stross_proto::message::*` 中的强类型 newtype 或枚举（`NodeId`, `StreamId`, `StreamKey`, `LinkId`, `StrategyId`, `TransferId`, `MsgId`, `EndpointRef`（宿主节点+端点句柄的复合定位，插件挂载表键））。
 - **领域模型命名红线（废除「设备（Device）」概念与字眼）**：本项目领域模型与架构中彻底废除「设备（Device）」概念与命名，统一以「端点（Endpoint）」表达能力与数据源/宿实体，以「节点（Node）」表达网络拓扑中的互联主体（如 `NodeId`, `NodeIdentity`, `TrustedNode`, `ScannedNode`, `CameraEndpoint`, `EndpointSourceList`）。彻底切换，严禁引入向后兼容别名（包括 `type ...Device = ...` 或 `serde(alias = ...)`）。

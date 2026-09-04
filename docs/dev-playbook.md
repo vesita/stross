@@ -223,3 +223,36 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
 - **同构分支与模式合并**：处理通道断开或异常时，相同行为的 match 分支必须使用 `|` 语法合并（如 `Ok(None) | Err(_) => break`、`Ok(Some(SessionPacket::Media(_) | SessionPacket::Control(_))) => {}`），消除冗余分支与认知开销。
 - **零冗余拷贝（Zero Redundant Clone）**：已拥有所有权（owned）的字段映射直接移交所有权（如 `.map(|m| m.name)` 代替 `.map(|m| m.name.clone())`）；只读消费的函数入参统一传入引用切片（`&str` 或 `&T`）而非接受 `String`/`T` 后在内部再借用，杜绝调用端产生非必要的 `.clone()`。
 - **测试并发与时序防抖**：跨线程测试（如解码器/写线程后台异步消费）断言丢帧或调度时，避免单次 try_send / 单次 push 竞态，采用有界循环确保可靠触发；对 ffmpeg 预热等重型测试的超时窗口设置合理裕量，杜绝 CI 与高并发压力测试下的假性红灯。
+
+## 10. v3.1「端点即插件」模式与坑（插件挂载表 / RelayClient / 凭证校验单一真源）
+
+架构真源：docs/framework-v3.md §10（v3.1 深化：节点 = 端点插件宿主，端点 = 挂载到
+节点插件区的插件；完全不兼容重构已完成，大提交后回归全绿）。
+
+- **插件挂载表复合键（`EndpointRef{owner, endpoint}`）**：`kernel/endpoint/` 挂载表
+  与**一切读路径**按 `(宿主节点, 端点)` 精确取——`resolve_strategy(node, endpoint, …)` /
+  `stream_profile(node, endpoint)` / `manifest_for(node, endpoint)`；**查表绝不忽略
+  node_id**（旧扁平表忽略 node_id 导致跨节点同 id 遮蔽：远端 `screen:0` 覆盖本机条目，
+  已修 + 回归测试 `composite_key_no_cross_node_shadow`）。自节点便捷方法
+  （`manifest(endpoint)` / `set_state` / `on_subscribed` 等）内部 owner = `self_node`，
+  只用于**本机**端点；订远端走 `manifest_for`。
+- **`EndpointRef` 不进 wire**：wire 上 `node_id` 与 `kind`/`endpoint_id` 本就是双字段
+  （`SubscribeSpec` / `EndpointDir`）；`EndpointRef` 只是内存挂载表键 / 日志定位。
+- **节点规范化**：查表前 `normalize_node(node, self_node)`——身份未注入时的缺省
+  `NodeId::NIL` / `"local"` 兼容键统一到 `self_node`（strategy.rs）。
+- **`Kernel::upsert_node<N: stross_node::Node>(node: N)`**：任何实现 `Node` trait 的
+  节点形态都能入节点图（`NodeInfo` 已实现，视图 DTO 即行为契约）；**新增节点形态 =
+  实现 trait，不碰内核分派**。`stross_node::Node` 无 `endpoints()`/`plugins()`——插件
+  清单是注册表投影（`node_endpoints` / `node_registrations`），不属节点行为。
+- **`RelayClient::new(timeout)` 服务对象**（`stross_kernel::relay::client`）：壳层探测
+  远端中继的唯一入口（`probe_base` / `info` / `streams`）；**禁止直调 kernel 内部
+  自由函数**（`get_json` / `post_json` 是 kernel 内部辅助，壳层不可见语义）。`adb
+  status` 循环内建一次 `RelayClient` 复用。
+- **凭证校验单一真源**：`kernel::session_api::verify_share_token(tokens, token)` 模块
+  自由函数（`pub(crate)`，签发表 + 逐字比对 + 过期）；数据面校验器
+  `KernelTokenValidator::validate` **复用它**——严禁另写一份校验逻辑。
+  `Kernel::token_validator()` 是 `#[doc(hidden)]` 数据面接线原语（集成测试独立接线场景
+  需要公开构造路径），壳层不直调。
+- **新增端点（插件）** = 实现 `Endpoint` / `ShareEndpoint`（或 `MediaSourceEndpoint` 宏）
+  + `Kernel::seed_endpoint` 登记；新增能力族订阅端 = 注册 `SubscribeEndpointFactory`
+  （`EndpointClass` 强类型键）——内核分发零改动（v3 §2.2 策略注册表模式）。

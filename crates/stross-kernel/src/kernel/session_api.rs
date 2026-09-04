@@ -24,8 +24,20 @@ impl Kernel {
     // -----------------------------------------------------------------------
 
     /// 注册/更新一个节点（发现结果、本机能力都走这里）。
-    pub fn upsert_node(&self, node: NodeInfo) {
-        self.graph.nodes.lock_poisoned().insert(node.node_id, node);
+    ///
+    /// 泛型化（v3.1 V1，docs/framework-v3.md §10.2 D2 / §10.4）：
+    /// [`stross_node::Node`] 是内核接纳任意节点形态的抽象面——发现扫描结果、
+    /// 目录映射、本机能力、视图 DTO 实现 `Node` 即经同一入口入表
+    /// （内部投影为 [`NodeInfo`] 快照）。
+    pub fn upsert_node<N: stross_node::Node>(&self, node: N) {
+        let info = NodeInfo {
+            node_id: node.id(),
+            name: node.name().to_string(),
+            roles: node.roles().to_vec(),
+            caps: node.caps().to_vec(),
+            addrs: node.addrs().to_vec(),
+        };
+        self.graph.nodes.lock_poisoned().insert(info.node_id, info);
     }
 
     /// 给已有节点追加一条能力（重复条目按 `media` 去重）。
@@ -239,30 +251,13 @@ impl Kernel {
         Ok(token)
     }
 
-    /// 校验凭证：已签发 + 未过期 + 与签发时逐字一致（防篡改 / 重放）。
-    pub fn verify_share_token(&self, token: &ShareToken) -> Result<()> {
-        let tokens = self.share_tokens.lock_poisoned();
-        let stored = tokens
-            .get(&Id::from(token.stream_id.as_str()))
-            .ok_or_else(|| {
-                Error::Token(format!("凭证无效：会话 {} 未签发凭证", token.stream_id))
-            })?;
-        if stored != token {
-            return Err(Error::Token(
-                "凭证无效：与签发时不符（可能被篡改或重放）".into(),
-            ));
-        }
-        if stored.is_expired(now_secs()) {
-            return Err(Error::Token("凭证已过期".into()));
-        }
-        Ok(())
-    }
-
     /// 数据面凭证校验器（读本内核签发表；注入受控中继用）。
     ///
-    /// 与 [`Kernel::attach_data_plane`] 配套的数据面接线原语：测试 / 独立接线
-    /// 方可把校验器注入后端而**不**整体接线（如凭证式跨设备推流闭环）；
-    /// 常规路径经 `attach_data_plane` 内部注入，壳层无需直调。
+    /// **数据面接线原语（`#[doc(hidden)]`，非门面契约）**：与
+    /// [`Kernel::attach_data_plane`] 配套——常规路径经 `attach_data_plane`
+    /// 内部注入，壳层无需直调；本方法仅独立接线 / 集成测试场景直调
+    /// （如凭证式跨设备推流闭环在 `attach_data_plane` 之外单独注入校验器）。
+    #[doc(hidden)]
     pub fn token_validator(&self) -> Arc<dyn crate::relay::ShareTokenValidator> {
         Arc::new(KernelTokenValidator {
             tokens: self.share_tokens.clone(),
@@ -312,10 +307,30 @@ pub(crate) struct KernelTokenValidator {
 
 impl crate::relay::ShareTokenValidator for KernelTokenValidator {
     fn validate(&self, token: &ShareToken) -> bool {
-        let tokens = self.tokens.lock_poisoned();
-        let Some(stored) = tokens.get(&Id::from(token.stream_id.as_str())) else {
-            return false;
-        };
-        stored == token && !stored.is_expired(now_secs())
+        // 校验核心单一真源：模块自由函数（v3.1 V3——与签发侧同一份
+        // 「存在 + 未过期 + 逐字一致」逻辑，消除两份重复实现）。
+        verify_share_token(&self.tokens.lock_poisoned(), token).is_ok()
     }
+}
+
+/// 凭证校验公共核心（**单一真源**）：存在 + 未过期 + 与签发时逐字一致
+/// （防篡改 / 重放）。数据面校验器 [`KernelTokenValidator`]（受控中继接入）
+/// 与内核单测共用——v3.1 V3 把旧 `Kernel::verify_share_token` 方法与校验器
+/// 里两份相同逻辑收敛为本函数。
+pub(crate) fn verify_share_token(
+    tokens: &std::collections::HashMap<Id, ShareToken>,
+    token: &ShareToken,
+) -> Result<()> {
+    let stored = tokens
+        .get(&Id::from(token.stream_id.as_str()))
+        .ok_or_else(|| Error::Token(format!("凭证无效：会话 {} 未签发凭证", token.stream_id)))?;
+    if stored != token {
+        return Err(Error::Token(
+            "凭证无效：与签发时不符（可能被篡改或重放）".into(),
+        ));
+    }
+    if stored.is_expired(now_secs()) {
+        return Err(Error::Token("凭证已过期".into()));
+    }
+    Ok(())
 }

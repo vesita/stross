@@ -10,11 +10,13 @@ use std::sync::Arc;
 
 use stross_endpoint::contract::{EndpointClass, ShareEndpoint, SubscribeCtx, TargetKind};
 use stross_proto::message::{
-    CodecId, Delivery, EndpointDir, EndpointId, EndpointManifest, EndpointState, EndpointStrategy,
-    EndpointSummary, NodeId, PickRule, ReliabilityProfile, TransportPreference, Visibility,
+    CodecId, Delivery, EndpointDir, EndpointId, EndpointManifest, EndpointRef, EndpointState,
+    EndpointStrategy, EndpointSummary, NodeId, PickRule, ReliabilityProfile, TransportPreference,
+    Visibility,
 };
 
 use super::file_source::FileSource;
+use super::strategy::normalize_node;
 use super::subscribe_generate::SubscribeEndpointFactory;
 use super::{EndpointEntry, EndpointRegistry};
 use crate::Kernel;
@@ -150,9 +152,20 @@ impl UnifiedRegistry {
                     },
                 );
             }
-            for e in self.endpoints.endpoints.values_mut() {
-                if e.owner == old_id {
-                    e.owner = new_id;
+            // 端点表键重建迁移（v3.1 §10.5 复合键）：旧宿主键 → 新宿主键
+            // （条目原样移动，`owner` 已编码进键、不再有字段可改）。
+            let old_keys: Vec<EndpointRef> = self
+                .endpoints
+                .endpoints
+                .keys()
+                .filter(|k| k.owner == old_id)
+                .copied()
+                .collect();
+            for k in old_keys {
+                if let Some(e) = self.endpoints.endpoints.remove(&k) {
+                    self.endpoints
+                        .endpoints
+                        .insert(EndpointRef::new(new_id, k.endpoint), e);
                 }
             }
         } else if let Some(entry) = self.nodes.get_mut(&new_id) {
@@ -216,12 +229,18 @@ impl UnifiedRegistry {
         true
     }
 
+    /// 端点行为对象（`on_subscribed` 出锁调用用；持锁调用会死锁）。
+    /// **自节点端点**（本机行为对象唯一可 `share` 的对象；远端存根不可本机
+    /// share——owner 固定为本机节点，v3.1 §10.5 复合键）。
     pub fn endpoint_arc(&self, endpoint_id: EndpointId) -> Option<Arc<dyn ShareEndpoint>> {
-        self.endpoints.endpoint_arc(endpoint_id)
+        self.endpoints
+            .endpoint_arc(EndpointRef::new(self.self_node, endpoint_id))
     }
 
+    /// 端点目标类型（缺省传输选择用；自节点端点）。
     pub fn target(&self, endpoint_id: EndpointId) -> Option<TargetKind> {
-        self.endpoints.target(endpoint_id)
+        self.endpoints
+            .target(EndpointRef::new(self.self_node, endpoint_id))
     }
 
     /// 本机端点清单（本机目录用；含未通告；owner 过滤 = 本机）。
@@ -239,9 +258,16 @@ impl UnifiedRegistry {
         self.endpoints.summaries_of(Some(self.self_node))
     }
 
-    /// 端点清单（订阅握手 / 目录 API 用；按 id 直查，任意归属）。
+    /// 端点清单（订阅握手 / 目录 API 用；**自节点端点**——`owner` 固定为本机）。
     pub fn manifest(&self, endpoint_id: EndpointId) -> Option<EndpointManifest> {
-        self.endpoints.manifest(endpoint_id)
+        self.manifest_for(&self.self_node, endpoint_id)
+    }
+
+    /// 端点清单（**节点限定查表**；`SubscribeService::resolve` 等按
+    /// `(宿主, 端点)` 精确取——v3.1 §10.5 修复跨节点同 id 遮蔽）。
+    pub fn manifest_for(&self, node: &NodeId, endpoint_id: EndpointId) -> Option<EndpointManifest> {
+        let key = EndpointRef::new(normalize_node(node, self.self_node), endpoint_id);
+        self.endpoints.manifest(key)
     }
 
     pub fn publish(
@@ -252,12 +278,18 @@ impl UnifiedRegistry {
         transports: Vec<TransportPreference>,
         codecs: Vec<CodecId>,
     ) -> Result<EndpointManifest> {
-        self.endpoints
-            .publish(endpoint_id, visibility, delivery, transports, codecs)
+        self.endpoints.publish(
+            EndpointRef::new(self.self_node, endpoint_id),
+            visibility,
+            delivery,
+            transports,
+            codecs,
+        )
     }
 
     pub fn unpublish(&mut self, endpoint_id: EndpointId) -> Result<()> {
-        self.endpoints.unpublish(endpoint_id)
+        self.endpoints
+            .unpublish(EndpointRef::new(self.self_node, endpoint_id))
     }
 
     /// 公开本机文件端点（动态端点；插入端点表 owner = 本机 + 追加本机引用）。
@@ -284,7 +316,8 @@ impl UnifiedRegistry {
     }
 
     pub fn file_source(&self, endpoint_id: EndpointId) -> Option<&FileSource> {
-        self.endpoints.file_source(endpoint_id)
+        self.endpoints
+            .file_source(EndpointRef::new(self.self_node, endpoint_id))
     }
 
     pub fn set_state(
@@ -293,7 +326,11 @@ impl UnifiedRegistry {
         state: EndpointState,
         subscribers: u32,
     ) -> bool {
-        self.endpoints.set_state(endpoint_id, state, subscribers)
+        self.endpoints.set_state(
+            EndpointRef::new(self.self_node, endpoint_id),
+            state,
+            subscribers,
+        )
     }
 
     pub fn on_subscribed(
@@ -302,19 +339,23 @@ impl UnifiedRegistry {
         endpoint_id: EndpointId,
         ctx: &SubscribeCtx,
     ) -> bool {
-        self.endpoints.on_subscribed(app, endpoint_id, ctx)
+        self.endpoints
+            .on_subscribed(app, EndpointRef::new(self.self_node, endpoint_id), ctx)
     }
 
     pub fn note_subscriber(&mut self, endpoint_id: EndpointId, node_id: NodeId) {
-        self.endpoints.note_subscriber(endpoint_id, node_id);
+        self.endpoints
+            .note_subscriber(EndpointRef::new(self.self_node, endpoint_id), node_id);
     }
 
     pub fn note_unsubscriber(&mut self, endpoint_id: EndpointId, node_id: NodeId) -> u32 {
-        self.endpoints.note_unsubscriber(endpoint_id, node_id)
+        self.endpoints
+            .note_unsubscriber(EndpointRef::new(self.self_node, endpoint_id), node_id)
     }
 
     pub fn clear_subscribers(&mut self, endpoint_id: EndpointId) {
-        self.endpoints.clear_subscribers(endpoint_id);
+        self.endpoints
+            .clear_subscribers(EndpointRef::new(self.self_node, endpoint_id));
     }
 
     pub fn default_transports(target: TargetKind) -> Vec<TransportPreference> {
@@ -353,12 +394,13 @@ impl UnifiedRegistry {
     }
 
     /// 查询投影：按节点 `endpoint_ids` 查端点表（「节点上的端点」= 投影，
-    /// 非嵌套存储）。
+    /// 非嵌套存储）。v3.1 §10.5：按 `(宿主, 端点)` 复合键精确取。
     pub fn node_endpoints(&self, node_id: &NodeId) -> impl Iterator<Item = &EndpointEntry> + '_ {
-        self.nodes.get(node_id).into_iter().flat_map(|n| {
+        let node = *node_id;
+        self.nodes.get(node_id).into_iter().flat_map(move |n| {
             n.endpoint_ids
                 .iter()
-                .filter_map(|id| self.endpoints.endpoint_entry(*id))
+                .filter_map(move |id| self.endpoints.endpoint_entry(EndpointRef::new(node, *id)))
         })
     }
 
@@ -377,7 +419,9 @@ impl UnifiedRegistry {
                     .endpoint_ids
                     .iter()
                     .filter_map(|id| {
-                        let entry = self.endpoints.endpoint_entry(*id)?;
+                        let entry = self
+                            .endpoints
+                            .endpoint_entry(EndpointRef::new(n.node_id, *id))?;
                         Some((*id, registration_of(entry)))
                     })
                     .collect(),
@@ -388,9 +432,10 @@ impl UnifiedRegistry {
     }
 
     /// 端点显式订阅节点集（[`ShareService::active`] 的 `subscriber_nodes` 投影
-    /// 真源；`note_subscriber` / `note_unsubscriber` 维护）。
+    /// 真源；`note_subscriber` / `note_unsubscriber` 维护；自节点端点）。
     pub fn subscriber_nodes(&self, endpoint_id: EndpointId) -> Option<Vec<NodeId>> {
-        self.endpoints.subscriber_nodes(endpoint_id)
+        self.endpoints
+            .subscriber_nodes(EndpointRef::new(self.self_node, endpoint_id))
     }
 
     /// 全部节点 id（订阅查表键；含本机）。
@@ -444,8 +489,8 @@ mod tests {
     use stross_endpoint::contract::{Probe, ShareEndpoint};
     use stross_endpoint::share::file::FileEndpoint;
     use stross_proto::message::{
-        CodecId, Delivery, EndpointDir, EndpointId, EndpointManifest, EndpointNode, EndpointState,
-        EndpointStrategy, MediaKind, NodeId, StrategyId, SubscribeSpec, Visibility,
+        CodecId, Delivery, EndpointDir, EndpointId, EndpointManifest, EndpointNode, EndpointRef,
+        EndpointState, EndpointStrategy, MediaKind, NodeId, StrategyId, SubscribeSpec, Visibility,
     };
     use stross_proto::time::unix_secs;
 
@@ -600,12 +645,15 @@ mod tests {
             2,
             "手机两个端点引用"
         );
-        assert_eq!(
-            reg.node_endpoints(&NodeId::from("node-phone"))
-                .next()
-                .map(|e| e.owner),
-            Some(NodeId::from("node-phone")),
-            "远端端点 owner 关联归属节点"
+        // 远端端点按 (宿主, 端点) 复合键可查（owner 已编码进键，v3.1 §10.5）
+        assert!(
+            reg.endpoints
+                .endpoint_entry(EndpointRef::new(
+                    NodeId::from("node-phone"),
+                    EndpointId::new(MediaKind::Screen, 0),
+                ))
+                .is_some(),
+            "远端端点按 (宿主, 端点) 复合键可查"
         );
 
         // 快照：本机 + 互联节点都在同一张表（含 is_self 标记）
@@ -663,6 +711,51 @@ mod tests {
             crate::EndpointClass::from_kind(media_ep.kind()),
             crate::EndpointClass::Graph,
             "屏幕归 Graph 能力族"
+        );
+    }
+
+    /// 遮蔽回归（v3.1 §10.5 复合键）：本机与远端各有 `screen:0`（不同策略 /
+    /// delivery / 名称）——查表按 `(宿主, 端点)` 精确取，互不遮蔽；旧扁平表
+    /// （仅 EndpointId 键、读路径忽略 node_id）会让两者互相串。
+    #[test]
+    fn composite_key_no_cross_node_shadow() {
+        let mut reg = UnifiedRegistry::new();
+        reg.set_self_node("node-pc", "电脑");
+        assert!(reg.seed(screen()), "本机 screen:0（默认 Realtime）");
+        // 远端同 id 端点：目录给不同名称 / delivery / 策略
+        let mut dir = remote_dir("node-phone", "手机A");
+        dir.endpoints[0].name = "手机屏幕".into();
+        dir.endpoints[0].delivery = Delivery::Push;
+        dir.endpoints[0].strategies = vec![EndpointStrategy {
+            strategy_id: EndpointStrategy::DEFAULT_ID,
+            serialize: stross_proto::message::SerializeRule::Passthrough,
+            pick: stross_proto::message::PickRule::StrictOrdered,
+        }];
+        reg.register_remote_directory(&dir, "192.168.1.5:18779");
+
+        let self_ep = EndpointId::new(MediaKind::Screen, 0);
+        // 本机查表：仍解析到本机端点（未被远端 screen:0 遮蔽）
+        let s = reg
+            .resolve_strategy(&NodeId::from("node-pc"), self_ep, None)
+            .expect("本机 screen:0 应可解析");
+        assert_eq!(s.pick, stross_proto::message::PickRule::Realtime);
+        // 远端查表：解析到远端端点（StrictOrdered）
+        let r = reg
+            .resolve_strategy(&NodeId::from("node-phone"), self_ep, None)
+            .expect("远端 screen:0 应可解析");
+        assert_eq!(r.pick, stross_proto::message::PickRule::StrictOrdered);
+        // manifest_for 节点限定：本机拿本机清单、远端拿远端清单
+        assert_eq!(
+            reg.manifest_for(&NodeId::from("node-pc"), self_ep)
+                .map(|m| m.name),
+            Some("屏幕".into()),
+            "本机 manifest 不被远端遮蔽"
+        );
+        assert_eq!(
+            reg.manifest_for(&NodeId::from("node-phone"), self_ep)
+                .map(|m| m.delivery),
+            Some(Delivery::Push),
+            "远端 manifest 取到远端 delivery（旧扁平表会拿到本机 Pull）"
         );
     }
 

@@ -1,9 +1,10 @@
-//! 端点注册表：**v3 存储解耦**（节点表持端点引用 + 独立端点表）+ 通告参数管理。
+//! 端点注册表：**插件挂载表**（v3.1 §10.5：层级进地址）+ 通告参数管理。
 //!
-//! 设计规格：docs/framework-v3.md §3.2（端点表）/ §4（内核结构）/ §7（模块拆分）。
+//! 设计规格：docs/framework-v3.md §3.2（端点表）/ §4（内核结构）/ §7（模块拆分）
+//! / §10.5（插件挂载表复合键）。
 //!
 //! 模块拆分（v3 §7）：`kernel/endpoint/` 目录——
-//! * [`self`]（本文件）：独立端点表核心（[`EndpointEntry`] / [`EndpointRegistry`] /
+//! * [`self`]（本文件）：插件挂载表核心（[`EndpointEntry`] / [`EndpointRegistry`] /
 //!   远端存根 [`RemoteEndpoint`]）+ 通告参数管理；
 //! * [`registry`]：统一注册表 [`UnifiedRegistry`]（节点表持端点引用 + 查询投影）
 //!   与节点 DTO（[`NodeEntry`] / [`NodeRegistration`] / [`EndpointRegistration`]）；
@@ -12,25 +13,28 @@
 //!   `generate_subscribe_endpoint`）；
 //! * [`file_source`]：[`FileSource`]（文件端点本地文件源）。
 //!
-//! * 端点 = 节点上可共享的能力实体；**契约（[`Endpoint`] / [`SubscribeCtx`] /
+//! * 端点 = 节点上可共享的能力实体（插件）；**契约（[`Endpoint`] / [`SubscribeCtx`] /
 //!   [`Probe`] 等）与具体端点实现（屏幕 / 麦克风 / 系统声音 / 文件）在
 //!   [`stross_endpoint`] 插件区**，本模块只做身份登记、通告参数管理与订阅联动
 //!   （内核 = 纯管理调度，不做媒体数据面）；
 //! * 端点自维护「可挂载性」（`available`，load 探测结果）与失败原因
 //!   （`last_error`）；注册表只做身份登记与通告参数管理；
 //! * **存储解耦（v3 §3.2）**：节点表（[`NodeEntry`]，含 `endpoint_ids` **引用**）
-//!   与独立端点表（[`EndpointRegistry`]，`EndpointId` → [`EndpointEntry`]）——
-//!   端点行为对象**只存在于端点表**（`owner` 关联归属节点），「节点上的端点」
-//!   是查询投影（[`UnifiedRegistry::node_endpoints`]），**不是把端点注册信息
-//!   嵌进节点结构**（v2 `NodeRegistration { endpoints: HashMap<…> }` 嵌套是
-//!   耦合根源）。本机与互联节点（目录/发现映射）在同一张端点表——订阅统一
-//!   按 `(节点 id, 端点 id, 策略 id) → 策略组合` 查表，自订与订其它互联节点
+//!   与独立端点表（[`EndpointRegistry`]）——端点行为对象**只存在于端点表**，
+//!   「节点上的端点」是查询投影（[`UnifiedRegistry::node_endpoints`]），**不是
+//!   把端点注册信息嵌进节点结构**（v2 `NodeRegistration { endpoints: HashMap<…> }`
+//!   嵌套是耦合根源）。本机与互联节点（目录/发现映射）在同一张端点表——订阅
+//!   统一按 `(节点 id, 端点 id, 策略 id) → 策略组合` 查表，自订与订其它互联节点
 //!   走同一套逻辑；策略 = 序列化规则 + pick 规则（[`EndpointStrategy`]），
 //!   传输档案不进注册表；
+//! * **插件挂载表（v3.1 §10.5）**：表键 = [`EndpointRef`]（宿主节点 + 端点句柄
+//!   复合键，**层级进地址**）——节点拥有端点（领域层级）无法展平，同一
+//!   `screen:0` 可在不同宿主节点各自挂载；**读路径一律节点限定**，按
+//!   (宿主, 端点) 精确取，杜绝跨节点同 id 遮蔽；
 //! * **远端端点 = 存根登记**（[`RemoteEndpoint`]）：目录只携带展示元数据
-//!   （无本机行为对象——远端端点不可本机 `share`），`EndpointId` 相同则
-//!   **更新不重复**（目录是权威快照；跨节点同 id 的覆盖语义见
-//!   [`EndpointRegistry::register_remote`]）；
+//!   （无本机行为对象——远端端点不可本机 `share`）；按 `(宿主, 端点)` 分键，
+//!   同节点重复拉取原位更新（幂等，目录是权威快照），不同节点同 id 端点共存
+//!   （无「后登记覆盖」遮蔽，见 [`EndpointRegistry::register_remote`]）；
 //! * **订阅联动**：`on_subscribed` 出锁克隆端点对象后调用其 `share`
 //!   （端点自驱动，内核不做类型分派）；订阅端由
 //!   [`UnifiedRegistry::generate_subscribe_endpoint`] 生成（订阅端点生成）。
@@ -53,7 +57,7 @@ use stross_endpoint::contract::{
 };
 use stross_endpoint::share::file::FileEndpoint;
 use stross_proto::message::{
-    CodecId, Delivery, EndpointId, EndpointManifest, EndpointState, EndpointStrategy,
+    CodecId, Delivery, EndpointId, EndpointManifest, EndpointRef, EndpointState, EndpointStrategy,
     EndpointSummary, MediaKind, NodeId, ReliabilityProfile, TransportId, TransportPreference,
     Visibility,
 };
@@ -86,15 +90,13 @@ fn endpoint_order(a: &EndpointManifest, b: &EndpointManifest) -> std::cmp::Order
         .then_with(|| a.endpoint_id.cmp(&b.endpoint_id))
 }
 
-/// 端点条目：行为对象（[`Endpoint`]）+ 归属节点 + 通告参数（公开者声明）。
+/// 端点条目：行为对象（[`Endpoint`]）+ 通告参数（公开者声明）。
 ///
 /// §3.2 定稿：**行为对象只存在本表**（节点表只持 `endpoint_ids` 引用）；
-/// `owner` 是关联字段，供「节点 → 端点」投影查询。
+/// 归属节点**已编码进表键**（[`EndpointRef`]，v3.1 §10.5——条目自身不再持
+/// `owner` 字段，杜绝「条目与键不一致」的漂移面）。
 pub struct EndpointEntry {
     pub ep: Arc<dyn ShareEndpoint>,
-    /// 归属节点（关联字段；本机 = [`UnifiedRegistry::self_node_id`]，远端 =
-    /// 目录节点 id）。
-    pub owner: NodeId,
     /// 端点自主声明的策略组合（策略独立可寻址，同一内容可有多种处理组合）。
     /// 本机 = `ep.strategy()` 单一真源（seed 时快照）；远端 = 目录携带全量
     /// （**保持清单声明顺序**：默认策略 = 首个）。
@@ -114,16 +116,20 @@ pub struct EndpointEntry {
     pub updated_at: u64,
 }
 
-/// 端点注册表：**独立端点表**——行为对象（本机）+ 远端存根登记（owner 关联）。
+/// 端点注册表：**插件挂载表**——行为对象（本机）+ 远端存根登记，键 =
+/// [`EndpointRef`]（宿主节点 + 端点句柄**复合键**，v3.1 §10.5：层级进地址）。
 ///
 /// v3 §3.2：平级存储，不嵌套在节点下；「节点上的端点」= 按节点
 /// `endpoint_ids` 查本表（投影），见 [`super::UnifiedRegistry::node_endpoints`]。
+/// v3.1 §10.5：同一 [`EndpointId`] 可在不同宿主节点各自挂载——读路径一律
+/// 节点限定（按复合键精确取），杜绝跨节点同 id 遮蔽。
 #[derive(Default)]
 pub struct EndpointRegistry {
-    /// 端点表（键 = 强类型 [`EndpointId`]）：本机行为对象 + 远端存根登记。
-    endpoints: HashMap<EndpointId, EndpointEntry>,
-    /// 文件端点：endpoint_id → 本地文件源（control.rs 状态展示）。
-    file_sources: HashMap<EndpointId, FileSource>,
+    /// 端点表（键 = [`EndpointRef`] 复合键：宿主节点 + 节点内端点句柄）：
+    /// 本机行为对象 + 远端存根登记。
+    endpoints: HashMap<EndpointRef, EndpointEntry>,
+    /// 文件端点：复合键 → 本地文件源（control.rs 状态展示）。
+    file_sources: HashMap<EndpointRef, FileSource>,
     /// 文件端点数值子 id 分配器（`file:<n>`；重名不再进 id，只影响展示名）。
     next_file_id: u32,
 }
@@ -139,13 +145,15 @@ impl EndpointRegistry {
         self.seed_with_owner(ep, NodeId::NIL)
     }
 
-    /// 登记端点并立即 `load`（探测可挂载性）；id 已存在时返回 `false`。
+    /// 登记端点并立即 `load`（探测可挂载性）；(宿主, 端点) 键已存在时返回
+    /// `false`。
     ///
     /// load 失败不阻止登记：端点保留在表里但标记不可挂载（`available=false`
     /// + `last_error`）——UI 可见原因，不可通告/订阅。
     pub fn seed_with_owner(&mut self, mut ep: Box<dyn ShareEndpoint>, owner: NodeId) -> bool {
         let id = ep.id();
-        if self.endpoints.contains_key(&id) {
+        let key = EndpointRef::new(owner, id);
+        if self.endpoints.contains_key(&key) {
             return false;
         }
         if let Err(e) = ep.load() {
@@ -153,10 +161,9 @@ impl EndpointRegistry {
         }
         let strategy = ep.strategy();
         self.endpoints.insert(
-            id,
+            key,
             EndpointEntry {
                 ep: Arc::from(ep),
-                owner,
                 strategies: vec![strategy],
                 published: false,
                 visibility: Visibility::Public,
@@ -175,12 +182,12 @@ impl EndpointRegistry {
     /// 远端端点登记（目录拉取）：把清单映射为**存根条目**（[`RemoteEndpoint`]，
     /// 只承载展示元数据与策略组合）插入端点表（`owner` = 该节点）。
     ///
-    /// **幂等/覆盖语义**：同 `EndpointId` 更新不重复（目录是权威快照）；跨
-    /// 节点同 id（`EndpointId` 是**本机族内句柄**，跨设备唯一性靠
-    /// `(节点, 端点)` 命名空间）按**后登记覆盖**处理——端点表是平级存储，
-    /// 键只有 `EndpointId`（§3.2 定稿），订阅收敛依赖「同端点必然同 id」。
+    /// **复合键语义（v3.1 §10.5）**：按 `(宿主, 端点)` 分键——同节点重复拉取
+    /// 目录**原位更新**（幂等，目录是权威快照）；**不同节点的同 id 端点共存**，
+    /// 不再有「后登记覆盖」遮蔽（`EndpointId` 只是节点内局部句柄，跨设备
+    /// 唯一性靠 `(宿主, 端点)` 命名空间）。
     pub fn register_remote(&mut self, m: &EndpointManifest, owner: NodeId) {
-        let id = EndpointId::new(m.kind, m.endpoint_id);
+        let key = EndpointRef::new(owner, EndpointId::new(m.kind, m.endpoint_id));
         let strategies = strategies_of(m);
         let strategy = strategies
             .first()
@@ -188,7 +195,7 @@ impl EndpointRegistry {
             .unwrap_or_else(|| m.strategy(None));
         let ep: Box<dyn ShareEndpoint> = Box::new(RemoteEndpoint {
             base: EndpointBase {
-                id,
+                id: EndpointId::new(m.kind, m.endpoint_id),
                 kind: m.kind,
                 name: m.name.clone(),
                 available: m.available,
@@ -199,10 +206,9 @@ impl EndpointRegistry {
             strategy,
         });
         self.endpoints.insert(
-            id,
+            key,
             EndpointEntry {
                 ep: Arc::from(ep),
-                owner,
                 strategies,
                 published: m.published,
                 visibility: m.visibility.clone(),
@@ -217,36 +223,36 @@ impl EndpointRegistry {
         );
     }
 
-    /// 按 id 直查端点条目（投影 / 解析用；行为对象单一真源在本表）。
-    pub fn endpoint_entry(&self, endpoint_id: EndpointId) -> Option<&EndpointEntry> {
-        self.endpoints.get(&endpoint_id)
+    /// 按复合键直查端点条目（投影 / 解析用；行为对象单一真源在本表）。
+    pub fn endpoint_entry(&self, key: EndpointRef) -> Option<&EndpointEntry> {
+        self.endpoints.get(&key)
     }
 
     /// 端点行为对象（`on_subscribed` 出锁调用用；持锁调用会死锁）。
-    pub fn endpoint_arc(&self, endpoint_id: EndpointId) -> Option<Arc<dyn ShareEndpoint>> {
-        self.endpoints.get(&endpoint_id).map(|e| e.ep.clone())
+    pub fn endpoint_arc(&self, key: EndpointRef) -> Option<Arc<dyn ShareEndpoint>> {
+        self.endpoints.get(&key).map(|e| e.ep.clone())
     }
 
     /// 端点目标类型（缺省传输选择用）。
-    pub fn target(&self, endpoint_id: EndpointId) -> Option<TargetKind> {
-        self.endpoints.get(&endpoint_id).map(|e| e.ep.target())
+    pub fn target(&self, key: EndpointRef) -> Option<TargetKind> {
+        self.endpoints.get(&key).map(|e| e.ep.target())
     }
 
-    /// 全部端点清单（`owner` 过滤：`Some` = 只看归属该节点的条目；`None` =
-    /// 整张端点表）。**确定性排序**：能力族固定顺序 + 端点 id——注册表持
+    /// 全部端点清单（`owner` 过滤：`Some` = 只看宿主为该节点的条目；`None` =
+    /// 整张挂载表）。**确定性排序**：能力族固定顺序 + 端点 id——注册表持
     /// HashMap（无序），直接 `values()` 迭代会使展示顺序不一致（真实缺陷）。
     pub fn manifests_of(&self, owner: Option<NodeId>) -> Vec<EndpointManifest> {
         let mut v: Vec<EndpointManifest> = self
             .endpoints
-            .values()
-            .filter(|e| owner.is_none_or(|o| e.owner == o))
-            .map(Self::manifest_of)
+            .iter()
+            .filter(|(key, _)| owner.is_none_or(|o| key.owner == o))
+            .map(|(_, e)| Self::manifest_of(e))
             .collect();
         v.sort_by(endpoint_order);
         v
     }
 
-    /// 整张端点表清单（平级存储视图；本机目录经 [`super::UnifiedRegistry`]
+    /// 整张挂载表清单（平级存储视图；本机目录经 [`super::UnifiedRegistry`]
     /// 按 owner 过滤）。
     pub fn manifests(&self) -> Vec<EndpointManifest> {
         self.manifests_of(None)
@@ -256,15 +262,15 @@ impl EndpointRegistry {
     pub fn published_manifests_of(&self, owner: Option<NodeId>) -> Vec<EndpointManifest> {
         let mut v: Vec<EndpointManifest> = self
             .endpoints
-            .values()
-            .filter(|e| owner.is_none_or(|o| e.owner == o) && e.published)
-            .map(Self::manifest_of)
+            .iter()
+            .filter(|(key, e)| owner.is_none_or(|o| key.owner == o) && e.published)
+            .map(|(_, e)| Self::manifest_of(e))
             .collect();
         v.sort_by(endpoint_order);
         v
     }
 
-    /// 整张端点表已通告清单。
+    /// 整张挂载表已通告清单。
     pub fn published_manifests(&self) -> Vec<EndpointManifest> {
         self.published_manifests_of(None)
     }
@@ -273,9 +279,9 @@ impl EndpointRegistry {
     pub fn summaries_of(&self, owner: Option<NodeId>) -> Vec<EndpointSummary> {
         let mut v: Vec<EndpointSummary> = self
             .endpoints
-            .values()
-            .filter(|e| owner.is_none_or(|o| e.owner == o))
-            .map(|e| {
+            .iter()
+            .filter(|(key, _)| owner.is_none_or(|o| key.owner == o))
+            .map(|(_, e)| {
                 let id = e.ep.id();
                 EndpointSummary {
                     endpoint_id: id.id,
@@ -294,7 +300,7 @@ impl EndpointRegistry {
         v
     }
 
-    /// 整张端点表 mDNS 摘要。
+    /// 整张挂载表 mDNS 摘要。
     pub fn summaries(&self) -> Vec<EndpointSummary> {
         self.summaries_of(None)
     }
@@ -334,15 +340,15 @@ impl EndpointRegistry {
         }
     }
 
-    /// 端点清单（订阅握手 / 目录 API 用；按 id 直查，任意归属）。
-    pub fn manifest(&self, endpoint_id: EndpointId) -> Option<EndpointManifest> {
-        self.endpoints.get(&endpoint_id).map(Self::manifest_of)
+    /// 端点清单（订阅握手 / 目录 API 用；按复合键直查，任意宿主）。
+    pub fn manifest(&self, key: EndpointRef) -> Option<EndpointManifest> {
+        self.endpoints.get(&key).map(Self::manifest_of)
     }
 
     /// 通告端点（设置可见性 / delivery / 传输；不可挂载端点拒绝）。
     pub fn publish(
         &mut self,
-        endpoint_id: EndpointId,
+        key: EndpointRef,
         visibility: Visibility,
         delivery: Delivery,
         transports: Vec<TransportPreference>,
@@ -350,16 +356,14 @@ impl EndpointRegistry {
     ) -> Result<EndpointManifest> {
         let entry = self
             .endpoints
-            .get_mut(&endpoint_id)
-            .ok_or_else(|| Error::Message(format!("端点不存在: {endpoint_id}")))?;
+            .get_mut(&key)
+            .ok_or_else(|| Error::Message(format!("端点不存在: {key}")))?;
         if !entry.ep.available() {
             let reason = entry.ep.last_error().unwrap_or("未知原因").to_string();
-            return Err(Error::Message(format!(
-                "端点不可挂载（{reason}）: {endpoint_id}"
-            )));
+            return Err(Error::Message(format!("端点不可挂载（{reason}）: {key}")));
         }
         if entry.published {
-            return Err(Error::Message(format!("端点已通告: {endpoint_id}")));
+            return Err(Error::Message(format!("端点已通告: {key}")));
         }
         entry.published = true;
         entry.visibility = visibility;
@@ -371,13 +375,13 @@ impl EndpointRegistry {
     }
 
     /// 取消通告（端点保留在表里：可再次通告；文件端点顺带移除文件源登记）。
-    pub fn unpublish(&mut self, endpoint_id: EndpointId) -> Result<()> {
+    pub fn unpublish(&mut self, key: EndpointRef) -> Result<()> {
         let entry = self
             .endpoints
-            .get_mut(&endpoint_id)
-            .ok_or_else(|| Error::Message(format!("端点不存在: {endpoint_id}")))?;
+            .get_mut(&key)
+            .ok_or_else(|| Error::Message(format!("端点不存在: {key}")))?;
         if !entry.published {
-            return Err(Error::Message(format!("端点未通告: {endpoint_id}")));
+            return Err(Error::Message(format!("端点未通告: {key}")));
         }
         entry.published = false;
         entry.visibility = Visibility::Public;
@@ -387,15 +391,15 @@ impl EndpointRegistry {
         entry.state = EndpointState::Idle;
         entry.subscribers = 0;
         entry.updated_at = unix_secs();
-        self.file_sources.remove(&endpoint_id);
+        self.file_sources.remove(&key);
         Ok(())
     }
 
     /// 公开一个本地文件为文件端点（确定目标，动态端点 `file:<名>`，重名加序号）。
     ///
     /// 返回的清单里 `kind == File`；本地路径登记进端点对象与 `file_sources`
-    /// （绝不出现在摘录 / 目录 / wire）。`owner` = 归属节点（本机端点走
-    /// 统一注册表时传本机节点 id）。
+    /// （绝不出现在摘录 / 目录 / wire）。`owner` = 宿主节点（本机端点走
+    /// 统一注册表时传本机节点 id）——注册键 = `(owner, 分配的文件端点 id)`。
     pub fn publish_file(
         &mut self,
         path: &Path,
@@ -414,18 +418,22 @@ impl EndpointRegistry {
         // 数值子 id：重名文件不再进 id（`file:<n>`），只影响展示名——
         // 文件名是内容（注册表 name / FileSource 登记），不进端点身份。
         let mut endpoint_id = EndpointId::new(MediaKind::File, self.next_file_id);
-        while self.endpoints.contains_key(&endpoint_id) {
+        while self
+            .endpoints
+            .contains_key(&EndpointRef::new(owner, endpoint_id))
+        {
             self.next_file_id += 1;
             endpoint_id = EndpointId::new(MediaKind::File, self.next_file_id);
         }
         self.next_file_id += 1;
+        let key = EndpointRef::new(owner, endpoint_id);
         let size = meta.len();
         let ep = FileEndpoint::new(endpoint_id, name.clone(), path.to_path_buf());
         if !self.seed_with_owner(Box::new(ep), owner) {
             return Err(Error::Message(format!("端点已存在: {endpoint_id}")));
         }
         self.file_sources.insert(
-            endpoint_id,
+            key,
             FileSource {
                 path: path.to_path_buf(),
                 name,
@@ -433,7 +441,7 @@ impl EndpointRegistry {
             },
         );
         self.publish(
-            endpoint_id,
+            key,
             visibility,
             delivery,
             Self::default_transports(TargetKind::Determined),
@@ -442,18 +450,13 @@ impl EndpointRegistry {
     }
 
     /// 文件端点的本地文件源（control.rs 状态展示；非文件端点返回 `None`）。
-    pub fn file_source(&self, endpoint_id: EndpointId) -> Option<&FileSource> {
-        self.file_sources.get(&endpoint_id)
+    pub fn file_source(&self, key: EndpointRef) -> Option<&FileSource> {
+        self.file_sources.get(&key)
     }
 
     /// 更新端点运行状态（Idle/Active/Suspended + 订阅数）。
-    pub fn set_state(
-        &mut self,
-        endpoint_id: EndpointId,
-        state: EndpointState,
-        subscribers: u32,
-    ) -> bool {
-        let Some(entry) = self.endpoints.get_mut(&endpoint_id) else {
+    pub fn set_state(&mut self, key: EndpointRef, state: EndpointState, subscribers: u32) -> bool {
+        let Some(entry) = self.endpoints.get_mut(&key) else {
             return false;
         };
         entry.state = state;
@@ -464,8 +467,8 @@ impl EndpointRegistry {
 
     /// 记录一个订阅者（订阅达成时调用）：加入端点订阅节点集并同步
     /// `subscribers` 计数（即时反映「N 订阅中」，早于数据面 watchers 事件）。
-    pub fn note_subscriber(&mut self, endpoint_id: EndpointId, node_id: NodeId) {
-        let Some(entry) = self.endpoints.get_mut(&endpoint_id) else {
+    pub fn note_subscriber(&mut self, key: EndpointRef, node_id: NodeId) {
+        let Some(entry) = self.endpoints.get_mut(&key) else {
             return;
         };
         entry.subscriber_nodes.insert(node_id);
@@ -475,8 +478,8 @@ impl EndpointRegistry {
 
     /// 记录一个取消订阅者（显式订阅终止通知时调用）：从订阅节点集移除并
     /// 同步计数；返回移除后仍存活的订阅者数（0 = 最后一个订阅者离开）。
-    pub fn note_unsubscriber(&mut self, endpoint_id: EndpointId, node_id: NodeId) -> u32 {
-        let Some(entry) = self.endpoints.get_mut(&endpoint_id) else {
+    pub fn note_unsubscriber(&mut self, key: EndpointRef, node_id: NodeId) -> u32 {
+        let Some(entry) = self.endpoints.get_mut(&key) else {
             return 0;
         };
         entry.subscriber_nodes.remove(&node_id);
@@ -486,8 +489,8 @@ impl EndpointRegistry {
     }
 
     /// 清空端点订阅者集（停流 / 流结束时调用）：订阅数归零。
-    pub fn clear_subscribers(&mut self, endpoint_id: EndpointId) {
-        let Some(entry) = self.endpoints.get_mut(&endpoint_id) else {
+    pub fn clear_subscribers(&mut self, key: EndpointRef) {
+        let Some(entry) = self.endpoints.get_mut(&key) else {
             return;
         };
         entry.subscriber_nodes.clear();
@@ -501,13 +504,8 @@ impl EndpointRegistry {
     ///
     /// 返回是否找到并触发了端点（`false` = 端点未登记，调用方可用自己持有的
     /// 端点对象兜底触发——契约 `ShareService::on_subscribed` 用它）。
-    pub fn on_subscribed(
-        &self,
-        app: &Arc<Kernel>,
-        endpoint_id: EndpointId,
-        ctx: &SubscribeCtx,
-    ) -> bool {
-        let Some(ep) = self.endpoint_arc(endpoint_id) else {
+    pub fn on_subscribed(&self, app: &Arc<Kernel>, key: EndpointRef, ctx: &SubscribeCtx) -> bool {
+        let Some(ep) = self.endpoint_arc(key) else {
             return false;
         };
         let host: Arc<dyn ShareHost> = app.clone();
@@ -518,9 +516,9 @@ impl EndpointRegistry {
 
     /// 端点显式订阅节点集（`subscriber_nodes` 投影真源；`note_subscriber` /
     /// `note_unsubscriber` 维护）。
-    pub fn subscriber_nodes(&self, endpoint_id: EndpointId) -> Option<Vec<NodeId>> {
+    pub fn subscriber_nodes(&self, key: EndpointRef) -> Option<Vec<NodeId>> {
         self.endpoints
-            .get(&endpoint_id)
+            .get(&key)
             .map(|e| e.subscriber_nodes.iter().copied().collect())
     }
 
@@ -619,12 +617,17 @@ mod tests {
         EndpointId::new(kind, id)
     }
 
+    /// 测试用复合键（seed 默认 owner = NIL，故测试查表统一用 (NIL, id)）。
+    const fn ref_of(id: EndpointId) -> EndpointRef {
+        EndpointRef::new(NodeId::NIL, id)
+    }
+
     #[test]
     fn seed_loads_and_marks_availability() {
         let mut r = EndpointRegistry::new();
         // 可用端点：load 成功 → available
         assert!(r.seed(screen()));
-        let m = r.manifest(sid(MediaKind::Screen, 0)).unwrap();
+        let m = r.manifest(ref_of(sid(MediaKind::Screen, 0))).unwrap();
         assert!(m.available);
         assert!(m.last_error.is_none());
         assert!(!m.published, "登记后未通告");
@@ -636,7 +639,7 @@ mod tests {
                 fail_probe("无图形会话（DISPLAY / WAYLAND_DISPLAY 均未设置）")
             )
         )));
-        let m2 = r2.manifest(sid(MediaKind::Screen, 0)).unwrap();
+        let m2 = r2.manifest(ref_of(sid(MediaKind::Screen, 0))).unwrap();
         assert!(!m2.available);
         assert_eq!(
             m2.last_error.as_deref(),
@@ -645,7 +648,7 @@ mod tests {
         // 不可挂载端点拒绝通告（错误携带原因）
         assert!(
             r2.publish(
-                sid(MediaKind::Screen, 0),
+                ref_of(sid(MediaKind::Screen, 0)),
                 Visibility::Public,
                 Delivery::Pull,
                 vec![],
@@ -663,7 +666,7 @@ mod tests {
 
         let m = r
             .publish(
-                sid(MediaKind::Screen, 0),
+                ref_of(sid(MediaKind::Screen, 0)),
                 Visibility::Public,
                 Delivery::Pull,
                 EndpointRegistry::default_transports(TargetKind::Live),
@@ -695,7 +698,7 @@ mod tests {
         // 重复通告报错
         assert!(
             r.publish(
-                sid(MediaKind::Screen, 0),
+                ref_of(sid(MediaKind::Screen, 0)),
                 Visibility::Public,
                 Delivery::Pull,
                 vec![],
@@ -706,7 +709,7 @@ mod tests {
         // 未知端点报错
         assert!(
             r.publish(
-                sid(MediaKind::Service, 99),
+                ref_of(sid(MediaKind::Service, 99)),
                 Visibility::Public,
                 Delivery::Pull,
                 vec![],
@@ -716,23 +719,31 @@ mod tests {
         );
 
         // 状态与订阅数
-        assert!(r.set_state(sid(MediaKind::Screen, 0), EndpointState::Active, 2));
-        let m = r.manifest(sid(MediaKind::Screen, 0)).unwrap();
+        assert!(r.set_state(ref_of(sid(MediaKind::Screen, 0)), EndpointState::Active, 2));
+        let m = r.manifest(ref_of(sid(MediaKind::Screen, 0))).unwrap();
         assert_eq!(m.state, EndpointState::Active);
         assert_eq!(m.subscribers, 2);
-        assert!(!r.set_state(sid(MediaKind::Service, 99), EndpointState::Active, 0));
+        assert!(!r.set_state(
+            ref_of(sid(MediaKind::Service, 99)),
+            EndpointState::Active,
+            0
+        ));
 
         // 摘要携带 available + published
         let s = r.summaries();
         assert!(s.iter().any(|e| e.published && e.available));
 
         // 取消通告（端点保留，可再次通告）
-        assert!(r.unpublish(sid(MediaKind::Screen, 0)).is_ok());
-        assert!(r.unpublish(sid(MediaKind::Screen, 0)).is_err());
-        assert!(!r.manifest(sid(MediaKind::Screen, 0)).unwrap().published);
+        assert!(r.unpublish(ref_of(sid(MediaKind::Screen, 0))).is_ok());
+        assert!(r.unpublish(ref_of(sid(MediaKind::Screen, 0))).is_err());
+        assert!(
+            !r.manifest(ref_of(sid(MediaKind::Screen, 0)))
+                .unwrap()
+                .published
+        );
         assert!(
             r.publish(
-                sid(MediaKind::Screen, 0),
+                ref_of(sid(MediaKind::Screen, 0)),
                 Visibility::Public,
                 Delivery::Pull,
                 vec![],
@@ -783,7 +794,7 @@ mod tests {
             stross_proto::message::PickRule::StrictOrdered,
             "确定目标默认严格顺序规则"
         );
-        let m_id = EndpointId::new(m.kind, m.endpoint_id);
+        let m_id = ref_of(EndpointId::new(m.kind, m.endpoint_id));
         // 文件源可查（本地路径不落 wire：清单里没有 path 字段）
         let src = r.file_source(m_id).expect("文件源已登记");
         assert_eq!(src.name, "备注.txt");
@@ -800,7 +811,7 @@ mod tests {
         r.unpublish(m_id).unwrap();
         assert!(r.file_source(m_id).is_none());
         assert!(!r.manifest(m_id).unwrap().published);
-        r.unpublish(EndpointId::new(m2.kind, m2.endpoint_id))
+        r.unpublish(ref_of(EndpointId::new(m2.kind, m2.endpoint_id)))
             .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -871,7 +882,7 @@ mod tests {
             fired: f,
         }));
         r.publish(
-            EndpointId::new(MediaKind::Mic, 0),
+            ref_of(EndpointId::new(MediaKind::Mic, 0)),
             Visibility::Confirm,
             Delivery::Push,
             vec![],
@@ -892,10 +903,10 @@ mod tests {
             share_token: Some("tok".into()),
         };
         let app = Arc::new(Kernel::new(crate::Platform::Desktop));
-        r.on_subscribed(&app, EndpointId::new(MediaKind::Mic, 0), &ctx);
+        r.on_subscribed(&app, ref_of(EndpointId::new(MediaKind::Mic, 0)), &ctx);
         assert_eq!(fired.load(Ordering::SeqCst), 1);
         // 未知端点不触发
-        r.on_subscribed(&app, EndpointId::new(MediaKind::Service, 99), &ctx);
+        r.on_subscribed(&app, ref_of(EndpointId::new(MediaKind::Service, 99)), &ctx);
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 }

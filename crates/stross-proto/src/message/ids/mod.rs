@@ -21,6 +21,6 @@ mod transport;
 
 pub use derive::derive_stream_id;
 pub use media::{CodecId, MediaKind};
-pub use node::{EndpointId, NodeId, RoleId};
+pub use node::{EndpointId, EndpointRef, NodeId, RoleId};
 pub use stream::{LinkId, StreamId, StreamKey, StreamRole};
 pub use transport::{CapabilityKind, PickRule, ReliabilityProfile, TransportId};

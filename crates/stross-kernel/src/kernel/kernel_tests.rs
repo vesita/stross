@@ -319,30 +319,43 @@ async fn share_token_lifecycle() {
     assert_eq!(token.expires_at, now_secs().saturating_add(60));
 
     // 校验通过
-    assert!(k.verify_share_token(&token).is_ok());
+    assert!(
+        super::session_api::verify_share_token(&k.share_tokens.lock().unwrap(), &token).is_ok()
+    );
 
     // 篡改 PIN → 拒绝（逐字比对）
     let mut forged = token.clone();
     forged.pin = "000000".into();
-    assert!(k.verify_share_token(&forged).is_err());
+    assert!(
+        super::session_api::verify_share_token(&k.share_tokens.lock().unwrap(), &forged).is_err()
+    );
 
     // 篡改 stream_id → 拒绝（查不到签发记录）
     let mut forged2 = token.clone();
     forged2.stream_id = "sess-other".into();
-    assert!(k.verify_share_token(&forged2).is_err());
+    assert!(
+        super::session_api::verify_share_token(&k.share_tokens.lock().unwrap(), &forged2).is_err()
+    );
 
     // 重新签发覆盖旧凭证（同会话最新凭证有效）
     let token2 = k
         .create_share_token(&s.id, vec![MediaKind::Mic], Duration::from_secs(60))
         .unwrap();
-    assert!(k.verify_share_token(&token2).is_ok());
-    assert!(k.verify_share_token(&token).is_err(), "旧凭证应失效");
+    assert!(
+        super::session_api::verify_share_token(&k.share_tokens.lock().unwrap(), &token2).is_ok()
+    );
+    assert!(
+        super::session_api::verify_share_token(&k.share_tokens.lock().unwrap(), &token).is_err(),
+        "旧凭证应失效"
+    );
 
     // ttl=0 → 立即过期
     let expired = k
         .create_share_token(&s.id, vec![MediaKind::Mic], Duration::ZERO)
         .unwrap();
-    assert!(k.verify_share_token(&expired).is_err());
+    assert!(
+        super::session_api::verify_share_token(&k.share_tokens.lock().unwrap(), &expired).is_err()
+    );
 }
 
 #[test]
@@ -431,10 +444,10 @@ async fn teardown_clears_share_token() {
     let t = k
         .create_share_token(&s.id, vec![MediaKind::Mic], Duration::from_secs(60))
         .unwrap();
-    assert!(k.verify_share_token(&t).is_ok());
+    assert!(super::session_api::verify_share_token(&k.share_tokens.lock().unwrap(), &t).is_ok());
     k.teardown(&s.id).unwrap();
     assert!(
-        k.verify_share_token(&t).is_err(),
+        super::session_api::verify_share_token(&k.share_tokens.lock().unwrap(), &t).is_err(),
         "teardown 后凭证应失效（签发表移除）"
     );
 }

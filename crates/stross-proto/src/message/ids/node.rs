@@ -74,6 +74,32 @@ impl<'de> serde::Deserialize<'de> for EndpointId {
     }
 }
 
+/// 端点插件全局限位：宿主节点 + 节点内局部端点句柄（层级进地址）。
+///
+/// 节点拥有端点（领域层级）无法展平（v3.1 §10.5）；本类型把层级编码进
+/// **地址**——插件挂载表以它为键，读路径按 (宿主, 端点) 精确取，杜绝跨
+/// 节点同 id 遮蔽。**不进 wire**（wire 上 node_id 与 kind/endpoint_id 本就
+/// 是双字段，见 SubscribeSpec / EndpointDir），故不实现 serde。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EndpointRef {
+    /// 宿主节点（挂载该插件的节点）。
+    pub owner: NodeId,
+    /// 节点内端点局部句柄。
+    pub endpoint: EndpointId,
+}
+
+impl EndpointRef {
+    pub const fn new(owner: NodeId, endpoint: EndpointId) -> Self {
+        Self { owner, endpoint }
+    }
+}
+
+impl std::fmt::Display for EndpointRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.owner, self.endpoint)
+    }
+}
+
 /// 节点全局物理/拓扑标识（16 字节定长原语，Copy 语义，零堆分配）。
 ///
 /// 在内存与二进制线序中直接为 `[u8; 16]`（2 个 CPU 寄存器大小，哈希/比对仅 1~2 条指令）；

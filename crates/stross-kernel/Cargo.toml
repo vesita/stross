@@ -15,6 +15,9 @@ stross-endpoint.workspace = true
 # 实现放内核 impl，见 docs/framework-v3.md §3.3/§3.4）。
 stross-share.workspace = true
 stross-subscribe.workspace = true
+# v3 概念 crate：节点 = 端点插件宿主（Node trait + NodeInfo/NodeRole/TransportAddr；
+# v3.1 V1 激活，kernel graph.rs 类型统一转发自此，docs/framework-v3.md §10.4）。
+stross-node.workspace = true
 # v3 概念 crate：pick 规则层（解读/缓冲/注册表）与序列化装载（Loader/loader_for）、
 # 广播发现（mDNS/子网扫描实现，P2b 迁出自本 crate discovery/ 模块）。
 stross-pick.workspace = true

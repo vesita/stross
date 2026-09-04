@@ -5544,6 +5544,7 @@ dependencies = [
  "str0m",
  "stross-discovery",
  "stross-endpoint",
+ "stross-node",
  "stross-pick",
  "stross-proto",
  "stross-serialize",

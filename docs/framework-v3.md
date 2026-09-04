@@ -577,5 +577,133 @@ v3 迁移中发现以下类型在多个 crate 重复定义（契约 crate 为真
 | P4 | 旧文档废弃（layering-architecture/architecture/endpoint-model-v2/plugin-architecture/comm-mode-v2）+ docs/README 登记 + AGENTS.md 更新 | 文档单一真源 |
 | P5 | Python+uv 工具链迁移（逐脚本行为等价） | ✅ 主体完成（16 .sh 删、9 命令建），验证并入 P6 |
 | P6 | 全量回归：cargo test + clippy + tsc + jsdom + uv check --quick + build cli | 全绿 |
-| P7 | 一次性大提交（重构完成） | git log 清晰 |
-| P7 | 一次性大提交（重构完成） | git log 清晰 |
+| P7 | 一次性大提交（重构完成） | ✅ `908bdd9` |
+
+## 10. v3.1 深化：端点即插件（Endpoint-as-Plugin）
+
+> 状态：**设计定稿（待实施）**。
+>
+> 用户诉求（重构完成后的下一轮）：**核心是减少技术债 + 按概念直观管理代码**；
+> 节点与端点因领域层级无法展平，应**通过提取 trait 解耦端点与节点**——端点在
+> 体验上就是节点的插件，最终应像「节点插件区」一样组织。继续完全不兼容策略。
+
+### 10.1 动机（v3 落地后暴露的技术债）
+
+1. **stross-node 是死 crate**：`Node` trait 全仓零消费者（`stross-discovery`
+   声明依赖但代码不用；kernel `graph.rs` 重复定义与 stross-node **完全相同**的
+   `NodeInfo` / `NodeRole` / `TransportAddr`——§7.1 去重表漏了这组）；
+2. **扁平端点表遮蔽（层级展平的代价）**：`EndpointRegistry` 以 `EndpointId`
+   为键，`resolve_strategy` / `stream_profile` / `SubscribeService::resolve`
+   查表时**忽略 node_id**（`let _ = node_id;`）——跨节点同 id（如远端
+   `screen:0`）会遮蔽本机/其它节点条目；wire 上 `(node_id, endpoint_id)` 本
+   来就是双字段，内部存储却把层级压平了；
+3. **壳层穿透 kernel 内部模块**：GUI `probe_relay` 与 CLI `adb status` 直调
+   `stross_kernel::relay::client::{probe_base, info, streams}`（注释「P3 后
+   清理」滞留）；
+4. **可见性未收紧**：`verify_share_token` / `token_validator` 为 `pub` 但仅
+   测试消费。
+
+### 10.2 设计决策
+
+| # | 决策 | 内容 |
+|---|------|------|
+| D1 | **端点 = 节点插件（契约语义定稿）** | `Endpoint` trait 即插件契约：自描述身份 + 能力声明 + 挂载性探测（`load`）+ 行为（`share`/`subscribe`）；四能力 trait（`StreamHost`/`FileHost`/`MediaHost`/`Runtime`）+ 组合（`ShareHost`/`SubscribeHost`）= 插件可见的**宿主能力接口**。插件只依赖宿主能力 trait + 强类型 ID，不认识具体节点/内核类型（v3 §3.2 已满足，本轮语义文档化） |
+| D2 | **节点 = 插件宿主（激活 stross-node）** | `Node` trait 去掉 `endpoints()`（插件区清单是注册表投影，不属节点行为）；删 kernel `graph.rs` 重复类型 → 统一 `stross_node::{NodeInfo, NodeRole, TransportAddr}`；`impl Node for NodeInfo`（视图 DTO 实现行为契约，「注册表条目即实现」）；`Kernel::upsert_node` 泛型化 `upsert_node<N: stross_node::Node>(&self, node: N)`——任何节点形态实现 `Node` 即被内核接纳（发现扫描结果、目录映射、本机能力同一入口） |
+| D3 | **插件挂载表（层级进地址）** | proto 增 `EndpointRef { owner: NodeId, endpoint: EndpointId }`（强类型复合定位，不进 wire——wire 已是双字段）；`EndpointRegistry` 存储键 `HashMap<EndpointId, …>` → `HashMap<EndpointRef, …>`；`EndpointEntry.owner` 字段删除（已入键）；**全部读路径节点限定**，`resolve_strategy` / `stream_profile` / `resolve` 按 `(node, endpoint)` 精确取——**修复跨节点遮蔽** |
+| D4 | **RelayClient 服务对象** | `relay::client` 自由函数 → `RelayClient` 结构（持默认超时），方法 `probe_base` / `info` / `streams`；壳层两处直调改服务对象；删「P3 后清理」注释。中继 HTTP 客户端仍是 kernel 内部服务（响应契约单一真源在 kernel），壳层只消费服务对象，不手写客户端 |
+| D5 | **可见性收紧** | `verify_share_token` 收敛为模块自由函数（校验单一真源，数据面校验器 `KernelTokenValidator` 复用）；`token_validator` 保留 `pub` + `#[doc(hidden)]`（数据面接线原语，集成测试独立接线场景需要公开构造路径） |
+| D6 | **概念命名对齐** | 注册表模块按「插件挂载表」语义重写注释（`UnifiedRegistry` 改名不动——避免无谓 churn，注释与 API 文档表达插件语义） |
+
+### 10.3 端点插件契约（stross-endpoint，语义定稿）
+
+- 插件（端点）**不知道宿主是谁**：`share`/`subscribe` 收宿主能力对象
+  （`Arc<dyn ShareHost>` / `Arc<dyn SubscribeHost>`）+ 运行时载体
+  （`Arc<dyn Runtime>`），宿主身份只以强类型 `NodeId` 出现在载荷
+  （`SubscribeCtx.subscriber`）与定位（`EndpointRef.owner`）；
+- 插件的挂载性 = `load` 探测（`available` / `last_error`）；挂载表只做身份
+  登记与通告参数管理，不持有插件实现知识；
+- **新增插件 = 实现 `Endpoint` + 注册**（`Kernel::seed_endpoint`），内核分发
+  零改动（§2.2 策略注册表模式）。
+
+### 10.4 节点插件宿主（stross-node，激活）
+
+```rust
+/// 网络拓扑中的互联主体（手机/电脑/中继…）= 端点插件的宿主。
+pub trait Node: Send + Sync {
+    fn id(&self) -> NodeId;
+    fn name(&self) -> &str;
+    fn roles(&self) -> &[NodeRole];
+    fn caps(&self) -> &[CapabilityDescriptor];
+    fn addrs(&self) -> &[TransportAddr];
+    // 无 endpoints()/plugins()：插件区清单是注册表投影，不属节点行为
+}
+impl Node for NodeInfo { /* 视图 DTO 即节点快照；字段直投影 */ }
+```
+
+- kernel `graph.rs` 删除 `NodeRole` / `TransportAddr` / `NodeInfo` 重复定义，
+  统一 `stross_node` 类型（kernel 根部继续重导出，路径不变）；
+- `Kernel::upsert_node<N: Node>`：trait 是内核接纳任意节点形态的**抽象面**
+  （§2.2 节点注册表的真实消费点）。
+
+### 10.5 插件挂载表（stross-kernel，复合键）
+
+```rust
+// stross-proto ids：端点插件全局限位（层级进地址；不进 wire）
+pub struct EndpointRef { pub owner: NodeId, pub endpoint: EndpointId }
+
+struct EndpointRegistry {
+    endpoints: HashMap<EndpointRef, EndpointEntry>, // 复合键：宿主 + 插件
+    file_sources: HashMap<EndpointRef, FileSource>,
+}
+```
+
+- 读路径：`endpoint_entry(&EndpointRef)` / `manifest(&EndpointRef)` /
+  `resolve_strategy(node, endpoint, …)`（内部构造 `EndpointRef`）——
+  **node_id 不再被忽略**；
+- 自节点便捷方法（`manifest` / `set_state` / `note_subscriber` /
+  `on_subscribed` / `publish` / `unpublish` …）由 `UnifiedRegistry` 以
+  `owner = self_node` 内部定位（调用方签名不变）；`register_remote_directory`
+  以 `owner = 目录节点` 登记远端存根；
+- `SubscribeService::resolve` 的 `delivery` 查表改 `(node, endpoint)` 限定
+  （修复「远端 `screen:0` 拿到本机 delivery」的遮蔽）。
+
+### 10.6 壳层消债（relay client + 可见性）
+
+```rust
+// stross-kernel relay/client.rs：服务对象取代自由函数
+pub struct RelayClient { timeout: Duration }
+impl RelayClient {
+    pub fn new(timeout: Duration) -> Self;
+    pub async fn probe_base(&self, base: &str) -> bool;
+    pub async fn info(&self, host: &str, port: u16) -> Result<InfoResp>;
+    pub async fn streams(&self, host: &str, port: u16) -> Result<Vec<StreamInfo>>;
+}
+```
+
+- GUI `probe_relay` / CLI `adb status` 改调 `RelayClient`（✅ V3 已落地）；
+- `verify_share_token` 收敛为模块自由函数（**校验单一真源**——数据面校验器
+  `KernelTokenValidator` 复用它，消除两份重复校验逻辑；✅ V3）；`token_validator`
+  保留 `pub` + `#[doc(hidden)]`（**数据面接线原语**：集成测试的独立接线场景
+  需要公开构造路径，常规路径经 `attach_data_plane` 内部注入，壳层不直调）。
+
+### 10.7 迁移映射（v3.1）
+
+| 现状 | v3.1 处置 | 状态 |
+|---|---|---|
+| `stross-node::Node::endpoints()` | 删除（插件清单 = 注册表投影） | ✅ V1 |
+| `kernel/graph.rs` NodeInfo/NodeRole/TransportAddr（与 stross-node 重复） | 删除 → 统一 stross-node；`impl Node for NodeInfo`；`upsert_node<N: Node>` 泛型化 | ✅ V1 |
+| `EndpointRegistry` 键 `EndpointId` + `EndpointEntry.owner` | 键 `EndpointRef{owner, endpoint}`（proto ids，不进 wire），`owner` 字段删；读路径节点限定 | ✅ V2 |
+| `resolve_strategy`/`stream_profile`/`resolve` 忽略 node_id | 按 `(node, endpoint)` 复合键精确取（修复跨节点遮蔽；新增回归测试） | ✅ V2 |
+| 壳层直调 `relay::client::{probe_base,info,streams}` | `RelayClient` 服务对象（kernel 内部 `get_json`/`post_json` 保留；`stream_watchers` 自由函数删除——无消费者） | ✅ V3 |
+| `verify_share_token`（pub，测试消费）+ 数据面校验器重复实现 | 收敛为模块自由函数单一真源，`KernelTokenValidator` 复用 | ✅ V3 |
+| `token_validator` pub | `#[doc(hidden)]` 数据面接线原语（集成测试独立接线场景保留公开构造路径） | ✅ V3 |
+| framework-v3.md 无 v3.1 | 本 §10 | ✅ 本文件 |
+
+### 10.8 实施阶段（v3.1）
+
+| 阶段 | 内容 | 验收 |
+|---|---|---|
+| V1 | stross-node 激活 + graph.rs 去重（Node trait 去 endpoints()；`impl Node for NodeInfo`；`upsert_node` 泛型化；kernel/壳层引用修齐） | ✅ cargo check/clippy 全绿 |
+| V2 | 插件挂载表复合键（proto `EndpointRef`；registry 复合键；读路径节点限定；遮蔽修复 + 回归测试） | ✅ cargo test 全绿（44 套件） |
+| V3 | 壳层消债（`RelayClient` 服务对象 + 壳层两处调用；`verify_share_token` 收敛自由函数单一真源 + `KernelTokenValidator` 复用；`token_validator` `#[doc(hidden)]`） | ✅ clippy 零告警 + kernel 109 测试全绿 |
+| V4 | 文档 + 全量回归 + 大提交（AGENTS.md/dev-playbook 同步；full check） | ⏳ 全绿 + 单一大提交 |

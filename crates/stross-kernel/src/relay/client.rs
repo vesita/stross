@@ -1,9 +1,10 @@
 //! 中继 HTTP API 的**官方客户端**（与 server 侧 [`super::api`] 同 crate，
 //! 响应契约单一真源；基于 reqwest 标准库封装，支持连接复用与完善的 HTTP 语义）。
 //!
-//! 消费方：CLI `devices` / `adb status` 探测、`endpoint ls` 目录拉取、
-//! 文件泵等观看者轮询（stross-app `file_xfer`）。任何一处解析 `/api/*`
-//! 响应都应经本模块——禁止在壳层再手写 HTTP 客户端（docs/framework-v3.md）。
+//! 消费方：壳层（GUI / CLI）经 [`RelayClient`] 服务对象探测远端中继
+//! （v3.1 §10.6）；kernel 内部（文件泵 / 订阅编排 / 协商客户端）经通用
+//! `get_json` / `post_json` 拉取。任何一处解析 `/api/*` 响应都应经本模块——
+//! 禁止在壳层再手写 HTTP 客户端（docs/framework-v3.md）。
 //!
 //! 兼容性：`/api/streams` 历史上有「裸数组」与「`{streams:[...]}`」两种形态
 //! （前端双形态兼容），此处统一收敛为 [`StreamsResp`] 一次解析。
@@ -137,39 +138,47 @@ pub async fn post_json<T: DeserializeOwned, B: Serialize>(
         .with_context(|| format!("响应 JSON 解析失败 {url}"))
 }
 
-/// `/api/info` 探测（不可达返回 Err；调用方决定是否忽略）。
-pub async fn info(host: &str, port: u16, timeout: Duration) -> anyhow::Result<InfoResp> {
-    get_json(&format!("http://{host}:{port}/api/info"), timeout).await
-}
-
-/// `/api/streams` 拉取（流信息列表；两种响应形态统一展开）。
-pub async fn streams(host: &str, port: u16, timeout: Duration) -> anyhow::Result<Vec<StreamInfo>> {
-    let resp: StreamsResp = get_json(&format!("http://{host}:{port}/api/streams"), timeout).await?;
-    Ok(resp.list())
-}
-
-/// 指定流的当前观看者数（流不存在 / 请求失败 = `None`；轮询方据此区分
-/// 「还在等」与「探测失败」——等观看者逻辑把失败当 0 继续轮询）。
-pub async fn stream_watchers(
-    host: &str,
-    port: u16,
-    stream_id: &str,
+/// 中继 HTTP API 服务对象（v3.1 §10.6）：壳层消费本对象探测远端中继
+/// （`probe_base` / `info` / `streams`），不再直调 kernel 内部模块路径的
+/// 自由函数；响应契约单一真源仍在 kernel（[`InfoResp`] / [`StreamsResp`]
+/// 与 server 侧同 crate）。
+#[derive(Debug, Clone)]
+pub struct RelayClient {
+    /// 单次请求超时。
     timeout: Duration,
-) -> Option<u32> {
-    let list = streams(host, port, timeout).await.ok()?;
-    list.into_iter()
-        .find(|s| s.stream_id == stream_id)
-        .map(|s| s.watchers)
 }
 
-/// 探测一个中继 HTTP 基址（`http://host:port`）是否可达：仅校验
-/// `/api/streams` 端点（受控 / 普通中继都提供的只读端点）。不可达返回 `false`。
-///
-/// GUI「手动添加设备」校验地址用——壳层不再手写 `/api/*` 探测客户端
-/// （docs/framework-v3.md：解析 `/api/*` 只允许在 stross-kernel）。
-pub async fn probe_base(base: &str, timeout: Duration) -> bool {
-    let url = format!("{}/api/streams", base.trim_end_matches('/'));
-    get_json::<serde_json::Value>(&url, timeout).await.is_ok()
+impl RelayClient {
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    /// `/api/info` 探测：中继入口信息（SRT/QUIC 端口等）。
+    /// 不可达返回 Err；调用方决定是否忽略。
+    pub async fn info(&self, host: &str, port: u16) -> anyhow::Result<InfoResp> {
+        get_json(&format!("http://{host}:{port}/api/info"), self.timeout).await
+    }
+
+    /// `/api/streams` 拉取（流信息列表；两种响应形态统一展开）。
+    pub async fn streams(&self, host: &str, port: u16) -> anyhow::Result<Vec<StreamInfo>> {
+        let resp: StreamsResp =
+            get_json(&format!("http://{host}:{port}/api/streams"), self.timeout).await?;
+        Ok(resp.list())
+    }
+
+    /// 探测一个中继 HTTP 基址（`http://host:port`）是否可达：仅校验
+    /// `/api/streams` 端点（受控 / 普通中继都提供的只读端点）。不可达返回
+    /// `false`。
+    ///
+    /// GUI「手动添加设备」校验地址用——壳层经本服务对象消费，不再手写
+    /// `/api/*` 探测客户端（docs/framework-v3.md：解析 `/api/*` 只允许在
+    /// stross-kernel）。
+    pub async fn probe_base(&self, base: &str) -> bool {
+        let url = format!("{}/api/streams", base.trim_end_matches('/'));
+        get_json::<serde_json::Value>(&url, self.timeout)
+            .await
+            .is_ok()
+    }
 }
 
 #[cfg(test)]

@@ -12,17 +12,17 @@ use std::process::Command;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use crate::pipeline::ffmpeg_bin;
 
-/// 摄像头设备（纯数据 DTO，定义收敛至 stross-types——应用契约层单一真源）。
-pub use stross_types::CameraDevice;
+/// 摄像头硬件端点（纯数据 DTO，定义收敛至 stross-types——应用契约层单一真源）。
+pub use stross_types::CameraEndpoint;
 
 /// 枚举摄像头。
-pub fn list_cameras() -> Vec<CameraDevice> {
+pub fn list_cameras() -> Vec<CameraEndpoint> {
     #[cfg(target_os = "windows")]
     {
         dshow_devices()
             .into_iter()
             .filter(|(_, kind)| kind == "video")
-            .map(|(name, _)| CameraDevice {
+            .map(|(name, _)| CameraEndpoint {
                 id: name.clone(),
                 name,
             })
@@ -33,7 +33,7 @@ pub fn list_cameras() -> Vec<CameraDevice> {
         avfoundation_devices()
             .into_iter()
             .filter(|(_, kind)| kind == "video")
-            .map(|(name, _)| CameraDevice {
+            .map(|(name, _)| CameraEndpoint {
                 id: name.clone(),
                 name,
             })
@@ -55,7 +55,7 @@ pub fn list_cameras() -> Vec<CameraDevice> {
             for p in paths {
                 let id = p.to_string_lossy().to_string();
                 let name = sysfs_name(&p).unwrap_or_else(|| id.clone());
-                out.push(CameraDevice { id, name });
+                out.push(CameraEndpoint { id, name });
             }
         }
         out

@@ -167,8 +167,8 @@ function renderRecent(): void {
 // 设备列表（左栏）：本机 + 局域网设备
 // ---------------------------------------------------------------------------
 
-/** 扫描条目 → 设备卡片基址（http://ip:port）。 */
-function baseOf(d: ScannedDevice): string {
+/** 扫描条目 → 节点卡片基址（http://ip:port）。 */
+function baseOf(d: ScannedNode): string {
   return `http://${d.ip}:${d.port}`;
 }
 
@@ -183,7 +183,7 @@ async function refreshDevices(force = false): Promise<void> {
   if (!force && discoverCacheAt && Date.now() - discoverCacheAt < DISCOVER_TTL_MS) return;
   scanInFlight = true;
   try {
-    const devs = await call<ScannedDevice[]>('scan_devices', {
+    const devs = await call<ScannedNode[]>('scan_nodes', {
       probeMs: PROBE_TIMEOUT_MS,
       extraBaseUrls: manualRelays.map((a) => a.replace(/\/+$/, '')),
     });

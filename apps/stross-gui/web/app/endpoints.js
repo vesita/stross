@@ -163,7 +163,7 @@ async function confirmPublish() {
     try {
         const name = publishTarget.ep.name;
         await call('endpoint_publish', {
-            deviceId: endpointIdStr(publishTarget.ep),
+            endpointId: endpointIdStr(publishTarget.ep),
             visibility: vis,
             delivery,
         });

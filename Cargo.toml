@@ -54,7 +54,7 @@ fastrand = "2.5.0"
 smol_str = "0.3"
 flume = { version = "0.12", default-features = false }
 if-addrs = { version = "0.15", features = ["link-local"] }
-mio = { version = "1.2.2", features = ["os-poll", "net"] }
+mio = { version = "1.2.3", features = ["os-poll", "net"] }
 socket-pktinfo = "0.4.1"
 socket2 = { version = "0.6.5", features = ["all"] }
 # mDNS tests 的 dev-dependency（同样统一管理）

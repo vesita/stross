@@ -58,6 +58,7 @@ const invoke = async (cmd, args) => {
   switch (cmd) {
     case 'app_info':
       return { version: '0.2.0', platform: 'desktop', ffmpeg: true, ips: ['192.168.1.50'] };
+    case 'list_sources':
     case 'list_devices':
       return { cameras: [], audioInputs: ['default'], systemAudio: [] };
     case 'device_identity':
@@ -76,6 +77,7 @@ const invoke = async (cmd, args) => {
     case 'start_relay':
       return { port: 8777, urls: ['http://192.168.1.50:8777/'], name: '测试电脑', kind: 'relay', roles: [], transports: [], ip: null };
     // 扫描聚合在 Rust（scan_devices）；前端只消费 ScannedDevice[]（isSelf/探测已含）
+    case 'scan_nodes':
     case 'scan_devices':
       if (scanReturnOverride) return scanReturnOverride; // [5] 场景：模拟空列表
       return [
@@ -170,7 +172,7 @@ const invoke = async (cmd, args) => {
     }
     case 'endpoint_ls':
       return {
-        node: { deviceId: 'dev-b', deviceName: '电脑B' },
+        node: { nodeId: 'dev-b', nodeName: '电脑B' },
         endpoints: [
           {
             endpointId: 0,
@@ -205,12 +207,13 @@ const invoke = async (cmd, args) => {
         ],
       };
     case 'endpoint_publish': {
-      localEpState.set(args.deviceId, { visibility: args.visibility, delivery: args.delivery });
-      // 方案 A：endpointId 数值子 id + kind；deviceId 参数为可读 "kind:id"
-      const sep = args.deviceId.indexOf(':');
-      const kind = sep >= 0 ? args.deviceId.slice(0, sep) : 'mic';
+      const epId = args.endpointId || args.deviceId;
+      localEpState.set(epId, { visibility: args.visibility, delivery: args.delivery });
+      // 方案 A：endpointId 数值子 id + kind；endpointId 参数为可读 "kind:id"
+      const sep = epId.indexOf(':');
+      const kind = sep >= 0 ? epId.slice(0, sep) : 'mic';
       return {
-        endpointId: sep >= 0 ? Number(args.deviceId.slice(sep + 1)) : 0,
+        endpointId: sep >= 0 ? Number(epId.slice(sep + 1)) : 0,
         kind,
         name: '麦克风',
         available: true,
@@ -530,7 +533,7 @@ if (pubRadio) pubRadio.checked = true;
 $('pub-confirm-btn').click();
 await sleep(400);
 const pubCallsMic = calls.filter((c) => c.cmd === 'endpoint_publish');
-check('endpoint_publish 被调用（deviceId=mic:0, public）', pubCallsMic.some((c) => c.args.deviceId === 'mic:0' && c.args.visibility === 'public'), JSON.stringify(pubCallsMic[pubCallsMic.length - 1]?.args));
+check('endpoint_publish 被调用（endpointId=mic:0, public）', pubCallsMic.some((c) => (c.args.endpointId === 'mic:0' || c.args.deviceId === 'mic:0') && c.args.visibility === 'public'), JSON.stringify(pubCallsMic[pubCallsMic.length - 1]?.args));
 const micRow2 = Array.from(document.querySelectorAll('[data-role="local-devices"] .ep-row')).find((r) => r.textContent.includes('麦克风'));
 check('共享后行显示「已共享」徽标', !!micRow2?.querySelector('.ep-badge'), micRow2?.textContent || '行丢失');
 micRow2?.querySelector('[data-act="unpublish-endpoint"]')?.click();
@@ -543,7 +546,7 @@ check('取消共享后回到「共享」按钮', !!micRow3?.querySelector('[data
 console.log('\n[9] 设备接入授权弹窗（电脑端首次人工确认：允许/记住）');
 // 通过 negotiator-request 事件驱动电脑端弹窗（与真实路径一致：Rust 协商服务 →
 // Tauri 事件 → 前端弹窗，注意 listen 包装解包 e.payload）
-await eventHandlers['negotiator-request']({ payload: { id: 'n9', deviceId: 'dev-phone-x', deviceName: '手机X', media: ['mic'], createdAt: 0 } });
+await eventHandlers['negotiator-request']({ payload: { id: 'n9', nodeId: 'dev-phone-x', nodeName: '手机X', media: ['mic'], createdAt: 0 } });
 await sleep(100);
 check('授权弹窗打开', !$('approve-modal').classList.contains('hidden'));
 check('弹窗显示设备名', $('approve-device').textContent.includes('手机X'));
@@ -553,7 +556,7 @@ await sleep(100);
 const ar = calls.filter((c) => c.cmd === 'negotiator_respond');
 check('negotiator_respond 被调用（allow=true, remember=true）', ar.length === 1 && ar[0].args.allow === true && ar[0].args.remember === true, JSON.stringify(ar[0]?.args));
 check('授权后弹窗关闭', $('approve-modal').classList.contains('hidden'));
-await eventHandlers['negotiator-request']({ payload: { id: 'n10', deviceId: 'dev-phone-y', deviceName: '手机Y', media: ['mic'], createdAt: 0 } });
+await eventHandlers['negotiator-request']({ payload: { id: 'n10', nodeId: 'dev-phone-y', nodeName: '手机Y', media: ['mic'], createdAt: 0 } });
 await sleep(100);
 $('approve-deny-btn').click();
 await sleep(100);
@@ -578,7 +581,7 @@ check('共享弹窗打开（可见性选择）', !$('pub-modal').classList.conta
 $('pub-confirm-btn').click();
 await sleep(300);
 const pubCalls = calls.filter((c) => c.cmd === 'endpoint_publish');
-check('endpoint_publish 被调用（deviceId=screen:0, confirm/pull 默认）', pubCalls.some((c) => c.args.deviceId === 'screen:0' && c.args.visibility === 'confirm' && c.args.delivery === 'pull'), JSON.stringify(pubCalls[pubCalls.length - 1]?.args));
+check('endpoint_publish 被调用（endpointId=screen:0, confirm/pull 默认）', pubCalls.some((c) => (c.args.endpointId === 'screen:0' || c.args.deviceId === 'screen:0') && c.args.visibility === 'confirm' && c.args.delivery === 'pull'), JSON.stringify(pubCalls[pubCalls.length - 1]?.args));
 check('共享后弹窗关闭', $('pub-modal').classList.contains('hidden'));
 const screenRow2 = Array.from(document.querySelectorAll('[data-role="local-devices"] .ep-row')).find((r) => r.textContent.includes('屏幕'));
 check('共享后行显示「已共享」徽标（需确认），方向不进徽标', !!screenRow2?.querySelector('.ep-badge') && screenRow2.textContent.includes('需确认') && screenRow2.textContent.includes('已共享') && !screenRow2.textContent.includes('拉取'), screenRow2?.textContent || '行丢失');

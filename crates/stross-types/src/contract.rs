@@ -28,8 +28,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use stross_proto::message::{
-    CodecId, ControlMessage, Delivery, EndpointId, EndpointStrategy, MediaKind, PickRule,
-    ReliabilityProfile, SubscribeSpec, TrackInfo,
+    CodecId, ControlMessage, Delivery, EndpointId, EndpointStrategy, MediaKind, NodeId, PickRule,
+    ReliabilityProfile, StreamId, SubscribeSpec, TrackInfo,
 };
 
 /// 目标类型：端点分两类的维度（决定默认传输 Lossless/Lossy 与共享生命周期）。
@@ -263,12 +263,11 @@ macro_rules! impl_media_source_endpoint {
 #[derive(Debug, Clone)]
 pub struct SubscribeCtx {
     /// 订阅方节点 device_id。
-    pub subscriber: String,
+    pub subscriber: NodeId,
     /// 公开方定稿后的数据面方向。
     pub delivery: Delivery,
     /// 数据面流 id：pull = 公开方本机会话（内核预授权）；push = 订阅方自签会话。
-    pub stream_id: String,
-    /// 协商定稿的传输层可靠性档案（允许丢包/不允许丢包/自适应）；
+    pub stream_id: StreamId,
     /// 端点据此装载对应传输模块（通信模式 v2，docs/comm-mode-v2.md §3）。
     pub transport_profile: ReliabilityProfile,
     /// 协商定稿的策略组合（序列化规则 + pick 规则；注册表
@@ -302,7 +301,7 @@ pub trait EndpointApp: Send + Sync {
     async fn receive_file(
         &self,
         watch_url: String,
-        stream_id: String,
+        stream_id: StreamId,
         out_dir: PathBuf,
     ) -> anyhow::Result<crate::ReceivedFile>;
     /// 媒体接收（订阅端 Graph / Audio 类的执行，播放器入端点）：连公开方
@@ -523,7 +522,7 @@ impl AudioSourceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamConfig {
-    pub stream_id: String,
+    pub stream_id: StreamId,
     pub title: String,
     #[serde(default)]
     pub video: Option<VideoSource>,
@@ -545,7 +544,7 @@ impl StreamConfig {
     /// `push` / `ctrl start-stream` / `demo_push` 共用，避免各处手拼字段
     /// （重复实现，曾出现 `--audio` 无声等不一致）。
     pub fn cli_synthetic(
-        stream_id: String,
+        stream_id: impl Into<StreamId>,
         title: String,
         quality: Quality,
         secs: u32,
@@ -553,7 +552,7 @@ impl StreamConfig {
         share_token: Option<String>,
     ) -> Self {
         let mut cfg = Self {
-            stream_id,
+            stream_id: stream_id.into(),
             title,
             video: Some(VideoSource::Synthetic {
                 pattern: "testsrc2".into(),
@@ -610,7 +609,7 @@ pub struct FilePushOptions {
     /// 中继推流地址（`ws://host:port/ws/push`；文件走无损 WS 路径）。
     pub push_url: String,
     /// 数据面流 id（pull = 公开方本机会话；push = 订阅方自签会话）。
-    pub stream_id: String,
+    pub stream_id: StreamId,
     /// 推流标题（Hello.title；展示用）。
     pub title: String,
     /// 跨设备接入凭证（push 模式 = 订阅方自签；本机 pull = `None`）。

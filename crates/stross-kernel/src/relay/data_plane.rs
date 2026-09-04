@@ -19,7 +19,7 @@
 use std::time::Duration;
 
 use stross_proto::frame::TRACK_VIDEO;
-use stross_proto::message::{ControlMessage, StreamInfo};
+use stross_proto::message::{ControlMessage, StreamId, StreamInfo};
 use tokio::sync::broadcast;
 
 use crate::transport::{DataSession, SessionPacket};
@@ -37,7 +37,7 @@ const PUSH_SILENCE_TIMEOUT: Duration = Duration::from_secs(10);
 /// 观看端：等待 Ready，然后按关键帧对齐转发。
 pub(super) async fn handle_watch(
     session: Box<dyn DataSession>,
-    stream_id: String,
+    stream_id: StreamId,
     state: RelayState,
 ) {
     let Some(entry) = state.get(&stream_id) else {
@@ -208,7 +208,7 @@ pub(super) fn spawn_quic_accept_loop(
 
 /// OpenStream 推流负载（`quic_push_stream` 参数分组，避免超长参数表）。
 struct OpenPush {
-    stream_id: String,
+    stream_id: StreamId,
     title: Option<String>,
     video: Option<stross_proto::message::TrackInfo>,
     audio: Option<stross_proto::message::TrackInfo>,
@@ -223,8 +223,8 @@ async fn quic_peer_loop(link: crate::transport::quic::QuicServerLink, state: Rel
     let mut pending_streams: VecDeque<(quinn::SendStream, quinn::RecvStream, u64)> =
         VecDeque::new();
     // 链路级 demux：quic stream id → (语义 stream_id, 方向)
-    let mut by_quic: HashMap<u64, (String, stross_proto::message::StreamRole)> = HashMap::new();
-    let mut by_semantic: HashMap<String, u64> = HashMap::new();
+    let mut by_quic: HashMap<u64, (StreamId, stross_proto::message::StreamRole)> = HashMap::new();
+    let mut by_semantic: HashMap<StreamId, u64> = HashMap::new();
     let mut accept = Box::pin(link.accept_media());
     loop {
         tokio::select! {
@@ -410,7 +410,7 @@ async fn quic_push_stream(
 async fn quic_watch_stream(
     link: crate::transport::quic::QuicServerLink,
     state: RelayState,
-    stream_id: String,
+    stream_id: StreamId,
     mut tx: quinn::SendStream,
     mut _rx: quinn::RecvStream,
 ) {
@@ -542,7 +542,7 @@ async fn handle_push_loop(
     state: RelayState,
     mut pending: Option<SessionPacket>,
 ) {
-    let mut stream_id: Option<String> = None;
+    let mut stream_id: Option<StreamId> = None;
     loop {
         let pkt = match pending.take() {
             Some(pkt) => pkt,
@@ -656,7 +656,7 @@ async fn handle_push_loop(
 
 /// 代理拉取任务：以观看者身份连接上游中继，把收到的帧转发到本地代理流；
 /// 上游断开 / 连接失败时清理本地代理流（[`RelayState::remove_proxy`]）。
-pub(super) async fn proxy_uplink(state: RelayState, upstream: String, stream_id: String) {
+pub(super) async fn proxy_uplink(state: RelayState, upstream: String, stream_id: StreamId) {
     let session = match crate::watch::connect_watch(&upstream, &stream_id).await {
         Ok(s) => s,
         Err(e) => {

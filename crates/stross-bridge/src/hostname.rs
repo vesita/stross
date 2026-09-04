@@ -46,14 +46,14 @@ fn android_device_model() -> Option<String> {
     }
 }
 
-/// 本机**设备名**（mDNS 广播名 / 默认设备标识用）。
+/// 本机**节点名**（mDNS 广播名 / 默认节点标识用）。
 ///
 /// 与 [`hostname_or`] 的区别：Android 平台主机名恒为 `localhost`
 /// （`/proc/sys/kernel/hostname`），直接广播会产生「localhost」这种
 /// 无标识意义的名字；这里把空值 / `localhost` / `android` 过滤掉，
 /// 优先在 Android 读取系统品牌与型号（如「OnePlus PLC110」），其余平台返回真实主机名，
-/// 均无可用标识时回退调用方给的品牌名（如「Stross 设备」）。
-pub fn device_name_or(fallback: &str) -> String {
+/// 均无可用标识时回退调用方给的品牌名（如「Stross 节点」）。
+pub fn node_name_or(fallback: &str) -> String {
     let h = hostname::get()
         .map(|h| h.to_string_lossy().trim().to_string())
         .unwrap_or_default();
@@ -75,7 +75,7 @@ mod tests {
     #[test]
     fn fallback_never_panics() {
         let _ = hostname_or("stross");
-        let _ = device_name_or("Stross 设备");
+        let _ = node_name_or("Stross 节点");
     }
 
     #[test]
@@ -88,14 +88,14 @@ mod tests {
     }
 
     #[test]
-    fn device_name_returns_real_hostname_when_meaningful() {
+    fn node_name_returns_real_hostname_when_meaningful() {
         let h = hostname::get()
             .map(|h| h.to_string_lossy().trim().to_string())
             .unwrap_or_default();
         if is_placeholder_hostname(&h) {
-            assert_eq!(device_name_or("Stross 设备"), "Stross 设备");
+            assert_eq!(node_name_or("Stross 节点"), "Stross 节点");
         } else {
-            assert_eq!(device_name_or("Stross 设备"), h);
+            assert_eq!(node_name_or("Stross 节点"), h);
         }
     }
 }

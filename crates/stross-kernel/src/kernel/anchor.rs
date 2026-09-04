@@ -83,13 +83,12 @@ impl Kernel {
 
     /// 注册 mDNS 广播本机中继；失败告警并返回 `None`（中继仍可用）。
     pub(crate) fn try_register_mdns(&self, hostname: &str, port: u16) -> Option<Discovery> {
-        let instance = relay_mdns_instance(
-            self.identity
-                .lock_poisoned()
-                .as_ref()
-                .map(|id| id.device_id.as_str()),
-            port,
-        );
+        let hex = self
+            .identity
+            .lock_poisoned()
+            .as_ref()
+            .map(|id| id.node_id.to_hex());
+        let instance = relay_mdns_instance(hex.as_deref(), port);
         match Discovery::start(
             &instance,
             &crate::net::local_ips(),
@@ -190,7 +189,7 @@ impl Kernel {
     /// 把本机节点（含采集能力）注册进内核设备图。
     pub fn register_local_node(&self, hostname: &str) {
         self.upsert_node(super::NodeInfo {
-            node_id: "local".into(),
+            node_id: stross_proto::message::NodeId::from("local"),
             name: hostname.into(),
             roles: vec![
                 super::NodeRole::Sender,
@@ -201,7 +200,10 @@ impl Kernel {
             addrs: vec![],
         });
         if let Some(backend) = self.backend.lock_poisoned().as_ref() {
-            self.register_capability("local", backend.descriptor());
+            self.register_capability(
+                &stross_proto::message::NodeId::from("local"),
+                backend.descriptor(),
+            );
         }
     }
 
@@ -235,10 +237,10 @@ impl Kernel {
             return None;
         }
         let (relay_port, srt_port, quic_port) = self.relay_ports()?;
-        let identity = self.device_identity()?;
-        let info = self.mdns_info(&identity.device_name);
+        let identity = self.node_identity()?;
+        let info = self.mdns_info(&identity.node_name);
         Some(crate::discovery::DiscoveryResp {
-            device_id: identity.device_id,
+            node_id: identity.node_id,
             name: info.name,
             relay_port,
             srt_port,
@@ -256,8 +258,8 @@ impl Kernel {
 /// 同名实例会互相覆盖导致扫描不到，实测）。
 ///
 /// 未注入身份时回退旧格式 `sender-{port}`（兼容无 UI 接入方）。
-pub(crate) fn relay_mdns_instance(device_id: Option<&str>, port: u16) -> String {
-    match device_id {
+pub(crate) fn relay_mdns_instance(node_id: Option<&str>, port: u16) -> String {
+    match node_id {
         Some(id) if !id.is_empty() => {
             let short = id.chars().take(8).collect::<String>();
             format!("stross-{short}-{port}")

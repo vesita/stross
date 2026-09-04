@@ -16,14 +16,14 @@ crates/
                     message/negotiator.rs）
   stross-transport  传输层：SRT / QUIC / WS / WebRTC、RelayUrl、
                     net（local_ips / advertise_ip / fake-IP 判定）
-  stross-types      应用契约层：跨壳层类型单一真源（展示视图 AppInfo/RelayInfo/
-                    StreamStatus…、控制面载荷 CtrlPayload、DTO CameraDevice/
-                    PendingRequest/MediaSubscribeOutcome；依赖只到 proto）
+  stross-types      应用契约层：跨壳层类型单一真源（强类型 ID 中心 id.rs、展示视图
+                    AppInfo/RelayInfo/StreamStatus…、控制面载荷 CtrlPayload、
+                    DTO CameraEndpoint/PendingRequest/MediaSubscribeOutcome；依赖只到 proto）
   stross-endpoint   数据源/宿插件区（端点层）：Endpoint 契约（端点化 + 数据还原，
                     EndpointApp 经契约调内核调度）+ 具体端点 screen/（linux
                     Wayland portal+pipewire / X11、windows gdigrab）、audio/、
                     file/；采集与还原机制（capture FfmpegBackend、pipeline
-                    StreamConfig、playback PlaybackSink、devices 枚举、codec/
+                    StreamConfig、playback PlaybackSink、sources 枚举、codec/
                     convert 数据处理辅助）；新增数据源 = 加目录实现契约即挂载
   stross-kernel     ★ 内核（纯管理调度，单一门面 Kernel）：
                     中继 server + 中继 HTTP 客户端（relay/，契约单一真源）、
@@ -34,14 +34,14 @@ crates/
                     ShareNegotiator + client、
                     端点注册表 kernel/endpoint.rs（会话/路由/鉴权/登记）、
                     订阅方编排 subscriber、文件传输 file_xfer、引导 bootstrap、
-                    扫描聚合 devices、推流引擎 engine、接收 receiver、view 展示视图构造
+                    扫描聚合 nodes、推流引擎 engine、接收 receiver、view 展示视图构造
                     （pub use stross_types::* 与端点契约重导出保持壳层路径兼容；
                     零媒体数据面细节，经 EndpointApp 契约调度端点层）
   stross-bridge     平台适应桥接层：paths（数据目录）/ hostname / 平台判定
                     （端点构造委托 stross-endpoint factory，只产出参数，不持有状态）
   mdns              mdns-sd 0.21 的本地 fork（workspace crate；跨设备发现修复都在这里）
 apps/
-  stross-cli        CLI：serve/ctrl/devices/adb/push/receive/relay/endpoint
+  stross-cli        CLI：serve/ctrl/nodes/adb/push/receive/relay/endpoint
                     （只做参数解析+展示，流程全部调 stross-kernel 库接口）
   stross-gui        Tauri GUI（桌面 + Android 共用一套 web 前端）
   stross-relay      独立中继 CLI
@@ -54,7 +54,7 @@ docs/               设计文档（layering-architecture.md 是分层判据；en
 提供 → stross-kernel（数据面/信令/编排，单一 `Kernel` 门面）；平台适应 →
 stross-bridge 与壳层；壳层只做参数解析 + 展示 + 平台适配。**内核必须平台
 无关**（kernel 零路径约定、零 OS 调用、零平台分支；base_dir / hostname /
-设备清单一律注入）。壳层禁止再写 HTTP 客户端、响应结构体或复制 IP 过滤规则。
+端点清单一律注入）。壳层禁止再写 HTTP 客户端、响应结构体或复制 IP 过滤规则。
 
 ## 2. 关键概念与端口约定
 
@@ -66,14 +66,14 @@ stross-bridge 与壳层；壳层只做参数解析 + 展示 + 平台适配。**�
 - **受控中继授权**：推入流必须先建会话 + 签发一次性接入凭证（ShareToken，
   含 streamId/PIN/expiresAt/media），推流端 Hello 出示 `--share-token` 接入。
 - **凭证自动协商**（免粘贴）：申请方 POST 对端 `:18779/api/negotiator/request`
-  （deviceId/deviceName/media）；未知设备挂起 60s 等人工确认（GUI 弹窗；
-  CLI 走 `stross ctrl negotiator-list / negotiator-respond`），已信任设备自动
+  （nodeId/nodeName/media）；未知节点挂起 60s 等人工确认（GUI 弹窗；
+  CLI 走 `stross ctrl negotiator-list / negotiator-respond`），已信任节点自动
   签发。协商服务桌面 GUI 与 CLI serve 都会启动。
 - **mDNS 发现**：`_stross._tcp.local.`，TXT 单 key `stross` 携带整个
   DiscoveryInfo JSON；多网卡广播全部 IPv4（A 记录），浏览端按 §6 的
   选址规则挑一个可拨号地址。
-- **身份**：`~/.local/share/stross/identity.json`（deviceId/name）+ 信任清单
-  `trusted_devices.json`，GUI 与 CLI serve 共用同一目录。
+- **身份**：`~/.local/share/stross/identity.json`（nodeId/name）+ 信任清单
+  `trusted_nodes.json`，GUI 与 CLI serve 共用同一目录。
 - **交互术语定稿**：**共享 = 我是内容源（推送预备），订阅 = 我是接收方**。
   **订阅驱动**（docs/comm-mode-v2.md / endpoint-model-v2.md §4 数据流定稿）：数据流一律
   由**订阅方发起并主动取（pull）**——共享方只在**自己的**受控中继发布，订阅方
@@ -110,7 +110,7 @@ npx tsc -p apps/stross-gui/web/tsconfig.json
 ```bash
 ./target/debug/stross adb status        # 手机型号/系统/WiFi IP/中继三端口/在线共享
 ./target/debug/stross adb ui-status     # 截图 + uiautomator 视图树文本
-./target/debug/stross devices           # 局域网 mDNS 扫描（发现 PC + 手机）
+./target/debug/stross nodes             # 局域网 mDNS 扫描（发现 PC + 手机）
 ```
 
 **WebView 驱动（首选，比 uiautomator 流畅）**：Tauri Android 构建默认开启
@@ -200,3 +200,5 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
   （其余只写指针，如 Android 构建→android-build.md）；用户可见术语统一「共享/订阅」；
   压缩对话前把套路/坑写进 docs/dev-playbook.md。
 - **代码整洁纪律（零 dead_code）**：严禁 `#[allow(dead_code)]`，无用代码就地删除；RAII 守护字段原生使用 `_` 前缀（如 `_wayland`/`_tx`）；平台特定逻辑用精确 `#[cfg(...)]` 条件编译，杜绝掩盖告警。
+- **强类型标识符铁律（零 bare String 作为键/ID）**：实体标识符（节点、流、链路、策略、传输、消息等）以及字典键严禁使用裸 `String` / `&str`，一律使用 `stross_types::id::*` 中的强类型 newtype 或枚举（`NodeId`, `StreamId`, `StreamKey`, `LinkId`, `StrategyId`, `TransferId`, `MsgId`）。
+- **领域模型命名红线（废除「设备（Device）」概念与字眼）**：本项目领域模型与架构中彻底废除「设备（Device）」概念与命名，统一以「端点（Endpoint）」表达能力与数据源/宿实体，以「节点（Node）」表达网络拓扑中的互联主体（如 `NodeId`, `NodeIdentity`, `TrustedNode`, `ScannedNode`, `CameraEndpoint`, `EndpointSourceList`）。彻底切换，严禁引入向后兼容别名（包括 `type ...Device = ...` 或 `serde(alias = ...)`）。

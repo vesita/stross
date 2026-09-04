@@ -61,7 +61,7 @@ pub use stross_transport::net;
 pub use stross_transport::{DataSession, SessionPacket, Transport, TransportError, TransportStats};
 // 发现子系统（discovery v0.2.0）：扫描聚合 + 统一发现清单（需 discovery feature）。
 #[cfg(feature = "discovery")]
-pub use discovery::{ScannedDevice, StreamView, probe_base, scan, scan_lan, to_views};
+pub use discovery::{ScannedNode, StreamView, probe_base, scan, scan_lan, to_views};
 pub use engine::SenderEngine;
 pub use error::{Error, RelayOpError, Result, WatchError};
 pub use file_xfer::{ReceivedFile, receive_file, receive_file_session};
@@ -71,8 +71,8 @@ pub use kernel::{
     RelayDataPlane, Session, SessionPrefs, TransportAddr, UnifiedRegistry, id::Id,
 };
 pub use negotiator::{
-    CliUi, DEFAULT_NEGOTIATOR_PORT, DeviceIdentity, NegotiatorUi, NoopUi, PendingRequest,
-    RelayAddr, ShareGrant, ShareNegotiator, ShareRequest, TrustStore, load_or_create_identity,
+    CliUi, DEFAULT_NEGOTIATOR_PORT, NegotiatorUi, NodeIdentity, NoopUi, PendingRequest, RelayAddr,
+    ShareGrant, ShareNegotiator, ShareRequest, TrustStore, TrustedNode, load_or_create_identity,
 };
 pub use negotiator_client::request_grant;
 pub use receiver::{ReceiveStats, Receiver};
@@ -95,8 +95,8 @@ pub use stross_proto::message::Platform;
 /// 应用契约层（壳层只读；展示视图 + 控制面载荷，定义单一真源在
 /// stross-types crate，此处重导出保持 `stross_kernel::*` 路径兼容）。
 pub use stross_types::{
-    AppInfo, AuthorizedView, CameraDevice, CaptureStatusView, DeviceList, EndpointListPayload,
-    FilePublishedView, GrantResponseView, IssuedShareTokenView, LocalCatalog,
+    AppInfo, AuthorizedView, CameraEndpoint, CaptureStatusView, EndpointListPayload,
+    EndpointSourceList, FilePublishedView, GrantResponseView, IssuedShareTokenView, LocalCatalog,
     PendingRequestsPayload, RelayInfo, SessionCreatedView, SessionView, SessionsPayload,
     ShareTokenView, StartResult, StatusView, StoppedView, StreamStatus, TeardownView,
     UnpublishedView,

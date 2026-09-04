@@ -7,7 +7,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use stross_proto::frame::{Frame, TRACK_VIDEO};
-use stross_proto::message::{ShareToken, StreamInfo};
+use stross_proto::message::{ShareToken, StreamId, StreamInfo};
 
 use super::peers::PeerInfo;
 use crate::kernel::id::Id;
@@ -23,11 +23,14 @@ use crate::lock::MutexExt;
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum RelayEvent {
     /// 推流端 Hello 成功建流。
-    StreamStarted { stream_id: String, info: StreamInfo },
+    StreamStarted {
+        stream_id: StreamId,
+        info: StreamInfo,
+    },
     /// 推流端 Bye / 断开，流被移除。
-    StreamEnded { stream_id: String },
+    StreamEnded { stream_id: StreamId },
     /// 观看者数量变化（订阅 / 断开时上报）。
-    WatchersChanged { stream_id: String, watchers: u32 },
+    WatchersChanged { stream_id: StreamId, watchers: u32 },
 }
 
 /// 接入凭证校验器（跨设备推流用）。
@@ -233,7 +236,7 @@ impl RelayState {
         self.allowed.lock_poisoned().remove(&Id::from(id));
         if self.remove(id) {
             self.emit(RelayEvent::StreamEnded {
-                stream_id: id.to_string(),
+                stream_id: StreamId::new(id),
             });
         }
     }
@@ -329,7 +332,7 @@ impl RelayState {
             }
             let (tx, _rx) = broadcast::channel(128);
             let info = info.unwrap_or_else(|| StreamInfo {
-                stream_id: stream_id.to_string(),
+                stream_id: StreamId::new(stream_id),
                 title: stream_id.to_string(),
                 video: None,
                 audio: None,
@@ -345,7 +348,7 @@ impl RelayState {
             let task = tokio::spawn(super::data_plane::proxy_uplink(
                 self.clone(),
                 upstream.to_string(),
-                stream_id.to_string(),
+                StreamId::new(stream_id),
             ));
             guards.insert(
                 stream_id.to_string(),
@@ -355,7 +358,7 @@ impl RelayState {
                 },
             );
             self.emit(RelayEvent::StreamStarted {
-                stream_id: stream_id.to_string(),
+                stream_id: StreamId::new(stream_id),
                 info,
             });
         }
@@ -367,7 +370,7 @@ impl RelayState {
         let removed = self.proxies.lock_poisoned().remove(id).is_some();
         if removed && self.remove(id) {
             self.emit(RelayEvent::StreamEnded {
-                stream_id: id.to_string(),
+                stream_id: StreamId::new(id),
             });
         }
     }

@@ -27,7 +27,7 @@
 //!
 //! * [`capture`]：采集后端抽象 [`CaptureBackend`] + 桌面 [`FfmpegBackend`]
 //! * [`pipeline`]：ffmpeg 采集与编码管线（[`StreamConfig`] / [`StreamSession`]）
-//! * [`devices`]：摄像头 / 麦克风 / 系统声音设备枚举
+//! * [`sources`]：摄像头 / 麦克风 / 系统声音端点源枚举
 //! * [`playback`]：播放后端（ffmpeg 子进程解码 + cpal 输出）
 //! * [`codec`] / [`convert`]：切帧 / 像素转换——源与还原两侧共用
 //!
@@ -38,11 +38,11 @@ pub mod capture;
 pub mod codec;
 pub mod contract;
 pub mod convert;
-pub mod devices;
 pub mod factory;
 pub mod pipeline;
 pub mod playback;
 pub mod share;
+pub mod sources;
 pub mod subscribe;
 
 pub use capture::{CaptureBackend, CaptureStatus};
@@ -54,7 +54,6 @@ pub use contract::{
 };
 pub use convert::rgba::rgba_scaled;
 pub use convert::yuv::{Yuv420Layout, yuv420_to_rgba_scaled};
-pub use devices::{CameraDevice, list_audio_inputs, list_cameras, list_system_audio};
 pub use factory::{platform_endpoints, seed_platform_endpoints};
 pub use pipeline::{
     AudioSourceConfig, Quality, StreamConfig, StreamSession, VideoSource, ffmpeg_available,
@@ -70,5 +69,6 @@ pub use share::{
     FileChannelEndpoint, FileEndpoint, FilePushOptions, MicEndpoint, ScreenEndpoint,
     SystemAudioEndpoint,
 };
+pub use sources::{CameraEndpoint, list_audio_inputs, list_cameras, list_system_audio};
 pub use stross_types::impl_media_source_endpoint;
 pub use subscribe::{FileChannelSubscribeEndpoint, FileReceiveEndpoint, MediaReceiveEndpoint};

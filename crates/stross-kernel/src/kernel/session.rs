@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-use stross_proto::message::{CodecId, ReliabilityProfile, RoutePath, TransportId};
+use stross_proto::message::{CodecId, ReliabilityProfile, RoutePath, StreamId, TransportId};
 
 use super::super::lock::MutexExt;
 use crate::error::{Error, Result};
@@ -24,7 +24,7 @@ pub struct Negotiated {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
-    pub id: String,
+    pub id: StreamId,
     /// 会话标题（接收端建会话时填写，如「手机麦克风」；UI 展示用）。
     pub title: String,
     pub source: String,

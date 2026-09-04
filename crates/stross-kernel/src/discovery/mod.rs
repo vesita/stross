@@ -30,5 +30,5 @@ mod mdns;
 pub use mdns::{BROWSE_TIMEOUT, Discovered, Discovery, SERVICE_TYPE};
 // 扫描聚合 + 统一发现清单 DTO
 pub use aggregate::{
-    DISCOVERY_PORT, DiscoveryResp, ScannedDevice, StreamView, probe_base, scan, scan_lan, to_views,
+    DISCOVERY_PORT, DiscoveryResp, ScannedNode, StreamView, probe_base, scan, scan_lan, to_views,
 };

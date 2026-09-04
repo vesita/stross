@@ -27,7 +27,7 @@
 use serde::{Deserialize, Serialize};
 
 use stross_proto::message::{
-    Delivery, EndpointId, EndpointManifest, EndpointSummary, MediaKind, RoleId, TransportId,
+    Delivery, EndpointManifest, EndpointSummary, MediaKind, RoleId, TransportId,
 };
 
 pub mod channel;
@@ -38,6 +38,9 @@ pub use channel::{ChannelEvent, ChannelStatus};
 
 /// 平台无关的主机名/设备名判定（桥接层与内核共用，单一真源）。
 pub mod hostname;
+/// 强类型 ID 单一真源（禁止裸字符串作 key / id）。
+pub mod id;
+pub use id::*;
 
 // ---------------------------------------------------------------------------
 // 固定端口真源（跨壳层单一真源；docs/layering-architecture.md 端口约定）
@@ -65,30 +68,30 @@ pub mod ports {
 }
 
 // ---------------------------------------------------------------------------
-// 设备 / 采集 DTO
+// 端点 / 采集源 DTO
 // ---------------------------------------------------------------------------
 
-/// 摄像头设备（采集枚举结果；跨壳层展示用）。
+/// 摄像头硬件端点（采集枚举结果；跨壳层展示用）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct CameraDevice {
+pub struct CameraEndpoint {
     /// 稳定标识（Linux 为 `/dev/videoN`，Windows 为 dshow 名称）。
     pub id: String,
     /// 展示名称。
     pub name: String,
 }
 
-/// 摄像头 / 麦克风 / 系统声音设备清单。
+/// 摄像头 / 麦克风 / 系统声音端点源清单。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeviceList {
-    pub cameras: Vec<CameraDevice>,
+pub struct EndpointSourceList {
+    pub cameras: Vec<CameraEndpoint>,
     pub audio_inputs: Vec<String>,
     pub system_audio: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
-// 展示视图（设备卡片 / 推流状态 / 中继入口 / 目录）
+// 展示视图（节点卡片 / 推流状态 / 中继入口 / 目录）
 // ---------------------------------------------------------------------------
 
 /// 应用信息（版本 / 平台 / ffmpeg 是否可用 / 本机 IP）。
@@ -131,7 +134,7 @@ pub struct StartResult {
     pub relay_port: u16,
     pub watch_urls: Vec<String>,
     /// 实际流 id（内核签发，D4：与 session id 合一；接收端据此订阅）。
-    pub stream_id: String,
+    pub stream_id: StreamId,
 }
 
 /// 推流状态。
@@ -139,7 +142,7 @@ pub struct StartResult {
 #[serde(rename_all = "camelCase")]
 pub struct StreamStatus {
     pub running: bool,
-    pub stream_id: Option<String>,
+    pub stream_id: Option<StreamId>,
     pub title: Option<String>,
     pub relay_port: Option<u16>,
     pub started_at: Option<u64>,
@@ -187,10 +190,8 @@ pub use contract::{
 pub struct PendingRequest {
     /// 挂起请求 id（`negotiator_respond` 时回填）。
     pub id: String,
-    pub device_id: String,
-    pub device_name: String,
-    /// 序列化后的媒体名（`MediaKind` camelCase；前端展示用）。
-    pub media: Vec<String>,
+    pub node_id: NodeId,
+    pub node_name: String,
     /// 订阅目标端点名（端点语义；旧语义为 `None`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_name: Option<String>,
@@ -207,7 +208,7 @@ pub struct MediaSubscribeOutcome {
     /// watch 入口（ws://host:port；pull = 公开方中继，push = 本机中继）。
     pub relay_url: String,
     /// 观看流 id（pull = 公开方会话；push = 本机自签会话）。
-    pub stream_id: String,
+    pub stream_id: StreamId,
 }
 
 /// 文件接收结果（文件端点半程：握手 → 接收 → 落盘；GUI 命令 / CLI 展示共用，
@@ -233,7 +234,7 @@ pub struct ReceivedFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionCreatedView {
-    pub session_id: String,
+    pub session_id: StreamId,
     pub title: String,
 }
 
@@ -241,7 +242,7 @@ pub struct SessionCreatedView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthorizedView {
-    pub session_id: String,
+    pub session_id: StreamId,
     pub authorized: bool,
 }
 
@@ -249,7 +250,7 @@ pub struct AuthorizedView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeardownView {
-    pub session_id: String,
+    pub session_id: StreamId,
 }
 
 /// `ctrl start-stream` 载荷（复用 [`StartResult`]：relayPort/watchUrls/streamId）。
@@ -265,7 +266,7 @@ pub struct StoppedView {
 #[serde(rename_all = "camelCase")]
 pub struct IssuedShareTokenView {
     pub token: String,
-    pub stream_id: String,
+    pub stream_id: StreamId,
     pub pin: String,
     pub expires_at: u64,
     pub media: Vec<MediaKind>,
@@ -275,7 +276,7 @@ pub struct IssuedShareTokenView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionView {
-    pub session_id: String,
+    pub session_id: StreamId,
     pub source: String,
     pub sinks: Vec<String>,
     pub requires_pin: bool,
@@ -302,7 +303,7 @@ pub struct StatusView {
     pub quic_port: Option<u16>,
     pub streaming: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stream_id: Option<String>,
+    pub stream_id: Option<StreamId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -323,7 +324,7 @@ pub struct PendingRequestsPayload {
 #[serde(rename_all = "camelCase")]
 pub struct GrantResponseView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stream_id: Option<String>,
+    pub stream_id: Option<StreamId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

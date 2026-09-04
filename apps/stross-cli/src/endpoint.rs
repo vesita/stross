@@ -115,7 +115,7 @@ async fn run_ls(host: &str, port: u16, json: bool) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&dir)?);
         return Ok(());
     }
-    println!("节点 {}（{}）", dir.node.device_name, dir.node.device_id);
+    println!("节点 {}（{}）", dir.node.node_name, dir.node.node_id);
     println!("已通告端点（{} 个）：", dir.endpoints.len());
     for e in &dir.endpoints {
         let avail = if e.available {

@@ -14,7 +14,7 @@ use crate::error::Result;
 use crate::lock::MutexExt;
 use crate::receiver::{LocalProxy, MAIN_RECEIVE_LINK, Receiver};
 
-use super::{Id, Kernel};
+use super::{Id, Kernel, StreamId};
 
 impl Kernel {
     // -----------------------------------------------------------------------
@@ -34,14 +34,14 @@ impl Kernel {
     pub async fn start_receive(
         &self,
         relay_url: String,
-        stream_id: String,
+        stream_id: StreamId,
         audio_out: AudioOut,
     ) -> Result<Arc<Receiver>> {
         self.stop_receive_link(MAIN_RECEIVE_LINK);
         self.start_receive_link(
             MAIN_RECEIVE_LINK.to_string(),
             relay_url,
-            stream_id,
+            stream_id.to_string(),
             audio_out,
         )
         .await
@@ -54,11 +54,15 @@ impl Kernel {
     pub async fn start_receive_raw(
         &self,
         relay_url: String,
-        stream_id: String,
+        stream_id: StreamId,
     ) -> Result<Arc<Receiver>> {
         self.stop_receive_link(MAIN_RECEIVE_LINK);
-        self.start_receive_raw_link(MAIN_RECEIVE_LINK.to_string(), relay_url, stream_id)
-            .await
+        self.start_receive_raw_link(
+            MAIN_RECEIVE_LINK.to_string(),
+            relay_url,
+            stream_id.to_string(),
+        )
+        .await
     }
 
     /// 停止接收（旧单流兼容：只停预留槽 `main`，不影响其它链路）。

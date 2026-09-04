@@ -58,7 +58,7 @@ function startStatusPolling() {
 }
 // ---------------------------------------------------------------- 设备能力
 async function loadDevices() {
-    devices = await call('list_devices');
+    devices = await call('list_sources');
 }
 // ---------------------------------------------------------------- 可被发现
 /** 更新本机卡片「可被发现」开关按钮态（on=公开，off=隐藏）。
@@ -97,7 +97,7 @@ async function setDiscoverable(on) {
 function onApproveRequest(req) {
     pendingApprove = req;
     $('approve-device').textContent =
-        `节点「${req.deviceName}」（${req.deviceId.slice(0, 12)}…）`;
+        `节点「${req.nodeName}」（${req.nodeId.slice(0, 12)}…）`;
     const mediaLabel = req.endpointName ||
         (req.media.length
             ? req.media.map((m) => labelOf(DEVICE_KIND_LABELS, m)).join('、')

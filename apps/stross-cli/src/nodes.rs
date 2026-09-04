@@ -1,4 +1,4 @@
-//! `stross devices`：扫描局域网设备（PC + 手机），展示设备能力与在线共享状态。
+//! `stross nodes`：扫描局域网节点（PC + 手机），展示节点能力与在线共享状态。
 //!
 //! 分层（docs/layering-architecture.md）：**聚合与探测收敛在
 //! `stross_kernel::discovery::scan_lan`**（内核层，CLI 与 GUI 共用）；本文件只做
@@ -8,15 +8,15 @@ use std::time::Duration;
 
 use clap::Args;
 use stross_kernel::discovery::BROWSE_TIMEOUT;
-use stross_kernel::discovery::ScannedDevice;
+use stross_kernel::discovery::ScannedNode;
 use stross_proto::message::{MediaKind, RoleId};
 
 #[derive(Args, Debug)]
-pub struct DevicesArgs {
+pub struct NodesArgs {
     /// 浏览窗口（秒），覆盖 mDNS resolve 重试预算
     #[arg(long, default_value_t = BROWSE_TIMEOUT.as_secs())]
     pub timeout: u64,
-    /// 每设备 HTTP 探测超时（毫秒；不可达设备快速跳过）
+    /// 每节点 HTTP 探测超时（毫秒；不可达节点快速跳过）
     #[arg(long, default_value_t = 1500)]
     pub probe_ms: u64,
     /// JSON 输出（脚本化 / 管道）
@@ -24,70 +24,70 @@ pub struct DevicesArgs {
     pub json: bool,
 }
 
-pub async fn run(args: DevicesArgs) -> anyhow::Result<()> {
+pub async fn run(args: NodesArgs) -> anyhow::Result<()> {
     let browse = Duration::from_secs(args.timeout);
     let probe = Duration::from_millis(args.probe_ms);
-    let devices = stross_kernel::discovery::scan_lan(browse, probe, Vec::new()).await?;
+    let nodes = stross_kernel::discovery::scan_lan(browse, probe, Vec::new()).await?;
 
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&devices)?);
+        println!("{}", serde_json::to_string_pretty(&nodes)?);
         return Ok(());
     }
     println!(
-        "局域网设备（{0} 秒扫描窗口，发现 {1} 台）",
+        "局域网节点（{0} 秒扫描窗口，发现 {1} 个）",
         args.timeout,
-        devices.len()
+        nodes.len()
     );
-    if devices.is_empty() {
-        println!("  未发现设备（mDNS 广播未达？检查网络 / 对端是否已打开 Stross）");
+    if nodes.is_empty() {
+        println!("  未发现节点（mDNS 广播未达？检查网络 / 对端是否已打开 Stross）");
         println!("  提示：手机经 USB 连接时，可运行 `stross adb status` 直接查手机状态");
         return Ok(());
     }
-    for dev in &devices {
-        print_device(dev);
+    for node in &nodes {
+        print_node(node);
     }
     Ok(())
 }
 
-fn print_device(dev: &ScannedDevice) {
-    let tag = if dev.is_self { "本机" } else { "设备" };
+fn print_node(node: &ScannedNode) {
+    let tag = if node.is_self { "本机" } else { "节点" };
     println!(
         "  {tag} {name}（{ip}:{port}）",
-        name = dev.name,
-        ip = dev.ip,
-        port = dev.port
+        name = node.name,
+        ip = node.ip,
+        port = node.port
     );
     let caps: Vec<String> = [
-        if dev.roles.is_empty() {
+        if node.roles.is_empty() {
             None
         } else {
             Some(format!(
                 "角色={}",
-                dev.roles
+                node.roles
                     .iter()
                     .map(role_label)
                     .collect::<Vec<_>>()
                     .join("/")
             ))
         },
-        if dev.media.is_empty() {
+        if node.media.is_empty() {
             None
         } else {
             Some(format!(
                 "可共享={}",
-                dev.media
+                node.media
                     .iter()
                     .map(media_label)
                     .collect::<Vec<_>>()
                     .join("/")
             ))
         },
-        if dev.transports.is_empty() {
+        if node.transports.is_empty() {
             None
         } else {
             Some(format!(
                 "传输={}",
-                dev.transports
+                node.transports
                     .iter()
                     .map(|t| format!("{t:?}").to_uppercase())
                     .collect::<Vec<_>>()
@@ -101,8 +101,8 @@ fn print_device(dev: &ScannedDevice) {
     if !caps.is_empty() {
         println!("      {}", caps.join(" · "));
     }
-    if !dev.endpoints.is_empty() {
-        let list: Vec<String> = dev
+    if !node.endpoints.is_empty() {
+        let list: Vec<String> = node
             .endpoints
             .iter()
             .map(|e| {
@@ -113,26 +113,26 @@ fn print_device(dev: &ScannedDevice) {
             .collect();
         println!("      端点: {}", list.join(" / "));
     }
-    if let Some(srt) = dev.srt_port {
+    if let Some(srt) = node.srt_port {
         println!("      SRT {srt}");
     } else {
         println!("      SRT -");
     }
-    if let Some(quic) = dev.quic_port {
+    if let Some(quic) = node.quic_port {
         println!("      QUIC {quic}");
     } else {
         println!("      QUIC -");
     }
     println!(
         "      在线共享 {} 条{}",
-        dev.streams.len(),
-        if dev.online {
+        node.streams.len(),
+        if node.online {
             ""
         } else {
             "（HTTP 探测不可达）"
         }
     );
-    for s in &dev.streams {
+    for s in &node.streams {
         let kinds = match (s.video, s.audio) {
             (true, true) => "视频+音频",
             (true, false) => "视频",
@@ -161,18 +161,18 @@ fn media_label(m: &MediaKind) -> String {
         MediaKind::Window => "窗口".into(),
         MediaKind::Camera => "摄像头".into(),
         MediaKind::Mic => "麦克风".into(),
-        MediaKind::SystemAudio => "系统声".into(),
-        MediaKind::Input => "输入".into(),
-        MediaKind::Clipboard => "剪贴板".into(),
+        MediaKind::SystemAudio => "系统声音".into(),
         MediaKind::File => "文件".into(),
+        MediaKind::Clipboard => "剪贴板".into(),
+        MediaKind::Input => "输入".into(),
         MediaKind::Service => "服务".into(),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use stross_kernel::discovery::StreamView;
+    use stross_proto::StreamId;
 
     #[test]
     fn role_and_media_labels() {
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn caps_fmt() {
-        let dev = ScannedDevice {
+        let node = ScannedNode {
             name: "x".into(),
             ip: "192.168.1.5".into(),
             port: 18777,
@@ -195,13 +195,13 @@ mod tests {
             srt_port: None,
             quic_port: None,
             streams: vec![StreamView {
-                stream_id: "s".into(),
+                stream_id: StreamId::from("s"),
                 title: "t".into(),
                 video: true,
                 audio: false,
                 watchers: 1,
             }],
         };
-        let _ = serde_json::to_string(&dev).unwrap(); // JSON 输出可序列化
+        let _ = serde_json::to_string(&node).unwrap(); // JSON 输出可序列化
     }
 }

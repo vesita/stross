@@ -39,8 +39,8 @@ pub use endpoint::{
     SerializeRule, StrategyId, SubscribeSpec, TransportPreference, Visibility,
 };
 pub use ids::{
-    CapabilityKind, CodecId, EndpointId, MediaKind, PickRule, ReliabilityProfile, RoleId,
-    StreamRole, TransportId, derive_stream_id,
+    CapabilityKind, CodecId, EndpointId, LinkId, MediaKind, NodeId, PickRule, ReliabilityProfile,
+    RoleId, StreamId, StreamKey, StreamRole, TransportId, derive_stream_id,
 };
 pub use negotiator::{
     EndpointDir, EndpointNode, RelayAddr, ShareGrant, ShareRequest, ShareTokenView,

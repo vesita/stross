@@ -31,6 +31,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use stross_proto::frame::{Frame, Frame2, FrameHeader2, HEADER2_LEN};
 use stross_proto::message::{ControlMessage, ReliabilityProfile, StreamRole, TransportId};
+use stross_types::id::StreamId;
 
 use super::{
     DataSession, PeerAddr, SessionPacket, SessionParams, SharedStats, Transport, TransportError,
@@ -144,7 +145,7 @@ pub struct QuicLink {
     /// quic stream id → 会话事件通道（control 循环路由目标）。
     sessions: Mutex<HashMap<u64, mpsc::UnboundedSender<LinkEvent>>>,
     /// 语义 stream_id → quic stream id（StreamOpened/CloseStream 反查）。
-    semantic: Mutex<HashMap<String, u64>>,
+    semantic: Mutex<HashMap<StreamId, u64>>,
     stats: SharedStats,
 }
 
@@ -292,7 +293,7 @@ pub struct QuicMediaSession {
     tx: Mutex<Option<quinn::SendStream>>,
     rx: Mutex<Option<quinn::RecvStream>>,
     events: Mutex<mpsc::UnboundedReceiver<LinkEvent>>,
-    semantic: Mutex<Option<String>>,
+    semantic: Mutex<Option<StreamId>>,
     role: Mutex<Option<StreamRole>>,
     registered: AtomicBool,
     /// 确认门：StreamOpened（Welcome/Ready）已送达。未确认前不吐媒体帧——
@@ -891,6 +892,7 @@ impl rustls::client::danger::ServerCertVerifier for SkipVerify {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stross_proto::StreamId;
     use stross_proto::frame::{CODEC_H264, FLAG_KEYFRAME, Frame, MAGIC, TRACK_VIDEO};
 
     /// 服务端测试用 peer 配对循环：control OpenStream ↔ accept_bi FIFO 配对，
@@ -900,12 +902,12 @@ mod tests {
     async fn server_pair_loop(
         link: QuicServerLink,
         stream_count: usize,
-    ) -> Vec<(String, quinn::SendStream, quinn::RecvStream)> {
+    ) -> Vec<(StreamId, quinn::SendStream, quinn::RecvStream)> {
         use std::collections::VecDeque;
         let mut opens: VecDeque<ControlMessage> = VecDeque::new();
         let mut streams: VecDeque<(quinn::SendStream, quinn::RecvStream)> = VecDeque::new();
         let mut accept = Box::pin(link.accept_media());
-        let mut paired: Vec<(String, quinn::SendStream, quinn::RecvStream)> = Vec::new();
+        let mut paired: Vec<(StreamId, quinn::SendStream, quinn::RecvStream)> = Vec::new();
         while paired.len() < stream_count {
             tokio::select! {
                 msg = link.recv_control() => {
@@ -987,8 +989,8 @@ mod tests {
 
         let (mut paired, _handle) = accept_task.await.unwrap();
         assert_eq!(paired.len(), 2, "两条媒体流按序配对");
-        assert_eq!(paired[0].0, "stream-a");
-        assert_eq!(paired[1].0, "stream-b");
+        assert_eq!(paired[0].0, StreamId::from("stream-a"));
+        assert_eq!(paired[1].0, StreamId::from("stream-b"));
 
         // 每条流独立发帧（紧凑帧头 v2 线上格式；s1 → stream-a、s2 → stream-b）
         let frames = [

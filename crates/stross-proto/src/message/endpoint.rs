@@ -21,7 +21,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::ids::{CodecId, MediaKind, PickRule, ReliabilityProfile, TransportId};
+use super::ids::{CodecId, MediaKind, NodeId, PickRule, ReliabilityProfile, TransportId};
 
 /// mDNS 摘要层（L1）：只带 id/kind/name/是否可挂载/是否已通告，绝无协议、
 /// 可见性等详情（详情走 L2 `GET /api/endpoints` 拉取）。
@@ -50,8 +50,8 @@ pub enum Visibility {
     Public,
     /// 首见人工确认；已信任节点自动（复用 TrustStore）。
     Confirm,
-    /// 仅白名单节点（按节点 device_id；不出现在目录响应中）。
-    Private { nodes: Vec<String> },
+    /// 仅白名单节点（按节点 node_id；不出现在目录响应中）。
+    Private { nodes: Vec<NodeId> },
 }
 
 impl Visibility {
@@ -106,7 +106,69 @@ pub struct TransportPreference {
 
 /// 策略 id：端点内**独立可寻址**（同一内容可有多种处理组合；
 /// docs/endpoint-model-v2.md §2——订阅按 `(节点, 端点, 策略)` 精确取）。
-pub type StrategyId = String;
+/// 强类型枚举，具备零堆分配、穷尽匹配与编译期检查。
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Default,
+    ToSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum StrategyId {
+    /// 默认策略（直通）。
+    #[default]
+    Default,
+    /// 直通策略。
+    Passthrough,
+    /// 大块分片策略。
+    Chunked,
+}
+
+impl StrategyId {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Passthrough => "passthrough",
+            Self::Chunked => "chunked",
+        }
+    }
+
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "default" => Some(Self::Default),
+            "passthrough" => Some(Self::Passthrough),
+            "chunked" => Some(Self::Chunked),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for StrategyId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for StrategyId {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_wire(s).ok_or_else(|| format!("未知的策略 id: {s}"))
+    }
+}
+
+impl From<&str> for StrategyId {
+    fn from(s: &str) -> Self {
+        s.parse().unwrap_or(Self::Default)
+    }
+}
 
 /// 序列化规则（SerializeRule）：数据 ↔ 管线格式的转换（装载/解装载，含分包）——
 /// 端点自定，内核不碰编码细节（docs/endpoint-model-v2.md §0/§2）。
@@ -129,7 +191,7 @@ pub enum SerializeRule {
 /// （[`PickRule`]：管线里怎么解读，docs/comm-mode-v2.md §3.0）。
 ///
 /// 传输档案（[`ReliabilityProfile`]）**不进注册表**（端点声明、传输模块执行）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointStrategy {
     /// 策略 id（端点内独立可寻址；订阅方按它指明要哪个策略）。
@@ -142,7 +204,7 @@ pub struct EndpointStrategy {
 
 impl EndpointStrategy {
     /// 默认策略 id（端点未声明多策略时的唯一策略；订阅方缺省按它取）。
-    pub const DEFAULT_ID: &'static str = "default";
+    pub const DEFAULT_ID: StrategyId = StrategyId::Default;
 
     /// 直通序列化 + 指定 pick 规则的默认策略（当前唯一实现组合）。
     ///
@@ -150,7 +212,7 @@ impl EndpointStrategy {
     /// docs/endpoint-model-v2.md §3）；新增序列化规则时在此扩展构造函数。
     pub fn passthrough(pick: PickRule) -> Self {
         Self {
-            strategy_id: Self::DEFAULT_ID.into(),
+            strategy_id: StrategyId::Default,
             serialize: SerializeRule::Passthrough,
             pick,
         }
@@ -170,7 +232,7 @@ impl EndpointStrategy {
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeSpec {
     /// 互联节点 id（对端 device_id；本机订阅本机时为本地节点 id）。
-    pub node_id: String,
+    pub node_id: super::ids::NodeId,
     /// 订阅目标端点能力族（与 `endpoint_id` 组合成内部 `EndpointId`）。
     pub kind: MediaKind,
     /// 对端端点数值子 id（"0" / "5"；与 `kind` 组合）。
@@ -182,7 +244,7 @@ pub struct SubscribeSpec {
     /// 定稿后的数据面方向（订阅驱动定稿只走 Pull）。
     pub delivery: Delivery,
     /// 数据面流 id（pull = 公开方签发的会话）。
-    pub stream_id: String,
+    pub stream_id: super::ids::StreamId,
     /// 订阅方连接公开方中继的 WS 基址（`ws://host:port`；pull 模式）。
     pub relay_url: Option<String>,
 }
@@ -276,8 +338,8 @@ impl EndpointManifest {
         self.strategies
             .iter()
             .find(|s| Some(s.strategy_id.as_str()) == strategy_id)
-            .cloned()
-            .or_else(|| self.strategies.first().cloned())
+            .copied()
+            .or_else(|| self.strategies.first().copied())
             .unwrap_or_else(|| EndpointStrategy::passthrough(self.pick_rule))
     }
 }
@@ -365,7 +427,7 @@ mod tests {
             Visibility::Public,
             Visibility::Confirm,
             Visibility::Private {
-                nodes: vec!["dev-a".into()],
+                nodes: vec![NodeId::from("node-a")],
             },
         ] {
             let text = serde_json::to_string(&v).unwrap();
@@ -379,10 +441,13 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&Visibility::Private {
-                nodes: vec!["dev-a".into()]
+                nodes: vec![NodeId::from("node-a")]
             })
             .unwrap(),
-            r#"{"private":{"nodes":["dev-a"]}}"#
+            format!(
+                r#"{{"private":{{"nodes":["{}"]}}}}"#,
+                NodeId::from("node-a")
+            )
         );
     }
 
@@ -398,7 +463,7 @@ mod tests {
         }
         // Private 的节点清单不在 wire 字符串里（解析出空清单，调用方补充）
         let v = Visibility::Private {
-            nodes: vec!["dev-a".into()],
+            nodes: vec![NodeId::from("node-a")],
         };
         assert_eq!(
             Visibility::from_wire(v.as_str()),
@@ -490,7 +555,7 @@ mod tests {
         let back: EndpointManifest = serde_json::from_str(&text).unwrap();
         assert_eq!(m, back);
         assert_eq!(back.strategies.len(), 1);
-        assert_eq!(back.strategies[0].strategy_id, "default");
+        assert_eq!(back.strategies[0].strategy_id, StrategyId::Default);
         // 不可用端点的 last_error 上 wire
         let mut m2 = sample_manifest();
         m2.available = false;
@@ -550,7 +615,10 @@ mod tests {
             relay_url: Some("ws://192.168.1.5:18777".into()),
         };
         let text = serde_json::to_string(&spec).unwrap();
-        assert!(text.contains("\"nodeId\":\"node-phone\""), "wire: {text}");
+        assert!(
+            text.contains(&format!("\"nodeId\":\"{}\"", spec.node_id)),
+            "wire: {text}"
+        );
         assert!(text.contains("\"kind\":\"screen\""), "wire: {text}");
         assert!(text.contains("\"endpointId\":0"), "wire: {text}");
         assert!(text.contains("\"strategyId\":null"), "wire: {text}");

@@ -203,7 +203,7 @@ pub async fn start_receive(
         let _ = &app; // Android 分支（Kotlin 播放）才用 app
         let ch = on_frame;
         state
-            .start_receive(relay, stream, audio)
+            .start_receive(relay, stream.into(), audio)
             .await
             .map_err(|e| e.to_user_string())?;
         let frames = match state.take_receive_frames() {

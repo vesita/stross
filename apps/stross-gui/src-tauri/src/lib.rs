@@ -60,9 +60,9 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app_info,
         discoverable_status,
         set_discoverable,
-        list_devices,
+        list_sources,
         start_relay,
-        scan_devices,
+        scan_nodes,
         probe_relay,
         endpoint_ls,
         endpoint_publish,
@@ -97,7 +97,7 @@ pub fn run() {
         .init();
 
     // 平台判定唯一来源在桥接层（`cfg(target_os)` 只允许出现在那里）
-    let app_state = Kernel::new(stross_bridge::devices::platform());
+    let app_state = Kernel::new(stross_bridge::endpoints::platform());
     // 平台设备清单（桥接层单一来源：桌面 = 屏幕/麦克风/系统声音；Android = 麦克风/系统声音）
     stross_bridge::seed_platform_endpoints(&app_state);
     // 桌面后端无依赖，可立即注入；Android 后端需要 plugin setup 阶段
@@ -121,7 +121,7 @@ pub fn run() {
                     .path()
                     .app_data_dir()
                     .unwrap_or_else(|_| std::env::temp_dir());
-                let name = stross_bridge::device_name_or("Stross 设备");
+                let name = stross_bridge::node_name_or("Stross 节点");
                 let id = stross_kernel::load_or_create_identity(&base, &name);
                 app.state::<Arc<Kernel>>().set_identity(id);
                 // 「可被发现」（mDNS 广播本机）：读持久化设置并注入内核。

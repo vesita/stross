@@ -30,7 +30,7 @@ use stross_endpoint::subscribe::file::FileReceiveEndpoint;
 use stross_endpoint::subscribe::media::MediaReceiveEndpoint;
 use stross_proto::message::{
     CodecId, Delivery, EndpointDir, EndpointId, EndpointManifest, EndpointState, EndpointStrategy,
-    EndpointSummary, MediaKind, PickRule, ReliabilityProfile, SubscribeSpec, TransportId,
+    EndpointSummary, MediaKind, NodeId, PickRule, ReliabilityProfile, SubscribeSpec, TransportId,
     TransportPreference, Visibility,
 };
 use stross_proto::time::unix_secs;
@@ -369,9 +369,9 @@ pub struct UnifiedRegistry {
     /// 本机（自节点）端点表：行为对象 + 通告参数（订阅联动走它）。
     local: EndpointRegistry,
     /// 互联节点注册（目录/发现拉取后映射；不含本机——本机走 `local`）。
-    nodes: HashMap<String, NodeRegistration>,
-    /// 本机节点 id（身份注入；未注入时缺省 `"local"`）。
-    self_node: String,
+    nodes: HashMap<NodeId, NodeRegistration>,
+    /// 本机节点 id（身份注入；未注入时缺省 `NodeId::NIL`）。
+    self_node: NodeId,
     /// 本机节点展示名（身份注入）。
     self_name: String,
 }
@@ -379,8 +379,8 @@ pub struct UnifiedRegistry {
 /// 一个互联节点（手机/电脑）的注册：节点信息 + 它拥有的端点（可分享内容）。
 #[derive(Debug, Clone)]
 pub struct NodeRegistration {
-    /// 互联节点 id（device_id；mDNS/目录权威）。
-    pub node_id: String,
+    /// 互联节点 id（mDNS/目录权威）。
+    pub node_id: NodeId,
     /// 展示名（device_name）。
     pub name: String,
     /// 协商/目录入口（`host:port`；本机为 `"local"`）。
@@ -410,7 +410,7 @@ impl Default for UnifiedRegistry {
         Self {
             local: EndpointRegistry::new(),
             nodes: HashMap::new(),
-            self_node: "local".into(),
+            self_node: NodeId::NIL,
             self_name: "本机".into(),
         }
     }
@@ -423,14 +423,14 @@ impl UnifiedRegistry {
 
     /// 注入本机节点身份（`is_self` 判定与 `(节点, 端点, 策略)` 查表的
     /// 本机分支用；身份未注入时本机缺省 id 为 `"local"`）。
-    pub fn set_self_node(&mut self, node_id: &str, name: &str) {
-        self.self_node = node_id.to_string();
+    pub fn set_self_node(&mut self, node_id: impl Into<NodeId>, name: &str) {
+        self.self_node = node_id.into();
         self.self_name = name.to_string();
     }
 
     /// 本机节点 id（订阅查表的本机分支键）。
-    pub fn self_node_id(&self) -> &str {
-        &self.self_node
+    pub fn self_node_id(&self) -> NodeId {
+        self.self_node
     }
 
     // -- 本机端点表委托（行为对象 + 通告参数；原 EndpointRegistry 方法面） --
@@ -515,13 +515,13 @@ impl UnifiedRegistry {
     /// 节点 → 端点 → 策略（策略组合来自清单 `strategies`，缺省由平铺
     /// `pick_rule` 推导）。幂等：同节点重复拉取覆盖（目录是权威快照）。
     pub fn register_remote_directory(&mut self, dir: &EndpointDir, addr: &str) {
-        let node_id = dir.node.device_id.clone();
+        let node_id = dir.node.node_id;
         if node_id.is_empty() || node_id == self.self_node {
             return; // 空节点 / 本机镜像不入远端表（本机走 local）
         }
         let mut reg = NodeRegistration {
-            node_id: node_id.clone(),
-            name: dir.node.device_name.clone(),
+            node_id,
+            name: dir.node.node_name.clone(),
             addr: addr.to_string(),
             is_self: false,
             endpoints: HashMap::new(),
@@ -548,23 +548,30 @@ impl UnifiedRegistry {
     /// * 互联节点：从目录映射取；`strategy_id` 缺省 = 端点默认策略（首个）。
     pub fn resolve_strategy(
         &self,
-        node_id: &str,
+        node_id: &NodeId,
         endpoint_id: EndpointId,
         strategy_id: Option<&str>,
     ) -> Option<EndpointStrategy> {
-        if node_id == self.self_node || node_id == "local" {
+        if *node_id == self.self_node
+            || *node_id == NodeId::NIL
+            || *node_id == NodeId::from_seed("local")
+        {
             let ep = self.local.endpoint_arc(endpoint_id)?;
             let s = ep.strategy();
             // 本机单策略：任何 id 都收敛到端点声明的策略
             return Some(match strategy_id {
-                Some(id) if id == s.strategy_id => s,
+                Some(id) if id == s.strategy_id.as_str() => s,
                 _ => s,
             });
         }
         let node = self.nodes.get(node_id)?;
         let ep = node.endpoints.get(&endpoint_id)?;
         match strategy_id {
-            Some(id) => ep.strategies.iter().find(|s| s.strategy_id == id).cloned(),
+            Some(id) => ep
+                .strategies
+                .iter()
+                .find(|s| s.strategy_id.as_str() == id)
+                .cloned(),
             None => ep.strategies.first().cloned(),
         }
     }
@@ -574,7 +581,7 @@ impl UnifiedRegistry {
         let mut v: Vec<NodeRegistration> = self.nodes.values().cloned().collect();
         // 本机镜像：从行为对象表现算（策略 = 端点声明，单一真源）
         let mut self_reg = NodeRegistration {
-            node_id: self.self_node.clone(),
+            node_id: self.self_node,
             name: self.self_name.clone(),
             addr: "local".into(),
             is_self: true,
@@ -594,7 +601,7 @@ impl UnifiedRegistry {
             );
         }
         v.push(self_reg);
-        v.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        v.sort_by_key(|a| a.node_id);
         v
     }
 
@@ -640,9 +647,9 @@ impl UnifiedRegistry {
     }
 
     /// 全部互联节点 id（订阅查表键；含本机）。
-    pub fn node_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.nodes.keys().cloned().collect();
-        ids.push(self.self_node.clone());
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        let mut ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+        ids.push(self.self_node);
         ids.sort();
         ids
     }
@@ -683,7 +690,7 @@ mod tests {
     use std::result::Result as StdResult;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use stross_endpoint::contract::{Endpoint, Probe};
-    use stross_proto::message::MediaKind;
+    use stross_proto::message::{MediaKind, StrategyId};
 
     fn ok_probe() -> Probe {
         Arc::new(|| Ok(()))
@@ -918,7 +925,7 @@ mod tests {
             }
             fn strategy(&self) -> stross_proto::message::EndpointStrategy {
                 stross_proto::message::EndpointStrategy {
-                    strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
+                    strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID,
                     serialize: stross_proto::message::SerializeRule::Passthrough,
                     pick: stross_proto::message::PickRule::Realtime,
                 }
@@ -940,7 +947,7 @@ mod tests {
                 _app: Arc<dyn stross_endpoint::contract::EndpointApp>,
                 ctx: SubscribeCtx,
             ) {
-                assert_eq!(ctx.subscriber, "dev-phone");
+                assert_eq!(ctx.subscriber, NodeId::from("dev-phone"));
                 self.fired.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -969,7 +976,7 @@ mod tests {
             stream_id: "sess-1".into(),
             transport_profile: stross_proto::message::ReliabilityProfile::Lossy,
             strategy: stross_proto::message::EndpointStrategy {
-                strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
+                strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID,
                 serialize: stross_proto::message::SerializeRule::Passthrough,
                 pick: stross_proto::message::PickRule::Realtime,
             },
@@ -991,8 +998,8 @@ mod tests {
     fn remote_dir(node_id: &str, name: &str) -> EndpointDir {
         EndpointDir {
             node: stross_proto::message::EndpointNode {
-                device_id: node_id.into(),
-                device_name: name.into(),
+                node_id: node_id.into(),
+                node_name: name.into(),
             },
             endpoints: vec![
                 EndpointManifest {
@@ -1008,7 +1015,7 @@ mod tests {
                     transport_profile: stross_proto::message::ReliabilityProfile::Lossy,
                     pick_rule: stross_proto::message::PickRule::Realtime,
                     strategies: vec![stross_proto::message::EndpointStrategy {
-                        strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
+                        strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID,
                         serialize: stross_proto::message::SerializeRule::Passthrough,
                         pick: stross_proto::message::PickRule::Realtime,
                     }],
@@ -1030,7 +1037,7 @@ mod tests {
                     transport_profile: stross_proto::message::ReliabilityProfile::Lossless,
                     pick_rule: stross_proto::message::PickRule::StrictOrdered,
                     strategies: vec![stross_proto::message::EndpointStrategy {
-                        strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID.into(),
+                        strategy_id: stross_proto::message::EndpointStrategy::DEFAULT_ID,
                         serialize: stross_proto::message::SerializeRule::Passthrough,
                         pick: stross_proto::message::PickRule::StrictOrdered,
                     }],
@@ -1057,9 +1064,13 @@ mod tests {
 
         // 本机查表：registry[本机][端点][策略] → 策略组合（strategy() 单一真源）
         let s = reg
-            .resolve_strategy("node-pc", EndpointId::new(MediaKind::Screen, 0), None)
+            .resolve_strategy(
+                &NodeId::from("node-pc"),
+                EndpointId::new(MediaKind::Screen, 0),
+                None,
+            )
             .expect("本机屏幕端点应可解析");
-        assert_eq!(s.strategy_id, "default");
+        assert_eq!(s.strategy_id, StrategyId::Default);
         assert_eq!(s.pick, stross_proto::message::PickRule::Realtime);
         assert_eq!(
             s.serialize,
@@ -1068,7 +1079,7 @@ mod tests {
         // 本机文件端点：严格顺序 + Lossless 推断为确定目标
         let fs = reg
             .resolve_strategy(
-                "node-pc",
+                &NodeId::from("node-pc"),
                 EndpointId::new(MediaKind::File, 0),
                 Some("default"),
             )
@@ -1076,19 +1087,27 @@ mod tests {
         assert_eq!(fs.pick, stross_proto::message::PickRule::StrictOrdered);
         // 未知端点 → None
         assert!(
-            reg.resolve_strategy("node-pc", EndpointId::new(MediaKind::Service, 99), None)
-                .is_none()
+            reg.resolve_strategy(
+                &NodeId::from("node-pc"),
+                EndpointId::new(MediaKind::Service, 99),
+                None
+            )
+            .is_none()
         );
 
         // 互联节点映射（目录拉取 → 节点 → 端点 → 策略）
         reg.register_remote_directory(&remote_dir("node-phone", "手机A"), "192.168.1.5:18779");
         let s = reg
-            .resolve_strategy("node-phone", EndpointId::new(MediaKind::Screen, 0), None)
+            .resolve_strategy(
+                &NodeId::from("node-phone"),
+                EndpointId::new(MediaKind::Screen, 0),
+                None,
+            )
             .expect("远端屏幕端点应可解析");
         assert_eq!(s.pick, stross_proto::message::PickRule::Realtime);
         let f = reg
             .resolve_strategy(
-                "node-phone",
+                &NodeId::from("node-phone"),
                 EndpointId::new(MediaKind::File, 0),
                 Some("default"),
             )
@@ -1097,7 +1116,7 @@ mod tests {
         // 未知策略 id → None（策略独立可寻址）
         assert!(
             reg.resolve_strategy(
-                "node-phone",
+                &NodeId::from("node-phone"),
                 EndpointId::new(MediaKind::Screen, 0),
                 Some("nope")
             )
@@ -1108,7 +1127,7 @@ mod tests {
         let nodes = reg.node_registrations();
         assert_eq!(nodes.len(), 2, "本机 + 手机两台节点");
         let self_node = nodes.iter().find(|n| n.is_self).expect("本机镜像在表内");
-        assert_eq!(self_node.node_id, "node-pc");
+        assert_eq!(self_node.node_id, NodeId::from("node-pc"));
         assert!(
             self_node
                 .endpoints
@@ -1116,7 +1135,7 @@ mod tests {
         );
         let phone = nodes
             .iter()
-            .find(|n| n.node_id == "node-phone")
+            .find(|n| n.node_id == NodeId::from("node-phone"))
             .expect("手机节点在表内");
         assert!(!phone.is_self);
         assert_eq!(phone.endpoints.len(), 2);
@@ -1173,9 +1192,13 @@ mod tests {
         dir.endpoints[0].pick_rule = stross_proto::message::PickRule::Realtime;
         reg.register_remote_directory(&dir, "192.168.1.9:18779");
         let s = reg
-            .resolve_strategy("node-old", EndpointId::new(MediaKind::Screen, 0), None)
+            .resolve_strategy(
+                &NodeId::from("node-old"),
+                EndpointId::new(MediaKind::Screen, 0),
+                None,
+            )
             .expect("旧对端策略应推导成功");
-        assert_eq!(s.strategy_id, "default");
+        assert_eq!(s.strategy_id, StrategyId::Default);
         assert_eq!(s.pick, stross_proto::message::PickRule::Realtime);
         assert_eq!(
             s.serialize,

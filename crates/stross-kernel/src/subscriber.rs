@@ -24,7 +24,8 @@ use anyhow::Context;
 use serde::Serialize;
 use stross_proto::message::derive_stream_id;
 use stross_proto::message::{
-    Delivery, EndpointDir, EndpointId, ShareGrant, ShareRequest, SubscribeSpec,
+    Delivery, EndpointDir, EndpointId, NodeId, ShareGrant, ShareRequest, StrategyId, StreamId,
+    SubscribeSpec,
 };
 
 use crate::Kernel;
@@ -57,7 +58,7 @@ pub struct SubscribeOutcome {
     /// 公开方拍板后的方向（pull = 连公开方中继；push = 公开方推入本机）。
     pub delivery: Delivery,
     /// 提交给观看接收的流 id（pull = 公开方会话；push = 本机自签会话）。
-    pub stream_id: String,
+    pub stream_id: StreamId,
     /// 接收到的文件（文件端点半程：握手 → 接收 → 落盘）。
     pub received: ReceivedFile,
 }
@@ -159,7 +160,7 @@ pub async fn subscribe_media_and_watch(
 struct EndpointGrant {
     grant: ShareGrant,
     /// 公开方节点 id（目录拉取；统一注册表 `(节点, 端点, 策略)` 查表键）。
-    node_id: String,
+    node_id: NodeId,
 }
 
 /// 订阅握手：目录拉取（映射公开方入统一注册表）→ 身份 → POST 对端协商端点。
@@ -172,25 +173,25 @@ async fn request_endpoint_grant(
     host: &str,
     port: u16,
     endpoint_id: EndpointId,
-    strategy_id: Option<String>,
+    strategy_id: Option<StrategyId>,
 ) -> anyhow::Result<EndpointGrant> {
     // 1) 目录拉取 → 映射进统一注册表（节点 → 端点 → 策略 三层；
     //    docs/endpoint-model-v2.md §4「订阅分享注册表」）
-    let mut node_id = String::new();
+    let mut node_id = NodeId::NIL;
     if let Ok(dir) = fetch_directory(host, port).await {
-        node_id = dir.node.device_id.clone();
+        node_id = dir.node.node_id;
         app.register_remote_directory(&dir, &format!("{host}:{port}"));
     }
     bootstrap::ensure_identity(app, base, crate::bootstrap::DEFAULT_NODE_NAME);
     let identity = app
-        .device_identity()
+        .node_identity()
         .ok_or_else(|| anyhow::anyhow!("身份未初始化"))?;
 
     // 订阅驱动定稿（docs/endpoint-model-v2.md §4）：只走 pull，无 push——
     // 不建本机会话/自签凭证/锚定中继；订阅方只连公开方中继 watch 取流。
     let req = ShareRequest {
-        device_id: identity.device_id.clone(),
-        device_name: identity.device_name.clone(),
+        node_id: identity.node_id,
+        node_name: identity.node_name.clone(),
         endpoint_id: Some(endpoint_id.id),
         endpoint_kind: Some(endpoint_id.kind),
         strategy_id,
@@ -218,13 +219,13 @@ fn build_subscribe_spec(
     host: &str,
     _port: u16,
     endpoint_id: EndpointId,
-    strategy_id: Option<String>,
+    strategy_id: Option<StrategyId>,
     grant: &ShareGrant,
-    node_id: &str,
+    node_id: &NodeId,
 ) -> anyhow::Result<SubscribeSpec> {
     let strategy = app
-        .resolve_strategy(node_id, endpoint_id, strategy_id.as_deref())
-        .or_else(|| grant.strategy.clone())
+        .resolve_strategy(node_id, endpoint_id, strategy_id.map(|s| s.as_str()))
+        .or(grant.strategy)
         .unwrap_or_else(|| {
             stross_proto::message::EndpointStrategy::passthrough(
                 grant.pick_rule.unwrap_or_default(),
@@ -250,7 +251,7 @@ fn build_subscribe_spec(
         .as_ref()
         .map(|r| format!("ws://{host}:{}", r.ws_port));
     Ok(SubscribeSpec {
-        node_id: node_id.to_string(),
+        node_id: *node_id,
         kind: endpoint_id.kind,
         endpoint_id: endpoint_id.id,
         strategy_id,

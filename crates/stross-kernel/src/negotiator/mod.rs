@@ -38,6 +38,7 @@ use stross_proto::message::{
     TransportId, Visibility, derive_stream_id,
 };
 use stross_proto::time::unix_secs;
+use stross_types::id::{NodeId, StrategyId};
 use tokio::sync::oneshot;
 
 use crate::Kernel;
@@ -64,63 +65,62 @@ const DEFAULT_GRANT_TTL_SECS: u64 = 600;
 // 身份与信任
 // ---------------------------------------------------------------------------
 
-/// 本机持久化身份（首次运行生成，之后稳定；device_id 是运行时生成标识）。
+/// 本机持久化节点身份（首次运行生成，之后稳定；node_id 是运行时稳定标识）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeviceIdentity {
-    pub device_id: String,
-    pub device_name: String,
+pub struct NodeIdentity {
+    pub node_id: NodeId,
+    pub node_name: String,
 }
 
-/// 已信任设备（信任清单条目）。
+/// 已信任节点（信任清单条目）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TrustedDevice {
+pub struct TrustedNode {
     pub name: String,
     pub added_at: u64,
 }
-
 /// 信任清单：`device_id → TrustedDevice`，JSON 持久化（应用数据目录）。
 ///
 /// 桌面与 Android 共用：`base_dir` 由上层（Tauri `app_data_dir`）注入，
 /// 本模块不依赖任何平台路径约定，可独立测试。
 pub struct TrustStore {
     path: PathBuf,
-    devices: Mutex<HashMap<String, TrustedDevice>>,
+    nodes: Mutex<HashMap<NodeId, TrustedNode>>,
 }
 
 impl TrustStore {
     /// 从 `base_dir` 加载（不存在时视为空清单）。
     pub fn load(base_dir: &std::path::Path) -> Self {
-        let path = base_dir.join("trusted_devices.json");
-        let devices = std::fs::read_to_string(&path)
+        let path = base_dir.join("trusted_nodes.json");
+        let nodes = std::fs::read_to_string(&path)
             .ok()
-            .and_then(|s| serde_json::from_str::<HashMap<String, TrustedDevice>>(&s).ok())
+            .and_then(|s| serde_json::from_str::<HashMap<NodeId, TrustedNode>>(&s).ok())
             .unwrap_or_default();
         Self {
             path,
-            devices: Mutex::new(devices),
+            nodes: Mutex::new(nodes),
         }
     }
 
     /// 是否已信任该设备。
-    pub fn is_trusted(&self, device_id: &str) -> bool {
-        self.devices.lock_poisoned().contains_key(device_id)
+    pub fn is_trusted(&self, node_id: &NodeId) -> bool {
+        self.nodes.lock_poisoned().contains_key(node_id)
     }
 
-    pub fn trusted_name(&self, device_id: &str) -> Option<String> {
-        self.devices
+    pub fn trusted_name(&self, node_id: &NodeId) -> Option<String> {
+        self.nodes
             .lock_poisoned()
-            .get(device_id)
+            .get(node_id)
             .map(|d| d.name.clone())
     }
 
-    /// 记住设备（写入清单并持久化）。幂等：重复记住仅更新时间。
-    pub fn remember(&self, device_id: &str, name: &str) {
-        let mut map = self.devices.lock_poisoned();
+    /// 记住节点（写入清单并持久化）。幂等：重复记住仅更新时间。
+    pub fn remember(&self, node_id: &NodeId, name: &str) {
+        let mut map = self.nodes.lock_poisoned();
         map.insert(
-            device_id.to_string(),
-            TrustedDevice {
+            *node_id,
+            TrustedNode {
                 name: name.to_string(),
                 added_at: unix_secs(),
             },
@@ -140,12 +140,12 @@ impl TrustStore {
 
     /// 信任设备数量（事件/展示用）。
     pub fn len(&self) -> usize {
-        self.devices.lock_poisoned().len()
+        self.nodes.lock_poisoned().len()
     }
 
-    /// 是否尚无信任设备。
+    /// 是否尚无信任节点。
     pub fn is_empty(&self) -> bool {
-        self.devices.lock_poisoned().is_empty()
+        self.nodes.lock_poisoned().is_empty()
     }
 }
 
@@ -155,23 +155,23 @@ impl TrustStore {
 /// 已有身份若 name 无标识意义（如 Android 早期写入的 `localhost`——
 /// `/proc/sys/kernel/hostname`），用传入 name 覆盖，避免对端看到
 /// 「localhost」这种节点名。
-pub fn load_or_create_identity(base_dir: &std::path::Path, name: &str) -> DeviceIdentity {
+pub fn load_or_create_identity(base_dir: &std::path::Path, name: &str) -> NodeIdentity {
     let path = base_dir.join("identity.json");
     if let Ok(s) = std::fs::read_to_string(&path)
-        && let Ok(mut id) = serde_json::from_str::<DeviceIdentity>(&s)
+        && let Ok(mut id) = serde_json::from_str::<NodeIdentity>(&s)
     {
-        // 已有身份若设备名无标识意义（如 Android 早期写入的 `localhost`，
+        // 已有身份若节点名无标识意义（如 Android 早期写入的 `localhost`，
         // `/proc/sys/kernel/hostname` 恒为 localhost），用传入展示名覆盖，
         // 避免对端看到「localhost」。
-        if is_placeholder_name(&id.device_name) {
-            id.device_name = name.to_string();
+        if is_placeholder_name(&id.node_name) {
+            id.node_name = name.to_string();
             let _ = std::fs::write(&path, serde_json::to_string_pretty(&id).unwrap_or_default());
         }
         return id;
     }
-    let id = DeviceIdentity {
-        device_id: new_device_id(),
-        device_name: name.to_string(),
+    let id = NodeIdentity {
+        node_id: new_node_id(),
+        node_name: name.to_string(),
     };
     if let Some(parent) = path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
@@ -192,21 +192,9 @@ fn is_placeholder_name(name: &str) -> bool {
     stross_types::hostname::is_placeholder(name)
 }
 
-/// 生成随机设备标识（16 字节 /dev/urandom → hex；失败时回退时间戳）。
-fn new_device_id() -> String {
-    let mut buf = [0u8; 16];
-    let ok = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| {
-            use std::io::Read;
-            f.read_exact(&mut buf)
-        })
-        .is_ok();
-    if ok {
-        buf.iter().map(|b| format!("{b:02x}")).collect()
-    } else {
-        // 回退：时间戳 + 进程号（仅当 /dev/urandom 不可用，如受限沙箱）
-        format!("dev-{}-{}", unix_secs(), std::process::id())
-    }
+/// 生成随机节点标识（16 字节随机原语）。
+fn new_node_id() -> NodeId {
+    NodeId::new_random()
 }
 
 // ---------------------------------------------------------------------------
@@ -237,10 +225,10 @@ pub struct CliUi;
 impl NegotiatorUi for CliUi {
     fn request_pending(&self, req: &PendingRequest) {
         tracing::warn!(
-            "设备 {}（{}）请求接入（{}），等待确认：stross ctrl negotiator-list / negotiator-respond {} --allow",
-            req.device_name,
-            req.device_id,
-            req.media.join(","),
+            "节点 {}（{}）请求接入（端点: {:?}），等待确认：stross ctrl negotiator-list / negotiator-respond {} --allow",
+            req.node_name,
+            req.node_id,
+            req.endpoint_name,
             req.id,
         );
     }
@@ -254,13 +242,12 @@ type PendingSender = oneshot::Sender<Result<ShareGrant, String>>;
 
 /// 挂起请求条目（应答时按条目内容签发对应 grant）。
 struct PendingEntry {
-    device_id: String,
-    device_name: String,
+    node_id: NodeId,
+    node_name: String,
     /// 订阅目标端点（端点语义；旧语义为 `None`）。
     endpoint_id: Option<EndpointId>,
     /// 订阅方选定的策略 id（注册表第三层；`None` = 端点默认策略）。
-    strategy_id: Option<String>,
-    /// 订阅方期望的 delivery。
+    strategy_id: Option<StrategyId>,
     delivery_mode: Option<Delivery>,
     /// push 模式：订阅方中继 HTTP 基址 + 自签凭证（授予成功后触发驱动）。
     relay_addr: Option<String>,
@@ -340,20 +327,20 @@ impl ShareNegotiator {
         if allow {
             // 先写信任再签发：grant.trusted 反映"该设备本次已受信任"
             if remember {
-                self.store.remember(&entry.device_id, &entry.device_name);
+                self.store.remember(&entry.node_id, &entry.node_name);
             }
             let grant = self.grant(
-                &entry.device_id,
-                &entry.device_name,
+                &entry.node_id,
+                &entry.node_name,
                 entry.endpoint_id,
-                entry.strategy_id.as_deref(),
+                entry.strategy_id,
                 entry.delivery_mode,
             )?;
             // 订阅达成：触发上层驱动（文件泵 / 媒体自动推流），docs §5 联动
             self.notify_subscribed(
                 entry.endpoint_id,
                 &grant,
-                &entry.device_id,
+                &entry.node_id,
                 entry.relay_addr.as_deref(),
                 entry.share_token.as_deref(),
             );
@@ -377,9 +364,8 @@ impl ShareNegotiator {
             .iter()
             .map(|(id, e)| PendingRequest {
                 id: id.clone(),
-                device_id: e.device_id.clone(),
-                device_name: e.device_name.clone(),
-                media: vec!["mic".into()], // 旧语义固定 mic；端点语义走 endpoint_name
+                node_id: e.node_id,
+                node_name: e.node_name.clone(),
                 endpoint_name: e
                     .endpoint_id
                     .as_ref()
@@ -392,21 +378,21 @@ impl ShareNegotiator {
 
     fn grant(
         &self,
-        device_id: &str,
-        device_name: &str,
+        node_id: &NodeId,
+        node_name: &str,
         endpoint_id: Option<EndpointId>,
-        strategy_id: Option<&str>,
+        strategy_id: Option<StrategyId>,
         delivery_mode: Option<Delivery>,
     ) -> Result<ShareGrant, String> {
         let endpoint = endpoint_id.and_then(|eid| self.app.endpoint_manifest(eid));
         let (title, media) = match &endpoint {
             Some(m) => (format!("接收 {} 共享", m.name), vec![m.kind]),
-            None => (format!("接收 {device_name} 共享"), vec![MediaKind::Mic]),
+            None => (format!("接收 {node_name} 共享"), vec![MediaKind::Mic]),
         };
         compose_grant(
             &self.app,
             &self.store,
-            device_id,
+            node_id,
             endpoint.as_ref(),
             strategy_id,
             delivery_mode,
@@ -425,7 +411,7 @@ impl ShareNegotiator {
         &self,
         endpoint_id: Option<EndpointId>,
         grant: &ShareGrant,
-        subscriber: &str,
+        subscriber: &NodeId,
         relay_addr: Option<&str>,
         share_token: Option<&str>,
     ) {
@@ -509,33 +495,24 @@ pub(crate) async fn handle_request(
     // subscriber::request_endpoint_grant）；旧语义（无 endpoint_id）取请求方
     // media 列表。二者都序列化为 MediaKind camelCase 名（前端按此映射中文标签，
     // 否则「想订阅你共享的内容」会显示「未知媒体」）。
-    let media_source: Vec<MediaKind> = match &endpoint {
+    let _media_source: Vec<MediaKind> = match &endpoint {
         Some(m) => vec![m.kind],
         None => req.media.clone(),
     };
-    let media_names: Vec<String> = media_source
-        .iter()
-        .map(|m| {
-            serde_json::to_string(m)
-                .unwrap_or_default()
-                .trim_matches('"')
-                .to_string()
-        })
-        .collect();
 
     // 按可见性决策（端点语义）或旧信任语义（docs/endpoint-model-v2.md §4）
-    match policy_decision(&state.store, endpoint.as_ref(), &req.device_id) {
+    match policy_decision(&state.store, endpoint.as_ref(), &req.node_id) {
         Decision::Grant => {
             let (title, media) = match &endpoint {
                 Some(m) => (format!("接收 {} 共享", m.name), vec![m.kind]),
-                None => (format!("接收 {} 共享", req.device_name), req.media.clone()),
+                None => (format!("接收 {} 共享", req.node_name), req.media.clone()),
             };
             match compose_grant(
                 &state.app,
                 &state.store,
-                &req.device_id,
+                &req.node_id,
                 endpoint.as_ref(),
-                req.strategy_id.as_deref(),
+                req.strategy_id,
                 req.delivery_mode,
                 media,
                 title,
@@ -546,7 +523,7 @@ pub(crate) async fn handle_request(
                         &state.app,
                         endpoint_id,
                         &grant,
-                        &req.device_id,
+                        &req.node_id,
                         req.relay_addr.as_deref(),
                         req.share_token.as_deref(),
                     );
@@ -574,10 +551,10 @@ pub(crate) async fn handle_request(
                 pending.insert(
                     id.clone(),
                     PendingEntry {
-                        device_id: req.device_id.clone(),
-                        device_name: req.device_name.clone(),
+                        node_id: req.node_id,
+                        node_name: req.node_name.clone(),
                         endpoint_id,
-                        strategy_id: req.strategy_id.clone(),
+                        strategy_id: req.strategy_id,
                         delivery_mode: req.delivery_mode,
                         relay_addr: req.relay_addr.clone(),
                         share_token: req.share_token.clone(),
@@ -587,9 +564,8 @@ pub(crate) async fn handle_request(
             }
             state.ui.request_pending(&PendingRequest {
                 id: id.clone(),
-                device_id: req.device_id.clone(),
-                device_name: req.device_name.clone(),
-                media: media_names,
+                node_id: req.node_id,
+                node_name: req.node_name.clone(),
                 endpoint_name: endpoint.as_ref().map(|m| m.name.clone()),
                 created_at: unix_secs(),
             });
@@ -634,7 +610,7 @@ enum Decision {
 fn policy_decision(
     store: &TrustStore,
     endpoint: Option<&EndpointManifest>,
-    requester: &str,
+    requester: &NodeId,
 ) -> Decision {
     match endpoint {
         None => {
@@ -676,9 +652,9 @@ fn policy_decision(
 fn compose_grant(
     app: &Kernel,
     store: &TrustStore,
-    device_id: &str,
+    node_id: &NodeId,
     endpoint: Option<&EndpointManifest>,
-    strategy_id: Option<&str>,
+    strategy_id: Option<StrategyId>,
     delivery_mode: Option<Delivery>,
     media: Vec<MediaKind>,
     title: String,
@@ -691,7 +667,7 @@ fn compose_grant(
         // 同端点已有活动共享（只走 pull），订阅方只用 stream_id（watch 路径）
         // 复用同一流，凭证/中继地址同现流。
         tracing::info!(
-            "端点「{}」已有活动共享（{sid}），订阅方 {device_id} 复用同一流",
+            "端点「{}」已有活动共享（{sid}），订阅方 {node_id} 复用同一流",
             m.name
         );
         return Ok(ShareGrant {
@@ -701,7 +677,7 @@ fn compose_grant(
                 pin: String::new(),
                 expires_at: 0,
             },
-            trusted: store.is_trusted(device_id),
+            trusted: store.is_trusted(node_id),
             delivery: Some(Delivery::Pull),
             transports: Some(m.transports.iter().map(|t| t.transport).collect()),
             transport_profile: Some(m.transport_profile),
@@ -768,7 +744,7 @@ fn compose_grant(
     };
     Ok(ShareGrant {
         view,
-        trusted: store.is_trusted(device_id),
+        trusted: store.is_trusted(node_id),
         delivery,
         transports,
         transport_profile: endpoint.map(|m| m.transport_profile),
@@ -785,11 +761,11 @@ fn compose_grant(
 /// 不静默降级——数据契约在协商边界就锁定（docs/endpoint-model-v2.md §0）。
 fn checked_strategy(
     m: &EndpointManifest,
-    strategy_id: Option<&str>,
+    strategy_id: Option<StrategyId>,
 ) -> Result<EndpointStrategy, String> {
     // 策略解析单一真源：`EndpointManifest::strategy`（按 id → 首个 → 推导默认，
     // 确定性；见 proto 定义）。
-    let strategy = m.strategy(strategy_id);
+    let strategy = m.strategy(strategy_id.map(|s| s.as_str()));
     if crate::pick::loader_for(&strategy).is_none() {
         return Err(format!(
             "内核不支持序列化规则 {:?}（端点 {} 策略 {}）——协商拒绝，不静默降级",
@@ -812,7 +788,7 @@ fn notify_subscribed(
     app: &Arc<Kernel>,
     endpoint_id: Option<EndpointId>,
     grant: &ShareGrant,
-    subscriber: &str,
+    subscriber: &NodeId,
     _relay_addr: Option<&str>,
     _share_token: Option<&str>,
 ) {
@@ -829,13 +805,12 @@ fn notify_subscribed(
         return;
     }
     let ctx = SubscribeCtx {
-        subscriber: subscriber.to_string(),
+        subscriber: *subscriber,
         delivery,
         stream_id: grant.view.stream_id.clone(),
         transport_profile: grant.transport_profile.unwrap_or_default(),
         strategy: grant
             .strategy
-            .clone()
             .unwrap_or_else(|| EndpointStrategy::passthrough(grant.pick_rule.unwrap_or_default())),
         relay_addr: None,
         share_token: None,
@@ -858,17 +833,12 @@ pub(crate) async fn handle_endpoints(State(state): State<Arc<ServerState>>) -> J
         .into_iter()
         .filter(|e| !matches!(e.visibility, Visibility::Private { .. }))
         .collect();
-    let (device_id, device_name) = state.app.device_identity().map_or_else(
-        || ("".into(), "本机".into()),
-        |i| (i.device_id, i.device_name),
+    let (node_id, node_name) = state.app.node_identity().map_or_else(
+        || (NodeId::NIL, "本机".into()),
+        |i| (i.node_id, i.node_name),
     );
-    // 类型化构造（stross-proto EndpointDir）：序列化与旧 json! 逐字节一致
-    // （node/deviceId/deviceName、endpoints，全 camelCase）
     let dir = EndpointDir {
-        node: EndpointNode {
-            device_id,
-            device_name,
-        },
+        node: EndpointNode { node_id, node_name },
         endpoints,
     };
     Json(dir)
@@ -954,9 +924,9 @@ mod tests {
         let dir = tmp_dir("identity");
         let a = load_or_create_identity(&dir, "电脑");
         let b = load_or_create_identity(&dir, "电脑");
-        assert_eq!(a.device_id, b.device_id, "同一目录下身份必须稳定");
-        assert_eq!(a.device_name, b.device_name);
-        assert!(!a.device_id.is_empty());
+        assert_eq!(a.node_id, b.node_id, "同一目录下身份必须稳定");
+        assert_eq!(a.node_name, b.node_name);
+        assert!(!a.node_id.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -965,29 +935,30 @@ mod tests {
         let dir = tmp_dir("trust");
         {
             let s = TrustStore::load(&dir);
-            assert!(!s.is_trusted("dev-x"));
-            s.remember("dev-x", "手机A");
-            assert!(s.is_trusted("dev-x"));
-            assert_eq!(s.trusted_name("dev-x").as_deref(), Some("手机A"));
+            let nid = NodeId::from("node-x");
+            assert!(!s.is_trusted(&nid));
+            s.remember(&nid, "节点A");
+            assert!(s.is_trusted(&nid));
+            assert_eq!(s.trusted_name(&nid).as_deref(), Some("节点A"));
         }
         // 重新加载（模拟重启）：持久化生效
         {
             let s = TrustStore::load(&dir);
-            assert!(s.is_trusted("dev-x"), "重启后信任应保留");
+            assert!(s.is_trusted(&NodeId::from("node-x")), "重启后信任应保留");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn new_device_id_unique_and_hex() {
-        let a = new_device_id();
-        let b = new_device_id();
+    fn new_node_id_unique_and_hex() {
+        let a = new_node_id();
+        let b = new_node_id();
         assert_ne!(a, b);
-        assert!(a.len() >= 16);
+        assert_eq!(a.as_bytes().len(), 16);
     }
 
     #[tokio::test]
-    async fn unknown_device_pends_and_allow_grants() {
+    async fn unknown_node_pends_and_allow_grants() {
         let dir = tmp_dir("http");
         let app = Arc::new(desktop_kernel());
         // 直接驱动挂起机制（不走 HTTP，避免端口/运行时依赖）：
@@ -999,13 +970,16 @@ mod tests {
             task: tokio::spawn(async {}),
             port: 0,
         };
-        assert!(!neg.store.is_trusted("dev-phone-1"), "未知设备未信任");
+        assert!(
+            !neg.store.is_trusted(&NodeId::from("dev-phone-1")),
+            "未知设备未信任"
+        );
         let (tx2, rx2) = oneshot::channel();
         neg.pending.lock_poisoned().insert(
             "n1".into(),
             PendingEntry {
-                device_id: "dev-phone-1".into(),
-                device_name: "手机A".into(),
+                node_id: "node-phone-1".into(),
+                node_name: "节点A".into(),
                 endpoint_id: None,
                 strategy_id: None,
                 delivery_mode: None,
@@ -1021,15 +995,18 @@ mod tests {
         assert!(!grant.view.token.is_empty());
         assert!(!grant.view.stream_id.is_empty());
         assert!(grant.view.expires_at > unix_secs());
-        assert!(neg.store.is_trusted("dev-phone-1"), "允许时应记住设备");
+        assert!(
+            neg.store.is_trusted(&NodeId::from("node-phone-1")),
+            "允许时应记住节点"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn trusted_device_auto_grants() {
+    async fn trusted_node_auto_grants() {
         let dir = tmp_dir("trusted");
         let store = TrustStore::load(&dir);
-        store.remember("dev-phone-2", "手机B");
+        store.remember(&NodeId::from("dev-phone-2"), "手机B");
         let app = Arc::new(desktop_kernel());
         let neg = ShareNegotiator {
             app,
@@ -1039,7 +1016,7 @@ mod tests {
             port: 0,
         };
         let grant = neg
-            .grant("dev-phone-2", "手机B", None, None, None)
+            .grant(&NodeId::from("dev-phone-2"), "手机B", None, None, None)
             .expect("信任设备应自动签发");
         assert!(grant.trusted);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1060,8 +1037,8 @@ mod tests {
         neg.pending.lock_poisoned().insert(
             "n3".into(),
             PendingEntry {
-                device_id: "dev-3".into(),
-                device_name: "手机C".into(),
+                node_id: "node-3".into(),
+                node_name: "节点C".into(),
                 endpoint_id: None,
                 strategy_id: None,
                 delivery_mode: None,
@@ -1090,7 +1067,7 @@ mod tests {
             port: 0,
         };
         let grant = neg
-            .grant("dev-phone", "手机A", Some(MIC), None, None)
+            .grant(&NodeId::from("dev-phone"), "手机A", Some(MIC), None, None)
             .expect("Public 端点应自动签发");
         assert_eq!(grant.delivery, Some(Delivery::Pull));
         let transports = grant.transports.expect("应携带传输列表");
@@ -1117,7 +1094,7 @@ mod tests {
         // 订阅方指明 Push 也被收敛为 Pull。
         let grant = neg
             .grant(
-                "dev-phone",
+                &NodeId::from("dev-phone"),
                 "手机A",
                 Some(SYSTEM_AUDIO),
                 None,
@@ -1127,7 +1104,13 @@ mod tests {
         assert_eq!(grant.delivery, Some(Delivery::Pull), "订阅驱动只走 pull");
         // Both + 未指明 → 仍 Pull
         let grant = neg
-            .grant("dev-phone", "手机A", Some(SYSTEM_AUDIO), None, None)
+            .grant(
+                &NodeId::from("dev-phone"),
+                "手机A",
+                Some(SYSTEM_AUDIO),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(grant.delivery, Some(Delivery::Pull));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1149,7 +1132,9 @@ mod tests {
             port: 0,
         };
         // 第一个订阅者：无活动共享 → 新建会话
-        let g1 = neg.grant("dev-a", "设备A", Some(MIC), None, None).unwrap();
+        let g1 = neg
+            .grant(&NodeId::from("dev-a"), "设备A", Some(MIC), None, None)
+            .unwrap();
         let sid1 = g1.view.stream_id;
         assert!(!sid1.is_empty());
         // 模拟端点共享已登记（真实路径：share → start_stream 成功 → note_share_active）
@@ -1157,7 +1142,9 @@ mod tests {
             std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
         app.note_share_active(weak, MIC, &sid1, Delivery::Pull);
         // 第二个订阅者：复用同一流
-        let g2 = neg.grant("dev-b", "设备B", Some(MIC), None, None).unwrap();
+        let g2 = neg
+            .grant(&NodeId::from("dev-b"), "设备B", Some(MIC), None, None)
+            .unwrap();
         assert_eq!(
             g2.view.stream_id, sid1,
             "pull 复用：第二个订阅者拿同一流 id"
@@ -1183,7 +1170,9 @@ mod tests {
             task: tokio::spawn(async {}),
             port: 0,
         };
-        let g1 = neg.grant("dev-a", "设备A", Some(MIC), None, None).unwrap();
+        let g1 = neg
+            .grant(&NodeId::from("dev-a"), "设备A", Some(MIC), None, None)
+            .unwrap();
         let m = app.endpoint_manifest(MIC).unwrap();
         let expected = derive_stream_id(
             &EndpointId::new(m.kind, m.endpoint_id),
@@ -1201,7 +1190,9 @@ mod tests {
             "派生 id 已建内核会话（受控中继可预授权接入）"
         );
         // 无活动共享时再次 grant → 同 id（确定性派生 + 会话幂等，不产生新会话）
-        let g2 = neg.grant("dev-b", "设备B", Some(MIC), None, None).unwrap();
+        let g2 = neg
+            .grant(&NodeId::from("dev-b"), "设备B", Some(MIC), None, None)
+            .unwrap();
         assert_eq!(g2.view.stream_id, expected, "确定性派生：同端点同 id");
         assert_eq!(app.sessions().len(), 1, "会话幂等：派生 id 不重复建会话");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1223,7 +1214,13 @@ mod tests {
             port: 0,
         };
         let g1 = neg
-            .grant("dev-a", "设备A", Some(MIC), None, Some(Delivery::Push))
+            .grant(
+                &NodeId::from("dev-a"),
+                "设备A",
+                Some(MIC),
+                None,
+                Some(Delivery::Push),
+            )
             .unwrap();
         assert_eq!(g1.delivery, Some(Delivery::Pull), "订阅驱动收敛为 pull");
         let sid1 = g1.view.stream_id;
@@ -1231,7 +1228,9 @@ mod tests {
             std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
         app.note_share_active(weak, MIC, &sid1, Delivery::Pull);
         // 第二个订阅者：复用同一流（不再报「正被使用」）
-        let g2 = neg.grant("dev-b", "设备B", Some(MIC), None, None).unwrap();
+        let g2 = neg
+            .grant(&NodeId::from("dev-b"), "设备B", Some(MIC), None, None)
+            .unwrap();
         assert_eq!(g2.view.stream_id, sid1, "Push 声明端点仍复用同一流");
         assert_eq!(g2.delivery, Some(Delivery::Pull));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1317,8 +1316,8 @@ mod tests {
         neg.pending.lock_poisoned().insert(
             "np1".into(),
             PendingEntry {
-                device_id: "dev-sub".into(),
-                device_name: "订阅方".into(),
+                node_id: "node-sub".into(),
+                node_name: "订阅方".into(),
                 endpoint_id: Some(EndpointId::new(m.kind, m.endpoint_id)),
                 strategy_id: None,
                 delivery_mode: Some(Delivery::Pull),
@@ -1333,7 +1332,7 @@ mod tests {
         let ctxs = fired.lock().unwrap();
         assert_eq!(ctxs.len(), 1, "确认后应触发一次端点 share");
         let ctx = &ctxs[0];
-        assert_eq!(ctx.subscriber, "dev-sub");
+        assert_eq!(ctx.subscriber, NodeId::from("node-sub"));
         assert_eq!(ctx.delivery, Delivery::Pull);
         assert_eq!(
             ctx.stream_id, grant.view.stream_id,
@@ -1355,7 +1354,7 @@ mod tests {
             .unwrap();
         let m = app.endpoint_manifest(MIC).unwrap();
         assert_eq!(
-            policy_decision(&store, Some(&m), "stranger"),
+            policy_decision(&store, Some(&m), &NodeId::from("stranger")),
             Decision::Grant
         );
 
@@ -1364,12 +1363,12 @@ mod tests {
             .unwrap();
         let m = app.endpoint_manifest(SCREEN).unwrap();
         assert_eq!(
-            policy_decision(&store, Some(&m), "dev-trusted"),
+            policy_decision(&store, Some(&m), &NodeId::from("dev-trusted")),
             Decision::Pending
         );
-        store.remember("dev-trusted", "可信设备");
+        store.remember(&NodeId::from("dev-trusted"), "可信设备");
         assert_eq!(
-            policy_decision(&store, Some(&m), "dev-trusted"),
+            policy_decision(&store, Some(&m), &NodeId::from("dev-trusted")),
             Decision::Grant
         );
 
@@ -1377,7 +1376,7 @@ mod tests {
         app.publish_endpoint(
             SYSTEM_AUDIO,
             Visibility::Private {
-                nodes: vec!["dev-ok".into()],
+                nodes: vec![NodeId::from("dev-ok")],
             },
             Delivery::Pull,
             None,
@@ -1385,18 +1384,24 @@ mod tests {
         )
         .unwrap();
         let m = app.endpoint_manifest(SYSTEM_AUDIO).unwrap();
-        assert_eq!(policy_decision(&store, Some(&m), "dev-ok"), Decision::Grant);
         assert_eq!(
-            policy_decision(&store, Some(&m), "dev-no"),
+            policy_decision(&store, Some(&m), &NodeId::from("dev-ok")),
+            Decision::Grant
+        );
+        assert_eq!(
+            policy_decision(&store, Some(&m), &NodeId::from("dev-no")),
             Decision::Reject("请求方不在该端点的白名单内")
         );
 
         // 旧语义（无端点）：信任自动、未信任挂起
         assert_eq!(
-            policy_decision(&store, None, "dev-trusted"),
+            policy_decision(&store, None, &NodeId::from("dev-trusted")),
             Decision::Grant
         );
-        assert_eq!(policy_decision(&store, None, "stranger"), Decision::Pending);
+        assert_eq!(
+            policy_decision(&store, None, &NodeId::from("stranger")),
+            Decision::Pending
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1436,8 +1441,8 @@ mod tests {
             pending: Arc::new(Mutex::new(HashMap::new())),
         });
         let req = ShareRequest {
-            device_id: "dev-x".into(),
-            device_name: "申请方".into(),
+            node_id: "node-x".into(),
+            node_name: "申请方".into(),
             endpoint_id: Some(SCREEN.id),
             endpoint_kind: Some(SCREEN.kind),
             strategy_id: None,

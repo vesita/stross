@@ -4,6 +4,7 @@
 //! `rename_all` 保证线上 JSON 与 mDNS TXT 格式稳定。
 
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 use utoipa::ToSchema;
 
 /// 传输标识（有限集合）。
@@ -36,7 +37,20 @@ pub enum CodecId {
 }
 
 /// 传输可靠性契约（设计文档 §4.1）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ToSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Default,
+    ToSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum ReliabilityProfile {
     /// TCP-like：控制消息、输入注入、剪贴板 —— 全序不丢。
@@ -54,7 +68,20 @@ pub enum ReliabilityProfile {
 /// 与 [`ReliabilityProfile`]（传输层「怎么送」）正交：本枚举描述数据面
 /// 「怎么处理」——发送侧装载逻辑与接收侧解读逻辑共用同一对 pick 规则，
 /// 协商定稿后内核按 id 装载对应模块。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ToSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Default,
+    ToSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum PickRule {
     /// 严格即时（Realtime）：低延迟、按 PTS 调度、容忍丢帧丢块
@@ -217,7 +244,7 @@ pub fn derive_stream_id(
     endpoint_id: &EndpointId,
     profile: ReliabilityProfile,
     pick: PickRule,
-) -> String {
+) -> StreamId {
     let profile_short = match profile {
         ReliabilityProfile::Lossless => "ll",
         ReliabilityProfile::Lossy => "ly",
@@ -258,7 +285,7 @@ pub fn derive_stream_id(
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{prefix}-{:08x}", h & 0xffff_ffff)
+    StreamId::new(format!("{prefix}-{:08x}", h & 0xffff_ffff))
 }
 
 /// 流在共享连接上的方向（通信模式 v2 Phase C「连接复用」：
@@ -284,6 +311,409 @@ pub enum RoleId {
     Relay,
     /// 控制者（控制面；D7 远程控制阶段开放）。
     Controller,
+}
+
+#[inline]
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// 节点全局物理/拓扑标识（16 字节定长原语，Copy 语义，零堆分配）。
+///
+/// 在内存与二进制线序中直接为 `[u8; 16]`（2 个 CPU 寄存器大小，哈希/比对仅 1~2 条指令）；
+/// 在 JSON / mDNS TXT / 日志中呈现为 32 位十六进制字符串（或由 `from_seed` 从短测试字符串确定性映射）。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, ToSchema)]
+#[schema(value_type = String, example = "0123456789abcdef0123456789abcdef")]
+pub struct NodeId(pub [u8; 16]);
+
+impl NodeId {
+    /// 全零空节点 ID。
+    pub const NIL: Self = Self([0u8; 16]);
+
+    /// 是否为空节点。
+    pub const fn is_nil(&self) -> bool {
+        let mut i = 0;
+        while i < 16 {
+            if self.0[i] != 0 {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// 是否为空节点（等价于 `is_nil`）。
+    pub const fn is_empty(&self) -> bool {
+        self.is_nil()
+    }
+    /// 由 16 字节原始数组构造。
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// 取底层 16 字节数组引用。
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+
+    /// 消费自身，转为底层 16 字节数组。
+    pub const fn into_bytes(self) -> [u8; 16] {
+        self.0
+    }
+
+    /// 转为 32 位十六进制小写字符串。
+    pub fn to_hex(&self) -> String {
+        let mut s = String::with_capacity(32);
+        for b in self.0 {
+            use std::fmt::Write;
+            let _ = write!(&mut s, "{b:02x}");
+        }
+        s
+    }
+
+    /// 从十六进制字符串解析（忽略可选的 `"node-"` 或 `"dev-"` 前缀）。
+    pub fn from_hex(s: &str) -> Option<Self> {
+        let hex = s
+            .strip_prefix("node-")
+            .or_else(|| s.strip_prefix("dev-"))
+            .unwrap_or(s);
+        if hex.len() != 32 {
+            return None;
+        }
+        let mut bytes = [0u8; 16];
+        for (i, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+            let hi = hex_nibble(chunk[0])?;
+            let lo = hex_nibble(chunk[1])?;
+            bytes[i] = (hi << 4) | lo;
+        }
+        Some(Self(bytes))
+    }
+
+    /// 从任意种子字符串确定性哈希派生 16 字节（测试 / 友好别名使用，如 `"alice"`, `"phone"`）。
+    pub fn from_seed(seed: &str) -> Self {
+        let mut h1 = 0xcbf2_9ce4_8422_2325u64;
+        let mut h2 = 0x8422_2325_cbf2_9ce4u64;
+        for b in seed.bytes() {
+            h1 ^= u64::from(b);
+            h1 = h1.wrapping_mul(0x0000_0100_0000_01b3);
+            h2 ^= u64::from(b.rotate_left(3));
+            h2 = h2.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&h1.to_le_bytes());
+        bytes[8..16].copy_from_slice(&h2.to_le_bytes());
+        Self(bytes)
+    }
+
+    /// 生成随机节点标识（读 `/dev/urandom`，不可用时回退时间戳 + 伪随机种子）。
+    pub fn new_random() -> Self {
+        let mut buf = [0u8; 16];
+        let read_ok = std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| {
+                use std::io::Read;
+                f.read_exact(&mut buf)
+            })
+            .is_ok();
+        if !read_ok {
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            buf[0..16].copy_from_slice(&t.to_le_bytes());
+        }
+        Self(buf)
+    }
+}
+
+impl std::str::FromStr for NodeId {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(id) = Self::from_hex(s) {
+            Ok(id)
+        } else {
+            Ok(Self::from_seed(s))
+        }
+    }
+}
+
+impl From<&str> for NodeId {
+    fn from(s: &str) -> Self {
+        s.parse().unwrap()
+    }
+}
+
+impl From<String> for NodeId {
+    fn from(s: String) -> Self {
+        s.as_str().parse().unwrap()
+    }
+}
+
+impl From<&String> for NodeId {
+    fn from(s: &String) -> Self {
+        s.as_str().parse().unwrap()
+    }
+}
+
+impl From<[u8; 16]> for NodeId {
+    fn from(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<NodeId> for [u8; 16] {
+    fn from(id: NodeId) -> Self {
+        id.0
+    }
+}
+
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
+}
+
+impl std::fmt::Debug for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NodeId({})", self.to_hex())
+    }
+}
+
+impl serde::Serialize for NodeId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            s.serialize_str(&self.to_hex())
+        } else {
+            self.0.serialize(s)
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NodeId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if d.is_human_readable() {
+            let s = String::deserialize(d)?;
+            Ok(s.parse().unwrap())
+        } else {
+            let bytes = <[u8; 16]>::deserialize(d)?;
+            Ok(Self(bytes))
+        }
+    }
+}
+
+/// 数据面流标识符（栈内联小字符串，≤23 字节零堆分配，具备强类型隔离与高吞吐）。
+///
+/// 避免散落的 `String` 堆分配，同时防止将流 ID 与节点 ID / 链路 ID 混淆。
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default, ToSchema)]
+#[schema(value_type = String, example = "screen-0-ly-rt")]
+pub struct StreamId(pub SmolStr);
+
+impl StreamId {
+    pub fn new(s: impl AsRef<str>) -> Self {
+        Self(SmolStr::new(s.as_ref()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn into_string(self) -> String {
+        self.0.to_string()
+    }
+}
+
+impl std::ops::Deref for StreamId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Display for StreamId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for StreamId {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::new(s))
+    }
+}
+
+impl From<&str> for StreamId {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for StreamId {
+    fn from(s: String) -> Self {
+        Self(SmolStr::new(s))
+    }
+}
+
+impl From<&String> for StreamId {
+    fn from(s: &String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl PartialEq<str> for StreamId {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for StreamId {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for StreamId {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl serde::Serialize for StreamId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StreamId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Self::new(s))
+    }
+}
+
+/// 语义流全局标识（23 字节全局确定性构造，docs/comm-mode-v2.md §6）。
+///
+/// 一条流在拓扑中由 `(发布节点, 端点, 传输档案, pick规则)` 四要素数学唯一确定。
+/// 双方握手后可在内存直接推导出完全一致的 23 字节结构体，零字符串拼接与清洗成本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamKey {
+    /// 发布方节点拓扑标识。
+    pub publisher: NodeId,
+    /// 资源端点标识。
+    pub endpoint: EndpointId,
+    /// 传输可靠性档案。
+    pub profile: ReliabilityProfile,
+    /// 管道装载/解读规则。
+    pub pick: PickRule,
+}
+
+impl StreamKey {
+    pub const fn new(
+        publisher: NodeId,
+        endpoint: EndpointId,
+        profile: ReliabilityProfile,
+        pick: PickRule,
+    ) -> Self {
+        Self {
+            publisher,
+            endpoint,
+            profile,
+            pick,
+        }
+    }
+
+    /// 转换为可读的语义 StreamId。
+    pub fn to_stream_id(&self) -> StreamId {
+        derive_stream_id(&self.endpoint, self.profile, self.pick)
+    }
+}
+
+impl std::fmt::Display for StreamKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.publisher, self.to_stream_id())
+    }
+}
+
+/// 接收端链路标识（数值单调槽位，杜绝裸字符串与 "main" 魔法字符串）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, ToSchema)]
+#[schema(value_type = String, example = "main")]
+pub struct LinkId(pub u32);
+
+impl LinkId {
+    /// 预留单流/主链路兼容槽位。
+    pub const MAIN: Self = Self(0);
+
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    pub const fn is_main(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::fmt::Display for LinkId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_main() {
+            write!(f, "main")
+        } else {
+            write!(f, "link-{}", self.0)
+        }
+    }
+}
+
+impl std::str::FromStr for LinkId {
+    type Err = std::num::ParseIntError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "main" || s.is_empty() {
+            return Ok(Self::MAIN);
+        }
+        if let Some(num) = s.strip_prefix("link-") {
+            let n: u32 = num.parse()?;
+            return Ok(Self(n));
+        }
+        let n: u32 = s.parse()?;
+        Ok(Self(n))
+    }
+}
+
+impl From<&str> for LinkId {
+    fn from(s: &str) -> Self {
+        s.parse().unwrap_or(Self::MAIN)
+    }
+}
+
+impl From<u32> for LinkId {
+    fn from(id: u32) -> Self {
+        Self(id)
+    }
+}
+
+impl serde::Serialize for LinkId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            s.serialize_str(&self.to_string())
+        } else {
+            self.0.serialize(s)
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LinkId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if d.is_human_readable() {
+            let s = String::deserialize(d)?;
+            Ok(s.parse().unwrap_or(Self::MAIN))
+        } else {
+            let id = u32::deserialize(d)?;
+            Ok(Self(id))
+        }
+    }
 }
 
 #[cfg(test)]

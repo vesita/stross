@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use stross_proto::message::StreamInfo;
+use stross_proto::message::{StreamId, StreamInfo};
 
 /// 错误响应体（统一 `{ "error": "..." }`）。
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -38,7 +38,7 @@ pub struct ProxyReq {
     /// 上游中继基址（`ws://host:port`；`srt://` / `quic://` 亦可）。
     pub upstream: String,
     /// 上游流 id。
-    pub stream_id: String,
+    pub stream_id: StreamId,
     /// 上游流信息（可选；前端自动发现时已持有，透传避免再向上游查询）。
     #[serde(default)]
     pub info: Option<StreamInfo>,
@@ -48,7 +48,7 @@ pub struct ProxyReq {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyStartResp {
-    pub stream_id: String,
+    pub stream_id: StreamId,
     pub proxied: bool,
 }
 
@@ -56,7 +56,7 @@ pub struct ProxyStartResp {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyItem {
-    pub stream_id: String,
+    pub stream_id: StreamId,
     pub upstream: String,
 }
 
@@ -64,7 +64,7 @@ pub struct ProxyItem {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebRtcStartReq {
-    pub stream_id: String,
+    pub stream_id: StreamId,
 }
 
 /// WebRTC 信令开始响应（`POST /api/webrtc/start`）。

@@ -21,6 +21,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use stross_proto::message::StreamInfo;
+use stross_types::id::StreamId;
 
 use crate::relay::data_plane::{handle_push, handle_watch};
 use crate::relay::dto::{
@@ -137,7 +138,7 @@ async fn api_proxy_start(
 ) -> Result<Json<ProxyStartResp>, ApiErr> {
     match state.start_proxy(&req.upstream, &req.stream_id, req.info) {
         Ok(id) => Ok(Json(ProxyStartResp {
-            stream_id: id,
+            stream_id: StreamId::new(id),
             proxied: true,
         })),
         Err(e) => Err(api_err(StatusCode::CONFLICT, e.to_string())),
@@ -157,7 +158,7 @@ async fn api_proxies(State(state): State<RelayState>) -> Json<Vec<ProxyItem>> {
             .proxies()
             .into_iter()
             .map(|(stream_id, upstream)| ProxyItem {
-                stream_id,
+                stream_id: StreamId::new(stream_id),
                 upstream,
             })
             .collect(),
@@ -266,14 +267,14 @@ async fn api_webrtc_answer(
             let _ = close_tx.send(PeerCommand::Close).await;
             return;
         }
-        handle_watch(session, stream_id, state).await;
+        handle_watch(session, StreamId::new(stream_id), state).await;
     });
     Ok(Json(WebRtcAnswerResp { ok: true }))
 }
 
 #[derive(Deserialize)]
 struct WatchQuery {
-    stream: String,
+    stream: StreamId,
 }
 
 async fn ws_watch(

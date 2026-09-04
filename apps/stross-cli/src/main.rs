@@ -28,15 +28,15 @@ use clap::{Parser, Subcommand};
 
 mod adb;
 mod ctrl;
-mod devices;
 mod endpoint;
+mod nodes;
 mod push;
 mod receive;
 mod relay;
 mod serve;
 
 #[derive(Parser, Debug)]
-#[command(name = "stross", version, about = "Stross 局域网设备共享工具链")]
+#[command(name = "stross", version, about = "Stross 局域网流媒体工具链")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -50,8 +50,8 @@ enum Command {
     Serve(serve::ServeArgs),
     /// 接入运行中实例的控制面，异步下发控制命令（仅回环，D7）
     Ctrl(ctrl::CtrlArgs),
-    /// 扫描局域网设备（PC + 手机），展示能力与在线共享状态
-    Devices(devices::DevicesArgs),
+    /// 扫描局域网节点（PC + 手机），展示能力与在线共享状态
+    Nodes(nodes::NodesArgs),
     /// 经 USB（adb）查看/操作已连接手机（局域网被隔离时的可靠通道）
     Adb(adb::AdbArgs),
     /// 推流：内嵌中继，或推往外部中继
@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Relay(a) => relay::run(a).await,
         Command::Serve(a) => serve::run(a).await,
         Command::Ctrl(a) => ctrl::run(a).await,
-        Command::Devices(a) => devices::run(a).await,
+        Command::Nodes(a) => nodes::run(a).await,
         Command::Adb(a) => adb::run(a).await,
         Command::Push(a) => push::run(a).await,
         Command::Receive(a) => receive::run(a).await,

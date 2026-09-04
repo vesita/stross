@@ -12,7 +12,7 @@ use crate::lock::MutexExt;
 use crate::relay::DEFAULT_PORT;
 use crate::view;
 
-use super::{Id, Kernel, RunningStream, SessionPrefs};
+use super::{Kernel, RunningStream, SessionPrefs};
 
 impl Kernel {
     // -----------------------------------------------------------------------
@@ -61,7 +61,7 @@ impl Kernel {
             .unwrap_or(DEFAULT_PORT);
         let started_at = stross_proto::time::unix_secs();
         {
-            let sid = Id::from(cfg.stream_id.as_str());
+            let sid = cfg.stream_id.clone();
             let mut g = self.engines.lock_poisoned();
             if g.contains_key(&sid) {
                 return Err(crate::error::Error::Message("该流已在推流中".into()));

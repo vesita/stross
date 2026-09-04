@@ -50,7 +50,7 @@ pub const DEFAULT_NODE_NAME: &str = "Stross 设备";
 ///
 /// `hostname`：身份默认名（壳层经 [`stross_bridge::hostname`] 注入）。
 pub fn ensure_identity(kernel: &Kernel, base_dir: &Path, hostname: &str) {
-    if kernel.device_identity().is_some() {
+    if kernel.node_identity().is_some() {
         return;
     }
     kernel.set_identity(load_or_create_identity(base_dir, hostname));

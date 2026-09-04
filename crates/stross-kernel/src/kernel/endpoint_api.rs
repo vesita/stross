@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use stross_endpoint::EndpointApp;
 use stross_proto::message::{
-    CodecId, Delivery, EndpointId, EndpointManifest, EndpointState, SubscribeSpec, Visibility,
+    CodecId, Delivery, EndpointId, EndpointManifest, EndpointState, NodeId, SubscribeSpec,
+    Visibility,
 };
 use stross_types::LocalCatalog;
 
@@ -17,7 +18,7 @@ use crate::Kernel;
 use crate::error::{Error, Result};
 use crate::lock::MutexExt;
 
-use super::{ActiveShare, EndpointRegistry, Id, SubscribeCtx};
+use super::{ActiveShare, EndpointRegistry, Id, StreamId, SubscribeCtx};
 
 impl Kernel {
     // -----------------------------------------------------------------------
@@ -144,7 +145,7 @@ impl Kernel {
     /// 端点默认策略。
     pub fn resolve_strategy(
         &self,
-        node_id: &str,
+        node_id: &NodeId,
         endpoint_id: EndpointId,
         strategy_id: Option<&str>,
     ) -> Option<stross_proto::message::EndpointStrategy> {
@@ -298,13 +299,14 @@ impl Kernel {
     }
 
     /// 查询端点当前活动共享（`(stream_id, delivery)`；订阅收敛用）。
-    pub fn active_share_by_endpoint(&self, endpoint_id: EndpointId) -> Option<(String, Delivery)> {
+    pub fn active_share_by_endpoint(
+        &self,
+        endpoint_id: EndpointId,
+    ) -> Option<(StreamId, Delivery)> {
         self.active_shares
             .lock_poisoned()
             .iter()
-            .find_map(|(sid, s)| {
-                (s.endpoint_id == endpoint_id).then(|| (sid.to_string(), s.delivery))
-            })
+            .find_map(|(sid, s)| (s.endpoint_id == endpoint_id).then(|| (sid.clone(), s.delivery)))
     }
 
     /// 查询流的活动共享登记（watchers 事件反查端点用）。

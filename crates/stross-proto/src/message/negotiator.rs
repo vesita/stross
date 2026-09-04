@@ -18,7 +18,7 @@ pub struct ShareTokenView {
     /// ShareToken JSON 字符串（原样粘贴给推流端 / 出站推流出示）。
     pub token: String,
     /// 接收端签发的会话 id（= 接收时的流 id）。
-    pub stream_id: String,
+    pub stream_id: super::ids::StreamId,
     /// 一次性 PIN（展示用；服务端签发表为准）。
     pub pin: String,
     /// 过期时间（Unix 秒）。
@@ -46,8 +46,8 @@ pub struct RelayAddr {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareRequest {
-    pub device_id: String,
-    pub device_name: String,
+    pub node_id: super::ids::NodeId,
+    pub node_name: String,
     /// 订阅目标端点数值子 id（端点框架，docs/endpoint-model-v2.md §4）。
     #[serde(default)]
     pub endpoint_id: Option<u32>,
@@ -57,7 +57,7 @@ pub struct ShareRequest {
     /// 订阅方选定的策略 id（注册表第三层；`None` = 取端点默认策略，
     /// docs/endpoint-model-v2.md §2）。仅端点语义生效。
     #[serde(default)]
-    pub strategy_id: Option<String>,
+    pub strategy_id: Option<super::endpoint::StrategyId>,
     /// 订阅方期望的 delivery（端点声明 `Both` 时生效；其余以端点声明为准）。
     #[serde(default)]
     pub delivery_mode: Option<Delivery>,
@@ -107,8 +107,17 @@ pub struct ShareGrant {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointNode {
-    pub device_id: String,
-    pub device_name: String,
+    pub node_id: super::ids::NodeId,
+    pub node_name: String,
+}
+
+impl EndpointNode {
+    pub fn new(node_id: impl Into<super::ids::NodeId>, node_name: impl Into<String>) -> Self {
+        Self {
+            node_id: node_id.into(),
+            node_name: node_name.into(),
+        }
+    }
 }
 
 /// L2 目录响应（`GET /api/endpoints`）：节点 + 端点清单（单层端点模型）。
@@ -129,11 +138,11 @@ mod tests {
     #[test]
     fn share_request_roundtrip_camel_case() {
         let req = ShareRequest {
-            device_id: "dev-a".into(),
-            device_name: "电脑".into(),
+            node_id: "dev-a".into(),
+            node_name: "电脑".into(),
             endpoint_id: Some(0),
             endpoint_kind: Some(MediaKind::Mic),
-            strategy_id: Some("default".into()),
+            strategy_id: Some(crate::message::StrategyId::Default),
             delivery_mode: Some(Delivery::Push),
             relay_addr: Some("ws://192.168.1.5:41355".into()),
             share_token: Some("sess-9:abc:123".into()),
@@ -141,7 +150,7 @@ mod tests {
         };
         let json = serde_json::to_value(&req).unwrap();
         // 端点语义字段：camelCase，与旧实现逐字一致；endpointId 数值化 + kind 独立
-        assert_eq!(json["deviceId"], "dev-a");
+        assert_eq!(json["nodeId"], req.node_id.to_hex());
         assert_eq!(json["endpointId"], 0);
         assert_eq!(json["endpointKind"], "mic");
         assert_eq!(json["strategyId"], "default");
@@ -150,7 +159,7 @@ mod tests {
         assert_eq!(json["shareToken"], "sess-9:abc:123");
         assert_eq!(json["media"][0], "file");
         let back: ShareRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(back.device_id, "dev-a");
+        assert_eq!(back.node_id, req.node_id);
         assert_eq!(back.endpoint_id, Some(0));
         assert_eq!(back.endpoint_kind, Some(MediaKind::Mic));
         assert_eq!(back.delivery_mode, Some(Delivery::Push));
@@ -202,17 +211,18 @@ mod tests {
     fn endpoint_dir_roundtrip() {
         let dir = EndpointDir {
             node: EndpointNode {
-                device_id: "node-1".into(),
-                device_name: "电脑".into(),
+                node_id: "node-1".into(),
+                node_name: "电脑".into(),
             },
             endpoints: vec![],
         };
         let json = serde_json::to_value(&dir).unwrap();
-        assert_eq!(json["node"]["deviceId"], "node-1");
+        assert_eq!(json["node"]["nodeId"], dir.node.node_id.to_hex());
         // 单层端点模型：目录不再携带独立 devices 数组
         assert!(json.get("devices").is_none());
         let back: EndpointDir = serde_json::from_value(json).unwrap();
-        assert_eq!(back.node.device_name, "电脑");
+        assert_eq!(back.node.node_id, dir.node.node_id);
+        assert_eq!(back.node.node_name, "电脑");
         let _ = serde_json::to_value(Visibility::Public).unwrap();
     }
 }

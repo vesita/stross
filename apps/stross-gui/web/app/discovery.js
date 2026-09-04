@@ -160,7 +160,7 @@ function renderRecent() {
 // ---------------------------------------------------------------------------
 // 设备列表（左栏）：本机 + 局域网设备
 // ---------------------------------------------------------------------------
-/** 扫描条目 → 设备卡片基址（http://ip:port）。 */
+/** 扫描条目 → 节点卡片基址（http://ip:port）。 */
 function baseOf(d) {
     return `http://${d.ip}:${d.port}`;
 }
@@ -177,7 +177,7 @@ async function refreshDevices(force = false) {
         return;
     scanInFlight = true;
     try {
-        const devs = await call('scan_devices', {
+        const devs = await call('scan_nodes', {
             probeMs: PROBE_TIMEOUT_MS,
             extraBaseUrls: manualRelays.map((a) => a.replace(/\/+$/, '')),
         });

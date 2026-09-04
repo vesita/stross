@@ -14,7 +14,7 @@ use anyhow::bail;
 use clap::{Args, Subcommand};
 use stross_endpoint::pipeline::StreamConfig;
 use stross_kernel::CtrlRequest;
-use stross_proto::message::{Delivery, EndpointId, Visibility};
+use stross_proto::message::{Delivery, EndpointId, NodeId, Visibility};
 
 use crate::push::QualityArg;
 
@@ -119,11 +119,11 @@ pub enum CtrlCommand {
 /// `stross ctrl endpoint` 子命令。
 #[derive(Subcommand, Debug)]
 pub enum EndpointCommand {
-    /// 公开设备为端点（端点框架 docs/endpoint-model-v2.md；P1 一设备一端点）
+    /// 公开端点（端点框架 docs/endpoint-model-v2.md）
     Publish {
-        /// 设备 id（`stross ctrl endpoint list` 可查）
+        /// 端点标识（`stross ctrl endpoint list` 可查，如 mic:0, screen:0）
         #[arg(long)]
-        device: String,
+        endpoint: String,
         /// public | confirm | private
         #[arg(long, default_value = "public")]
         visibility: String,
@@ -256,15 +256,15 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
             println!("待确认的凭证协商请求：");
             for p in &r.pending {
                 println!(
-                    "  {}  {}（{}）media={}",
+                    "  {}  {}（{}）endpoint={}",
                     p.id,
-                    p.device_name,
-                    p.device_id,
-                    p.media.join(","),
+                    p.node_name,
+                    p.node_id,
+                    p.endpoint_name.as_deref().unwrap_or("-"),
                 );
             }
             println!(
-                "批准: stross ctrl negotiator-respond <id>（--deny 拒绝，--remember 记住设备）"
+                "批准: stross ctrl negotiator-respond <id>（--deny 拒绝，--remember 记住节点）"
             );
         }
         CtrlCommand::NegotiatorRespond {
@@ -293,13 +293,16 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
         }
         CtrlCommand::Endpoint { cmd } => match cmd {
             EndpointCommand::Publish {
-                device,
+                endpoint,
                 visibility,
                 nodes,
                 delivery,
             } => {
+                let endpoint_id = EndpointId::parse(&endpoint).ok_or_else(|| {
+                    anyhow::anyhow!("非法端点标识: {endpoint}（期望形如 screen:0）")
+                })?;
                 let req = CtrlRequest::EndpointPublish {
-                    device_id: device.clone(),
+                    endpoint_id,
                     visibility: parse_visibility(&visibility, &nodes)?,
                     delivery: parse_delivery(&delivery)?,
                     transports: None,
@@ -387,7 +390,7 @@ pub async fn run(args: CtrlArgs) -> anyhow::Result<()> {
 fn parse_visibility(s: &str, nodes: &[String]) -> anyhow::Result<Visibility> {
     match Visibility::from_wire(s) {
         Some(Visibility::Private { .. }) => Ok(Visibility::Private {
-            nodes: nodes.to_vec(),
+            nodes: nodes.iter().map(|n| NodeId::from(n.as_str())).collect(),
         }),
         Some(v) => Ok(v),
         None => bail!("--visibility 取值 public|confirm|private，收到 {s}"),

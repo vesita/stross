@@ -138,8 +138,8 @@ pub fn set_discoverable(
 }
 
 #[tauri::command]
-pub fn list_devices(state: State<'_, Arc<Kernel>>) -> stross_kernel::DeviceList {
-    state.list_devices()
+pub fn list_sources(state: State<'_, Arc<Kernel>>) -> stross_kernel::EndpointSourceList {
+    state.list_endpoint_sources()
 }
 
 #[tauri::command]
@@ -158,7 +158,7 @@ pub async fn start_relay(
             relay_port,
             stross_kernel::DEFAULT_SRT_PORT,
             stross_kernel::DEFAULT_QUIC_PORT,
-            &stross_bridge::device_name_or("Stross 设备"),
+            &stross_bridge::node_name_or("Stross 节点"),
         )
         .await
         .map_err(|e| e.to_user_string())
@@ -175,11 +175,11 @@ pub async fn start_relay(
 ///
 /// `extra_base_urls`：手动添加的地址（无 mDNS），一并探测并入结果。
 #[tauri::command]
-pub async fn scan_devices(
+pub async fn scan_nodes(
     probe_ms: u64,
     timeout_ms: Option<u64>,
     extra_base_urls: Vec<String>,
-) -> Result<Vec<stross_kernel::discovery::ScannedDevice>, String> {
+) -> Result<Vec<stross_kernel::discovery::ScannedNode>, String> {
     let browse = std::time::Duration::from_millis(timeout_ms.unwrap_or(2000));
     let probe = std::time::Duration::from_millis(probe_ms);
     stross_kernel::discovery::scan_lan(browse, probe, extra_base_urls)
@@ -212,11 +212,11 @@ pub async fn endpoint_ls(
     .map_err(|e| format!("{e:#}"))
 }
 
-/// 通告本机设备为端点（端点框架：可见性 / delivery 由公开者声明，P1 1:1）。
+/// 通告本机端点（端点框架：可见性 / delivery 由公开者声明，P1 1:1）。
 #[tauri::command]
 pub fn endpoint_publish(
     state: State<'_, Arc<Kernel>>,
-    device_id: String,
+    endpoint_id: String,
     visibility: String,
     delivery: String,
 ) -> Result<stross_proto::message::EndpointManifest, String> {
@@ -226,8 +226,8 @@ pub fn endpoint_publish(
     let delivery = Delivery::from_wire(&delivery).unwrap_or(Delivery::Pull);
     // 前端传入可读 "kind:id"（端点 id 强类型化后数值子 id + kind 独立字段），
     // 在边界解析为强类型 EndpointId（与 CLI `--endpoint` 同语义）
-    let endpoint_id = EndpointId::parse(&device_id)
-        .ok_or_else(|| format!("非法端点标识: {device_id}（期望形如 screen:0）"))?;
+    let endpoint_id = EndpointId::parse(&endpoint_id)
+        .ok_or_else(|| format!("非法端点标识: {endpoint_id}（期望形如 screen:0）"))?;
     state
         .publish_endpoint(endpoint_id, visibility, delivery, None, None)
         .map_err(|e| e.to_user_string())

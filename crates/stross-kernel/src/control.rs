@@ -75,9 +75,9 @@ pub enum CtrlRequest {
         #[serde(default)]
         remember: bool,
     },
-    /// 公开设备为端点（端点框架，docs/endpoint-model-v2.md §2；P1 1:1）。
+    /// 公开端点（端点框架，docs/endpoint-model-v2.md §2；P1 1:1）。
     EndpointPublish {
-        device_id: String,
+        endpoint_id: EndpointId,
         visibility: Visibility,
         delivery: Delivery,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -255,22 +255,15 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             }
         }
         CtrlRequest::EndpointPublish {
-            device_id,
+            endpoint_id,
             visibility,
             delivery,
             transports,
             codecs,
-        } => {
-            // 旧字段名 device_id 实际承载端点标识（可读 "kind:id"），强类型化后
-            // 在边界解析为 EndpointId
-            let Some(endpoint_id) = EndpointId::parse(&device_id) else {
-                return CtrlResponse::err(format!("非法端点标识: {device_id}"));
-            };
-            match app.publish_endpoint(endpoint_id, visibility, delivery, transports, codecs) {
-                Ok(m) => CtrlResponse::ok_json(m),
-                Err(e) => CtrlResponse::err(e.to_user_string()),
-            }
-        }
+        } => match app.publish_endpoint(endpoint_id, visibility, delivery, transports, codecs) {
+            Ok(m) => CtrlResponse::ok_json(m),
+            Err(e) => CtrlResponse::err(e.to_user_string()),
+        },
         CtrlRequest::EndpointPublishFile {
             path,
             visibility,
@@ -325,13 +318,15 @@ async fn handle_request(state: &CtrlState, text: &str) -> CtrlResponse {
             access_code,
         } => match app.authorize(&session_id, access_code.as_deref()) {
             Ok(()) => CtrlResponse::ok_json(stross_types::AuthorizedView {
-                session_id,
+                session_id: session_id.into(),
                 authorized: true,
             }),
             Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::Teardown { session_id } => match app.teardown(&session_id) {
-            Ok(()) => CtrlResponse::ok_json(stross_types::TeardownView { session_id }),
+            Ok(()) => CtrlResponse::ok_json(stross_types::TeardownView {
+                session_id: session_id.into(),
+            }),
             Err(e) => CtrlResponse::err(e.to_user_string()),
         },
         CtrlRequest::StartStream { config, relay_url } => {

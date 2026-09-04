@@ -9,6 +9,7 @@ use clap::Args;
 use stross_endpoint::capture::FfmpegBackend;
 use stross_endpoint::pipeline::{AudioSourceConfig, Quality, StreamConfig, VideoSource};
 use stross_kernel::SenderEngine;
+use stross_proto::StreamId;
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum QualityArg {
@@ -62,9 +63,10 @@ pub struct PushArgs {
 }
 
 pub async fn run(args: PushArgs) -> anyhow::Result<()> {
-    let stream_id = args
-        .stream_id
-        .unwrap_or_else(|| format!("demo-{}", std::process::id()));
+    let stream_id = StreamId::from(
+        args.stream_id
+            .unwrap_or_else(|| format!("demo-{}", std::process::id())),
+    );
     let mut cfg = if args.screen {
         let mut c = StreamConfig {
             stream_id: stream_id.clone(),

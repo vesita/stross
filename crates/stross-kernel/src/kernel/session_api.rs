@@ -16,23 +16,23 @@ use crate::Kernel;
 use crate::error::{Error, Result};
 use crate::lock::MutexExt;
 
-use super::{Id, KernelEvent, Negotiated, NodeInfo, Session, SessionPrefs, now_secs, random_pin};
+use super::{
+    Id, KernelEvent, Negotiated, NodeId, NodeInfo, Session, SessionPrefs, StreamId, now_secs,
+    random_pin,
+};
 
 impl Kernel {
     // -----------------------------------------------------------------------
-    // 设备图
+    // 节点图
     // -----------------------------------------------------------------------
 
     /// 注册/更新一个节点（发现结果、本机能力都走这里）。
     pub fn upsert_node(&self, node: NodeInfo) {
-        self.graph
-            .nodes
-            .lock_poisoned()
-            .insert(node.node_id.clone(), node);
+        self.graph.nodes.lock_poisoned().insert(node.node_id, node);
     }
 
     /// 给已有节点追加一条能力（重复条目按 `media` 去重）。
-    pub fn register_capability(&self, node_id: &str, desc: CapabilityDescriptor) {
+    pub fn register_capability(&self, node_id: &NodeId, desc: CapabilityDescriptor) {
         let mut guard = self.graph.nodes.lock_poisoned();
         if let Some(node) = guard.get_mut(node_id)
             && !node.caps.contains(&desc)
@@ -45,7 +45,7 @@ impl Kernel {
     pub fn nodes(&self) -> Vec<NodeInfo> {
         let guard = self.graph.nodes.lock_poisoned();
         let mut v: Vec<_> = guard.values().cloned().collect();
-        v.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        v.sort_by_key(|a| a.node_id);
         v
     }
 
@@ -67,7 +67,10 @@ impl Kernel {
         sinks: &[String],
         prefs: &SessionPrefs,
     ) -> Result<Session> {
-        let id = format!("sess-{:x}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let id = StreamId::new(format!(
+            "sess-{:x}",
+            self.next_id.fetch_add(1, Ordering::Relaxed)
+        ));
         self.build_session(id, src, sinks, prefs)
     }
 
@@ -89,14 +92,14 @@ impl Kernel {
         if let Some(s) = self.sessions.get(&id) {
             return Ok(s);
         }
-        self.build_session(id.into_string(), src, sinks, prefs)
+        self.build_session(id, src, sinks, prefs)
     }
 
     /// 会话构建公共核心（`create_session` 生成随机 id、`ensure_session_with_id`
     /// 用派生 id，均走本函数）：校验 → 访问码 → 数据面预授权 → 登记 → 事件。
     fn build_session(
         &self,
-        id: String,
+        id: StreamId,
         src: &str,
         sinks: &[String],
         prefs: &SessionPrefs,
@@ -139,7 +142,7 @@ impl Kernel {
         let id = Id::from(id);
         self.sessions.route(&id, path.clone())?;
         let _ = self.events.send(KernelEvent::SessionRouted {
-            session_id: id.into_string(),
+            session_id: id.clone(),
             path,
         });
         Ok(())
@@ -177,7 +180,7 @@ impl Kernel {
             .graph
             .nodes
             .lock_poisoned()
-            .get(src)
+            .get(&NodeId::from(src))
             .map(|n| n.caps.clone())
             .unwrap_or_default();
         let mut transports: Vec<TransportId> = caps
@@ -222,9 +225,9 @@ impl Kernel {
             dp.revoke_stream(id.as_str())
                 .map_err(|e| Error::DataPlane(format!("撤销失败: {e}")))?;
         }
-        let _ = self.events.send(KernelEvent::SessionEnded {
-            session_id: id.into_string(),
-        });
+        let _ = self
+            .events
+            .send(KernelEvent::SessionEnded { session_id: id });
         Ok(())
     }
 
@@ -261,7 +264,7 @@ impl Kernel {
         tokens.retain(|_, t| !t.is_expired(now));
         let token = ShareToken {
             v: ShareToken::VERSION,
-            stream_id: session_id.to_string(),
+            stream_id: StreamId::new(session_id),
             pin: random_pin(session_id),
             expires_at: now.saturating_add(ttl.as_secs()),
             media,

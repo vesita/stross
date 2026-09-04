@@ -10,6 +10,7 @@
 //! 媒体帧的消费（抖动缓冲/播放）由调用方负责。
 
 use stross_proto::message::ControlMessage;
+use stross_types::id::StreamId;
 
 use crate::error::WatchError;
 use crate::transport::{DataSession, PeerAddr, RelayUrl, SessionPacket, SessionParams};
@@ -43,7 +44,7 @@ pub async fn connect_watch(
     if !url.is_ws() {
         session
             .send(SessionPacket::Control(ControlMessage::Watch {
-                stream_id: stream_id.to_string(),
+                stream_id: StreamId::new(stream_id),
             }))
             .await
             .map_err(|e| WatchError::SendWatch(e.to_string()))?;

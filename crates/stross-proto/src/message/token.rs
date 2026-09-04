@@ -23,7 +23,7 @@ pub struct ShareToken {
     /// 描述版本（自描述演进；当前 [`ShareToken::VERSION`]）。
     pub v: u8,
     /// 接收端内核签发的会话 id（D4：与 stream_id 合一）；推流 Hello 必须携带同一 id。
-    pub stream_id: String,
+    pub stream_id: super::ids::StreamId,
     /// 签发时生成的随机 PIN（一次性；服务端存储为准，防重放/篡改）。
     pub pin: String,
     /// 过期时间（Unix 秒）；过期后中继拒绝接入。

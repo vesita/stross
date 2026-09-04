@@ -44,7 +44,7 @@ impl RelayClient {
             .ok_or_else(|| anyhow::anyhow!("无法解析中继地址: {url}"))?;
         let stream_id = match &hello {
             ControlMessage::Hello { stream_id, .. } => stream_id.clone(),
-            _ => String::new(),
+            _ => stross_types::id::StreamId::default(),
         };
         let transport = crate::transport::transport_for_url(url);
         let peer = PeerAddr {
@@ -52,7 +52,7 @@ impl RelayClient {
             addr: url.to_string(),
         };
         let params = SessionParams {
-            session_id: stream_id,
+            session_id: stream_id.to_string(),
             profile: transport.profile(),
         };
         let session = transport

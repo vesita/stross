@@ -222,7 +222,7 @@ async fn uncontrolled_relay_keeps_open_push() {
 /// 受控中继未预授权该 id（内核不接数据面），推流端仅出示内核签发的
 /// [`ShareToken`] 即可接入；无凭证 / 篡改凭证被拒绝。
 #[tokio::test]
-async fn share_token_grants_cross_device_push() {
+async fn share_token_grants_cross_node_push() {
     use stross_kernel::relay::RelayHandle;
     use stross_proto::message::MediaKind;
 

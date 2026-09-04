@@ -18,7 +18,7 @@ use crate::net::{is_fake_or_link_local, local_ips};
 use crate::relay::client as relay_http;
 use serde::{Deserialize, Serialize};
 use stross_proto::message::{
-    DiscoveryInfo, EndpointSummary, MediaKind, RoleId, StreamInfo, TransportId,
+    DiscoveryInfo, EndpointSummary, MediaKind, NodeId, RoleId, StreamId, StreamInfo, TransportId,
 };
 use utoipa::ToSchema;
 
@@ -26,7 +26,7 @@ use utoipa::ToSchema;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamView {
-    pub stream_id: String,
+    pub stream_id: StreamId,
     pub title: String,
     pub video: bool,
     pub audio: bool,
@@ -46,10 +46,10 @@ pub fn to_views(list: Vec<StreamInfo>) -> Vec<StreamView> {
         .collect()
 }
 
-/// 一台设备的聚合状态（发现 + 探测）。
+/// 一个互联节点的聚合状态（发现 + 探测）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ScannedDevice {
+pub struct ScannedNode {
     pub name: String,
     pub ip: String,
     pub port: u16,
@@ -80,22 +80,22 @@ pub async fn scan(
     found: Vec<Discovered>,
     self_ips: &[String],
     probe: Duration,
-) -> Vec<ScannedDevice> {
+) -> Vec<ScannedNode> {
     // 同一实例可能按 A/AAAA 记录各触发一次 ServiceResolved——按实例名去重，
     // 地址优先取 IPv4（发现层已剔除 link-local；IPv6 前缀跨设备常不通）。
     let mut seen: HashMap<String, usize> = HashMap::new();
-    let mut devices: Vec<ScannedDevice> = Vec::new();
+    let mut nodes: Vec<ScannedNode> = Vec::new();
     for d in found {
         if let Some(&idx) = seen.get(&d.instance) {
-            if devices[idx].ip.contains(':') && d.ip.is_ipv4() {
-                devices[idx].ip = d.ip.to_string();
+            if nodes[idx].ip.contains(':') && d.ip.is_ipv4() {
+                nodes[idx].ip = d.ip.to_string();
             }
             continue;
         }
-        seen.insert(d.instance.clone(), devices.len());
+        seen.insert(d.instance.clone(), nodes.len());
         let info = DiscoveryInfo::from_txt(&d.txt);
         let ip = d.ip.to_string();
-        let mut dev = ScannedDevice {
+        let mut node = ScannedNode {
             name: info
                 .as_ref()
                 .map_or_else(|| d.instance.clone(), |i| i.name.clone()),
@@ -119,24 +119,24 @@ pub async fn scan(
         };
         // 探测地址：本机走回环（局域网 IP 在部分网络栈上不可自连），
         // 对端走其广播 IP；两个请求独立超时，互不拖累
-        let probe_ip = if dev.is_self {
+        let probe_ip = if node.is_self {
             "127.0.0.1".to_string()
         } else {
             ip
         };
         if let Ok(resp) = relay_http::info(&probe_ip, d.port, probe).await {
-            dev.online = true;
-            dev.srt_port = resp.srt_port;
-            dev.quic_port = resp.quic_port;
+            node.online = true;
+            node.srt_port = resp.srt_port;
+            node.quic_port = resp.quic_port;
         }
         if let Ok(list) = relay_http::streams(&probe_ip, d.port, probe).await {
-            dev.streams = to_views(list);
+            node.streams = to_views(list);
         }
-        devices.push(dev);
+        nodes.push(node);
     }
     // 本机优先，其余按名字排序——输出稳定，脚本可比对
-    devices.sort_by(|a, b| b.is_self.cmp(&a.is_self).then(a.name.cmp(&b.name)));
-    devices
+    nodes.sort_by(|a, b| b.is_self.cmp(&a.is_self).then(a.name.cmp(&b.name)));
+    nodes
 }
 
 /// 完整局域网扫描（CLI `devices` 与 GUI `scan_devices` 命令共用的**唯一**入口）：
@@ -159,28 +159,27 @@ pub async fn scan_lan(
     browse: Duration,
     probe: Duration,
     extra_base_urls: Vec<String>,
-) -> anyhow::Result<Vec<ScannedDevice>> {
+) -> anyhow::Result<Vec<ScannedNode>> {
     let raw_ips = local_ips();
     let self_ips: Vec<IpAddr> = raw_ips.clone();
     let self_ip_strings: Vec<String> = raw_ips.iter().map(|ip| ip.to_string()).collect();
     let probe = probe.max(Duration::from_millis(100));
     let found = Discovery::browse(browse).await?;
-    let mut devices = scan(found, &self_ip_strings, probe).await;
+    let mut nodes = scan(found, &self_ip_strings, probe).await;
     // 已见节点集合（ip:port）：mDNS 结果先入，后续子网回退 / 手动地址按此去重，
-    // 避免同一物理设备经 mDNS + 子网扫描双路径重复出现在设备列表（曾导致
-    // 手机界面同一节点出现两张卡片）。
-    let mut seen: HashSet<String> = devices
+    // 避免同一物理节点经 mDNS + 子网扫描双路径重复出现在节点列表。
+    let mut seen: HashSet<String> = nodes
         .iter()
         .map(|d| format!("{}:{}", d.ip, d.port))
         .collect();
     // mDNS 零远端 → 子网单播扫描回退（纯单播，与组播/广播无关）
-    if !devices.iter().any(|d| !d.is_self) {
-        tracing::info!("mDNS 零远端设备，触发子网单播扫描回退");
+    if !nodes.iter().any(|d| !d.is_self) {
+        tracing::info!("mDNS 零远端节点，触发子网单播扫描回退");
         let scanned = subnet_scan(&self_ips, &self_ip_strings, probe).await;
-        tracing::info!("子网扫描回退发现 {} 台设备", scanned.len());
+        tracing::info!("子网扫描回退发现 {} 台节点", scanned.len());
         for d in scanned {
             if seen.insert(format!("{}:{}", d.ip, d.port)) {
-                devices.push(d);
+                nodes.push(d);
             }
         }
     }
@@ -190,10 +189,10 @@ pub async fn scan_lan(
         if let Some(d) = probe_base(&base, probe).await
             && seen.insert(format!("{}:{}", d.ip, d.port))
         {
-            devices.push(d);
+            nodes.push(d);
         }
     }
-    Ok(devices)
+    Ok(nodes)
 }
 
 /// 统一发现清单（`GET /api/discovery`，监听于发现权威端口 [`DISCOVERY_PORT`]）：
@@ -204,9 +203,9 @@ pub async fn scan_lan(
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveryResp {
-    pub device_id: String,
+    pub node_id: NodeId,
     pub name: String,
-    /// 中继 HTTP/WS 入口端口（本设备连接/展示节点 = ScannedDevice.port）。
+    /// 中继 HTTP/WS 入口端口（本节点连接/展示节点 = ScannedNode.port）。
     pub relay_port: u16,
     pub srt_port: Option<u16>,
     pub quic_port: Option<u16>,
@@ -275,15 +274,19 @@ fn scan_hosts(self_ips: &[IpAddr]) -> Vec<Ipv4Addr> {
 /// `/api/info` + `/api/streams` 填充在线/数据面端口/在线共享（与 mDNS 路径
 /// `scan` 的语义一致——两路径最终指向同一设备同一 `relay_port`）。
 /// 每端口超时截断到 300ms（扫描是打通的快检；对端中继在局域网内应远快于此）。
-async fn scan_probe_host(host: &str, probe: Duration) -> Option<ScannedDevice> {
-    let fast = probe.min(Duration::from_millis(300));
-    let disc: DiscoveryResp = relay_http::get_json(
-        &format!("http://{host}:{DISCOVERY_PORT}/api/discovery"),
-        fast,
-    )
-    .await
-    .ok()?;
-    let mut dev = ScannedDevice {
+async fn scan_probe_host(host: &str, probe: Duration) -> Option<ScannedNode> {
+    let fast = probe.min(Duration::from_millis(500));
+    let manifest_url = format!("http://{host}:{DISCOVERY_PORT}/api/discovery");
+    let resp = reqwest::Client::builder()
+        .timeout(fast)
+        .build()
+        .ok()?
+        .get(&manifest_url)
+        .send()
+        .await
+        .ok()?;
+    let disc: DiscoveryResp = resp.json().await.ok()?;
+    let mut node = ScannedNode {
         name: disc.name,
         ip: host.to_string(),
         port: disc.relay_port,
@@ -297,15 +300,15 @@ async fn scan_probe_host(host: &str, probe: Duration) -> Option<ScannedDevice> {
         quic_port: disc.quic_port,
         streams: Vec::new(),
     };
-    if let Ok(resp) = relay_http::info(host, dev.port, fast).await {
-        dev.online = true;
-        dev.srt_port = resp.srt_port;
-        dev.quic_port = resp.quic_port;
+    if let Ok(resp) = relay_http::info(host, node.port, fast).await {
+        node.online = true;
+        node.srt_port = resp.srt_port;
+        node.quic_port = resp.quic_port;
     }
-    if let Ok(list) = relay_http::streams(host, dev.port, fast).await {
-        dev.streams = to_views(list);
+    if let Ok(list) = relay_http::streams(host, node.port, fast).await {
+        node.streams = to_views(list);
     }
-    Some(dev)
+    Some(node)
 }
 
 /// 子网单播扫描回退（mDNS 组播不可用时）：对本机各 /24 网段主机并发单播
@@ -319,7 +322,7 @@ async fn subnet_scan(
     self_ips: &[IpAddr],
     self_ip_strings: &[String],
     probe: Duration,
-) -> Vec<ScannedDevice> {
+) -> Vec<ScannedNode> {
     let hosts = scan_hosts(self_ips);
     if hosts.is_empty() {
         return Vec::new();
@@ -343,7 +346,7 @@ async fn subnet_scan(
 /// 手动地址探测（无 mDNS 的设备）：解析 `http://host:port` 基址，探测
 /// 在线 / SRT/QUIC / 在线共享。返回 `None` = 地址非法（无法探测）。
 /// GUI「手动添加设备」与 CLI 可共用——不再各自实现探测客户端。
-pub async fn probe_base(base: &str, probe: Duration) -> Option<ScannedDevice> {
+pub async fn probe_base(base: &str, probe: Duration) -> Option<ScannedNode> {
     let rest = base
         .strip_prefix("http://")
         .or_else(|| base.strip_prefix("https://"))?;
@@ -352,7 +355,7 @@ pub async fn probe_base(base: &str, probe: Duration) -> Option<ScannedDevice> {
         Some((h, p)) => (h.to_string(), p.parse::<u16>().ok()?),
         None => (host_port.to_string(), 80),
     };
-    let mut dev = ScannedDevice {
+    let mut node = ScannedNode {
         name: host_port.to_string(),
         ip: host.clone(),
         port,
@@ -367,14 +370,14 @@ pub async fn probe_base(base: &str, probe: Duration) -> Option<ScannedDevice> {
         streams: Vec::new(),
     };
     if let Ok(resp) = relay_http::info(&host, port, probe).await {
-        dev.online = true;
-        dev.srt_port = resp.srt_port;
-        dev.quic_port = resp.quic_port;
+        node.online = true;
+        node.srt_port = resp.srt_port;
+        node.quic_port = resp.quic_port;
     }
     if let Ok(list) = relay_http::streams(&host, port, probe).await {
-        dev.streams = to_views(list);
+        node.streams = to_views(list);
     }
-    Some(dev)
+    Some(node)
 }
 
 #[cfg(test)]

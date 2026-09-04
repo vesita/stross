@@ -103,7 +103,7 @@ fn camera_input_args(device: Option<&str>, q: &Quality) -> Result<Vec<String>> {
 fn camera_input_args(device: Option<&str>, q: &Quality) -> Result<Vec<String>> {
     let dev = match device {
         Some(d) => d.to_string(),
-        None => crate::devices::list_cameras()
+        None => crate::sources::list_cameras()
             .into_iter()
             .next()
             .map(|c| c.id)
@@ -125,7 +125,7 @@ fn camera_input_args(device: Option<&str>, q: &Quality) -> Result<Vec<String>> {
 fn camera_input_args(device: Option<&str>, q: &Quality) -> Result<Vec<String>> {
     let dev = match device {
         Some(d) => d.to_string(),
-        None => crate::devices::list_cameras()
+        None => crate::sources::list_cameras()
             .into_iter()
             .next()
             .map(|c| c.id)
@@ -241,7 +241,7 @@ fn mic_input_args(device: Option<&str>) -> Result<Vec<String>> {
 fn mic_input_args(device: Option<&str>) -> Result<Vec<String>> {
     let dev = match device {
         Some(d) => d.to_string(),
-        None => crate::devices::list_audio_inputs()
+        None => crate::sources::list_audio_inputs()
             .into_iter()
             .next()
             .context("Windows 下未检测到可用麦克风设备（DirectShow audio），请接入麦克风后重试")?,
@@ -258,7 +258,7 @@ fn mic_input_args(device: Option<&str>) -> Result<Vec<String>> {
 fn mic_input_args(device: Option<&str>) -> Result<Vec<String>> {
     let dev = match device {
         Some(d) => d.to_string(),
-        None => crate::devices::list_audio_inputs()
+        None => crate::sources::list_audio_inputs()
             .into_iter()
             .next()
             .unwrap_or_else(|| "default".into()),

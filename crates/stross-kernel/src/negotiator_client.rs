@@ -38,8 +38,8 @@ mod tests {
     #[test]
     fn request_serialization_matches_wire() {
         let req = ShareRequest {
-            device_id: "dev-b".into(),
-            device_name: "手机".into(),
+            node_id: "node-b".into(),
+            node_name: "手机".into(),
             endpoint_id: Some(0),
             endpoint_kind: Some(MediaKind::File),
             strategy_id: None,
@@ -49,7 +49,7 @@ mod tests {
             media: vec![MediaKind::File],
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["deviceId"], "dev-b");
+        assert_eq!(json["nodeId"], req.node_id.to_hex());
         // 方案 A：endpointId 数值化 + kind 独立字段
         assert_eq!(json["endpointId"], 0);
         assert_eq!(json["endpointKind"], "file");
@@ -59,8 +59,8 @@ mod tests {
         // 空端点（旧信任语义）：可选字段序列化为 null / 缺省（服务端按缺省
         // 解析，逐字节与旧实现一致）
         let old = ShareRequest {
-            device_id: "dev-b".into(),
-            device_name: "手机".into(),
+            node_id: "node-b".into(),
+            node_name: "手机".into(),
             endpoint_id: None,
             endpoint_kind: None,
             strategy_id: None,

@@ -38,8 +38,8 @@ pub(crate) mod streams; // 推流引擎 / 采集状态
 
 pub use auth::{AuthError, AuthPolicy, PinAuthPolicy};
 pub use data_plane::{DataPlaneBackend, RelayDataPlane};
-// 内核 id 新类型（内部业务 id 用；壳层仍传 &str，见 id.rs 边界约定）。
-pub use id::Id;
+// 内核 id 新类型（从 stross_types::id 接入）。
+pub use id::{Id, LinkId, NodeId, StreamId, StreamKey};
 // 端点契约与端点实现（插件区 stross-endpoint）：本模块只保留注册表
 // （EndpointRegistry / EndpointEntry / FileSource），路径经 stross_kernel 根部重导出。
 pub use endpoint::{
@@ -77,13 +77,13 @@ use tokio::task::JoinHandle;
 
 use crate::engine::SenderEngine;
 use crate::lock::MutexExt;
-use crate::negotiator::DeviceIdentity;
+use crate::negotiator::NodeIdentity;
 use crate::receiver::Receiver;
 use crate::relay::{RelayEvent, RelayHandle};
 use stross_proto::message::Platform;
-use stross_types::{AppInfo, DeviceList};
+use stross_types::{AppInfo, EndpointSourceList};
 
-use self::graph::DeviceGraph;
+use self::graph::NodeGraph;
 use self::session::SessionManager;
 
 /// 内核事件（推给 UI，替代轮询）。
@@ -94,24 +94,24 @@ pub enum KernelEvent {
         session: Session,
     },
     SessionRouted {
-        session_id: String,
+        session_id: StreamId,
         path: RoutePath,
     },
     SessionEnded {
-        session_id: String,
+        session_id: StreamId,
     },
     /// 数据面流启动（内嵌中继上报；D4：session_id 与 stream_id 合一）。
     StreamStarted {
-        session_id: String,
+        session_id: StreamId,
         info: StreamInfo,
     },
     /// 数据面流结束。
     StreamEnded {
-        session_id: String,
+        session_id: StreamId,
     },
     /// 观看者数量变化。
     WatchersChanged {
-        session_id: String,
+        session_id: StreamId,
         watchers: u32,
     },
 }
@@ -124,7 +124,7 @@ pub enum KernelEvent {
 /// 字段 `pub(crate)` 供同 crate 各域 impl 访问，公共 API 与调用方路径不变。
 pub struct Kernel {
     // -- 控制面：设备图 / 会话 / 路由 / 鉴权 / 凭证 --
-    pub(crate) graph: DeviceGraph,
+    pub(crate) graph: NodeGraph,
     pub(crate) sessions: SessionManager,
     pub(crate) auth: Arc<dyn AuthPolicy>,
     pub(crate) next_id: AtomicU64,
@@ -169,7 +169,7 @@ pub struct Kernel {
     pub(crate) receivers: Mutex<HashMap<Id, Arc<Receiver>>>,
     /// 本机持久化身份（`load_or_create_identity` 注入；用于 mDNS 实例名
     /// 唯一化——多设备同端口广播不再同名串扰）。
-    pub(crate) identity: Mutex<Option<DeviceIdentity>>,
+    pub(crate) identity: Mutex<Option<NodeIdentity>>,
     /// 实例启动时刻（控制面 Status 的 uptime 统计源）。
     pub(crate) started: std::time::Instant,
     /// 节点间对等通道管理器（全双工文字与文件互传）。
@@ -194,7 +194,7 @@ pub(crate) struct RunningStream {
     pub(crate) engine: SenderEngine,
     pub(crate) relay_port: u16,
     pub(crate) title: String,
-    pub(crate) stream_id: String,
+    pub(crate) stream_id: StreamId,
     pub(crate) started_at: u64,
 }
 
@@ -220,7 +220,7 @@ impl Kernel {
     pub fn with_auth(platform: Platform, auth: Arc<dyn AuthPolicy>) -> Self {
         let (events, _rx) = broadcast::channel(64);
         Self {
-            graph: DeviceGraph::default(),
+            graph: NodeGraph::default(),
             sessions: SessionManager::default(),
             auth,
             next_id: AtomicU64::new(1),
@@ -277,15 +277,15 @@ impl Kernel {
     /// 注入本机持久化身份（UI 层启动时调用；缺失时 mDNS 实例名回退旧格式）。
     /// 同时把本机登记为统一注册表的自节点（`(节点, 端点, 策略)` 查表的
     /// 本机分支键，docs/endpoint-model-v2.md §2）。
-    pub fn set_identity(&self, id: DeviceIdentity) {
+    pub fn set_identity(&self, id: NodeIdentity) {
         self.registry
             .lock_poisoned()
-            .set_self_node(&id.device_id, &id.device_name);
+            .set_self_node(id.node_id, &id.node_name);
         *self.identity.lock_poisoned() = Some(id);
     }
 
     /// 本机持久化身份（目录 API 的 node 信息源）。
-    pub fn device_identity(&self) -> Option<DeviceIdentity> {
+    pub fn node_identity(&self) -> Option<NodeIdentity> {
         self.identity.lock_poisoned().clone()
     }
 
@@ -306,12 +306,12 @@ impl Kernel {
         }
     }
 
-    /// 摄像头 / 麦克风 / 系统声音设备列表。
-    pub fn list_devices(&self) -> DeviceList {
-        DeviceList {
-            cameras: stross_endpoint::devices::list_cameras(),
-            audio_inputs: stross_endpoint::devices::list_audio_inputs(),
-            system_audio: stross_endpoint::devices::list_system_audio(),
+    /// 摄像头 / 麦克风 / 系统声音端点源列表。
+    pub fn list_endpoint_sources(&self) -> EndpointSourceList {
+        EndpointSourceList {
+            cameras: stross_endpoint::sources::list_cameras(),
+            audio_inputs: stross_endpoint::sources::list_audio_inputs(),
+            system_audio: stross_endpoint::sources::list_system_audio(),
         }
     }
 
@@ -449,10 +449,9 @@ impl EndpointApp for Kernel {
     async fn receive_file(
         &self,
         watch_url: String,
-        stream_id: String,
+        stream_id: StreamId,
         out_dir: PathBuf,
     ) -> anyhow::Result<stross_types::ReceivedFile> {
-        // 对「流尚未出现」重试（与 CLI subscribe_file 同语义兜底；
         // 订阅端点生成路径共享此竞态收敛）
         crate::subscriber::receive_file_retry(&watch_url, &stream_id, &out_dir).await
     }
@@ -479,7 +478,7 @@ impl EndpointApp for Kernel {
             .ok_or_else(|| anyhow::anyhow!("媒体订阅端点缺公开方中继地址（pull 未锚定）"))?;
         let recv = Receiver::start_with_rule(
             relay_url,
-            spec.stream_id.clone(),
+            spec.stream_id.to_string(),
             AudioOut::Discard,
             None,
             spec.strategy.pick,
@@ -550,7 +549,7 @@ mod tests {
 
     fn node(id: &str) -> NodeInfo {
         NodeInfo {
-            node_id: id.into(),
+            node_id: NodeId::from(id),
             name: id.into(),
             roles: vec![NodeRole::Sender],
             caps: vec![],
@@ -578,11 +577,11 @@ mod tests {
     }
 
     #[test]
-    fn app_info_and_devices_never_panic() {
+    fn app_info_and_sources_never_panic() {
         let kernel = Kernel::new(Platform::Desktop);
         let info = kernel.app_info();
         assert_eq!(info.platform, "desktop");
-        let _ = kernel.list_devices();
+        let _ = kernel.list_endpoint_sources();
     }
 
     #[test]
@@ -610,9 +609,13 @@ mod tests {
         k.upsert_node(node("a"));
         k.upsert_node(node("b"));
         assert_eq!(k.nodes().len(), 2);
-        k.register_capability("a", CapabilityDescriptor::unknown());
-        k.register_capability("a", CapabilityDescriptor::unknown()); // 去重
-        let a = k.nodes().into_iter().find(|n| n.node_id == "a").unwrap();
+        k.register_capability(&NodeId::from("a"), CapabilityDescriptor::unknown());
+        k.register_capability(&NodeId::from("a"), CapabilityDescriptor::unknown()); // 去重
+        let a = k
+            .nodes()
+            .into_iter()
+            .find(|n| n.node_id == NodeId::from("a"))
+            .unwrap();
         assert_eq!(a.caps.len(), 1);
     }
 
@@ -867,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_mdns_instance_unique_per_device_same_port() {
+    fn relay_mdns_instance_unique_per_node_same_port() {
         // 不同 device_id、同端口：实例名必须不同（mdns-sd 同名互覆盖的根因）
         let a = relay_mdns_instance(Some("0123456789abcdef0123456789abcdef"), 8777);
         let b = relay_mdns_instance(Some("fedcba9876543210fedcba9876543210"), 8777);
@@ -879,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_mdns_instance_same_device_stable() {
+    fn relay_mdns_instance_same_node_stable() {
         // 同一设备（同 device_id）跨启动实例名稳定（端口不变时）
         let id = "deadbeefcafe0123deadbeefcafe0123";
         assert_eq!(
@@ -958,11 +961,11 @@ mod tests {
     /// 不可见（子网单播扫描回退也探测不到），关闭 = 所有发现路径不可见。
     #[tokio::test]
     async fn discovery_manifest_gated_by_discoverable() {
-        use crate::negotiator::DeviceIdentity;
+        use crate::negotiator::NodeIdentity;
         let k = Arc::new(Kernel::new(Platform::Desktop));
-        k.set_identity(DeviceIdentity {
-            device_id: "dev-gated".into(),
-            device_name: "pico".into(),
+        k.set_identity(NodeIdentity {
+            node_id: "node-gated".into(),
+            node_name: "pico".into(),
         });
         let _ = k.start_relay_on(0, "pico").await.unwrap();
         // 默认 discoverable=false → 清单不可见
@@ -973,7 +976,7 @@ mod tests {
         // 开启 → 清单可见（mDNS + 子网扫描都据此找到本节点）
         k.set_discoverable(true);
         let m = k.discovery_manifest().expect("开启后可被发现应返回清单");
-        assert_eq!(m.device_id, "dev-gated");
+        assert_eq!(m.node_id, NodeId::from("node-gated"));
         assert!(m.relay_port > 0, "已锚定中继才有入口");
         // 再关闭 → 清单重新不可见
         k.set_discoverable(false);
@@ -1133,11 +1136,11 @@ mod tests {
 
         // 旧 API：main 槽启新停旧
         kernel
-            .start_receive_raw(base.clone(), "legacy-1".into())
+            .start_receive_raw(base.clone(), StreamId::from("legacy-1"))
             .await
             .unwrap();
         let r1 = kernel
-            .start_receive_raw(base.clone(), "legacy-2".into())
+            .start_receive_raw(base.clone(), StreamId::from("legacy-2"))
             .await
             .unwrap();
         let _ = r1; // 第二次启动应停掉第一次（main 槽单链）

@@ -164,8 +164,8 @@ function endpointIdStr(ep: { kind: string; endpointId: number }): string {
 // 线协议 / 命令面类型镜像（Rust serde camelCase；字段名 = wire 键）
 // ---------------------------------------------------------------------------
 
-interface CameraDevice { id: string; name: string; }
-interface DeviceList { cameras: CameraDevice[]; audioInputs: string[]; systemAudio: string[]; }
+interface CameraEndpoint { id: string; name: string; }
+interface EndpointSourceList { cameras: CameraEndpoint[]; audioInputs: string[]; systemAudio: string[]; }
 /** 本机锚点（`start_relay` 启动的受控中继 + mDNS 广播；推流/级联兜底的数据面入口）。 */
 interface Anchor {
   port: number;
@@ -229,9 +229,9 @@ interface RemoteStream {
  *  字段是 EndpointManifest 的子集——用 Pick 派生，避免双份定义漂移。 */
 type L1EndpointSummary = Pick<EndpointManifest, 'endpointId' | 'kind' | 'name' | 'available' | 'published'>;
 
-/** 扫描聚合视图（Rust `stross_app::devices::ScannedDevice`——mDNS + 探测
+/** 扫描聚合视图（Rust `stross_kernel::discovery::ScannedNode`——mDNS + 探测
  *  聚合全在库层，前端只消费结果不再自写 /api/* 探测）。 */
-interface ScannedDevice {
+interface ScannedNode {
   name: string;
   ip: string;
   port: number;
@@ -287,8 +287,8 @@ interface ShareGrant extends ShareTokenView {
 /** 待人工确认的挂起请求（Rust `PendingRequest`，经 `negotiator-request` 事件送达）。 */
 interface PendingRequest {
   id: string;
-  deviceId: string;
-  deviceName: string;
+  nodeId: string;
+  nodeName: string;
   /** 序列化后的媒体名（camelCase）。 */
   media: string[];
   /** 订阅目标端点名（端点语义；旧语义缺省）。 */
@@ -336,7 +336,7 @@ interface LocalCatalog {
 
 /** L2 目录（Rust `EndpointDir`：节点 + 已共享端点；服务端已滤 Private）。 */
 interface RemoteDir {
-  node: { deviceId: string; deviceName: string };
+  node: { nodeId: string; nodeName: string };
   endpoints: EndpointManifest[];
 }
 

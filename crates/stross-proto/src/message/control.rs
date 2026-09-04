@@ -18,7 +18,7 @@ use super::stream::{StreamInfo, TrackInfo};
 pub enum ControlMessage {
     /// 推流端声明开始推流。
     Hello {
-        stream_id: String,
+        stream_id: super::ids::StreamId,
         title: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         video: Option<TrackInfo>,
@@ -33,11 +33,11 @@ pub enum ControlMessage {
     Bye,
     /// 观看端请求观看一个流（SRT/QUIC watch 的首条控制消息；
     /// WS 观看由 URL 查询参数声明，无需此消息）。
-    Watch { stream_id: String },
+    Watch { stream_id: super::ids::StreamId },
     /// 中继端确认。
-    Welcome { stream_id: String },
+    Welcome { stream_id: super::ids::StreamId },
     /// 观看端就绪，可以开始收帧。
-    Ready { stream_id: String },
+    Ready { stream_id: super::ids::StreamId },
     /// 错误。
     Error { message: String },
     /// **共享 QUIC 连接上登记一条流**（通信模式 v2 Phase C「连接复用」：
@@ -50,7 +50,7 @@ pub enum ControlMessage {
     /// 中继确认后回 [`ControlMessage::StreamOpened`]；流级拆解走
     /// [`ControlMessage::CloseStream`]（不关连接——其它流不受影响）。
     OpenStream {
-        stream_id: String,
+        stream_id: super::ids::StreamId,
         /// 方向：push = 推流（等价 Hello）；watch = 观看（等价 Watch）。
         role: super::ids::StreamRole,
         /// push 用：标题（等价 Hello.title）。
@@ -66,23 +66,23 @@ pub enum ControlMessage {
     },
     /// 中继确认 OpenStream（push 等价 Welcome、watch 等价 Ready 的语义；
     /// 由连接层转换为上层熟悉的消息形态）。
-    StreamOpened { stream_id: String },
+    StreamOpened { stream_id: super::ids::StreamId },
     /// 关闭共享连接上的一条流（流级拆解；不关连接）。
-    CloseStream { stream_id: String },
+    CloseStream { stream_id: super::ids::StreamId },
     /// 流列表（备用，目前主要走 REST）。
     Info { streams: Vec<StreamInfo> },
     /// 能力上报（握手后，供传输/编解码协商）。
     Capabilities { caps: Vec<CapabilityDescriptor> },
     /// 传输/编解码协商提议。
     Offer {
-        session_id: String,
+        session_id: super::ids::StreamId,
         transports: Vec<TransportOffer>,
         codecs: Vec<CodecId>,
         profile: ReliabilityProfile,
     },
     /// 协商应答。
     Answer {
-        session_id: String,
+        session_id: super::ids::StreamId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transport: Option<TransportOffer>,
         ok: bool,
@@ -90,10 +90,13 @@ pub enum ControlMessage {
         reason: Option<String>,
     },
     /// 控制传输方向（会话存续期间动态改道）。
-    Route { session_id: String, path: RoutePath },
+    Route {
+        session_id: super::ids::StreamId,
+        path: RoutePath,
+    },
     /// 会话事件广播。
     SessionEvent {
-        session_id: String,
+        session_id: super::ids::StreamId,
         event: SessionEventKind,
     },
     /// 节点对等通道消息（即时文字/文件互传/信令）

@@ -58,7 +58,7 @@ function startStatusPolling(): void {
 // ---------------------------------------------------------------- 设备能力
 
 async function loadDevices(): Promise<void> {
-  devices = await call<DeviceList>('list_devices');
+  devices = await call<EndpointSourceList>('list_sources');
 }
 
 // ---------------------------------------------------------------- 可被发现
@@ -101,7 +101,7 @@ async function setDiscoverable(on: boolean): Promise<void> {
 function onApproveRequest(req: PendingRequest): void {
   pendingApprove = req;
   $('approve-device').textContent =
-    `节点「${req.deviceName}」（${req.deviceId.slice(0, 12)}…）`;
+    `节点「${req.nodeName}」（${req.nodeId.slice(0, 12)}…）`;
   const mediaLabel =
     req.endpointName ||
     (req.media.length

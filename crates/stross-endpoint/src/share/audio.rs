@@ -104,7 +104,7 @@ impl MediaSourceEndpoint for SystemAudioEndpoint {
         None
     }
     fn audio(&self) -> Option<AudioSourceConfig> {
-        let device = crate::devices::list_system_audio().into_iter().next();
+        let device = crate::sources::list_system_audio().into_iter().next();
         Some(AudioSourceConfig {
             system_audio: device,
             ..Default::default()

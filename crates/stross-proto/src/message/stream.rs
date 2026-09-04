@@ -26,7 +26,7 @@ pub struct TrackInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamInfo {
-    pub stream_id: String,
+    pub stream_id: super::ids::StreamId,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<TrackInfo>,

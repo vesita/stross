@@ -12,5 +12,6 @@ thiserror.workspace = true
 bytes.workspace = true
 # ToSchema：API 公开的线协议类型可进入 OpenAPI 文档（dto/线格式单一真源）。
 utoipa.workspace = true
+smol_str.workspace = true
 
 [dev-dependencies]

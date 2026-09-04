@@ -233,7 +233,6 @@ impl WebRtcPeer {
         let control_id = self.control_id;
         let media_id = self.media_id;
         let open_tx = self.open_tx.clone();
-        let stats_loop = stats.clone();
         tokio::spawn(
             PeerLoop {
                 udp,
@@ -242,7 +241,7 @@ impl WebRtcPeer {
                 inbound_tx,
                 control_id,
                 media_id,
-                stats: stats_loop,
+                stats,
                 open_tx,
             }
             .run(),
@@ -541,7 +540,7 @@ fn pick_first(addrs: &HashSet<mdns::ScopedIp>) -> Option<std::net::IpAddr> {
 }
 
 /// 若 `a=candidate:` 行第 5 个 token 是 `.local` 名则返回它，否则 None。
-#[cfg_attr(not(feature = "discovery"), allow(dead_code))] // 非 discovery 构建仅测试使用
+#[cfg(any(feature = "discovery", test))]
 fn mdns_host_in_candidate(line: &str) -> Option<&str> {
     if !line.starts_with("a=candidate:") {
         return None;

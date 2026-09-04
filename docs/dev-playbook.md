@@ -215,3 +215,12 @@ cargo test -p stross-kernel --lib discovery   # 发现相关单测
   - **全屏智能自适应旋转**：前端在全屏时根据视频真实宽高比调用 `set_screen_orientation`，横屏内容自动旋转 `SENSOR_LANDSCAPE`，竖屏内容保持 `SENSOR_PORTRAIT`，退出全屏恢复 `UNSPECIFIED`。
 - Android 屏幕端点（MediaProjection FGS）、摄像头（CameraX）、剪贴板（E 阶段）待扩充。
 - 协议优化排队：watch 鉴权 + stream_id 不可枚举、应用层保活控制帧、pts 回绕。
+
+## 9. 代码质量与整洁纪律（零 dead_code 规范与技术债收敛）
+
+- **严格零 `#[allow(dead_code)]`**：无用代码必须就地删除，绝不允许使用 `#[allow(dead_code)]` 掩盖死代码。
+- **RAII / 生命周期守护字段命名规范**：仅持有用于维持生命周期或 Drop 触发的结构体字段（如采集任务控制器、发送通道存活守卫），统一使用 `_` 开头命名（如 `_wayland`、`_tx`）。Rust 编译器原生支持下划线前缀表示故意保留的 RAII 字段，无需且不得标记 `#[allow(dead_code)]`。
+- **精确平台条件编译 `#[cfg(...)]`**：平台特定函数/类型（如 Linux 独有的 ufw/pkexec 防火墙放行逻辑、webrtc candidate mDNS 解析）必须标注精确的目标平台与测试属性（如 `#[cfg(any(feature = "discovery", test))]`），严禁使用宽泛的 `allow(dead_code)` 压制非当前平台的未调用告警。
+- **同构分支与模式合并**：处理通道断开或异常时，相同行为的 match 分支必须使用 `|` 语法合并（如 `Ok(None) | Err(_) => break`、`Ok(Some(SessionPacket::Media(_) | SessionPacket::Control(_))) => {}`），消除冗余分支与认知开销。
+- **零冗余拷贝（Zero Redundant Clone）**：已拥有所有权（owned）的字段映射直接移交所有权（如 `.map(|m| m.name)` 代替 `.map(|m| m.name.clone())`）；只读消费的函数入参统一传入引用切片（`&str` 或 `&T`）而非接受 `String`/`T` 后在内部再借用，杜绝调用端产生非必要的 `.clone()`。
+- **测试并发与时序防抖**：跨线程测试（如解码器/写线程后台异步消费）断言丢帧或调度时，避免单次 try_send / 单次 push 竞态，采用有界循环确保可靠触发；对 ffmpeg 预热等重型测试的超时窗口设置合理裕量，杜绝 CI 与高并发压力测试下的假性红灯。

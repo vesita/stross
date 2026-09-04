@@ -57,8 +57,7 @@ pub struct StreamSession {
     /// Wayland 屏幕采集控制器（仅 Wayland 屏幕共享时存在；持有以保活任务，
     /// 停止经 ffmpeg 子进程 stdin 关闭自清理）。
     #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
-    #[allow(dead_code)] // 只持有不读取，用于维持采集任务存活
-    wayland: Option<crate::share::screen::wayland::WaylandCapture>,
+    _wayland: Option<crate::share::screen::wayland::WaylandCapture>,
     /// 采集侧错误通道（portal 授权失败 / 协商失败等；FfmpegBackend 转发到
     /// CaptureStatus.error——桌面侧 CaptureStatusView 轮询展示）。
     error_rx: Option<mpsc::Receiver<String>>,
@@ -71,8 +70,7 @@ pub struct StreamSession {
     pub first_frame: Arc<std::sync::Mutex<Option<(SystemTime, u32)>>>,
     /// 持有发送端，保证推流通道在会话存续期间一直打开
     /// （读循环只持 clone；若此处不持有，读循环一结束推流就会被判定为结束）。
-    #[allow(dead_code)] // 只持有不读取，用于维持通道存活
-    tx: mpsc::Sender<Frame>,
+    _tx: mpsc::Sender<Frame>,
 }
 
 impl StreamSession {
@@ -125,12 +123,12 @@ impl StreamSession {
             video,
             audio,
             #[cfg(all(target_os = "linux", feature = "wayland-capture"))]
-            wayland,
+            _wayland: wayland,
             error_rx: None,
             started,
             started_wall,
             first_frame,
-            tx,
+            _tx: tx,
         })
     }
 
@@ -206,12 +204,12 @@ impl StreamSession {
         Ok(Self {
             video: Some(child),
             audio,
-            wayland: Some(wayland),
+            _wayland: Some(wayland),
             error_rx: Some(error_rx),
             started,
             started_wall,
             first_frame,
-            tx,
+            _tx: tx,
         })
     }
 }

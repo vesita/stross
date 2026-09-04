@@ -86,31 +86,34 @@ fn filter_self(
         if d.port == self_port && self_ips.contains(&d.ip) {
             continue;
         }
-        out.insert(format!("{}:{}", d.ip, d.port), peer_from_discovered(d));
+        out.insert(format!("{}:{}", d.ip, d.port), peer_from_discovered(&d));
     }
     out
 }
 
 /// 把一条 mDNS 浏览记录映射为 [`PeerInfo`]（能力引导缺失时回退默认值）。
 #[cfg(feature = "discovery")]
-fn peer_from_discovered(d: crate::discovery::Discovered) -> PeerInfo {
+fn peer_from_discovered(d: &crate::discovery::Discovered) -> PeerInfo {
     // 单 key JSON 解码（F1.2 / 1d）；旧设备 / 缺失时回退默认
     let info = DiscoveryInfo::from_txt(&d.txt);
+    let ip_str = d.ip.to_string();
+    let id = format!("{ip_str}:{}", d.port);
+    let name = info
+        .as_ref()
+        .map(|i| i.name.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| id.clone());
     PeerInfo {
-        id: format!("{}:{}", d.ip, d.port),
-        name: info
-            .as_ref()
-            .map(|i| i.name.clone())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("{}:{}", d.ip, d.port)),
-        ip: d.ip.to_string(),
+        id,
+        name,
+        ip: ip_str.clone(),
         port: d.port,
         roles: info.as_ref().map(|i| i.roles.clone()).unwrap_or_default(),
         transports: info
             .as_ref()
             .map(|i| i.transports.clone())
             .unwrap_or_default(),
-        url: crate::transport::RelayUrl::http(&d.ip.to_string(), d.port),
+        url: crate::transport::RelayUrl::http(&ip_str, d.port),
     }
 }
 
@@ -199,7 +202,7 @@ mod tests {
             codecs: vec![CodecId::H264, CodecId::Aac],
             endpoints: vec![],
         };
-        let p = peer_from_discovered(discovered(
+        let p = peer_from_discovered(&discovered(
             "192.168.1.9",
             8777,
             info.to_txt().expect("测试摘要应编码成功"),
@@ -223,7 +226,7 @@ mod tests {
     #[cfg(feature = "discovery")]
     #[test]
     fn peer_from_discovered_falls_back_without_txt() {
-        let p = peer_from_discovered(discovered("10.0.0.7", 9001, vec![]));
+        let p = peer_from_discovered(&discovered("10.0.0.7", 9001, vec![]));
         assert_eq!(p.name, "10.0.0.7:9001");
         assert!(p.roles.is_empty());
         assert!(p.transports.is_empty());

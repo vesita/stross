@@ -173,6 +173,7 @@ impl CtrlServer {
     /// 停止控制面。
     pub async fn stop(self) {
         self.task.abort();
+        let _ = self.task.await;
     }
 }
 

@@ -328,9 +328,9 @@ impl Kernel {
     /// * `StreamEnded` → 清共享登记 + 复位状态 + 本机会话 teardown（会话生命周期 = 流生命周期）；
     /// * `WatchersChanged{0}` → 延迟复查后停止端点共享（订阅者全部断开自动收尾）。
     pub fn attach_data_plane(self: &Arc<Self>, backend: Arc<dyn DataPlaneBackend>) {
-        *self.data_plane.lock_poisoned() = Some(backend.clone());
         backend.set_share_token_validator(self.token_validator());
         let mut rx = backend.events();
+        *self.data_plane.lock_poisoned() = Some(backend);
         let events = self.events.clone();
         let me = self.clone();
         let stop_delay = self.share_stop_delay;

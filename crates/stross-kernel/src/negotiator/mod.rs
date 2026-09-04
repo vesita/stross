@@ -343,10 +343,10 @@ impl ShareNegotiator {
                 self.store.remember(&entry.device_id, &entry.device_name);
             }
             let grant = self.grant(
-                entry.device_id.clone(),
-                entry.device_name.clone(),
+                &entry.device_id,
+                &entry.device_name,
                 entry.endpoint_id,
-                entry.strategy_id.clone(),
+                entry.strategy_id.as_deref(),
                 entry.delivery_mode,
             )?;
             // 订阅达成：触发上层驱动（文件泵 / 媒体自动推流），docs §5 联动
@@ -384,7 +384,7 @@ impl ShareNegotiator {
                     .endpoint_id
                     .as_ref()
                     .and_then(|eid| self.app.endpoint_manifest(*eid))
-                    .map(|m| m.name.clone()),
+                    .map(|m| m.name),
                 created_at: 0, // 挂起表未记录创建时刻，置 0 表示未知
             })
             .collect()
@@ -392,10 +392,10 @@ impl ShareNegotiator {
 
     fn grant(
         &self,
-        device_id: String,
-        device_name: String,
+        device_id: &str,
+        device_name: &str,
         endpoint_id: Option<EndpointId>,
-        strategy_id: Option<String>,
+        strategy_id: Option<&str>,
         delivery_mode: Option<Delivery>,
     ) -> Result<ShareGrant, String> {
         let endpoint = endpoint_id.and_then(|eid| self.app.endpoint_manifest(eid));
@@ -406,9 +406,9 @@ impl ShareNegotiator {
         compose_grant(
             &self.app,
             &self.store,
-            &device_id,
+            device_id,
             endpoint.as_ref(),
-            strategy_id.as_deref(),
+            strategy_id,
             delivery_mode,
             media,
             title,
@@ -442,6 +442,7 @@ impl ShareNegotiator {
     /// 停止协商服务。
     pub async fn stop(self) {
         self.task.abort();
+        let _ = self.task.await;
     }
 }
 
@@ -1038,7 +1039,7 @@ mod tests {
             port: 0,
         };
         let grant = neg
-            .grant("dev-phone-2".into(), "手机B".into(), None, None, None)
+            .grant("dev-phone-2", "手机B", None, None, None)
             .expect("信任设备应自动签发");
         assert!(grant.trusted);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1082,14 +1083,14 @@ mod tests {
         app.publish_endpoint(MIC, Visibility::Public, Delivery::Pull, None, None)
             .expect("公开麦克风端点");
         let neg = ShareNegotiator {
-            app: app.clone(),
+            app,
             store: Arc::new(TrustStore::load(&dir)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             task: tokio::spawn(async {}),
             port: 0,
         };
         let grant = neg
-            .grant("dev-phone".into(), "手机A".into(), Some(MIC), None, None)
+            .grant("dev-phone", "手机A", Some(MIC), None, None)
             .expect("Public 端点应自动签发");
         assert_eq!(grant.delivery, Some(Delivery::Pull));
         let transports = grant.transports.expect("应携带传输列表");
@@ -1106,7 +1107,7 @@ mod tests {
         app.publish_endpoint(SYSTEM_AUDIO, Visibility::Public, Delivery::Both, None, None)
             .expect("公开系统声音端点");
         let neg = ShareNegotiator {
-            app: app.clone(),
+            app,
             store: Arc::new(TrustStore::load(&dir)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             task: tokio::spawn(async {}),
@@ -1116,8 +1117,8 @@ mod tests {
         // 订阅方指明 Push 也被收敛为 Pull。
         let grant = neg
             .grant(
-                "dev-phone".into(),
-                "手机A".into(),
+                "dev-phone",
+                "手机A",
                 Some(SYSTEM_AUDIO),
                 None,
                 Some(Delivery::Push),
@@ -1126,13 +1127,7 @@ mod tests {
         assert_eq!(grant.delivery, Some(Delivery::Pull), "订阅驱动只走 pull");
         // Both + 未指明 → 仍 Pull
         let grant = neg
-            .grant(
-                "dev-phone".into(),
-                "手机A".into(),
-                Some(SYSTEM_AUDIO),
-                None,
-                None,
-            )
+            .grant("dev-phone", "手机A", Some(SYSTEM_AUDIO), None, None)
             .unwrap();
         assert_eq!(grant.delivery, Some(Delivery::Pull));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1154,19 +1149,15 @@ mod tests {
             port: 0,
         };
         // 第一个订阅者：无活动共享 → 新建会话
-        let g1 = neg
-            .grant("dev-a".into(), "设备A".into(), Some(MIC), None, None)
-            .unwrap();
-        let sid1 = g1.view.stream_id.clone();
+        let g1 = neg.grant("dev-a", "设备A", Some(MIC), None, None).unwrap();
+        let sid1 = g1.view.stream_id;
         assert!(!sid1.is_empty());
         // 模拟端点共享已登记（真实路径：share → start_stream 成功 → note_share_active）
         let weak: std::sync::Weak<dyn crate::EndpointApp> =
             std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
         app.note_share_active(weak, MIC, &sid1, Delivery::Pull);
         // 第二个订阅者：复用同一流
-        let g2 = neg
-            .grant("dev-b".into(), "设备B".into(), Some(MIC), None, None)
-            .unwrap();
+        let g2 = neg.grant("dev-b", "设备B", Some(MIC), None, None).unwrap();
         assert_eq!(
             g2.view.stream_id, sid1,
             "pull 复用：第二个订阅者拿同一流 id"
@@ -1192,9 +1183,7 @@ mod tests {
             task: tokio::spawn(async {}),
             port: 0,
         };
-        let g1 = neg
-            .grant("dev-a".into(), "设备A".into(), Some(MIC), None, None)
-            .unwrap();
+        let g1 = neg.grant("dev-a", "设备A", Some(MIC), None, None).unwrap();
         let m = app.endpoint_manifest(MIC).unwrap();
         let expected = derive_stream_id(
             &EndpointId::new(m.kind, m.endpoint_id),
@@ -1212,9 +1201,7 @@ mod tests {
             "派生 id 已建内核会话（受控中继可预授权接入）"
         );
         // 无活动共享时再次 grant → 同 id（确定性派生 + 会话幂等，不产生新会话）
-        let g2 = neg
-            .grant("dev-b".into(), "设备B".into(), Some(MIC), None, None)
-            .unwrap();
+        let g2 = neg.grant("dev-b", "设备B", Some(MIC), None, None).unwrap();
         assert_eq!(g2.view.stream_id, expected, "确定性派生：同端点同 id");
         assert_eq!(app.sessions().len(), 1, "会话幂等：派生 id 不重复建会话");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1236,23 +1223,15 @@ mod tests {
             port: 0,
         };
         let g1 = neg
-            .grant(
-                "dev-a".into(),
-                "设备A".into(),
-                Some(MIC),
-                None,
-                Some(Delivery::Push),
-            )
+            .grant("dev-a", "设备A", Some(MIC), None, Some(Delivery::Push))
             .unwrap();
         assert_eq!(g1.delivery, Some(Delivery::Pull), "订阅驱动收敛为 pull");
-        let sid1 = g1.view.stream_id.clone();
+        let sid1 = g1.view.stream_id;
         let weak: std::sync::Weak<dyn crate::EndpointApp> =
             std::sync::Arc::downgrade(&(app.clone() as std::sync::Arc<dyn crate::EndpointApp>));
         app.note_share_active(weak, MIC, &sid1, Delivery::Pull);
         // 第二个订阅者：复用同一流（不再报「正被使用」）
-        let g2 = neg
-            .grant("dev-b".into(), "设备B".into(), Some(MIC), None, None)
-            .unwrap();
+        let g2 = neg.grant("dev-b", "设备B", Some(MIC), None, None).unwrap();
         assert_eq!(g2.view.stream_id, sid1, "Push 声明端点仍复用同一流");
         assert_eq!(g2.delivery, Some(Delivery::Pull));
         let _ = std::fs::remove_dir_all(&dir);

@@ -296,7 +296,7 @@ impl EndpointRegistry {
             endpoint_id,
             FileSource {
                 path: path.to_path_buf(),
-                name: name.clone(),
+                name,
                 size,
             },
         );
@@ -953,7 +953,7 @@ mod tests {
                 available: false,
                 last_error: None,
             },
-            fired: f.clone(),
+            fired: f,
         }));
         r.publish(
             EndpointId::new(MediaKind::Mic, 0),

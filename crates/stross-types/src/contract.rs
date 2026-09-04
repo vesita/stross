@@ -204,7 +204,7 @@ pub trait MediaSourceEndpoint: ShareEndpoint {
     /// 分享端统一实现：组流推本机中继（订阅驱动只走 pull）。
     fn share(&self, app: Arc<dyn EndpointApp>, ctx: SubscribeCtx) {
         spawn_media_share(
-            app,
+            &app,
             ctx,
             self.id(),
             self.name().to_string(),
@@ -341,14 +341,14 @@ pub trait EndpointApp: Send + Sync {
 /// 经 [`EndpointApp::spawn_task`] 在运行时上下文执行（契约层零 tokio 依赖，
 /// 运行时由内核注入）。
 pub fn spawn_media_share(
-    app: Arc<dyn EndpointApp>,
+    app: &Arc<dyn EndpointApp>,
     ctx: SubscribeCtx,
     endpoint_id: EndpointId,
     title: String,
     video: Option<VideoSource>,
     audio: Option<AudioSourceConfig>,
 ) {
-    let self_weak = std::sync::Arc::downgrade(&app);
+    let self_weak = std::sync::Arc::downgrade(app);
     let app2 = app.clone();
     app.spawn_task(Box::pin(async move {
         let cfg = StreamConfig {

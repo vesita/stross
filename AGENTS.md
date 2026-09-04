@@ -199,3 +199,4 @@ node scripts/phone-cdp.mjs text          # 页面可见文本
 - **文档纪律**：新文档先在 docs/README.md 清单登记（职责+状态）；同一事实**单一真源**
   （其余只写指针，如 Android 构建→android-build.md）；用户可见术语统一「共享/订阅」；
   压缩对话前把套路/坑写进 docs/dev-playbook.md。
+- **代码整洁纪律（零 dead_code）**：严禁 `#[allow(dead_code)]`，无用代码就地删除；RAII 守护字段原生使用 `_` 前缀（如 `_wayland`/`_tx`）；平台特定逻辑用精确 `#[cfg(...)]` 条件编译，杜绝掩盖告警。

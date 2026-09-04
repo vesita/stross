@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn bytes_chunks_zero_copy_slicing() {
         let original = Bytes::from_static(b"0123456789ABCDEF");
-        let chunks: Vec<Bytes> = chunk_bytes(original.clone(), 5).collect();
+        let chunks: Vec<Bytes> = chunk_bytes(original, 5).collect();
         assert_eq!(chunks.len(), 4);
         assert_eq!(&chunks[0][..], b"01234");
         assert_eq!(&chunks[1][..], b"56789");

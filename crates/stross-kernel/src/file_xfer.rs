@@ -241,8 +241,7 @@ pub async fn receive_file_session(
                         });
                     }
                 }
-                Ok(Some(SessionPacket::Media(_))) => {} // 其它轨（视频/音频）忽略
-                Ok(Some(SessionPacket::Control(_))) => {}
+                Ok(Some(SessionPacket::Media(_) | SessionPacket::Control(_))) => {} // 其它轨或控制帧忽略
                 Ok(None) => bail!("流提前关闭，文件不完整（实收 {} 字节）", received_bytes),
                 Err(e) => bail!("观看连接异常: {e}"),
             }

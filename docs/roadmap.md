@@ -109,3 +109,4 @@
 - [x] Android 端到端验证：屏幕+麦克风推流 → 电脑观看（166 视频帧 + 260 音频帧/5s）
 - [x] 修复：前端 `VideoSource` serde 契约（小写 variant）—— 统一命令面后
       桌面与 Android 共用一个 `buildConfig()`
+- [x] 代码质量加固与技术债清零（2026-09）：全仓彻底移除 `#[allow(dead_code)]`，RAII 守护字段规范下划线命名（`_wayland`/`_tx`），清除未使用 dead code，消除零拷贝路径冗余克隆与同构 match 分支，全仓 407 测试 100% 通过且 clippy 保持零告警

@@ -151,13 +151,7 @@ pub async fn subscribe_media_and_watch(
         outcome.stream_id,
     );
     // 保持 watcher：CLI 无显示，读帧丢弃；对端断开（Ok(None)）或异常（Err）即退出
-    loop {
-        match session.recv().await {
-            Ok(Some(_)) => {}
-            Ok(None) => break,
-            Err(_) => break,
-        }
-    }
+    while let Ok(Some(_)) = session.recv().await {}
     Ok(())
 }
 

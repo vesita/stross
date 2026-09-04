@@ -173,8 +173,7 @@ pub async fn run(args: ReceiveArgs) -> anyhow::Result<()> {
                     break;
                 }
             }
-            Ok(None) => break,
-            Err(_) => break, // 接收时长到
+            Ok(None) | Err(_) => break, // 接收时长到或通道关闭
         }
     }
     // 收尾：停止接收（库内拆净通道）→ 关闭转发 → 等落盘 task 结束

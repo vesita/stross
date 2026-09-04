@@ -136,10 +136,10 @@ impl Frame2 {
     /// 二次拷贝），本方法只做一次拷贝：把 [`FrameHeader2::encode`] 的 14 字节
     /// 头与载荷拼进新缓冲。QUIC 发送热路径（`write_msg` 前）请用它减少每帧
     /// 载荷的一整轮复制。
-    pub fn to_bytes_owned(header: &FrameHeader2, payload: Bytes) -> Bytes {
+    pub fn to_bytes_owned(header: &FrameHeader2, payload: &[u8]) -> Bytes {
         let mut out = bytes::BytesMut::with_capacity(HEADER2_LEN + payload.len());
         out.extend_from_slice(&header.encode());
-        out.extend_from_slice(&payload);
+        out.extend_from_slice(payload);
         out.freeze()
     }
 
@@ -502,7 +502,7 @@ mod tests {
         assert!(back.header.is_keyframe());
         assert_eq!(back.payload.to_vec(), vec![1u8, 2, 3, 4]);
         // 零拷贝路径等价
-        let back2 = Frame2::to_frame_owned(wire.clone()).unwrap();
+        let back2 = Frame2::to_frame_owned(wire).unwrap();
         assert_eq!(back2.header, back.header);
         assert_eq!(back2.payload.to_vec(), back.payload.to_vec());
     }
@@ -552,7 +552,7 @@ mod tests {
         let good = Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![9u8; 8]).to_bytes();
 
         // ① 尾部多余字节（头声明 len=8，实际缓冲有第 9 个字节）→ LenMismatch
-        let mut trailing = good.clone().to_vec();
+        let mut trailing = good.to_vec();
         trailing.push(0xAA);
         match Frame::from_bytes_owned(trailing.into()) {
             Err(FrameError::LenMismatch { declared, actual }) => {
@@ -576,7 +576,7 @@ mod tests {
         // ③ v2 紧凑帧同样校验
         let v2_good =
             Frame2::from_frame(&Frame::new(TRACK_VIDEO, CODEC_H264, 0, 0, vec![1u8; 4])).to_bytes();
-        let mut v2_trailing = v2_good.clone().to_vec();
+        let mut v2_trailing = v2_good.to_vec();
         v2_trailing.push(0xBB);
         match Frame2::to_frame_owned(v2_trailing.into()) {
             Err(FrameError::LenMismatch { declared, actual }) => {
@@ -586,7 +586,7 @@ mod tests {
             other => panic!("v2 尾部多余字节应报 LenMismatch，得到 {other:?}"),
         }
         assert!(
-            Frame2::to_frame_owned(v2_good.clone()).is_ok(),
+            Frame2::to_frame_owned(v2_good).is_ok(),
             "正常 v2 帧必须通过一致性校验"
         );
     }

@@ -272,13 +272,13 @@ function scanRelays(): Promise<void> {
   return refreshDevices(true);
 }
 
-/** 渲染左栏设备列表：本机卡片 + 各设备卡片（设备可展开）。 */
+/** 渲染左栏设备列表：各设备卡片（纯净局域网节点，本机已释放至独立 #local-pane）。 */
 function renderDeviceList(): void {
-  const box = $('device-list');
-  box.innerHTML = '';
-  box.appendChild(localDeviceCard());
-  // 本机卡片已插入 DOM，设备树此刻渲染（构造期容器未入文档，查不到会空渲）
+  // 保持本机端点管理树实时渲染
   renderLocalDevices();
+  const box = $('device-list');
+  if (!box) return;
+  box.innerHTML = '';
   if (!deviceViews.length) {
     box.appendChild(
       emptyState(
@@ -327,62 +327,6 @@ function renderDeviceList(): void {
   }
 }
 
-/** 本机卡片：节点 → 设备 → 端点（共享为可订阅端点）。恒展开。 */
-function localDeviceCard(): HTMLElement {
-  const card = document.createElement('div');
-  card.className = 'dev-card local expanded';
-  card.dataset.key = 'local';
-
-  const head = document.createElement('div');
-  head.className = 'dev-head';
-  const ic = document.createElement('span');
-  ic.className = 'card-ic local';
-  ic.innerHTML = icon('logo');
-  const body = document.createElement('span');
-  body.className = 'card-body';
-  const nameLine = document.createElement('span');
-  nameLine.className = 'scan-name';
-  nameLine.textContent = '本机';
-  const metaLine = document.createElement('span');
-  metaLine.className = 'scan-meta';
-  metaLine.id = 'anchor-box';
-  metaLine.textContent = anchor ? '已就绪' : '启动中…';
-  body.appendChild(nameLine);
-  // meta 行：锚点状态 + 可被发现开关（公开/隐藏）。放在 meta 行内避免被 flex:1 顶到最右。
-  const metaRow = document.createElement('span');
-  metaRow.className = 'scan-meta-row';
-  metaRow.appendChild(metaLine);
-  const disco = document.createElement('button');
-  disco.type = 'button';
-  disco.id = 'disco-toggle';
-  disco.className = 'disco-btn';
-  disco.dataset.act = 'toggle-disco';
-  disco.setAttribute('aria-pressed', 'false');
-  metaRow.appendChild(disco);
-  body.appendChild(metaRow);
-  head.appendChild(ic);
-  head.appendChild(body);
-  updateDiscoUI(discoverableOn, disco);
-  card.appendChild(head);
-
-  const detail = document.createElement('div');
-  detail.className = 'dev-detail';
-
-  // 本机设备树（节点 → 端点）：共享状态 + 共享/取消共享。
-  // 卡片头已标注「本机」，此处不再重复「本机设备」标题。
-  const devBox = document.createElement('div');
-  devBox.className = 'dev-dir';
-  devBox.dataset.role = 'local-devices';
-  const devList = document.createElement('div');
-  devList.className = 'dev-list';
-  devBox.appendChild(devList);
-  detail.appendChild(devBox);
-  // 设备树由 renderDeviceList 在卡片入 DOM 后统一渲染（见 renderDeviceList）
-
-  card.appendChild(detail);
-  return card;
-}
-
 /** 局域网设备卡片：点击头部展开 → 对端目录（可订阅端点）+ TA 的在线共享（点流接收）。 */
 function deviceCard(dev: DeviceView): HTMLElement {
   const card = document.createElement('div');
@@ -395,11 +339,14 @@ function deviceCard(dev: DeviceView): HTMLElement {
   head.tabIndex = 0;
   const isPhone = /android|phone|手机/i.test(dev.name) || /android/i.test(dev.meta);
   const iconName = dev.manual ? 'link' : isPhone ? 'phone' : 'monitor';
-  const ic = document.createElement('span');
-  ic.className = 'card-ic';
-  ic.innerHTML = icon(iconName);
+   const ic = document.createElement('span');
+   ic.className = 'card-ic';
+  const isOnline = !dev.name.includes('不可达');
+  ic.innerHTML =
+    icon(iconName) +
+     `<span class="card-status-dot${isOnline ? '' : ' offline'}"></span>`;
   const body = document.createElement('span');
-  body.className = 'card-body';
+   body.className = 'card-body';
   const nameLine = document.createElement('span');
   nameLine.className = 'scan-name';
   nameLine.textContent = dev.name;
@@ -414,10 +361,13 @@ function deviceCard(dev: DeviceView): HTMLElement {
   head.appendChild(ic);
   head.appendChild(body);
   head.appendChild(chevron);
-  const toggle = () => {
-    expandedDevice = expandedDevice === dev.key ? null : dev.key;
-    renderDeviceList();
-  };
+   const toggle = () => {
+     expandedDevice = expandedDevice === dev.key ? null : dev.key;
+     renderDeviceList();
+    if (expandedDevice === dev.key) {
+      updateStageForDevice(dev);
+    }
+   };
   head.addEventListener('click', () => {
     toggle();
   });
@@ -458,5 +408,56 @@ function renderLocalCard(): void {
   const meta = $('anchor-box');
   if (meta) {
     meta.textContent = anchor ? '已就绪' : '未就绪';
+  }
+}
+
+/** 当前被选中的远端设备。 */
+let selectedDevice: DeviceView | null = null;
+
+function getSelectedDevice(): DeviceView | null {
+  return selectedDevice;
+}
+winObj.getSelectedDevice = getSelectedDevice;
+
+/** 选中节点后同步更新右侧订阅工作台顶栏。 */
+function updateStageForDevice(dev: DeviceView): void {
+  selectedDevice = dev;
+  const title = $('stage-title');
+  const sub = $('stage-sub');
+  const avatar = $('stage-avatar');
+  if (title) title.textContent = `订阅 · ${dev.name}`;
+  if (sub) sub.textContent = `${dev.meta} · 在线可订阅接收`;
+  if (avatar) {
+    const isPhone = /android|phone|手机/i.test(dev.name) || /android/i.test(dev.meta);
+    avatar.innerHTML = icon(dev.manual ? 'link' : isPhone ? 'phone' : 'monitor');
+  }
+
+  // 若当前无针对该设备的活跃播放画面，默认切入「端点浏览」以便用户查看可订阅端点
+  const stageLiveBadge = $('stage-live-badge');
+  const isStreaming = stageLiveBadge && !stageLiveBadge.classList.contains('hidden');
+  if (!isStreaming) {
+    switchNodeSubtab('browse');
+  }
+
+  const dir = remoteDirs.get(dev.key);
+  if (dir) {
+    renderBrowsePaneEndpoints(dev, dir);
+  } else {
+    const browseBox = $('node-browse-endpoints');
+    if (browseBox) browseBox.innerHTML = '<div class="hint" style="padding: 16px; text-align: center;">加载端点中…</div>';
+    void loadRemoteDir(dev);
+  }
+  const specIp = $('spec-ip');
+  const specPort = $('spec-port');
+  const specOnline = $('spec-online');
+  if (specIp) specIp.textContent = dev.meta;
+  if (specPort) specPort.textContent = dev.quicPort ? `QUIC ${dev.quicPort}` : (dev.base ? dev.base.split(':')[2] || '8777' : '8777');
+  if (specOnline) {
+    const isOnline = !dev.name.includes('不可达');
+    specOnline.textContent = isOnline ? '在线可连接' : '离线不可达';
+    specOnline.className = 'specs-v ' + (isOnline ? 'ok' : 'err');
+  }
+  if (window.innerWidth <= 900) {
+    switchView('consume');
   }
 }

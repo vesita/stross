@@ -72,10 +72,10 @@ function updateDiscoUI(on: boolean, el?: HTMLElement): void {
   btn.classList.toggle('on', on);
   btn.setAttribute('aria-pressed', String(on));
   btn.title = on
-    ? '已公开：局域网内其它节点可以发现并连接本机（点击隐藏）'
-    : '已隐藏：局域网内其它节点无法发现本机（点击公开）';
+    ? '已公开：局域网内其它节点可以发现并连接本机（点击隐身）'
+    : '未公开：局域网内其它节点无法发现本机（点击公开）';
   btn.innerHTML = icon(on ? 'radio' : 'eye') +
-    (on ? '<span>公开</span>' : '<span>隐藏</span>');
+    (on ? '<span>已公开 (广播中)</span>' : '<span>未公开 (已隐身)</span>');
 }
 
 /** 读取运行时「可被发现」状态并同步开关 UI。 */
@@ -132,8 +132,8 @@ async function respondApprove(allow: boolean): Promise<void> {
 
 // ---------------------------------------------------------------- 事件绑定
 
-// 设备列表事件委托：端点框架操作按钮（data-act：共享/取消共享/订阅）
-$('device-list').addEventListener('click', (e) => {
+// 设备列表与本机管理面板事件委托：端点框架操作按钮（data-act：共享/取消共享/订阅）
+const handleDeviceAction = (e: MouseEvent) => {
   const t = e.target as HTMLElement;
   const btn = t.closest('[data-act]') as HTMLElement | null;
   if (!btn) return;
@@ -165,7 +165,10 @@ $('device-list').addEventListener('click', (e) => {
       break;
     }
   }
-});
+};
+
+$('device-list')?.addEventListener('click', handleDeviceAction);
+$('local-pane')?.addEventListener('click', handleDeviceAction);
 
 // 设备接入授权确认（权限自动化：首次人工确认）
 $btn('approve-allow-btn').onclick = () => void respondApprove(true);
@@ -218,38 +221,108 @@ $input('manual-addr').addEventListener('keydown', (e) => {
   }
 });
 
-// 全局视图切换导航
-const navBtnManage = $('nav-btn-manage');
-const navBtnConsume = $('nav-btn-consume');
-if (navBtnManage) {
-  navBtnManage.onclick = () => switchView('manage');
+// 节点二级页底部子标签切换（浏览 vs 订阅）
+const nodeTabBrowse = $('node-tab-browse');
+const nodeTabPlayer = $('node-tab-player');
+if (nodeTabBrowse) {
+  nodeTabBrowse.onclick = () => switchNodeSubtab('browse');
 }
-if (navBtnConsume) {
-  navBtnConsume.onclick = () => switchView('consume');
+if (nodeTabPlayer) {
+  nodeTabPlayer.onclick = () => switchNodeSubtab('player');
 }
 
-// 消费舞台「浏览局域网节点」按钮：切回共享（顶部导航已提供「共享」入口）
+// 全局主底部导航栏事件
+const mainTabLocal = $('main-tab-local');
+const mainTabDiscover = $('main-tab-discover');
+const mainTabConsume = $('main-tab-consume');
+if (mainTabLocal) {
+  mainTabLocal.onclick = () => switchMainBottomTab('local');
+}
+if (mainTabDiscover) {
+  mainTabDiscover.onclick = () => switchMainBottomTab('discover');
+}
+if (mainTabConsume) {
+  mainTabConsume.onclick = () => switchMainBottomTab('consume');
+}
+
+// 消费舞台空状态跳转到端点浏览
+const emptyGoBrowseBtn = $('empty-go-browse-btn');
+if (emptyGoBrowseBtn) {
+  emptyGoBrowseBtn.onclick = () => switchNodeSubtab('browse');
+}
 const emptyGoManageBtn = $('empty-go-manage-btn');
 if (emptyGoManageBtn) {
-  emptyGoManageBtn.onclick = () => switchView('manage');
+  emptyGoManageBtn.onclick = () => {
+    switchMainBottomTab('discover');
+  };
 }
-
-// 移动端分段导航兼容
-const tabDevBtn = $('tab-devices-btn');
-const tabRecvBtn = $('tab-recv-btn');
-if (tabDevBtn) {
-  tabDevBtn.onclick = () => switchView('manage');
-}
-if (tabRecvBtn) {
-  tabRecvBtn.onclick = () => switchView('consume');
-}
-
 // 移动端快速跳转到接收面板
 const mobJumpBtn = $('mobile-recv-jump-btn');
 if (mobJumpBtn) {
   mobJumpBtn.onclick = () => {
-    switchView('consume');
+    switchMainBottomTab('consume');
+    switchNodeSubtab('player');
     $('recv-pane')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+}
+
+// 移动端返回节点列表
+const mobBackBtn = $('mobile-back-btn');
+if (mobBackBtn) {
+  mobBackBtn.onclick = () => {
+    switchMainBottomTab('discover');
+  };
+}
+
+// 快速发送便签到当前节点
+const chatSendBtn = $('chat-send-btn');
+const chatNoteInput = document.getElementById('chat-note-input') as HTMLInputElement | null;
+const sendChatNote = (): void => {
+  if (!chatNoteInput) return;
+  const text = chatNoteInput.value.trim();
+  if (!text) return;
+  chatNoteInput.value = '';
+  appendChatTimelineMessage(text, true);
+  showToast('便签已发送到当前节点', 'ok');
+};
+
+if (chatSendBtn) {
+  chatSendBtn.onclick = sendChatNote;
+}
+if (chatNoteInput) {
+  chatNoteInput.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendChatNote();
+    }
+  };
+}
+
+// 快速共享屏幕 / 共享声音 / 共享文件
+const actScreen = $('chat-act-screen');
+if (actScreen) {
+  actScreen.onclick = () => {
+    const ep = localCatalog.endpoints.find((e) => e.kind === 'screen');
+    if (ep) openPublishModal(endpointIdStr(ep));
+    else showToast('未找到可用的屏幕共享源', 'err');
+  };
+}
+
+const actMic = $('chat-act-mic');
+if (actMic) {
+  actMic.onclick = () => {
+    const ep = localCatalog.endpoints.find((e) => e.kind === 'audio' || e.kind === 'microphone');
+    if (ep) openPublishModal(endpointIdStr(ep));
+    else showToast('未找到可用的声音共享源', 'err');
+  };
+}
+
+const actFile = $('chat-act-file');
+if (actFile) {
+  actFile.onclick = () => {
+    const ep = localCatalog.endpoints.find((e) => e.kind === 'file');
+    if (ep) openPublishModal(endpointIdStr(ep));
+    else showToast('可通过命令行将文件公开为端点供节点订阅', 'info');
   };
 }
 // 设备搜索/过滤输入框事件

@@ -247,6 +247,20 @@
       <polyline points="2 17 12 22 22 17" />
       <polyline points="2 12 12 17 22 12" />
     </symbol>
+    <symbol id="i-message-square" viewBox="0 0 24 24">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </symbol>
+    <symbol id="i-send" viewBox="0 0 24 24">
+      <line x1="22" y1="2" x2="11" y2="13" />
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+    </symbol>
+    <symbol id="i-arrow-left" viewBox="0 0 24 24">
+      <line x1="19" y1="12" x2="5" y2="12" />
+      <polyline points="12 19 5 12 12 5" />
+    </symbol>
+    <symbol id="i-paperclip" viewBox="0 0 24 24">
+      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </symbol>
   </svg>
 
   <header>
@@ -262,19 +276,6 @@
         <span class="subtitle">局域网节点共享</span>
       </div>
     </div>
-
-    <!-- 全局视图模式切换：[ 共享 (发布/管理端点) | 订阅 (接收播放) ] -->
-    <nav class="view-switcher" id="view-switcher" aria-label="视图模式切换">
-      <button id="nav-btn-manage" class="nav-switch-btn active" type="button" data-view="manage">
-        <svg class="ic"><use href="#i-radio" /></svg>
-        <span>共享</span>
-      </button>
-      <button id="nav-btn-consume" class="nav-switch-btn" type="button" data-view="consume">
-        <svg class="ic"><use href="#i-monitor" /></svg>
-        <span>订阅</span>
-        <span id="consume-badge" class="nav-badge hidden">0</span>
-      </button>
-    </nav>
 
     <div class="header-right">
       <span id="ffmpeg-badge" class="badge">检查 ffmpeg…</span>
@@ -298,59 +299,99 @@
 
       <!-- ── 1. 管理界面：设备资产、共享配置、目录发现 ── -->
       <div id="view-manage" class="view-panel active">
-      <section class="card" id="device-pane">
-        <div class="pane-head">
-          <h2>共享与订阅</h2>
-          <button id="scan-btn" type="button" class="btn-scan">
-            <svg class="ic"><use href="#i-refresh" /></svg><span>刷新扫描</span>
-          </button>
-        </div>
-        <div class="pane-addrow">
-          <div class="search-input-wrap">
-            <svg class="ic"><use href="#i-link" /></svg>
-            <input id="manual-addr" type="text" placeholder="手动添加节点 IP 或 IP:端口" />
-          </div>
-          <button id="manual-add-btn" type="button" class="btn-compact">
-            <svg class="ic"><use href="#i-link" /></svg><span>添加</span>
-          </button>
-        </div>
-        <div class="pane-filterrow" id="pane-filterrow">
-          <div class="filter-input-wrap">
-            <svg class="ic"><use href="#i-filter" /></svg>
-            <input id="dev-filter-input" type="text" placeholder="过滤节点名称或 IP 地址…" />
-            <button id="dev-filter-clear" class="filter-clear-btn hidden" type="button" title="清除搜索">
-              <svg class="ic"><use href="#i-x" /></svg>
+
+        <!-- 独立本机管理控制面板 (Local Management Pane) -->
+        <section class="card local-pane hidden" id="local-pane">
+          <div class="pane-head">
+            <div class="local-head-info">
+              <div class="card-ic local">
+                <svg class="ic"><use href="#i-logo" /></svg>
+                <span class="card-status-dot"></span>
+              </div>
+              <div class="local-title-box">
+                <div class="local-name-row">
+                  <h2>本机</h2>
+                  <span id="anchor-box" class="scan-meta badge ok-subtle">已就绪</span>
+                </div>
+                <span class="scan-meta hint">局域网内容共享源</span>
+              </div>
+            </div>
+            <button id="disco-toggle" class="disco-btn" type="button" data-act="toggle-disco" aria-pressed="false">
+              <svg class="ic"><use href="#i-radio" /></svg>
+              <span>公开</span>
             </button>
           </div>
-        </div>
-        <div id="grid-error" class="error hidden"></div>
-        <!-- 防火墙自动放行（权限自动化）：检测到 ufw 入站拦截 Stross 端口时提示一键放行 -->
-        <div id="fw-banner" class="fw-banner hidden">
-          <div class="fw-banner-text">
-            <svg class="ic"><use href="#i-zap" /></svg>
-            <span>跨节点共享会被防火墙拦截，缺少放行：<b id="fw-missing"></b></span>
+
+          <!-- 防火墙自动放行（权限自动化）：检测到 ufw 入站拦截 Stross 端口时提示一键放行 -->
+          <div id="fw-banner" class="fw-banner hidden">
+            <div class="fw-banner-text">
+              <svg class="ic"><use href="#i-zap" /></svg>
+              <span>跨节点共享会被防火墙拦截，缺少放行：<b id="fw-missing"></b></span>
+            </div>
+            <div class="row">
+              <button id="fw-allow-btn" class="primary sm" type="button">
+                <svg class="ic"><use href="#i-check" /></svg><span>一键放行</span>
+              </button>
+              <button id="fw-close-btn" class="sm" type="button">忽略</button>
+            </div>
           </div>
-          <div class="row">
-            <button id="fw-allow-btn" class="primary sm" type="button">
-              <svg class="ic"><use href="#i-check" /></svg><span>一键放行</span>
+
+          <!-- 本机端点管理树（屏幕、麦克风、系统声音、文件） -->
+          <div class="dev-dir" data-role="local-devices">
+            <div class="pane-subtitle">
+              <span>本机共享端点</span>
+              <span class="hint">开启共享后局域网其它节点可订阅</span>
+            </div>
+            <div class="dev-list"></div>
+          </div>
+        </section>
+
+        <!-- 局域网发现节点面板 (Discovered Nodes Pane) -->
+        <section class="card" id="device-pane">
+          <div class="pane-head">
+            <div class="pane-title-wrap">
+              <svg class="ic"><use href="#i-grid" /></svg>
+              <h2>局域网其它节点</h2>
+            </div>
+            <button id="scan-btn" type="button" class="btn-scan">
+              <svg class="ic"><use href="#i-refresh" /></svg><span>刷新扫描</span>
             </button>
-            <button id="fw-close-btn" class="sm" type="button">忽略</button>
           </div>
-        </div>
-        <!-- 本机卡片（设备树：共享/取消共享）+ 局域网设备卡片（目录：订阅端点） -->
-        <div id="device-list"></div>
-        <!-- 手动添加历史（紧凑芯片标签组） -->
-        <div id="recent-block" class="recent-block hidden">
-          <div class="recent-head">
-            <span class="recent-title">
-              <svg class="ic"><use href="#i-refresh" /></svg>
-              <span>快捷历史</span>
-            </span>
-            <button id="recent-clear-btn" class="recent-clear-btn" type="button" title="清空全部历史记录">清空</button>
+          <div id="pane-discover-controls" class="pane-discover-controls">
+            <div class="pane-addrow">
+              <div class="search-input-wrap">
+                <svg class="ic"><use href="#i-link" /></svg>
+                <input id="manual-addr" type="text" placeholder="手动添加节点 IP 或 IP:端口" />
+              </div>
+              <button id="manual-add-btn" type="button" class="btn-compact">
+                <svg class="ic"><use href="#i-link" /></svg><span>添加</span>
+              </button>
+            </div>
+            <div class="pane-filterrow" id="pane-filterrow">
+              <div class="filter-input-wrap">
+                <svg class="ic"><use href="#i-filter" /></svg>
+                <input id="dev-filter-input" type="text" placeholder="过滤节点名称或 IP 地址…" />
+                <button id="dev-filter-clear" class="filter-clear-btn hidden" type="button" title="清除搜索">
+                  <svg class="ic"><use href="#i-x" /></svg>
+                </button>
+              </div>
+            </div>
           </div>
-          <div id="recent-list" class="recent-chips"></div>
-        </div>
-      </section>
+          <div id="grid-error" class="error hidden"></div>
+          <!-- 局域网设备卡片列表（纯净发现节点列表，绝无本机卡片） -->
+          <div id="device-list"></div>
+          <!-- 手动添加历史 -->
+          <div id="recent-block" class="recent-block hidden">
+            <div class="recent-head">
+              <span class="recent-title">
+                <svg class="ic"><use href="#i-refresh" /></svg>
+                <span>快捷历史</span>
+              </span>
+              <button id="recent-clear-btn" class="recent-clear-btn" type="button" title="清空全部历史记录">清空</button>
+            </div>
+            <div id="recent-list" class="recent-chips"></div>
+          </div>
+        </section>
       </div>
 
       <!-- ── 2. 消费界面：沉浸式播放舞台、音视频多轨混音与遥测 ── -->
@@ -358,7 +399,16 @@
         <section class="card stage-card" id="recv-pane">
           <div class="pane-head stage-head">
             <div class="stage-title-wrap">
-              <h2>订阅</h2>
+              <button id="mobile-back-btn" class="mobile-back-btn hidden" type="button" title="返回节点列表" aria-label="返回">
+                <svg class="ic"><use href="#i-arrow-left" /></svg>
+              </button>
+              <div class="stage-avatar" id="stage-avatar">
+                <svg class="ic"><use href="#i-monitor" /></svg>
+              </div>
+              <div class="stage-titles">
+                <h2 id="stage-title">订阅</h2>
+                <span id="stage-sub" class="stage-sub hint">在「发现节点」选择节点以浏览端点或接收串流</span>
+              </div>
               <span id="stage-live-badge" class="badge ok hidden">正在播放</span>
             </div>
             <div class="stage-actions">
@@ -367,11 +417,49 @@
               </button>
             </div>
           </div>
+
+          <!-- 节点二级页面子标签切换条（置顶分段器：[ 🎬 订阅 ] [ 📋 浏览 ]） -->
+          <nav class="node-tabs-bar" id="node-tabs-bar" aria-label="节点交互切换">
+            <button id="node-tab-player" class="node-subtab-btn" type="button" data-subpane="player">
+              <svg class="ic"><use href="#i-monitor" /></svg>
+              <span>订阅</span>
+              <span id="node-player-dot" class="subtab-live-dot hidden"></span>
+            </button>
+            <button id="node-tab-browse" class="node-subtab-btn active" type="button" data-subpane="browse">
+              <svg class="ic"><use href="#i-layers" /></svg>
+              <span>浏览</span>
+            </button>
+          </nav>
+          <div id="node-pane-browse" class="node-subpane hidden">
+            <div class="node-browse-head">
+              <div class="node-browse-title">
+                <svg class="ic"><use href="#i-layers" /></svg>
+                <span>节点可订阅端点</span>
+              </div>
+              <span class="hint" id="node-browse-count">选择端点发起订阅</span>
+            </div>
+            <div id="node-browse-endpoints" class="node-browse-endpoints"></div>
+            <div class="node-specs-card" id="node-specs-card">
+              <div class="specs-title">
+                <svg class="ic"><use href="#i-info" /></svg>
+                <span>节点网络与属性</span>
+              </div>
+              <div class="specs-grid" id="node-specs-grid">
+                <div class="specs-item"><span class="specs-k">可达地址</span><span class="specs-v" id="spec-ip">-</span></div>
+                <div class="specs-item"><span class="specs-k">中继端口</span><span class="specs-v" id="spec-port">-</span></div>
+                <div class="specs-item"><span class="specs-k">传输协议</span><span class="specs-v" id="spec-transports">QUIC / SRT / WS</span></div>
+                <div class="specs-item"><span class="specs-k">在线状态</span><span class="specs-v ok" id="spec-online">在线可连接</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 节点订阅播放子视图（播放器舞台、可视化、控制条、协作便签） -->
+          <div id="node-pane-player" class="node-subpane active">
           <!-- 空状态：未接收任何共享时的占位提示（接收中隐藏） -->
           <div class="recv-empty" id="recv-empty">
             <span class="recv-empty-ic"><svg class="ic"><use href="#i-monitor" /></svg></span>
             <p>暂无活跃的串流</p>
-            <span class="hint">在「共享」中选择任意节点的屏幕、麦克风或声音进行订阅</span>
+            <span class="hint">在「发现节点」中选择任意节点的屏幕、麦克风或声音进行订阅</span>
             <button id="empty-go-manage-btn" class="primary sm" type="button" style="margin-top: 8px;">
               <svg class="ic"><use href="#i-search" /></svg><span>浏览局域网节点</span>
             </button>
@@ -498,9 +586,60 @@
           <span id="recv-status">未接收</span>
         </div>
         <div id="recv-meta" class="meta"></div>
-      </section>
+        <!-- 节点协作与传输交互区：即时便签、快速端点共享与文件互传 -->
+        <div class="chat-workspace" id="chat-workspace">
+          <div class="chat-timeline" id="chat-timeline">
+            <div class="chat-notice">
+              <svg class="ic"><use href="#i-shield" /></svg>
+              <span>局域网节点直连 · 共享与订阅端对端安全传输</span>
+            </div>
+          </div>
+          <div class="chat-bottom-bar" id="chat-bottom-bar">
+            <div class="chat-quick-actions">
+              <button type="button" class="chat-action-chip" id="chat-act-file" title="向节点发送文件">
+                <svg class="ic"><use href="#i-file" /></svg>
+                <span>共享文件</span>
+              </button>
+              <button type="button" class="chat-action-chip" id="chat-act-screen" title="向节点共享屏幕">
+                <svg class="ic"><use href="#i-monitor" /></svg>
+                <span>共享屏幕</span>
+              </button>
+              <button type="button" class="chat-action-chip" id="chat-act-mic" title="向节点共享声音">
+                <svg class="ic"><use href="#i-mic" /></svg>
+                <span>共享声音</span>
+              </button>
+            </div>
+            <div class="chat-input-row">
+              <input type="text" id="chat-note-input" class="chat-input" placeholder="发送便签或剪贴板文本到当前节点…" />
+              <button type="button" id="chat-send-btn" class="chat-send-btn" title="发送 (Enter)">
+                <svg class="ic"><use href="#i-send" /></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+          </div>
+
+        </section>
       </div>
     </div>
+
+    <!-- 全局主底部导航栏（常驻底栏） -->
+    <nav class="main-bottom-bar" id="main-bottom-bar" aria-label="全局导航">
+      <button id="main-tab-local" class="main-tab-btn" type="button" data-tab="local">
+        <svg class="ic"><use href="#i-radio" /></svg>
+        <span>本机管理</span>
+      </button>
+      <button id="main-tab-discover" class="main-tab-btn active" type="button" data-tab="discover">
+        <svg class="ic"><use href="#i-grid" /></svg>
+        <span>发现节点</span>
+        <span id="main-discover-badge" class="bottom-badge hidden">0</span>
+      </button>
+      <button id="main-tab-consume" class="main-tab-btn" type="button" data-tab="consume">
+        <svg class="ic"><use href="#i-monitor" /></svg>
+        <span>订阅浏览</span>
+        <span id="main-consume-badge" class="bottom-badge hidden">0</span>
+      </button>
+    </nav>
 
   <!-- 共享弹窗（本机设备 → 端点：可见性由公开者声明；共享=推送端） -->
   <div id="pub-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="pub-modal-title">

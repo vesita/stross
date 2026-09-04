@@ -18,10 +18,13 @@
 //! * [`StreamSession`]：子进程生命周期与管道读取
 
 mod args;
+pub mod resolution;
 
 pub use args::{
     audio_command, ffmpeg_available, ffmpeg_bin, rawvideo_video_command, video_command,
+    wayland_rawvideo_command,
 };
+pub use resolution::{DynamicResolutionBuffer, ResolutionPlan, make_even};
 
 use std::process::Stdio;
 use std::sync::Arc;

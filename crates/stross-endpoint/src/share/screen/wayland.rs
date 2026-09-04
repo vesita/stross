@@ -151,10 +151,38 @@ async fn capture_loop(
         .map_err(|e| format!("建流失败: {e}"))?;
     tracing::info!("[wayland] 建流成功，进入帧循环");
 
-    // ---- 3. 回传原生分辨率 → 等 ffmpeg stdin → 节流喂帧（原生 BGRA）----
+    // ---- 3. 等待首帧以获取真实的物理像素分辨率（解决 KWin/GNOME 分数缩放下 portal 尺寸与物理尺寸不一致问题）----
+    let mut initial_frame = None;
+    let (real_w, real_h) = {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut found = None;
+        while Instant::now() < deadline {
+            if let Some(frame) = mgr.recv_frame_timeout(Duration::from_millis(100)) {
+                found = Some(frame);
+                break;
+            }
+        }
+        if let Some(frame) = found {
+            let w = frame.width;
+            let h = frame.height;
+            tracing::info!(
+                "[wayland] PipeWire 实际首帧尺寸: {w}x{h} (portal 报告尺寸: {src_w}x{src_h})"
+            );
+            initial_frame = Some(frame);
+            (w, h)
+        } else {
+            tracing::warn!(
+                "[wayland] 等待 PipeWire 首帧超时，回退 portal 报告尺寸: {src_w}x{src_h}"
+            );
+            (src_w, src_h)
+        }
+    };
+
+    // ---- 4. 回传原生分辨率 → 等 ffmpeg stdin → 节流喂帧（原生 BGRA）----
     // 原生尺寸必须先给管线：ffmpeg 的 `-video_size` 必须与采集尺寸一致，否则
     // 像素错位。管线拿到后起动 ffmpeg，再把 stdin 经 oneshot 送回。
-    let _ = native_tx.send((src_w, src_h));
+    let plan = crate::pipeline::ResolutionPlan::fit(real_w, real_h, quality.width, quality.height);
+    let _ = native_tx.send((plan.src_width, plan.src_height));
     let mut stdin = stdin_rx
         .await
         .map_err(|_| "等待 ffmpeg stdin 失败".to_string())?;
@@ -164,8 +192,15 @@ async fn capture_loop(
     // 正确，新观看端随时可接入。**缩放交给 ffmpeg swscale**，这里只把最新的
     // 原生 BGRA（按 stride 规整为紧密布局）写入 stdin；静止时复用上一帧以保持
     // PTS。不再做内容指纹/缩放（那是 CPU 瓶颈来源）。
-    feed_loop(quality, &mut stdin, &mut mgr, src_w, src_h).await?;
-
+    feed_loop(
+        quality,
+        &mut stdin,
+        &mut mgr,
+        plan.src_width,
+        plan.src_height,
+        initial_frame,
+    )
+    .await?;
     let _ = mgr.shutdown();
     tracing::debug!("Wayland 采集结束");
     Ok(())
@@ -183,22 +218,42 @@ async fn feed_loop(
     mgr: &mut PipeWireThreadManager,
     src_w: u32,
     src_h: u32,
+    initial_frame: Option<lamco_pipewire::VideoFrame>,
 ) -> Result<(), String> {
+    use crate::pipeline::DynamicResolutionBuffer;
     use lamco_pipewire::FrameBuffer;
+
     let interval = Duration::from_secs_f64(1.0 / f64::from(quality.fps.max(1)));
-    let native_len = (src_w as usize) * (src_h as usize) * 4;
-    let row = (src_w as usize) * 4;
-    let mut last = vec![0u8; native_len];
+    let mut dyn_buf = DynamicResolutionBuffer::new(src_w, src_h);
     let mut got = false;
     let mut next_write = Instant::now();
     let mut sent = 0u32;
+
+    if let Some(lamco_pipewire::VideoFrame {
+        buffer: FrameBuffer::Memory(data),
+        width,
+        height,
+        stride,
+        ..
+    }) = initial_frame.as_ref()
+        && dyn_buf.ingest_frame(*width, *height, *stride as usize, data)
+    {
+        got = true;
+        tracing::info!(
+            "[wayland] 首帧已装入自适应缓冲 {}x{} stride={}",
+            width,
+            height,
+            stride
+        );
+    }
+
     loop {
         let now = Instant::now();
         if now >= next_write {
             // 到达节流点：写最新一帧。
             if got {
                 next_write = now + interval;
-                if stdin.write_all(&last).await.is_err() {
+                if stdin.write_all(dyn_buf.current_buffer()).await.is_err() {
                     // ffmpeg 已退出（会话停止 / 接收端关闭）；结束采集
                     break;
                 }
@@ -214,50 +269,15 @@ async fn feed_loop(
             continue;
         }
         // 未到节流点：等新帧，但**最长只等到写帧时刻**（`remaining`）。
-        // 关键修复：此前用固定 30ms `recv_frame_timeout`，在节流闸门之后又
-        // 阻塞最多 30ms，写帧周期变成 max(interval, recv 阻塞) → 合成器送帧
-        // 相位与闸门相位独立漂移，实际帧率在 30fps 与 ~16fps 间相噪跳变。
-        // 现在等帧窗口与节流截止重叠：到点必写上一帧，周期严格 = interval。
+        // 等帧窗口与节流截止重叠：到点必写上一帧，周期严格 = interval。
         let remaining = next_write.saturating_duration_since(now);
         if let Some(frame) = mgr.recv_frame_timeout(remaining.min(Duration::from_millis(30))) {
-            if sent == 0 && !got {
-                let dlen = match &frame.buffer {
-                    FrameBuffer::Memory(d) => d.len(),
-                    _ => usize::MAX,
-                };
-                tracing::info!(
-                    "[wayland] 收到首帧 {}x{} stride={} data_len={}",
-                    frame.width,
-                    frame.height,
-                    frame.stride,
-                    dlen
-                );
-            }
             let FrameBuffer::Memory(data) = &frame.buffer else {
                 continue; // 不应出现 DMA-BUF 帧（已强制 SHM）；跳过
             };
-            let stride = frame.stride as usize;
-            // 尺寸须与原生一致（ffmpeg 输入固定），不一致时丢弃这一帧
-            if frame.width != src_w || frame.height != src_h {
-                continue;
+            if dyn_buf.ingest_frame(frame.width, frame.height, frame.stride as usize, data) {
+                got = true;
             }
-            if data.len() < native_len {
-                continue;
-            }
-            if stride == row {
-                last.copy_from_slice(&data[..native_len]);
-            } else {
-                // 行间距可能有 padding：逐行拷贝为紧密布局
-                for y in 0..src_h as usize {
-                    let src = y * stride;
-                    let dst = y * row;
-                    if src + row > data.len() || dst + row > native_len {
-                        continue; // 越界保护（不应发生）
-                    }
-                    last[dst..dst + row].copy_from_slice(&data[src..src + row]);
-                }
-            }
-            got = true;
         }
         // 回环顶部：若已到节流点则写帧，否则继续等（每轮最多等 remaining）
     }

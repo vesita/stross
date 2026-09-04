@@ -43,8 +43,6 @@ fn screen_input_args(q: &Quality) -> Result<Vec<String>> {
     Ok(vec![
         "-f".into(),
         "x11grab".into(),
-        "-video_size".into(),
-        format!("{}x{}", q.width, q.height),
         "-framerate".into(),
         q.fps.to_string(),
         "-i".into(),
@@ -59,8 +57,6 @@ fn screen_input_args(q: &Quality) -> Result<Vec<String>> {
         "gdigrab".into(),
         "-framerate".into(),
         q.fps.to_string(),
-        "-video_size".into(),
-        format!("{}x{}", q.width, q.height),
         "-i".into(),
         "desktop".into(),
     ])
@@ -283,6 +279,13 @@ pub fn video_command(cfg: &StreamConfig) -> Result<Vec<String>> {
         args.push("-t".into());
         args.push(d.to_string());
     }
+    // 分辨率自适应层：等比缩放约束在画质档位上限内，保持原宽高比不拉伸，并确保偶数对齐
+    let q = &cfg.quality;
+    args.push("-vf".into());
+    args.push(format!(
+        "scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+        q.width, q.height
+    ));
     args.extend(video_encode_args(&cfg.quality));
     Ok(args)
 }
@@ -332,6 +335,8 @@ pub fn wayland_rawvideo_command(
     native_h: u32,
 ) -> Result<Vec<String>> {
     let q = &cfg.quality;
+    // 分辨率规划层：确保原生尺寸与目标尺寸偶数对齐，严格保持原生宽高比
+    let plan = super::resolution::ResolutionPlan::fit(native_w, native_h, q.width, q.height);
     let mut args = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
@@ -342,14 +347,13 @@ pub fn wayland_rawvideo_command(
         "-pix_fmt".into(),
         "bgra".into(),
         "-video_size".into(),
-        format!("{native_w}x{native_h}"),
+        format!("{}x{}", plan.src_width, plan.src_height),
         "-framerate".into(),
         q.fps.to_string(),
         "-i".into(),
         "pipe:0".into(),
-        // 缩放+转格式走 swscale（快、多线程）；目标是 quality 编码分辨率
         "-vf".into(),
-        format!("scale={}x{},format=yuv420p", q.width, q.height),
+        plan.ffmpeg_vf_scale(),
     ];
     if let Some(d) = cfg.duration_secs {
         args.push("-t".into());

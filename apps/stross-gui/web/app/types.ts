@@ -51,6 +51,12 @@ interface WindowWithTauri extends Window {
   toggleMute?: () => void;
   updateMuteButtonUI?: () => void;
   updateZoomChipUI?: () => void;
+  appendChatTimelineMessage?: (text: string, isSelf: boolean) => void;
+  switchManageSubtab?: (subtab: 'discover' | 'local') => void;
+  switchNodeSubtab?: (subtab: 'browse' | 'player') => void;
+  switchMainBottomTab?: (tab: 'local' | 'discover' | 'consume') => void;
+  getSelectedDevice?: () => DeviceView | null;
+  loadRemoteDir?: (dev: DeviceView, force?: boolean) => Promise<void>;
 }
 /** Tauri invoke 的弱类型契约（与 Rust 命令面逐步收紧）。 */
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;

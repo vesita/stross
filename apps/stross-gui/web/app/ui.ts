@@ -258,6 +258,67 @@ function switchMobileTab(tab: string): void {
   switchView(tab === 'recv' ? 'consume' : 'manage');
 }
 
+/** 切换管理视图下的子标签（发现节点 vs 本机管理）。 */
+function switchManageSubtab(subtab: 'discover' | 'local'): void {
+  const localPane = $('local-pane');
+  const devicePane = $('device-pane');
+  if (localPane) localPane.classList.toggle('hidden', subtab !== 'local');
+  if (devicePane) devicePane.classList.toggle('hidden', subtab !== 'discover');
+  const btnDiscover = $('subtab-discover');
+  const btnLocal = $('subtab-local');
+  if (btnDiscover) {
+    btnDiscover.classList.toggle('active', subtab === 'discover');
+    btnDiscover.setAttribute('aria-selected', String(subtab === 'discover'));
+  }
+  if (btnLocal) {
+    btnLocal.classList.toggle('active', subtab === 'local');
+    btnLocal.setAttribute('aria-selected', String(subtab === 'local'));
+  }
+  const mainTabLocal = $('main-tab-local');
+  const mainTabDiscover = $('main-tab-discover');
+  if (mainTabLocal) mainTabLocal.classList.toggle('active', subtab === 'local');
+  if (mainTabDiscover) mainTabDiscover.classList.toggle('active', subtab === 'discover');
+}
+
+/** 切换特定节点二级页面的子标签（端点浏览 vs 订阅播放）。 */
+function switchNodeSubtab(subtab: 'browse' | 'player'): void {
+  const paneBrowse = $('node-pane-browse');
+  const panePlayer = $('node-pane-player');
+  if (paneBrowse) paneBrowse.classList.toggle('hidden', subtab !== 'browse');
+  if (panePlayer) panePlayer.classList.toggle('hidden', subtab !== 'player');
+
+  const tabBrowse = $('node-tab-browse');
+  const tabPlayer = $('node-tab-player');
+  if (tabBrowse) tabBrowse.classList.toggle('active', subtab === 'browse');
+  if (tabPlayer) tabPlayer.classList.toggle('active', subtab === 'player');
+
+  if (subtab === 'browse' && selectedDevice) {
+    const dir = remoteDirs.get(selectedDevice.key);
+    if (dir) {
+      renderBrowsePaneEndpoints(selectedDevice, dir);
+    } else {
+      void loadRemoteDir(selectedDevice);
+    }
+  }
+}
+/** 切换全局主底部导航栏（本机管理 | 发现节点 | 订阅浏览）。 */
+function switchMainBottomTab(tab: 'local' | 'discover' | 'consume'): void {
+  if (tab === 'local') {
+    switchView('manage');
+    switchManageSubtab('local');
+  } else if (tab === 'discover') {
+    switchView('manage');
+    switchManageSubtab('discover');
+  } else {
+    switchView('consume');
+  }
+  const tabLocal = $('main-tab-local');
+  const tabDiscover = $('main-tab-discover');
+  const tabConsume = $('main-tab-consume');
+  if (tabLocal) tabLocal.classList.toggle('active', tab === 'local');
+  if (tabDiscover) tabDiscover.classList.toggle('active', tab === 'discover');
+  if (tabConsume) tabConsume.classList.toggle('active', tab === 'consume');
+}
 /** 状态机驱动的全局 DOM 响应式同步器。 */
 function initFSMUI(): void {
   subscribeUIFSM((state) => {
@@ -266,11 +327,23 @@ function initFSMUI(): void {
     if (viewManage) viewManage.classList.toggle('active', state.viewMode === 'manage');
     if (viewConsume) viewConsume.classList.toggle('active', state.viewMode === 'consume');
 
-    const btnManage = $('nav-btn-manage');
-    const btnConsume = $('nav-btn-consume');
-    if (btnManage) btnManage.classList.toggle('active', state.viewMode === 'manage');
-    if (btnConsume) btnConsume.classList.toggle('active', state.viewMode === 'consume');
-    void syncAndroidSurface();
+    const tabConsume = $('main-tab-consume');
+    const tabLocal = $('main-tab-local');
+    const tabDiscover = $('main-tab-discover');
+    if (tabConsume) tabConsume.classList.toggle('active', state.viewMode === 'consume');
+    if (state.viewMode === 'manage') {
+      const isLocal = $('device-pane')?.classList.contains('mode-local');
+      if (tabLocal) tabLocal.classList.toggle('active', !!isLocal);
+      if (tabDiscover) tabDiscover.classList.toggle('active', !isLocal);
+    } else {
+      if (tabLocal) tabLocal.classList.remove('active');
+      if (tabDiscover) tabDiscover.classList.remove('active');
+    }
+ 
+    const mobBack = $('mobile-back-btn');
+    if (mobBack) {
+      mobBack.classList.toggle('hidden', state.viewMode !== 'consume');
+    }
 
     const empty = $('recv-empty');
     const canvasWrap = $('recv-canvas-wrap');
@@ -662,3 +735,27 @@ winObj.resetZoomAndPan = resetZoomAndPan;
 winObj.toggleMute = toggleMute;
 winObj.updateMuteButtonUI = updateMuteButtonUI;
 winObj.updateZoomChipUI = updateZoomChipUI;
+winObj.switchManageSubtab = switchManageSubtab;
+winObj.switchNodeSubtab = switchNodeSubtab;
+winObj.switchMainBottomTab = switchMainBottomTab;
+
+/** 向协作时间线追加一条传输或便签气泡。 */
+function appendChatTimelineMessage(text: string, isSelf: boolean): void {
+  const timeline = $('chat-timeline');
+  if (!timeline) return;
+  const msg = document.createElement('div');
+  msg.className = 'chat-msg ' + (isSelf ? 'self' : 'peer');
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-msg-bubble';
+  bubble.textContent = text;
+  const time = document.createElement('span');
+  time.className = 'chat-msg-time';
+  const now = new Date();
+  time.textContent = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+  msg.appendChild(bubble);
+  msg.appendChild(time);
+  timeline.appendChild(msg);
+  timeline.scrollTop = timeline.scrollHeight;
+}
+
+winObj.appendChatTimelineMessage = appendChatTimelineMessage;

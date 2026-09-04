@@ -214,12 +214,19 @@ async function loadRemoteDir(dev: DeviceView, force = false): Promise<void> {
   const cachedAt = remoteDirAt.get(dev.key);
   if (!force && cached && cachedAt && Date.now() - cachedAt < REMOTE_DIR_TTL_MS) {
     renderRemoteDir(dev, cached);
+    if (selectedDevice?.key === dev.key) {
+      renderBrowsePaneEndpoints(dev, cached);
+    }
     return;
   }
   if (remoteDirLoading.has(dev.key)) return;
   remoteDirLoading.add(dev.key);
   const box = document.querySelector(`[data-role="remote-dir"][data-key="${dev.key}"] .dir-status`);
   if (box) box.textContent = '目录加载中…';
+  const browseBox = $('node-browse-endpoints');
+  if (selectedDevice?.key === dev.key && browseBox && !browseBox.querySelector('.node-ep-card')) {
+    browseBox.innerHTML = '<div class="hint" style="padding: 16px; text-align: center;">加载端点中…</div>';
+  }
   try {
     const dir = await Promise.race([
       call<RemoteDir>('endpoint_ls', { host }),
@@ -228,15 +235,22 @@ async function loadRemoteDir(dev: DeviceView, force = false): Promise<void> {
     remoteDirs.set(dev.key, dir);
     remoteDirAt.set(dev.key, Date.now());
     renderRemoteDir(dev, dir);
+    if (selectedDevice?.key === dev.key) {
+      renderBrowsePaneEndpoints(dev, dir);
+    }
   } catch (e) {
     if (box) {
       box.textContent = '目录不可用（' + errMsg(e) + '）';
       box.classList.add('hint');
     }
+    if (selectedDevice?.key === dev.key && browseBox) {
+      browseBox.innerHTML = `<div class="hint" style="padding: 16px; text-align: center; color: var(--err);">端点获取失败（${errMsg(e)}）</div>`;
+    }
   } finally {
     remoteDirLoading.delete(dev.key);
   }
 }
+winObj.loadRemoteDir = loadRemoteDir;
 
 /** 对端节点目录渲染（设备 + 可订阅端点；写入卡片 [data-role="remote-dir"]）。 */
 function renderRemoteDir(dev: DeviceView, dir: RemoteDir): void {
@@ -312,6 +326,88 @@ function renderRemoteDir(dev: DeviceView, dir: RemoteDir): void {
     }
     container.appendChild(row);
   }
+  if (expandedDevice === dev.key) {
+    renderBrowsePaneEndpoints(dev, dir);
+  }
+}
+
+/** 专属端点浏览面板渲染（节点二级页的「端点浏览」Tab 内容）。 */
+function renderBrowsePaneEndpoints(dev: DeviceView, dir: RemoteDir): void {
+  const browseBox = $('node-browse-endpoints');
+  const countEl = $('node-browse-count');
+  if (countEl) {
+    countEl.textContent = dir.endpoints.length ? `共 ${dir.endpoints.length} 个可订阅端点` : '暂无可订阅端点';
+  }
+  const specIp = $('spec-ip');
+  const specPort = $('spec-port');
+  const specOnline = $('spec-online');
+  if (specIp) specIp.textContent = dev.meta;
+  if (specPort) specPort.textContent = dev.quicPort ? `QUIC ${dev.quicPort}` : (dev.base ? dev.base.split(':')[2] || '8777' : '8777');
+  if (specOnline) {
+    const isOnline = !dev.name.includes('不可达');
+    specOnline.textContent = isOnline ? '在线可连接' : '离线不可达';
+    specOnline.className = 'specs-v ' + (isOnline ? 'ok' : 'err');
+  }
+
+  if (!browseBox) return;
+  browseBox.innerHTML = '';
+  if (!dir.endpoints.length) {
+    browseBox.appendChild(emptyState('radio', '该节点暂未共享任何端点', '对方开启屏幕、麦克风或文件共享后将在此处呈现'));
+    return;
+  }
+  for (const ep of dir.endpoints) {
+    const card = document.createElement('div');
+    card.className = 'node-ep-card';
+    const main = document.createElement('div');
+    main.className = 'node-ep-main';
+    const ic = document.createElement('span');
+    ic.className = 'node-ep-ic';
+    ic.innerHTML = icon(deviceKindIcon(ep.kind));
+    const info = document.createElement('div');
+    info.className = 'node-ep-info';
+    const name = document.createElement('span');
+    name.className = 'node-ep-name';
+    name.textContent = ep.name;
+    const meta = document.createElement('span');
+    meta.className = 'node-ep-meta';
+    meta.textContent =
+      labelOf(DEVICE_KIND_LABELS, ep.kind) +
+      ' · ' +
+      labelOf(VISIBILITY_LABELS, ep.visibility) +
+      (ep.subscribers ? ` · ${ep.subscribers} 正在订阅` : '');
+    info.appendChild(name);
+    info.appendChild(meta);
+    main.appendChild(ic);
+    main.appendChild(info);
+    card.appendChild(main);
+
+    const isSubbed =
+      subscribedEndpoints.has(deviceHostOf(dev) + '/' + endpointIdStr(ep)) ||
+      subscribedEndpoints.has(endpointIdStr(ep)) ||
+      recvLinks.has(deviceHostOf(dev) + '/' + endpointIdStr(ep));
+
+    if (isSubbed) {
+      const badge = document.createElement('span');
+      badge.className = 'badge ep-badge live';
+      badge.textContent = '已订阅 · 接收中';
+      card.appendChild(badge);
+    } else if (!ep.available) {
+      const hint = document.createElement('span');
+      hint.className = 'hint';
+      hint.textContent = '不可用';
+      card.appendChild(hint);
+    } else {
+      const subBtn = document.createElement('button');
+      subBtn.type = 'button';
+      subBtn.className = 'sm primary ep-act';
+      subBtn.innerHTML = icon('download') + '<span>订阅</span>';
+      subBtn.onclick = () => {
+        openSubscribeModal(deviceHostOf(dev), endpointIdStr(ep));
+      };
+      card.appendChild(subBtn);
+    }
+    browseBox.appendChild(card);
+  }
 }
 
 /** 设备视图 → 对端主机（http://ip:port 基址取 host）。 */
@@ -370,6 +466,9 @@ async function confirmSubscribe(): Promise<void> {
       subscribedEndpoints.add(subscribeTarget.host + '/' + endpointIdStr(subscribeTarget.ep));
       showToast(`已订阅「${subscribeTarget.ep.name}」`, 'ok');
       switchMobileTab('recv');
+      switchNodeSubtab('player');
+      const dot = $('node-player-dot');
+      if (dot) dot.classList.remove('hidden');
     }
     renderDeviceList();
   } catch (e) {
